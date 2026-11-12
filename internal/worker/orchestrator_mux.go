@@ -1056,10 +1056,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 
 	// The archive an earlier recording of this job left is renamed aside before
 	// anything is written (owner ruling R2-W1): this finalize can resolve to
-	// its name, and would replace it.
-	if err := o.setAsidePriorArchive(jobCtx); err != nil {
-		return err
-	}
+	// its name, and would replace it. One that cannot be renamed stops only
+	// the write that would land on it (blockedByPriorArchive).
+	o.setAsidePriorArchive(jobCtx)
 
 	// Recover parts whose mux never persisted a segment row — a daemon
 	// restart killed the background FFmpeg before AddSegment, or an
@@ -1103,6 +1102,12 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	outputDir := filepath.Dir(outputFile)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
+	}
+	// The earlier archive is still at this name (its rename aside failed):
+	// stop before anything is muxed, with the staging kept, so a Mux tries
+	// again.
+	if err := jobCtx.blockedByPriorArchive(outputFile); err != nil {
+		return err
 	}
 	// relBase preserves the full relative path (including channel subdir) for DB
 	// storage, so the web handler can resolve files via Join(outputDir, filename).
@@ -1428,8 +1433,14 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
+	// Not onto an earlier archive that could not be set aside: the part then
+	// keeps its suffixed name, as it does when the rename itself fails.
 	if len(segments) == 1 {
-		segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		if err := jobCtx.blockedByPriorArchive(filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
+			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
+		} else {
+			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		}
 	}
 
 	// Calculate total file size and duration from segments
@@ -2107,6 +2118,8 @@ func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobCo
 			// so it needs its own announcement, after the Muxing write
 			// above. A manual mux is a mux.
 			o.sendMuxingStarting(jobCtx)
+			// As muxAndFinalize does ahead of either shape (R2-W1).
+			o.setAsidePriorArchive(jobCtx)
 			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments, nil)
 		}
 		return fmt.Errorf("no segment files found in staging directory")

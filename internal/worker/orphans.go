@@ -546,6 +546,9 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	if err != nil {
 		return nil, err
 	}
+	// A set-aside earlier archive the operator has removed by hand comes off
+	// its row here, where every row is read anyway (owner ruling R2-W1).
+	forgetMissingPriorArchives(db, jobs)
 	owners := newOutputOwners(jobs, trims, absOutputDir)
 
 	var entries, trimEntries []OrphanedEntry
@@ -779,6 +782,11 @@ func jobFileLocations(job *database.Job, absOutputDir string) []string {
 	for _, p := range []string{job.OutputFile, job.PriorOutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
 		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
 	}
+	// The earlier archive's chat, thumbnail and description: the reset that
+	// kept the archive cleared their columns, and they stay with it.
+	for _, p := range priorArchiveSidecars(job.PriorOutputFile) {
+		paths = append(paths, rowAbsoluteLocations(job, p, absOutputDir)...)
+	}
 	for _, rel := range []string{job.Filename, job.ChatFilename} {
 		paths = append(paths, rowRelativeLocations(job, rel, absOutputDir)...)
 	}
@@ -880,6 +888,17 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 		owner := "job " + job.ID
 		for _, p := range jobFileLocations(job, absOutputDir) {
 			own(p, owner)
+		}
+		// An earlier archive that was set aside (prior_output_file,
+		// "<stem>.restart-<ts>.mp4") owns the stem it was set aside from as
+		// well: an archive older still, set aside under the same stem by a
+		// later reset (setOlderArchiveAside), is on no column of its own.
+		for _, p := range rowAbsoluteLocations(job, job.PriorOutputFile, absOutputDir) {
+			for _, n := range o.spellings(p) {
+				if stem, ok := asideSiblingStem(n); ok {
+					first(o.stems, stem, owner)
+				}
+			}
 		}
 		for _, seg := range job.Segments {
 			for _, p := range rowAbsoluteLocations(job, seg.FilePath, absOutputDir) {

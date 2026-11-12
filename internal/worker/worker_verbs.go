@@ -367,10 +367,12 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// R2-W1): the reset clears output_file, and the path moves to
 	// prior_output_file in the same write.
 	beforeResetClaim(jobID)
-	if !w.db.UpdateJobFieldsIf(jobID, from, w.resetFieldsKeepingArchive(reinitResetFields(0), prior)) {
+	fields, olderArchive, keptArchive := w.resetFieldsKeepingArchive(reinitResetFields(0), prior)
+	if !w.db.UpdateJobFieldsIf(jobID, from, fields) {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
 		return
 	}
+	w.setOlderArchiveAside(jobID, olderArchive, keptArchive)
 
 	w.removeStaging(jobID, "reinitialize")
 	// Fresh start: discard any parts from a prior quality/gap-split attempt.
@@ -446,10 +448,12 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		return
 	}
 	beforeResetClaim(jobID)
-	if !w.db.UpdateJobFieldsIf(jobID, seen, w.resetFieldsKeepingArchive(reinitResetFields(prev.AutoRetryCount+1), prev)) {
+	fields, olderArchive, keptArchive := w.resetFieldsKeepingArchive(reinitResetFields(prev.AutoRetryCount+1), prev)
+	if !w.db.UpdateJobFieldsIf(jobID, seen, fields) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
+	w.setOlderArchiveAside(jobID, olderArchive, keptArchive)
 	w.removeStaging(jobID, "auto-reinitialize")
 	w.enqueueHeld(jobID)
 }

@@ -182,6 +182,12 @@ type JobContext struct {
 	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
 	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
 	Logger        logger
+	// priorArchiveStuck is the archive an earlier recording of the job left
+	// (prior_output_file) when this finalize could not rename it aside, and
+	// priorArchiveStuckErr why: the finalize writes nothing at that path
+	// (setAsidePriorArchive, blockedByPriorArchive). Set anew by each finalize.
+	priorArchiveStuck    string
+	priorArchiveStuckErr error
 	// Interruption tracks the broadcast-interrupted signature (interruption
 	// spec Tier 1) observed across every player-response fetch for this
 	// job. Shared by POINTER — strategyCtx/segCtx/segJobCtx value-copies
