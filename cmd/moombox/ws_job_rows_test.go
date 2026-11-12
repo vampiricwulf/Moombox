@@ -22,7 +22,7 @@ import (
 // JobVersion, so a stale job_update is still dropped behind a later one.
 //
 // The call sites are pinned by source, as the progress frame's are
-// (TestJobChangeSubscriberRoutesProgressTicksToTheSlimFrame): driving the
+// (TestEveryProgressTickStillProducesExactlyOneFrame): driving the
 // real subscribers needs a whole runState.
 //
 // Mutants (each run): any one job_update, jobs_update or initial_state site

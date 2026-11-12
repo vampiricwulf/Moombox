@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"net"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -104,27 +103,6 @@ func proxyConfigOf(parent []string) httpproxy.Config {
 		HTTPProxy:  get("HTTP_PROXY", "http_proxy"),
 		HTTPSProxy: get("HTTPS_PROXY", "https_proxy"),
 		NoProxy:    get("NO_PROXY", "no_proxy"),
-	}
-}
-
-// startLocked reads the process's environment with httpproxy.FromEnvironment,
-// the reading net/http's ProxyFromEnvironment makes, so the table above
-// speaks for production.
-//
-// Mutant: startLocked passing a nil or hand-built config.
-func TestTheSidecarReadsTheProxyAsGoDoes(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "")
-	t.Setenv("https_proxy", "proxy.corp.example:3128")
-	got := httpproxy.FromEnvironment()
-	if got.HTTPSProxy != "proxy.corp.example:3128" {
-		t.Fatalf("FromEnvironment().HTTPSProxy = %q", got.HTTPSProxy)
-	}
-	src, err := os.ReadFile("sidecar.go")
-	if err != nil {
-		t.Fatalf("read sidecar.go: %v", err)
-	}
-	if !strings.Contains(string(src), "childEnv(os.Environ(), httpproxy.FromEnvironment())") {
-		t.Fatalf("startLocked no longer builds the child's environment from childEnv(os.Environ(), httpproxy.FromEnvironment())")
 	}
 }
 

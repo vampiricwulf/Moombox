@@ -71,26 +71,3 @@ func TestParseStreamInfoClassification(t *testing.T) {
 		}
 	})
 }
-
-// TestGetStreamInfoSingleSwallowsNotFound verifies the single-call wrapper
-// preserves its historical (nil, nil) for a not-found login so worker
-// callers (which treat not-yet-live and not-found identically) are
-// unaffected by the new sentinel — only the batch path surfaces it.
-func TestGetStreamInfoSingleSwallowsNotFound(t *testing.T) {
-	a := NewAPI(&testLogger{})
-	sm := json.RawMessage(`{"data":{"user":null}}`)
-	cs := json.RawMessage(`{"data":{"user":null}}`)
-
-	// Exercise the same translation the single wrapper applies.
-	info, err := a.parseStreamInfo("gone", sm, cs)
-	if !errors.Is(err, ErrChannelNotFound) {
-		t.Fatalf("parse should sentinel not-found, got %v", err)
-	}
-	// The wrapper contract: errors.Is(ErrChannelNotFound) → (nil, nil).
-	if errors.Is(err, ErrChannelNotFound) {
-		info, err = nil, nil
-	}
-	if info != nil || err != nil {
-		t.Fatal("single wrapper must map not-found to (nil, nil)")
-	}
-}

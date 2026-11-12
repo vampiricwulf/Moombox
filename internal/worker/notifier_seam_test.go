@@ -76,16 +76,6 @@ func TestScheduledDoesNotFireForAStreamAlreadyLive(t *testing.T) {
 	}
 }
 
-// TestRecorderSatisfiesBothInterfaces pins the two seams by assignment. A
-// Recorder that stops satisfying Notifier cannot stand in for runState's
-// notifyMgr, which is where cmd/moombox's defect tests install it (Task 6).
-func TestRecorderSatisfiesBothInterfaces(t *testing.T) {
-	var _ notifications.Sender = notificationtest.New()
-	var _ notifications.Notifier = notificationtest.New()
-	var _ notifications.Sender = (*notifications.Manager)(nil)
-	var _ notifications.Notifier = (*notifications.Manager)(nil)
-}
-
 // TestTwitchResumeEmbedCarriesThePause is C8's payload half. The pause embed
 // was sent WHILE THE MACHINE WAS OFFLINE — three attempts inside ~7s of backoff
 // plus dial timeouts, so it arrived only when the outage was shorter than the

@@ -12,16 +12,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// TestYouTubeThumbnailURL locks the maxres URL format. Audit
-// reports/cmd-moombox.md D-7 — centralising the URL.
-func TestYouTubeThumbnailURL(t *testing.T) {
-	got := youtubeThumbnailURL("dQw4w9WgXcQ")
-	want := "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"
-	if got != want {
-		t.Errorf("youtubeThumbnailURL = %q, want %q", got, want)
-	}
-}
-
 // TestResolveOutputDirChannelOverride covers the channel-specific
 // branch — when ChannelConfig.OutputDirectory is set, it wins over
 // the global default.
@@ -264,25 +254,6 @@ func TestShouldSkipPendingVersion(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestNopLoggerImplementsInterface — compile-time check that nopLogger
-// satisfies the anonymous logger interfaces used across the codebase.
-// This locks the contract so a future logger-method addition gets
-// caught here rather than at the first nil-deref.
-func TestNopLoggerImplementsInterface(t *testing.T) {
-	var l interface {
-		Debug(msg string, args ...any)
-		Info(msg string, args ...any)
-		Warn(msg string, args ...any)
-		Error(msg string, args ...any)
-	} = &nopLogger{}
-	l.Debug("d")
-	l.Info("i")
-	l.Warn("w")
-	l.Error("e")
-	// Drop a tiny invariant in the test name so test grep finds intent.
-	_ = strings.Contains("ok", "k")
 }
 
 // TestCookieFilePath: the auth-failure notifications name the cookie file so

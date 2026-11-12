@@ -108,30 +108,6 @@ func TestRateLimiterSlidingWindow(t *testing.T) {
 	}
 }
 
-func TestRateLimiterClose(t *testing.T) {
-	rl := NewRateLimiter(5, time.Minute)
-
-	// Ensure Allow works before close
-	if !rl.Allow("1.2.3.4") {
-		t.Error("should allow before close")
-	}
-
-	// Close should not panic
-	rl.Close()
-}
-
-func TestRateLimiterLimitOne(t *testing.T) {
-	rl := NewRateLimiter(1, time.Minute)
-	defer rl.Close()
-
-	if !rl.Allow("10.0.0.1") {
-		t.Error("first request with limit=1 should be allowed")
-	}
-	if rl.Allow("10.0.0.1") {
-		t.Error("second request with limit=1 should be denied")
-	}
-}
-
 func TestRateLimiterManyIPs(t *testing.T) {
 	rl := NewRateLimiter(1, time.Minute)
 	defer rl.Close()

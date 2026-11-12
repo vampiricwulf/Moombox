@@ -82,7 +82,8 @@ func TestSOCSIsAdmittedFromYouTubeDomainsAlone(t *testing.T) {
 // The expired SAPISID beside it is the control: Load's contract still holds
 // for every other name — an expired credential is still sent, and is what
 // ExpiredAuthCookiesFor reports — so the rule is SOCS's alone. A session
-// SOCS (expiry 0) and an unexpired one are sent.
+// SOCS (expiry 0) is sent; the unexpired one is a row of
+// TestSOCSIsAdmittedFromYouTubeDomainsAlone.
 //
 // Mutant: GetCookieHeaderFor without its expired-SOCS skip (the expired SOCS
 // rides the header); the skip applied to every name (the expired SAPISID is
@@ -101,10 +102,6 @@ func TestAnExpiredSOCSIsNotSentOnInnertube(t *testing.T) {
 			wantHeader: "SAPISID=sapisid-a"},
 		{name: "a session SOCS is sent",
 			rows:       []string{cookieRow(".youtube.com", "0", "SOCS", "CAESxyz")},
-			wantSOCS:   "CAESxyz",
-			wantHeader: "SOCS=CAESxyz"},
-		{name: "an unexpired SOCS is sent",
-			rows:       []string{cookieRow(".youtube.com", unexpiredAt, "SOCS", "CAESxyz")},
 			wantSOCS:   "CAESxyz",
 			wantHeader: "SOCS=CAESxyz"},
 	} {

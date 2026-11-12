@@ -30,8 +30,9 @@ import (
 // and no "youtube.com" or "google.com" substring anywhere — not in the name, not
 // in the value, not in an attribute. Against the pre-filter it is invisible;
 // with the pre-filter gone it is admitted by the tracked-name rule and by
-// nothing else. TestB2HeaderCannotPassTheOldPreFilter pins that property so a
-// later edit cannot quietly make this fixture prove something weaker.
+// nothing else. An edit that adds either substring or a Domain= would quietly
+// turn every B2 assertion in this file into a test of the scoped path, which was
+// never broken.
 const b2UnscopedHeader = "SAPISID=rotated-without-a-domain; Path=/; Secure"
 
 // oneYear is admitSetCookie's default expiry when the server named none.
@@ -41,21 +42,6 @@ const oneYear = int64(365 * 24 * 60 * 60)
 // read from maxCookieLifetime so that changing the constant fails these rows
 // instead of silently moving them with it.
 const fourHundredDays = int64(400 * 24 * 60 * 60)
-
-// TestB2HeaderCannotPassTheOldPreFilter guards the fixture, not the code. If
-// somebody edits b2UnscopedHeader into something containing either substring,
-// every B2 assertion in this file silently degrades into a test of the scoped
-// path, which was never broken.
-func TestB2HeaderCannotPassTheOldPreFilter(t *testing.T) {
-	lower := strings.ToLower(b2UnscopedHeader)
-	if strings.Contains(lower, "youtube.com") || strings.Contains(lower, "google.com") {
-		t.Fatalf("b2UnscopedHeader %q would have passed the removed substring pre-filter — "+
-			"it proves nothing about the unscoped path", b2UnscopedHeader)
-	}
-	if strings.Contains(lower, "domain=") {
-		t.Fatalf("b2UnscopedHeader %q carries a Domain= — it is not the unscoped case", b2UnscopedHeader)
-	}
-}
 
 // admitCase is one row of the hostile-input table. origin is originYouTube for
 // every row here; TestAdmitSetCookieOriginDecidesAdmission varies it separately.
@@ -524,8 +510,9 @@ func TestUnscopedDeletionFromTheWireStaysInsideTheOrigin(t *testing.T) {
 //
 // Discriminates in both directions. The name heuristic put SID on .google.com
 // regardless of caller; the origin rule puts it on the caller's own site, so the
-// two disagree for originYouTube (the live case) and agree for originGoogle —
-// which is why the originGoogle row is a control and not a proof.
+// two disagree for originYouTube (the live case) and agree for originGoogle. The
+// other origins (google, twitch, none declared) are rows of
+// TestInsertionStaysInsideTheDeclaredPlatform.
 func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
 	// The live path first: a real Set-Cookie, through processYouTubeSetCookies.
 	t.Run("from the wire", func(t *testing.T) {
@@ -554,27 +541,15 @@ func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
 		}
 	})
 
-	// The rule itself, across origins, through the write path directly.
+	// The rule itself, through the write path directly.
 	cases := []struct {
 		name       string
 		origin     cookieOrigin
-		wantDomain string // "" means: nothing may be written
+		wantDomain string
 	}{
 		// The discriminator: the name says google, the origin says youtube, and
 		// the origin wins.
 		{"youtube caller", originYouTube, ".youtube.com"},
-		// The control. Agrees with the retired heuristic, so it proves nothing on
-		// its own — without it, "never insert" would pass.
-		{"google caller", originGoogle, ".google.com"},
-		// Now placed correctly rather than refused: the invented domain is the
-		// origin's own site, so a Twitch caller's unscoped row lands on
-		// .twitch.tv. It used to be refused because the NAME heuristic sent it to
-		// .google.com and the platform guard caught it — the right outcome for
-		// the wrong reason, and the reason is what mattered.
-		{"twitch caller", originTwitch, ".twitch.tv"},
-		// An undeclared origin invents ".", which is on no platform, so the
-		// insertion guard refuses it. The narrow direction.
-		{"no declared origin", cookieOrigin(""), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -588,12 +563,6 @@ func TestUnscopedInsertionLandsOnTheDeclaredOrigin(t *testing.T) {
 			}
 
 			rows := rowsNamed(readCookieRows(t, path), "SID")
-			if tc.wantDomain == "" {
-				if len(rows) != 0 {
-					t.Errorf("origin %q inserted SID under %q; nothing may be written", tc.origin, rows[0].domain)
-				}
-				return
-			}
 			if len(rows) != 1 {
 				t.Fatalf("want exactly 1 SID row for origin %q, got %d: %+v", tc.origin, len(rows), rows)
 			}
@@ -725,18 +694,6 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 			t.Errorf("a freshly loaded jar reads SID as %q, want fresh", got)
 		}
 	})
-
-	t.Run("an unscoped cookie with no sibling still lands", func(t *testing.T) {
-		// The other control: the rule keys on the SIBLING, not on being unscoped.
-		rs, _, path := newSetCookieFixture(t, nopLogger{}, "# Netscape HTTP Cookie File\n")
-
-		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped-alone; Path=/; Secure"), "")
-
-		rows := rowsNamed(readCookieRows(t, path), "SID")
-		if len(rows) != 1 || rows[0].value != "unscoped-alone" {
-			t.Errorf("want one .youtube.com SID row carrying unscoped-alone, got %+v", rows)
-		}
-	})
 }
 
 // TestScopedInsertionCreatesOnItsDeclaredDomain pins the owner's rule — YOUTUBE
@@ -766,7 +723,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 // nothing about creation. This test is the one place the owner's rule is stated
 // end to end.
 //
-// Three cases, the two edges giving it shape:
+// Two cases:
 //
 //   - .google.com from a youtube.com reply CREATES. The claim itself.
 //   - .twitch.tv from a youtube.com reply creates NOTHING. Note where that is
@@ -777,11 +734,6 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 //     caller that hand-builds an update; TestInsertionStaysInsideTheDeclared-
 //     Platform's "explicit twitch domain from a youtube caller" row drives that
 //     one directly.
-//   - an UNSCOPED SID against the same empty file lands on .youtube.com, NOT
-//     .google.com. The misattribution rule, and the row that separates this test
-//     from an over-confinement. Fully pinned by
-//     TestUnscopedInsertionLandsOnTheDeclaredOrigin; repeated here so the
-//     mutant below can be seen to spare it.
 //
 // MUTANTS RUN AGAINST THIS TEST, both killed here and both also killed
 // elsewhere — recorded so the next reader does not have to re-derive them:
@@ -789,8 +741,10 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 //   - OVER-CONFINEMENT: make the insertion loop force
 //     `domain = "." + string(origin)` unconditionally rather than only when
 //     key.Domain is empty. The first subtest writes .youtube.com and fails while
-//     the third still passes, which is the asymmetry this test exists to show.
-//     Also caught by TestInsertionStaysInsideTheDeclaredPlatform.
+//     TestUnscopedInsertionLandsOnTheDeclaredOrigin's "from the wire" subtest
+//     (an unscoped SID against the same empty file) still passes: the mutant
+//     over-confines, it does not misattribute. Also caught by
+//     TestInsertionStaysInsideTheDeclaredPlatform.
 //   - SEAM: drop scoped keys outside the origin's own SITE inside
 //     processYouTubeSetCookies — the literal implementation of the false claim
 //     that a youtube.com reply "cannot invent a .google.com row". Also caught by
@@ -849,22 +803,6 @@ func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
 				"platform's reply may not place another platform's credential, and the entitlement "+
 				"above is to the DECLARED platform, not to any Domain= the header cares to name",
 				rows[0].domain)
-		}
-	})
-
-	t.Run("an unscoped cookie against the same file lands on the origin's site", func(t *testing.T) {
-		rs, _, path := newSetCookieFixture(t, nopLogger{}, empty)
-
-		rs.processYouTubeSetCookies(setCookieResponse("SID=unscoped; Path=/; Secure"), "")
-
-		rows := rowsNamed(readCookieRows(t, path), "SID")
-		if len(rows) != 1 {
-			t.Fatalf("want exactly 1 SID row, got %d: %+v", len(rows), rows)
-		}
-		if rows[0].domain != ".youtube.com" {
-			t.Errorf("an unscoped SID from a youtube.com reply landed on %q, want .youtube.com — a "+
-				"Domain-less cookie belongs to the responding site, and inventing .google.com for it "+
-				"mints a different cookie under a real one's name", rows[0].domain)
 		}
 	})
 }

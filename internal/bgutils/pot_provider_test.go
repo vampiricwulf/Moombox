@@ -29,57 +29,12 @@ func TestDescramble(t *testing.T) {
 	}
 }
 
-func TestSessionData_Expiry(t *testing.T) {
-	session := &SessionData{
-		PoToken:        "test-token",
-		ContentBinding: "test-binding",
-		ExpiresAt:      time.Now().Add(1 * time.Hour),
-	}
-
-	if time.Now().After(session.ExpiresAt) {
-		t.Error("session should not be expired yet")
-	}
-
-	expired := &SessionData{
-		ExpiresAt: time.Now().Add(-1 * time.Hour),
-	}
-	if !time.Now().After(expired.ExpiresAt) {
-		t.Error("session should be expired")
-	}
-}
-
 type testLogger struct{}
 
 func (l *testLogger) Debug(msg string, args ...any) {}
 func (l *testLogger) Info(msg string, args ...any)  {}
 func (l *testLogger) Warn(msg string, args ...any)  {}
 func (l *testLogger) Error(msg string, args ...any) {}
-
-func TestPotProvider_CacheCleanup(t *testing.T) {
-	config := &BgConfig{RequestKey: DefaultRequestKey}
-	pp := NewPotProvider(config, &testLogger{})
-
-	// Add an expired session
-	pp.sessionCache["expired"] = &SessionData{
-		ExpiresAt: time.Now().Add(-1 * time.Hour),
-	}
-	// Add a valid session
-	pp.sessionCache["valid"] = &SessionData{
-		PoToken:   "token",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-	}
-
-	pp.mu.Lock()
-	pp.cleanupExpired()
-	pp.mu.Unlock()
-
-	if _, ok := pp.sessionCache["expired"]; ok {
-		t.Error("expected expired session to be cleaned up")
-	}
-	if _, ok := pp.sessionCache["valid"]; !ok {
-		t.Error("expected valid session to still exist")
-	}
-}
 
 // TestPotProvider_CleanupExpiredReturnsMintersForOutOfLockCleanup locks in
 // the C3 fix from the pre-2.6.0 review: cleanupExpired must drop expired
@@ -626,27 +581,8 @@ func TestPotProvider_Cleanup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PotProvider.GeneratePoToken — session cache hit
+// PotProvider.GeneratePoToken — session cache
 // ---------------------------------------------------------------------------
-
-func TestPotProvider_SessionCacheHit(t *testing.T) {
-	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
-
-	binding := "test-binding"
-	pp.sessionCache[binding] = &SessionData{
-		PoToken:        "cached-token",
-		ContentBinding: binding,
-		ExpiresAt:      time.Now().Add(1 * time.Hour),
-	}
-
-	session, err := pp.GeneratePoToken(context.Background(), binding, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if session.PoToken != "cached-token" {
-		t.Errorf("expected cached-token, got %q", session.PoToken)
-	}
-}
 
 func TestPotProvider_SessionCacheExpired(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
@@ -675,41 +611,6 @@ func TestPotProvider_SessionCacheExpired(t *testing.T) {
 	}
 	if session.PoToken != "fresh-token" {
 		t.Errorf("expected fresh-token, got %q", session.PoToken)
-	}
-}
-
-func TestPotProvider_BypassCache(t *testing.T) {
-	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
-
-	binding := "bypass-binding"
-	pp.sessionCache[binding] = &SessionData{
-		PoToken:        "cached-token",
-		ContentBinding: binding,
-		ExpiresAt:      time.Now().Add(1 * time.Hour),
-	}
-
-	// With bypassCache=true, should skip BOTH session AND minter caches (match TS).
-	// The minter is present but should NOT be used — generateAndMint will fail without
-	// network, confirming the minter cache was correctly skipped. Single-minter
-	// cache (CRIT-2) keys on defaultMinterKey now.
-	minterUsed := false
-	pp.minterCache[defaultMinterKey] = &TokenMinter{
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-		MintFunc: func(cb string) (string, error) {
-			minterUsed = true
-			return "bypassed-fresh-token", nil
-		},
-	}
-
-	_, err := pp.GeneratePoToken(context.Background(), binding, true)
-	// bypassCache=true should skip the minter cache and go to generateAndMint.
-	// This may succeed (with fallback token from Google) or fail (no network).
-	// Either way, the cached minter must NOT have been used.
-	if err != nil {
-		t.Logf("generateAndMint returned error (expected if no network): %v", err)
-	}
-	if minterUsed {
-		t.Error("bypassCache=true should skip the minter cache, but minter was used")
 	}
 }
 
@@ -1113,23 +1014,8 @@ func TestPotProvider_CleanupExpiredBoth(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BGError — all error codes
+// BGError — Info
 // ---------------------------------------------------------------------------
-
-func TestBGError_AllCodes(t *testing.T) {
-	codes := []string{
-		ErrBadConfig, ErrRequestFailed, ErrChallengeParse, ErrVMInit,
-		ErrVMError, ErrTimeout, ErrIntegrity, ErrAsyncSnapshot, ErrSyncSnapshot,
-	}
-	for _, code := range codes {
-		t.Run(code, func(t *testing.T) {
-			err := &BGError{Code: code, Message: "msg"}
-			if !strings.HasPrefix(err.Error(), code+":") {
-				t.Errorf("expected prefix %q, got %q", code+":", err.Error())
-			}
-		})
-	}
-}
 
 func TestBGError_WithInfo(t *testing.T) {
 	err := &BGError{

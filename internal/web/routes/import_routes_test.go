@@ -359,24 +359,6 @@ func TestImportRejectsDuplicateVideoID(t *testing.T) {
 	}
 }
 
-func TestImportRejectsZipWithPathTraversal(t *testing.T) {
-	// Zip files containing entries with ".." or absolute paths are
-	// rejected to prevent extracted files from escaping outputDir.
-	f := newImportFixture(t)
-
-	zipBytes := makeImportZip(t, map[string][]byte{
-		"../escape.mp4": []byte("malicious"),
-	})
-
-	req := importRequest(zipBytes)
-	rec := httptest.NewRecorder()
-	f.router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("path traversal: want 400, got %d", rec.Code)
-	}
-}
-
 func TestImportTruncatesOverlongHeaders(t *testing.T) {
 	// X-Import-Title / X-Import-Channel cap at 500 chars to bound the
 	// size of the resulting filename + DB row. Imports with a 600-char

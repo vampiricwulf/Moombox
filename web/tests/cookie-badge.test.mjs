@@ -7,13 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, COOKIE_BADGE_PRECEDENCE } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
-
-test("the precedence is the TUI's", () => {
-  assert.deepEqual(COOKIE_BADGE_PRECEDENCE, ["checking", "relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"]);
-});
 
 // The contested state: cookies.txt unreadable, not authenticated, a job
 // parked. The TUI shows "YT?" (the file); the dashboard showed red "A

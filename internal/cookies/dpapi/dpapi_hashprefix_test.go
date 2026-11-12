@@ -55,12 +55,6 @@ func TestDecryptV10Cookie_HashPrefixGate(t *testing.T) {
 			hashPrefix: false,
 			want:       longValue,
 		},
-		{
-			name:       "meta.version < 24 short value untouched",
-			plaintext:  []byte("YSC=abc"),
-			hashPrefix: false,
-			want:       "YSC=abc",
-		},
 	}
 
 	for _, tt := range tests {

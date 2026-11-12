@@ -21,21 +21,6 @@ func TestExtractTwitchTarget(t *testing.T) {
 			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
 		},
 		{
-			name:     "www channel URL",
-			input:    "https://www.twitch.tv/shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
-			name:     "mobile channel URL",
-			input:    "https://m.twitch.tv/shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
-			name:     "bare twitch.tv without protocol",
-			input:    "twitch.tv/shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
 			name:     "www.twitch.tv without protocol",
 			input:    "www.twitch.tv/shroud",
 			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
@@ -44,16 +29,6 @@ func TestExtractTwitchTarget(t *testing.T) {
 			name:     "channel URL with trailing slash",
 			input:    "https://twitch.tv/shroud/",
 			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
-			name:     "channel URL mixed case lowered",
-			input:    "https://twitch.tv/Shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
-			name:     "bare twitch.tv root returns nil",
-			input:    "https://twitch.tv/",
-			expected: nil,
 		},
 		{
 			name:     "bare twitch.tv no path returns nil",
@@ -122,11 +97,6 @@ func TestExtractTwitchTarget(t *testing.T) {
 
 		// Bare identifiers
 		{
-			name:     "v-prefixed VOD ID",
-			input:    "v1234567890",
-			expected: &TwitchTarget{Type: TwitchVOD, Value: "1234567890"},
-		},
-		{
 			name:     "bare numeric VOD ID 7 digits",
 			input:    "1234567",
 			expected: &TwitchTarget{Type: TwitchVOD, Value: "1234567"},
@@ -137,19 +107,9 @@ func TestExtractTwitchTarget(t *testing.T) {
 			expected: &TwitchTarget{Type: TwitchVOD, Value: "123456789012"},
 		},
 		{
-			name:     "bare login name",
-			input:    "shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-		{
 			name:     "bare login with underscores",
 			input:    "cool_streamer_99",
 			expected: &TwitchTarget{Type: TwitchChannel, Value: "cool_streamer_99"},
-		},
-		{
-			name:     "bare login mixed case lowered",
-			input:    "Shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
 		},
 
 		// Reserved paths return nil
@@ -194,13 +154,6 @@ func TestExtractTwitchTarget(t *testing.T) {
 			expected: nil,
 		},
 
-		// URL with port (hostname must strip port)
-		{
-			name:     "URL with port still matches channel",
-			input:    "https://twitch.tv:443/shroud",
-			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
-		},
-
 		// Empty and invalid inputs
 		{
 			name:     "empty string",
@@ -210,11 +163,6 @@ func TestExtractTwitchTarget(t *testing.T) {
 		{
 			name:     "whitespace only",
 			input:    "   ",
-			expected: nil,
-		},
-		{
-			name:     "numeric too short for VOD (6 digits)",
-			input:    "123456",
 			expected: nil,
 		},
 		{

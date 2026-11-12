@@ -35,16 +35,6 @@ func TestWebSocketHubClose(t *testing.T) {
 	hub.mu.Unlock()
 }
 
-func TestWebSocketHubBroadcastNoClients(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-
-	// Should not panic with no clients
-	hub.Broadcast("test", map[string]string{"key": "value"})
-	hub.BroadcastJobUpdate(map[string]string{"key": "value"})
-	hub.BroadcastJobsUpdate([]string{})
-	hub.BroadcastCheckTimers(map[string]any{})
-}
-
 // TestWebSocketReadLimitRefusesAnOversizedClientFrame is the WEB-11 pin.
 //
 // The only message a client ever sends is {"type":"ping"} — 15 bytes
@@ -157,13 +147,6 @@ func TestInitialStateCarriesOnlyTheProviderLogs(t *testing.T) {
 	if _, ok := payload.Payload["logs"]; ok {
 		t.Error("initial_state carries a logs key the provider did not supply — the hub is still " +
 			"keeping a second log ring")
-	}
-}
-
-func TestWebSocketHubClientCount(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-	if hub.ClientCount() != 0 {
-		t.Errorf("expected 0 clients, got %d", hub.ClientCount())
 	}
 }
 

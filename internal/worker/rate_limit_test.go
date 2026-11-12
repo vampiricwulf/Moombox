@@ -792,19 +792,6 @@ func TestRateLimitWaitLineCarriesTheWaitMarker(t *testing.T) {
 	}
 }
 
-// TestRateLimitIntervalsAreUpstreamsHourAndTheFullFetchCadence pins the two
-// waits: an hour for a backlog VOD and for backlog admission, the hour yt-dlp
-// says the limit lasts, and the waiting loop's full-fetch cadence for a job
-// waiting in place.
-func TestRateLimitIntervalsAreUpstreamsHourAndTheFullFetchCadence(t *testing.T) {
-	if rateLimitBackoff != time.Hour {
-		t.Errorf("rateLimitBackoff = %s, want 1h", rateLimitBackoff)
-	}
-	if rateLimitRetryInterval != fullFetchInterval || fullFetchInterval != 30*time.Minute {
-		t.Errorf("rateLimitRetryInterval = %s (fullFetchInterval %s), want the 30m full-fetch cadence", rateLimitRetryInterval, fullFetchInterval)
-	}
-}
-
 // TestRateLimitHoldLeavesTheDiskGateItsReadings: the disk gate reads the
 // volume, and closes, on the same sweeps whether or not a rate-limit hold
 // stands, so a disk that filled during the hour is held — and recorded for

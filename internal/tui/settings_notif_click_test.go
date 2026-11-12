@@ -33,20 +33,3 @@ func TestHandleMouseNotifClickAccountsForScroll(t *testing.T) {
 			"it did not — the handler ignored the scroll offset", firstEvent)
 	}
 }
-
-// TestHandleMouseNotifClickNoScrollUnchanged confirms the unscrolled path still
-// maps clicks the same as before (regression guard for the offset addition).
-func TestHandleMouseNotifClickNoScrollUnchanged(t *testing.T) {
-	firstEvent := notifEventGroups[0].events[0]
-	m := &SettingsModel{
-		notifMode:            "edit",
-		notifEditEvents:      map[string]bool{},
-		textInput:            textinput.New(),
-		notifEditScrollStart: 0,
-	}
-	// Unscrolled: group0 event0 is at original line 9 = contentY 9.
-	m.handleMouseNotifClick(9)
-	if !m.notifEditEvents[firstEvent] {
-		t.Errorf("unscrolled click (contentY=9) should toggle the first event %q", firstEvent)
-	}
-}

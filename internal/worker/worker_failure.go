@@ -242,8 +242,8 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// wrote: a copy of the job carrying the new status, error and park
 	// reason — the reason is what it reads (twitch_offline,
 	// twitch_unreachable), so a latched row, which carries its own, is
-	// never one; pinned by jobstate.TestBothRecoveryCallersKeepTheirAnswers
-	// and TestOfflineParkReasonsKeepTheRecoveryTruthTable.
+	// never one; pinned by
+	// jobstate.TestOfflineParkReasonsKeepTheRecoveryTruthTable.
 	written := *job
 	written.Status, written.Error, written.ParkReason = status, errMsg, reason
 	retryLikely := jobstate.TwitchAutoRetryPending(&written)

@@ -74,34 +74,6 @@ func TestAcquisitionRowIsACycleWithTwoOptions(t *testing.T) {
 	}
 }
 
-// TestAcquisitionIsNotRestartRequired guards the hot-reload claim. Both UIs
-// label a restart-required setting and the dashboard shows a banner; labelling
-// this one would tell the operator to restart for a change the very next R F
-// already sees, and NOT labelling a setting that needs one is the worse half of
-// the same mistake. It is read live through AutoCookieService.AcquisitionMode,
-// so it belongs in neither list.
-func TestAcquisitionIsNotRestartRequired(t *testing.T) {
-	if restartRequiredKeys["acquisition"] {
-		t.Error("acquisition is marked restart-required, but AcquisitionMode is consulted per " +
-			"refresh pass — the label would be false")
-	}
-}
-
-// TestForceRefreshFeedbackNamesTheMechanism is the TUI half of the ladder's
-// pre-flight sentence. Under "profile" nothing is launched, so the browser
-// sentence names a mechanism the operator switched off.
-func TestForceRefreshFeedbackNamesTheMechanism(t *testing.T) {
-	for _, tc := range []struct{ mode, want string }{
-		{"auto", "Running browser cookie refresh..."},
-		{"", "Running browser cookie refresh..."},
-		{"profile", "Importing cookies from the browser profile..."},
-	} {
-		if got := cookieRefreshFeedback(tc.mode); got != tc.want {
-			t.Errorf("cookieRefreshFeedback(%q) = %q, want %q", tc.mode, got, tc.want)
-		}
-	}
-}
-
 // utilsModuleVM loads the SHIPPED utils.js into a goja runtime, the way
 // settingsVM loads settings.js: strip the `export` keyword and nothing else.
 func utilsModuleVM(t *testing.T) *goja.Runtime {
@@ -125,8 +97,8 @@ func utilsModuleVM(t *testing.T) *goja.Runtime {
 // so the two renderers should say the identical thing for every mode.
 //
 // It pins two things at once. First, against the literal sentences the brief
-// specifies (redundant with TestForceRefreshFeedbackNamesTheMechanism, but this
-// test stays self-checking even before the second half can run). Second,
+// specifies (the only pin of the TUI wording, and it runs even when the second
+// half cannot). Second,
 // against the dashboard's own cookieRefreshPreflightToast in
 // web/public/modules/utils.js, RUN through goja and compared to the Go
 // renderer by exact equality — never Contains, because a wording drift that

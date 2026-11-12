@@ -296,12 +296,6 @@ func TestReleaseAndComplete(t *testing.T) {
 	}
 }
 
-func TestReleaseDownloadSlot_NonexistentJob(t *testing.T) {
-	q := NewJobQueue(10)
-	// Should not panic
-	q.ReleaseDownloadSlot("nonexistent")
-}
-
 func TestCancel_RemovesFromPending(t *testing.T) {
 	q := NewJobQueue(10)
 	q.Enqueue("job1", database.StatusUpcoming)

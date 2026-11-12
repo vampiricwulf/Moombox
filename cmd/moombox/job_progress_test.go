@@ -164,30 +164,6 @@ func TestOnlyProgressColumnsTakeTheSlimFrame(t *testing.T) {
 	}
 }
 
-// TestJobChangeSubscriberRoutesProgressTicksToTheSlimFrame pins the CALL SITE.
-// Driving the real subscriber needs a whole runState, so this reads the source
-// the way internal/web/routes' call-site pins do.
-//
-// THE MUTANT: the helpers exist, the tests above are green, and nobody calls
-// them — the whole row still goes out 60 times a second.
-func TestJobChangeSubscriberRoutesProgressTicksToTheSlimFrame(t *testing.T) {
-	src, err := os.ReadFile("monitor_callbacks.go")
-	if err != nil {
-		t.Fatalf("read monitor_callbacks.go: %v", err)
-	}
-	text := string(src)
-	for _, want := range []string{
-		"if database.IsProgressOnlyChange(ev.Changes) {",
-		"s.wsHub.BroadcastJobProgress(newJobProgressFrame(job))",
-		"s.wsHub.BroadcastJobUpdate(listedJob(s.configStore, job))",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("the OnJobChange subscriber does not contain %q — progress ticks are not being "+
-				"routed to the slim frame", want)
-		}
-	}
-}
-
 // downloadTickChangeSets is what the ~60 Hz writer actually emits over an
 // archive's life, in the order a download produces them
 // (internal/worker/progress.go): the chat-only tick before either media

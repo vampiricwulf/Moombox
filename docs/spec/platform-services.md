@@ -1845,7 +1845,7 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 
 **Request Structure**
 
-- “`hl`, `timeZone` and `utcOffsetMinutes` are in every client's `Context`…”: `TestEveryClientContextIsEnglishAndUTC`, `TestInnertubeRequestsStateEnglishAndUTC`, `TestChatContextIsEnglishAndUTC`
+- “`hl`, `timeZone` and `utcOffsetMinutes` are in every client's `Context`…”: `TestInnertubeContextSnapshots`, `TestInnertubeRequestsStateEnglishAndUTC`, `TestChatContextIsEnglishAndUTC`
 - “`userAgent` is in the `Context` of web_safari, tv_samsung, visionos…”: `TestInnertubeContextSnapshots`
 
 **Authenticated Fallback Flow**
@@ -2041,7 +2041,7 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 
 **Sidecar lifecycle (`internal/bgutils/sidecar/`)**
 
-- Subprocess: `TestChildEnvHandsNodeGosOwnProxy`, `TestTheSidecarReadsTheProxyAsGoDoes`, and `TestTheSidecarFetchesThroughTheEnvironmentsProxy` on the embedded Node with a scheme-less lowercase `https_proxy`.
+- Subprocess: `TestChildEnvHandsNodeGosOwnProxy` and `TestTheSidecarFetchesThroughTheEnvironmentsProxy` on the embedded Node with a scheme-less lowercase `https_proxy`.
 
 **Sidecar JS (`bgutil-sidecar/`)**
 

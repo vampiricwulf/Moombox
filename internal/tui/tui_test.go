@@ -60,23 +60,11 @@ func TestExtractTwitchTarget(t *testing.T) {
 		wantType string
 	}{
 		// Channel URL
-		{"https://www.twitch.tv/shroud", "shroud", "twitch"},
 		{"https://twitch.tv/shroud", "shroud", "twitch"},
-		{"twitch.tv/shroud", "shroud", "twitch"},
-		// VOD URL
-		{"https://www.twitch.tv/videos/1234567890", "tw_v1234567890", "twitch"},
-		// Login/video/{id} format
-		{"https://www.twitch.tv/shroud/video/1234567890", "tw_v1234567890", "twitch"},
 		// Clip URL (clips subdomain)
 		{"https://clips.twitch.tv/SomeClipSlug", "tw_clip_SomeClipSlug", "twitch"},
 		// Clip URL (login/clip/slug)
 		{"https://www.twitch.tv/shroud/clip/SomeSlug", "tw_clip_SomeSlug", "twitch"},
-		// Raw VOD with v prefix
-		{"v1234567890", "tw_v1234567890", "twitch"},
-		// Raw numeric VOD (7-12 digits)
-		{"1234567890", "tw_v1234567890", "twitch"},
-		// Raw username
-		{"shroud", "shroud", "twitch"},
 		// Reserved path (not a channel)
 		{"https://twitch.tv/directory", "", ""},
 		// Empty

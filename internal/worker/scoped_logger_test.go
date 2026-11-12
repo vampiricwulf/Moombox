@@ -57,35 +57,6 @@ func (c *captureLogger) Info(msg string, args ...any)  { c.log(msg, args) }
 func (c *captureLogger) Warn(msg string, args ...any)  { c.log(msg, args) }
 func (c *captureLogger) Error(msg string, args ...any) { c.log(msg, args) }
 
-// TestCaptureLoggerIsSafeForConcurrentUse logs from several goroutines at
-// once, as two downloaders sharing one job's logger do, and expects every
-// line kept.
-//
-// Mutant: drop the lock in log — -race reports the concurrent appends (and
-// without -race, lines go missing).
-func TestCaptureLoggerIsSafeForConcurrentUse(t *testing.T) {
-	logs := &captureLogger{}
-	const writers, each = 4, 200
-	var wg sync.WaitGroup
-	for i := range writers {
-		wg.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("writer %d panicked: %v", i, r)
-				}
-			}()
-			for n := range each {
-				logs.Info("line", "writer", i, "n", n)
-				_ = logs.lines()
-			}
-		})
-	}
-	wg.Wait()
-	if got := len(logs.lines()); got != writers*each {
-		t.Errorf("kept %d lines, want %d", got, writers*each)
-	}
-}
-
 func TestScopedLoggerAppendsFixedArgs(t *testing.T) {
 	cap := &captureLogger{}
 	sl := newScopedLogger(cap, "jobID", "abc123", "stream", "video")

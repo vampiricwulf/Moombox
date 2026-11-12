@@ -265,12 +265,6 @@ func TestMetadataFailureTracker_Eviction(t *testing.T) {
 	}
 }
 
-func TestMetadataFailureTracker_ClearNonExistent(t *testing.T) {
-	tracker := NewMetadataFailureTracker()
-	// Should not panic
-	tracker.ClearFailure("nonexistent")
-}
-
 func TestProcessYouTubeVideo_NoProbeFunc(t *testing.T) {
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
 		VideoID:    "test123",

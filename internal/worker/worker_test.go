@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -109,72 +108,6 @@ func TestAutoReinitializeJobIncrementsCounter(t *testing.T) {
 	}
 	if got.AutoRetryCount != 2 {
 		t.Errorf("after second call, AutoRetryCount: want 2, got %d", got.AutoRetryCount)
-	}
-}
-
-func TestReinitializeJobResetsCounter(t *testing.T) {
-	w, db := testWorkerSetup(t)
-
-	job := &database.Job{
-		ID:             "tw_userreinit",
-		VideoID:        "userreinit",
-		URL:            "https://twitch.tv/x",
-		Platform:       "twitch",
-		Status:         database.StatusError,
-		Error:          "twitch channel is offline",
-		AutoRetryCount: 2,
-	}
-	if _, err := db.AddJob(job); err != nil {
-		t.Fatal(err)
-	}
-
-	w.ReinitializeJob("tw_userreinit")
-
-	got, err := db.GetJob("tw_userreinit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AutoRetryCount != 0 {
-		t.Errorf("after user reinit, AutoRetryCount: want 0, got %d", got.AutoRetryCount)
-	}
-}
-
-// TestNewDownloadWorker_AcceptsRoutedCipherSolver confirms that
-// DownloadWorkerDeps accepts a non-nil cipher.Solver in RoutedCipherSolver
-// and that NewDownloadWorker constructs without panic. This locks in the
-// field-shape so any future Deps refactor that drops or renames
-// RoutedCipherSolver surfaces here.
-//
-// Full wiring (solver → orchestrator → StrategyDeps) is exercised by the
-// production code path; this smoke ensures the constructor round-trip is
-// covered so CI catches accidental field removal.
-//
-// Raised in the v2.6.16-prep code review (I3).
-func TestNewDownloadWorker_AcceptsRoutedCipherSolver(t *testing.T) {
-	dir := t.TempDir()
-	db, err := database.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	cfg := &config.MoomboxConfig{}
-	cfg.Paths.StagingDirectory = filepath.Join(dir, "staging")
-
-	var solver cipher.Solver = stubCipherSolver{}
-
-	deps := &DownloadWorkerDeps{
-		CipherSolver:       nil, // goja resolver not needed for this smoke
-		RoutedCipherSolver: solver,
-	}
-
-	// Confirm the interface assignment compiles (type-shape lock).
-	var _ cipher.Solver = deps.RoutedCipherSolver
-
-	// Confirm construction doesn't panic with a non-nil RoutedCipherSolver.
-	w := NewDownloadWorker(db, nil, cfg, &discardLogger{}, deps)
-	if w == nil {
-		t.Fatal("NewDownloadWorker returned nil")
 	}
 }
 

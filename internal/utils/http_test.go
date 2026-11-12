@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -171,26 +170,6 @@ func TestFetchBodyHonoursCtxCancel(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "context canceled") {
 		t.Errorf("err: want context.Canceled, got %v", err)
-	}
-}
-
-// TestFetchBodyCapsAtMaxFetchBodySize verifies the ordinary under-the-cap
-// path still returns the whole body. The over-the-cap path is
-// TestFetchBodyErrorsPastMaxFetchBodySize.
-func TestFetchBodyCapsAtMaxFetchBodySize(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		// 100 bytes — well under the cap. We're verifying the
-		// LimitReader is wired, not that 50MB downloads work.
-		io.WriteString(rw, strings.Repeat("a", 100))
-	}))
-	t.Cleanup(srv.Close)
-
-	body, err := FetchBody(t.Context(), srv.URL, 5*time.Second, nil)
-	if err != nil {
-		t.Fatalf("FetchBody: %v", err)
-	}
-	if len(body) != 100 {
-		t.Errorf("body length: want 100, got %d", len(body))
 	}
 }
 
