@@ -1192,8 +1192,9 @@ export class JobDetailsController {
    * view on the newest line, as the TUI's O L overlay does; every later one
    * (the every-second `poll`, or the read after a rebuild) goes through
    * _writePolledJobLogs, which keeps the operator's place. A failed read
-   * leaves lines already shown. A poll is given up after JOB_LOG_POLL_DEADLINE_MS
-   * so that one request that never answers cannot stop the re-read.
+   * leaves lines already shown. Every read is given up after
+   * JOB_LOG_POLL_DEADLINE_MS, the first one and a rebuild's as well as a
+   * poll's, so that one request that never answers cannot stop the re-read.
    */
   async loadJobLogs(jobId, { poll = false } = {}) {
     // Abort any in-flight log fetch (e.g. user switched to a different job)
@@ -1202,10 +1203,10 @@ export class JobDetailsController {
     this._jobLogsAbort = abort;
     // The interval skips its tick while a read is in flight, and fetch has no
     // timeout of its own: free the slot here, so the next tick asks again.
-    const deadline = poll ? setTimeout(() => {
+    const deadline = setTimeout(() => {
       abort.abort();
       if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
-    }, JOB_LOG_POLL_DEADLINE_MS) : null;
+    }, JOB_LOG_POLL_DEADLINE_MS);
 
     try {
       const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: abort.signal });
@@ -1239,7 +1240,7 @@ export class JobDetailsController {
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
     } finally {
-      if (deadline !== null) clearTimeout(deadline);
+      clearTimeout(deadline);
       // Not in flight any more, unless a newer read has taken its place.
       if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
     }

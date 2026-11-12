@@ -114,6 +114,22 @@ test("a poll that never answers is given up, and the next second reads again", {
   assert.equal(logText(h), "line 1\nline 2", "the given-up read's late answer was written");
 });
 
+// The first read on open and the read after a rebuild hold the same slot as
+// a poll. Mutant: the deadline armed for polls only — a first read that never
+// answers leaves "Loading logs..." up and no poll ever starts.
+test("a first read that never answers is given up too, and the next second reads", { skip }, async () => {
+  const server = { logs: () => new Promise(() => {}) };
+  const h = await openDetails(server);
+  assert.equal(reads(h), 1);
+  await tick(h);
+  assert.equal(reads(h), 1, "the first read is still in flight: no second one yet");
+  server.logs = ["line 1"];
+  h.advance(10000); // the deadline
+  await tick(h);
+  assert.equal(reads(h), 2, "the read after the deadline did not start");
+  assert.equal(logText(h), "line 1");
+});
+
 /** Give the log box a layout: jsdom has none. */
 function layout(el, { scrollHeight, clientHeight, scrollTop }) {
   let top = scrollTop;
