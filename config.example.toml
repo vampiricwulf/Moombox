@@ -393,6 +393,8 @@
 # ─── Connectivity ───────────────────────────────────────────────────────────
 # [connectivity]
 # probe_targets = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]  # host:port TCP targets raced to detect internet reachability (requires restart)
+                                                                 # When none answers within a second, www.youtube.com and gql.twitch.tv are tried too,
+                                                                 # so a firewall that blocks these targets does not put Moombox offline.
 
 # ─── Webhook Notifications ──────────────────────────────────────────────────
 # Send Discord webhook notifications for stream events. Discord only —
