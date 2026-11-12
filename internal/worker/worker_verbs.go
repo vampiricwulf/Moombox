@@ -702,8 +702,9 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		// that finds N interrupted Muxing rows would otherwise start N
 		// FFmpegs at once, which num_parallel_downloads exists to prevent.
 		// The wait ends on the mux root's cancellation, so a shutdown does not
-		// sit here holding the process open.
-		if !w.queue.AcquireDownloadSlot(ctx, jobID) {
+		// sit here holding the process open. While it waits the row says so
+		// (acquireMuxSlot).
+		if !w.acquireMuxSlot(ctx, jobID) {
 			if root.Err() == nil {
 				w.logger.Info("MuxJob: cancelled while waiting for a mux slot; staging is kept", "jobID", jobID)
 				return
@@ -823,10 +824,18 @@ func (w *DownloadWorker) restoreLogRouting(jobID string) {
 // free it under the other, leaving one FFmpeg uncounted. Nothing should
 // start such a run (the heartbeat and the scheduler skip a claimed job), but
 // the count must not depend on that.
+//
+// A recovery that has to queue says so once in the job's log, where both UIs
+// send the operator for its progress: it writes no status and no progress
+// line (the row is a finished or failed job's, not this run's), so the log is
+// the only place a wait can show.
 func (w *DownloadWorker) acquireRecoverySlot(ctx context.Context, jobID string) (func(), bool) {
 	key := jobID + "\x00" + string(opRecoverAsides)
-	if !w.queue.AcquireDownloadSlot(ctx, key) {
-		return func() {}, false
+	if !w.queue.TryAcquireDownloadSlot(key) {
+		w.logger.Info("RecoverAsides: waiting for a download slot before muxing the set-aside recordings", "jobID", jobID)
+		if !w.queue.AcquireDownloadSlot(ctx, key) {
+			return func() {}, false
+		}
 	}
 	return func() { w.queue.ReleaseDownloadSlot(key) }, true
 }

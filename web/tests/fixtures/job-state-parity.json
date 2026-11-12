@@ -37,6 +37,7 @@
   "waitLines": [
     { "line": "Waiting for a download slot... (3m)", "want": true },
     { "line": "Waiting for a download slot... (<1m)", "want": true },
+    { "line": "Waiting for a download slot to mux... (3m)", "want": true },
     { "line": "Waiting for network connectivity... (1m 20s)", "want": true },
     { "line": "Rate-limited by YouTube; fetching again... (24m 0s left)", "want": true },
     { "line": "YouTube asks for a captcha... (24m 0s left)", "want": true },

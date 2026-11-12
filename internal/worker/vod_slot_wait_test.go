@@ -371,3 +371,132 @@ func TestSlotWaitLineCountsTheWait(t *testing.T) {
 		t.Errorf("progress after the wait = %q, want it cleared", row.Progress)
 	}
 }
+
+// TestMuxSlotWaitSaysSoAndPutsTheLineBack: an off-queue mux that has to queue
+// for a download slot shows its wait line on the Muxing row, counts the wait,
+// and puts the row's own line back when the slot comes; one that finds a slot
+// free writes nothing; a row cancelled during the wait never keeps the line,
+// and a line a killed mux or a killed wait left is not put back (owner ruling
+// R2-W5).
+//
+// Mutants: no wait write (the row says nothing); writes not conditional on
+// Muxing (the refresher rewrites the line onto the Cancelled row, or the
+// restore leaves it there); restore of "" (the download's line is lost);
+// restore of a readout or wait line (a stale "Muxing 42%" comes back).
+func TestMuxSlotWaitSaysSoAndPutsTheLineBack(t *testing.T) {
+	old := vodSlotWaitRefresh
+	vodSlotWaitRefresh = 5 * time.Millisecond
+	t.Cleanup(func() { vodSlotWaitRefresh = old })
+
+	const downloadLine = "(V: 1234/1300 A: 1234/1300 C: 5678)"
+	// start queues a mux of a Muxing row holding line behind a full pool and
+	// returns once the row shows the wait line at least twice (the refresher
+	// is running).
+	// offMuxing counts the updates that showed the wait line on a row not
+	// Muxing.
+	var offMuxing atomic.Int32
+	start := func(t *testing.T, line string) (*DownloadWorker, *database.Database, context.CancelFunc, chan bool) {
+		t.Helper()
+		w, db := testWorkerSetup(t)
+		w.queue = NewJobQueue(1)
+		for _, id := range []string{"j-busy", "j-mux"} {
+			if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "twitch", Status: database.StatusMuxing}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db.UpdateJobFields("j-mux", map[string]any{"progress": line})
+		if !w.queue.TryAcquireDownloadSlot("j-busy") {
+			t.Fatal("the free slot was not taken")
+		}
+		var waits atomic.Int32
+		unsubscribe := db.OnJobUpdate(func(j *database.Job) {
+			if j.ID == "j-mux" && isMuxSlotWaitLine(j.Progress) {
+				if j.Status != database.StatusMuxing {
+					offMuxing.Add(1)
+				}
+				waits.Add(1)
+			}
+		})
+		t.Cleanup(unsubscribe)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		got := make(chan bool, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("acquireMuxSlot panicked: %v", r)
+				}
+			}()
+			got <- w.acquireMuxSlot(ctx, "j-mux")
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for waits.Load() < 2 {
+			if time.Now().After(deadline) {
+				row, _ := db.GetJob("j-mux")
+				t.Fatalf("the queueing mux's progress is %q after %d wait writes, want %q rewritten", row.Progress, waits.Load(), muxSlotWaitLine(0))
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return w, db, cancel, got
+	}
+
+	t.Run("free slot writes nothing", func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		w.queue = NewJobQueue(1)
+		if _, err := db.AddJob(&database.Job{ID: "j-mux", VideoID: "j-mux", URL: "u", Status: database.StatusMuxing}); err != nil {
+			t.Fatal(err)
+		}
+		var writes atomic.Int32
+		defer db.OnJobUpdate(func(*database.Job) { writes.Add(1) })()
+		if !w.acquireMuxSlot(context.Background(), "j-mux") {
+			t.Fatal("the free slot was not taken")
+		}
+		if n := writes.Load(); n != 0 {
+			t.Errorf("a mux that found a slot free wrote its row %d times, want none", n)
+		}
+	})
+	t.Run("slot comes", func(t *testing.T) {
+		w, db, _, got := start(t, downloadLine)
+		w.queue.ReleaseDownloadSlot("j-busy")
+		if !<-got {
+			t.Fatal("the slot was not acquired once it freed")
+		}
+		if row, _ := db.GetJob("j-mux"); row.Progress != downloadLine {
+			t.Errorf("progress after the wait = %q, want the download's line %q back", row.Progress, downloadLine)
+		}
+	})
+	t.Run("cancelled during the wait", func(t *testing.T) {
+		_, db, cancel, got := start(t, downloadLine)
+		offMuxing.Store(0)
+		db.UpdateJobFields("j-mux", map[string]any{"status": database.StatusCancelled})
+		// The Cancel write itself shows the line once; the refresher, still
+		// ticking, must not write it again.
+		time.Sleep(50 * time.Millisecond)
+		if n := offMuxing.Load(); n > 1 {
+			t.Errorf("the wait line was rewritten onto the Cancelled row %d times", n-1)
+		}
+		cancel()
+		if <-got {
+			t.Fatal("a cancelled wait reported a slot")
+		}
+		row, _ := db.GetJob("j-mux")
+		if row.Status != database.StatusCancelled || row.Progress != downloadLine {
+			t.Errorf("after a cancel the row reads %s %q, want Cancelled with %q", row.Status, row.Progress, downloadLine)
+		}
+	})
+	for name, stale := range map[string]string{
+		"a killed mux's readout is not put back": jobstate.MuxProgressLine(42),
+		"a killed wait's line is not put back":   muxSlotWaitLine(3 * time.Minute),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, db, _, got := start(t, stale)
+			w.queue.ReleaseDownloadSlot("j-busy")
+			if !<-got {
+				t.Fatal("the slot was not acquired once it freed")
+			}
+			if row, _ := db.GetJob("j-mux"); row.Progress != "" {
+				t.Errorf("progress after the wait = %q, want it empty", row.Progress)
+			}
+		})
+	}
+}
