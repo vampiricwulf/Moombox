@@ -471,126 +471,12 @@ func (o *DownloadOrchestrator) fileOffRow(jobID, path string) (unnamed, older bo
 	return true, err == nil && info.ModTime().Before(started)
 }
 
-// otherRowSet is what every row but one job's own names in the output tree,
-// for a finalize of that job asking whose the file at its name is
-// (setForeignFileAside): the rows, and outputOwners over them for the marker
-// rule (asideOwner).
-type otherRowSet struct {
-	owners *outputOwners
-	jobs   []*database.Job
-	trims  []database.TrimRecord
-	root   string
-}
-
-// fileRow returns the row that names the file at path, "" when none does. It
-// is narrower than outputOwners.fileRow, which the Files sweep and its delete
-// go by: that one counts every row path under the current global directory as
-// well as where the row stores it (the moved-tree rule, rowAbsoluteLocations
-// and rowRelativeLocations), so a job stored under ANOTHER output tree — a
-// per-channel directory, or the global directory of before
-// paths.output_directory changed — "names" the file of the same relative
-// name in this tree, while its real file sits where the row says. Refusing a
-// finalize on that kept a job from replacing its own interrupted finalize's
-// file until the operator renamed it.
-//
-// So here a row names path when it stores it there, or when path is another
-// place the same column can resolve to and none of the column's other places
-// holds a file — the tree that really was moved. A row that outputOwners does
-// not count is never counted here: this only ever refuses less.
-func (r *otherRowSet) fileRow(path string) string {
-	if r.owners.fileRow(path) == "" {
-		return ""
-	}
-	byID := make(map[string]*database.Job, len(r.jobs))
-	for _, job := range r.jobs {
-		byID[job.ID] = job
-		for _, places := range jobColumnPlaces(job, r.root) {
-			if r.columnNames(places, path) {
-				return "job " + job.ID
-			}
-		}
-	}
-	for _, tr := range r.trims {
-		if r.columnNames(trimFileLocations(tr, byID[tr.JobID], r.root), path) {
-			return "a trim of job " + tr.JobID
-		}
-	}
-	return ""
-}
-
-// columnNames reports whether one column, whose file can be at any of places
-// (the first is where the row stores it), names path: path is the first, or
-// path is one of the others and no other place holds a file. Paths meet in
-// either spelling (outputOwners.spellings).
-func (r *otherRowSet) columnNames(places []string, path string) bool {
-	same := func(p string) bool {
-		for _, a := range r.owners.spellings(p) {
-			for _, b := range r.owners.spellings(path) {
-				if a == b {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	named := false
-	for i, p := range places {
-		if !same(p) {
-			continue
-		}
-		if i == 0 {
-			return true
-		}
-		named = true
-	}
-	if !named {
-		return false
-	}
-	for _, p := range places {
-		if !same(p) && fileExists(p) {
-			return false
-		}
-	}
-	return true
-}
-
-// jobColumnPlaces returns, for each file column of job and of its parts, the
-// places its file can be, the stored one first: jobFileLocations' paths, kept
-// apart by column. A relative column (filename, chat_filename) names the file
-// its absolute twin (output_file, chat_file) stores, so that path leads its
-// places: a row with no output_directory of its own, stored under the global
-// directory of before the setting changed, resolves its filename under the
-// current one only.
-func jobColumnPlaces(job *database.Job, absOutputDir string) [][]string {
-	var cols [][]string
-	add := func(places []string) {
-		if len(places) > 0 {
-			cols = append(cols, places)
-		}
-	}
-	for _, p := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
-		add(rowAbsoluteLocations(job, p, absOutputDir))
-	}
-	for _, c := range [][2]string{{job.OutputFile, job.Filename}, {job.ChatFile, job.ChatFilename}} {
-		places := rowRelativeLocations(job, c[1], absOutputDir)
-		if c[0] != "" && len(places) > 0 {
-			places = append([]string{c[0]}, places...)
-		}
-		add(places)
-	}
-	for _, seg := range job.Segments {
-		for _, p := range []string{seg.FilePath, seg.ChatFile} {
-			add(rowAbsoluteLocations(job, p, absOutputDir))
-		}
-	}
-	return cols
-}
-
-// otherRows is what every row but jobID's own names in the output tree: the
-// other jobs with their parts, and the trims. Read only once a finalize has
-// found a file its row does not name at its name, which is rare; a finalize
-// that finds none reads nothing.
-func (o *DownloadOrchestrator) otherRows(jobID string) (*otherRowSet, error) {
+// otherRows is what every row but jobID's own names in the output tree
+// (outputOwners, the rule the Files sweep and its delete use): the other
+// jobs with their parts, and the trims. Read only once a finalize has found
+// a file its row does not name at its name, which is rare; a finalize that
+// finds none reads nothing.
+func (o *DownloadOrchestrator) otherRows(jobID string) (*outputOwners, error) {
 	jobs, err := o.db.GetAllJobs()
 	if err != nil {
 		return nil, err
@@ -609,7 +495,7 @@ func (o *DownloadOrchestrator) otherRows(jobID string) (*otherRowSet, error) {
 	if o.globalOutputDir != nil {
 		root = o.globalOutputDir()
 	}
-	return &otherRowSet{owners: newOutputOwners(others, trims, root), jobs: others, trims: trims, root: root}, nil
+	return newOutputOwners(others, trims, root), nil
 }
 
 // setForeignFileAside makes path free for a finalize of jobID to write. A
@@ -627,9 +513,7 @@ func (o *DownloadOrchestrator) otherRows(jobID string) (*otherRowSet, error) {
 // is a file whose owner cannot be read, and a sidecar another row names
 // stays where it is. That is asked of every file at the name that this job's
 // row does not name, ahead of the age rule: the other job can have started
-// later and finished first, and its archive is then newer than this run. A
-// row stored under another output tree whose own file is there does not name
-// the file of the same relative name in this one (otherRowSet.fileRow).
+// later and finished first, and its archive is then newer than this run.
 //
 // Nor a file kept under another existing job's marker (the archive that
 // job's reset could not rename, outputOwners.asideOwner): set aside, it
@@ -655,7 +539,7 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 			"path", path, "owner", row, "jobID", jobID)
 		return fmt.Errorf("%s already exists and belongs to %s: it is kept, not replaced; give one of the two another name, then use Mux", filepath.Base(path), row)
 	}
-	if row := others.owners.asideOwner(path); row != "" {
+	if row := others.asideOwner(path); row != "" {
 		o.logger.Warn("finalize: a file another job kept at a Reinitialize holds the name it writes; it is kept where it is",
 			"path", path, "owner", row, "jobID", jobID)
 		return fmt.Errorf("%s already exists and belongs to %s: it is kept, not replaced; give one of the two another name, then use Mux", filepath.Base(path), row)
