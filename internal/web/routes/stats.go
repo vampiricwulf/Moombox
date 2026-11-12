@@ -81,9 +81,13 @@ type StatsRouteDeps struct {
 // StatsRoutes registers the /api/stats endpoint.
 func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
 	r.Get("/api/stats", func(rw http.ResponseWriter, req *http.Request) {
-		var js *database.JobStats
-		if got, err := deps.DB.GetJobStats(); err == nil {
-			js = got
+		// A failed query answers an error, never a snapshot of zeros: all-zero
+		// totals with a 200 read as an emptied archive. The TUI's Statistics
+		// overlay shows the same failure (cmd/moombox/tui_wiring.go).
+		js, err := deps.DB.GetJobStats()
+		if err != nil {
+			jsonError(rw, "Could not read statistics: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 		snap := stats.Build(js, SharedDiskStatus.Load().Stats())
 		warn := snap.Disk.WarnLevel

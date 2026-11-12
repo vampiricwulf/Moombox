@@ -270,8 +270,15 @@ function defineShoelaceStubs(window) {
   }
   // sl-alert.toast() appends the alert to Shoelace's toast stack; showToast
   // calls it on every toast, so it must exist or every toast throws.
+  // A hidden toast leaves the document and says sl-after-hide, as Shoelace's
+  // does: showToast keeps track of the error toasts still up by both.
   class SlAlert extends SlOverlay {
     toast() { (this._calls ??= []).push("toast"); return Promise.resolve(); }
+    hide() {
+      super.hide();
+      this.remove();
+      this.dispatchEvent(new window.Event("sl-after-hide"));
+    }
   }
   // sl-tab-group.show(name) selects a panel; the keyboard shortcuts use it.
   class SlTabGroup extends HTMLElement {

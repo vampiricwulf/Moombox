@@ -41,6 +41,7 @@ Pure — no DOM, nothing to install:
 | `nico-geometry.test.mjs` | `nico-geometry.js`: the video's box inside the player (letterbox, pillarbox) for the chat overlay |
 | `nico-lanes.test.mjs` | `nico-lanes.js`: lane allocation for the scrolling chat overlay |
 | `nico-scheduler.test.mjs` | `nico-scheduler.js`: the overlay's cursor, anchor, pending list and drop count |
+| `toast-duration.test.mjs` | how long a toast stays: an error until closed, a warning or a long message for a time scaled to its length, a short success 3 s; the countdown bar runs for the same time |
 | `template-preview.test.mjs` | the Settings page's output-template example, formatted as `config.ResolveTemplate` writes a name |
 | `channel-failing.test.mjs` | `channelFailing`, `failingChannels` and `failingChannel` in `utils.js` against Go over `fixtures/channel-failing-parity.json` (owner ruling R-H1) |
 | `utils.test.mjs` | `utils.js`: the formatters (`formatBytes`, timestamps, durations) and the small helpers beside them |

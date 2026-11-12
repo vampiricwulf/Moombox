@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -22,6 +22,11 @@ const TASK_STATUS_PRIORITY = {
   "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
   "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
 };
+
+// The batch bar's action buttons, disabled while a per-job batch runs, and
+// the word its progress line opens with for each of those actions.
+const BATCH_ACTION_BUTTON_IDS = ["batch-cancel", "batch-resume", "batch-reinit", "batch-delete", "batch-watched", "batch-unwatched"];
+const BATCH_PROGRESS_VERBS = { cancel: "Cancelling", resume: "Resuming", reinitialize: "Reinitializing", delete: "Deleting" };
 
 /**
  * The dashboard WebSocket's states. _setConnState is the only writer of the
@@ -61,6 +66,9 @@ export const ConnState = Object.freeze({
   BACKOFF: "backoff",
   UNAUTHORIZED: "unauthorized",
 });
+
+/** How many toasts that stay until closed may be up at once; the oldest makes way. */
+const MAX_STAYING_TOASTS = 4;
 
 export class MoomboxApp {
   constructor() {
@@ -149,6 +157,13 @@ export class MoomboxApp {
     // True when archivedJobs changed while the Archived panel was hidden —
     // the panel re-renders on activation instead of on every change.
     this._archivedRenderDirty = false;
+    // A redraw of the Archived cards is waiting for the next animation frame
+    // (_scheduleArchivedRender). Cleared by renderArchivedJobs itself, so a
+    // direct redraw in between makes the waiting frame a no-op.
+    this._archivedFramePending = false;
+    // The per-job batch action that is running, as { verb, done, total }, or
+    // null. Written by batchAction only; the batch bar draws it.
+    this._batchProgress = null;
     // Which platforms the status bar was last told have a job parked in
     // COOKIES?. null means "never computed", which is distinct from
     // {youtube:false,twitch:false} — see _syncParkedBadge, where the first
@@ -333,7 +348,18 @@ export class MoomboxApp {
     // fire after submit/close and re-populate a closed dialog.
     document
       .getElementById("video-url-input")
-      .addEventListener("sl-input", () => {
+      .addEventListener("sl-input", (e) => {
+        // The listed formats belong to one video. Once the URL names another
+        // they go at once, not after the debounce: the picker must not show,
+        // and the submit must not send, an earlier video's rendition.
+        // The same goes for a list still being fetched: disowned here
+        // (_lastFormatVideoId), its answer is dropped when it arrives.
+        const listedOrAsked = this._formatsListedFor ?? this._lastFormatVideoId;
+        if (listedOrAsked && this.extractVideoId(e.target.value || "") !== listedOrAsked) {
+          this.clearFormatChoice();
+          this._lastFormatVideoId = null;
+          document.getElementById("format-skeleton").style.display = "none";
+        }
         if (document.getElementById("advanced-options-toggle").checked) {
           clearTimeout(this._formatFetchTimeout);
           this._formatFetchTimeout = setTimeout(() => {
@@ -397,6 +423,8 @@ export class MoomboxApp {
           this.files.fetchOrphanedHistory();
         } else if (e.detail.name === "stats") {
           this.stats.activate();
+        } else if (e.detail.name === "logs") {
+          this.logPanel.onShow();
         }
         // Detach the player's document-level keydown listener when leaving
         // the player tab — it used to run for every keystroke app-wide even
@@ -714,19 +742,78 @@ export class MoomboxApp {
     }
   }
 
-  async loadStatus() {
+  /**
+   * GET /api/status, given up after 15 s: fetch has no timeout of its own,
+   * and a read that never settles (a stalled proxy, a laptop back from sleep)
+   * would hold onStatusChanged's busy latch for the life of the tab.
+   * Resolves the parsed body, or null for a non-ok answer; rejects when the
+   * server cannot be reached or the deadline passes.
+   */
+  async _fetchStatus() {
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), 15000);
     try {
-      const response = await fetch("/api/status");
-      if (response.ok) {
-        const status = await response.json();
-        this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
-        this.cookieStatus = status.cookieStatus;
-        this.twitchAuthStatus = status.twitchAuthStatus;
-        this.activePlatforms = status.activePlatforms || {};
-        // Tri-state on purpose. `null` means the server published nothing —
-        // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
-        // as a fault; only an explicit `healthy: false` raises the warning.
-        this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
+      const response = await fetch("/api/status", { signal: abort.signal });
+      return response.ok ? await response.json() : null;
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
+
+  /**
+   * The cookie and re-login fields have several writers: loadStatus, the
+   * status_changed read (_loadAuthStatus), the first-check poll
+   * (_pollCookieCheck) and the answers of Recheck and Refresh. Each takes the
+   * next number here; a read applies its answer only while its number is
+   * still the newest, so an older read never draws over a newer answer.
+   */
+  _nextAuthGen() {
+    return (this._authGen = (this._authGen || 0) + 1);
+  }
+
+  /**
+   * The sidecar's health and the active platforms come only from a whole
+   * status answer, so only the two status reads (loadStatus and
+   * _loadAuthStatus) take this number. The cookie writers above do not: a
+   * poll or a Recheck that answers during a status read says nothing about
+   * the sidecar, and must not make that read's sidecar half be dropped (no
+   * second status_changed frame would follow to correct it).
+   */
+  _nextHealthGen() {
+    return (this._healthGen = (this._healthGen || 0) + 1);
+  }
+
+  /**
+   * The auth half of a status answer: what a status_changed frame is about.
+   * `gens` are the numbers the read took when it was sent; each group of
+   * fields is applied only while its number is still the newest.
+   */
+  _applyAuthStatus(status, gens) {
+    if (gens.auth === this._authGen) {
+      this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
+      this.cookieStatus = status.cookieStatus;
+      this.twitchAuthStatus = status.twitchAuthStatus;
+    }
+    if (gens.health !== this._healthGen) return;
+    this.activePlatforms = status.activePlatforms || {};
+    // Tri-state on purpose. `null` means the server published nothing —
+    // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
+    // as a fault; only an explicit `healthy: false` raises the warning.
+    this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
+  }
+
+  async loadStatus() {
+    // Each read takes the next number and its answer is applied only while
+    // that number is still the newest: of two reads that overlap, the one
+    // asked for first can answer last, with the older status.
+    const gen = (this._statusGen = (this._statusGen || 0) + 1);
+    const gens = { auth: this._nextAuthGen(), health: this._nextHealthGen() };
+    try {
+      const status = await this._fetchStatus();
+      if (status) {
+        if (gen !== this._statusGen) return;
+        // Each group of fields is skipped when a newer writer of it answered meanwhile.
+        this._applyAuthStatus(status, gens);
         // The server's zone, which recordings are named in: the Settings
         // template example renders its date there (renderTemplatePreview).
         // The config may have drawn it already, with the browser's.
@@ -742,7 +829,12 @@ export class MoomboxApp {
             // unsaved settings edits: defer (retry on the next status load)
             // and tell the user instead of discarding their changes.
             if (this.settings?.isDirty()) {
-              this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
+              // Said once per version: this branch runs again on every
+              // status load until the settings are saved.
+              if (this._updateToastShownFor !== status.version) {
+                this._updateToastShownFor = status.version;
+                this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
+              }
             } else {
               window.location.reload();
               return;
@@ -774,6 +866,45 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * The server's status_changed frame: cookie authentication, a re-login flag
+   * or the sidecar's health changed. The frame carries nothing; the status is
+   * read again, so the badges are only ever drawn from an answer this tab
+   * asked for. One read is in flight at a time, and frames that arrive during
+   * it ask for one more after it, however many they were. Only the fields
+   * the frame is about are taken from the answer (_loadAuthStatus): the rest
+   * of the status has its own frames, which this read could be older than.
+   */
+  async onStatusChanged() {
+    if (this._statusNudgeBusy) {
+      this._statusNudgeAgain = true;
+      return;
+    }
+    this._statusNudgeBusy = true;
+    try {
+      do {
+        this._statusNudgeAgain = false;
+        await this._loadAuthStatus();
+      } while (this._statusNudgeAgain);
+    } finally {
+      this._statusNudgeBusy = false;
+    }
+  }
+
+  /** Read the status and apply its auth half only; a group of fields a newer writer answered first is left. */
+  async _loadAuthStatus() {
+    const gens = { auth: this._nextAuthGen(), health: this._nextHealthGen() };
+    try {
+      const status = await this._fetchStatus();
+      if (!status) return;
+      this._applyAuthStatus(status, gens);
+      this.updateStatusBar();
+    } catch (e) {
+      // Unreachable or too slow: the reconnect's status load, or the next
+      // frame, reads again.
+    }
+  }
+
   async recheckCookies() {
     const btn = document.getElementById("btn-refresh-cookies");
     if (btn) btn.classList.add("checking");
@@ -782,6 +913,7 @@ export class MoomboxApp {
       const response = await fetch("/api/cookies/recheck", { method: "POST" });
       if (response.ok) {
         const data = await response.json();
+        this._nextAuthGen(); // a status read still in flight is older than this answer
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         this.cookieStatus = data.cookieStatus;
         this.twitchAuthStatus = data.twitchAuthStatus;
@@ -839,6 +971,7 @@ export class MoomboxApp {
         this.config?.cookies?.acquisition,
       );
       if (response.ok && !data.error) {
+        this._nextAuthGen(); // a status read still in flight is older than this answer
         if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
         if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
@@ -1138,10 +1271,10 @@ export class MoomboxApp {
       this._cookieCheckTimer = null;
       // Only the cookie keys are taken: loadStatus also acts on the version
       // and the zone, which this poll has no business repeating.
+      const authGen = this._nextAuthGen();
       try {
-        const response = await fetch("/api/status");
-        if (response.ok) {
-          const status = await response.json();
+        const status = await this._fetchStatus();
+        if (status && authGen === this._authGen) {
           this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
           this.cookieStatus = status.cookieStatus;
           this.twitchAuthStatus = status.twitchAuthStatus;
@@ -1779,6 +1912,10 @@ export class MoomboxApp {
 
       case "admission_holds":
         this.setAdmissionHolds(p);
+        break;
+
+      case "status_changed":
+        this.onStatusChanged();
         break;
 
       case "channel_monitors":
@@ -2694,8 +2831,30 @@ export class MoomboxApp {
     const idx = this.archivedJobs.findIndex(j => j.id === id);
     if (idx === -1) return false;
     this.archivedJobs.splice(idx, 1);
-    this.renderArchivedJobs();
+    this._scheduleArchivedRender();
     return true;
+  }
+
+  /**
+   * Redraw the Archived cards once in the next animation frame, however many
+   * rows left the list before it: a batch delete of K rows sends K
+   * job_deleted frames, and a redraw each rebuilt up to 200 cards K times.
+   * Until the frame a card whose row is gone can still be on screen; a click
+   * or key on it looks its row up in archivedJobs and finds nothing to act
+   * on. Redraws at once where no frame would come: a hidden tab (frames are
+   * paused there), or a panel that is not shown (renderArchivedJobs only
+   * marks it dirty).
+   */
+  _scheduleArchivedRender() {
+    if (this._activePanel !== "archived" || document.hidden || typeof requestAnimationFrame !== "function") {
+      this.renderArchivedJobs();
+      return;
+    }
+    if (this._archivedFramePending) return;
+    this._archivedFramePending = true;
+    requestAnimationFrame(() => {
+      if (this._archivedFramePending) this.renderArchivedJobs();
+    });
   }
 
   /**
@@ -2788,6 +2947,7 @@ export class MoomboxApp {
   }
 
   renderArchivedJobs() {
+    this._archivedFramePending = false;
     // Defer DOM work while the Archived panel isn't visible. On a 24/7
     // recorder the archive grows continuously (60s sweep + job updates), and
     // this method rebuilds every drawn archived card via innerHTML — destroying
@@ -3360,11 +3520,16 @@ export class MoomboxApp {
           const startInput = document.getElementById("start-time-input");
           const endInput = document.getElementById("end-time-input");
 
-          if (videoSelect.value) {
-            body.selectedVideoItag = parseInt(videoSelect.value, 10);
-          }
-          if (audioSelect.value) {
-            body.selectedAudioItag = parseInt(audioSelect.value, 10);
+          // A rendition is sent only for the video it was listed for: the
+          // selects can still hold an earlier URL's choice while the new
+          // URL's formats are being fetched, or after that fetch failed.
+          if (this._formatsListedFor === target.videoId) {
+            if (videoSelect.value) {
+              body.selectedVideoItag = parseInt(videoSelect.value, 10);
+            }
+            if (audioSelect.value) {
+              body.selectedAudioItag = parseInt(audioSelect.value, 10);
+            }
           }
 
           const startTime = this.parseTimeInput(startInput.value);
@@ -3472,21 +3637,30 @@ export class MoomboxApp {
     document.getElementById("format-selection").style.display = "none";
     document.getElementById("format-skeleton").style.display = "none";
 
-    // Clear selections
-    const videoSelect = document.getElementById("video-format-select");
-    const audioSelect = document.getElementById("audio-format-select");
-    videoSelect.value = "";
-    audioSelect.value = "";
-
-    // Remove dynamic options (keep the "None" option)
-    videoSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
-    audioSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    this.clearFormatChoice();
 
     document.getElementById("start-time-input").value = "";
     document.getElementById("end-time-input").value = "";
 
     // Reset cached video ID
     this._lastFormatVideoId = null;
+  }
+
+  /**
+   * Forget the listed formats and whatever was picked from them: both selects
+   * back on Auto with no renditions, the section hidden, and no video named
+   * as the one they were listed for (_formatsListedFor, which addVideo checks
+   * before it sends an itag). Run whenever the URL stops being that video's.
+   */
+  clearFormatChoice() {
+    this._formatsListedFor = null;
+    document.getElementById("format-selection").style.display = "none";
+    for (const id of ["video-format-select", "audio-format-select"]) {
+      const select = document.getElementById(id);
+      select.value = "";
+      // Remove dynamic options (keep the "None" option)
+      select.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    }
   }
 
   /**
@@ -3501,7 +3675,7 @@ export class MoomboxApp {
     if (!videoId) {
       // Non-YouTube URL (e.g. Twitch) — hide stale format options
       document.getElementById("format-skeleton").style.display = "none";
-      document.getElementById("format-selection").style.display = "none";
+      this.clearFormatChoice();
       this._lastFormatVideoId = null;
       return;
     }
@@ -3509,6 +3683,9 @@ export class MoomboxApp {
     // Don't re-fetch if same video
     if (this._lastFormatVideoId === videoId) return;
     this._lastFormatVideoId = videoId;
+    // Another video: the earlier one's renditions and choice go now, not
+    // when (and if) this one's list arrives.
+    this.clearFormatChoice();
 
     const formatSkeleton = document.getElementById("format-skeleton");
     const formatSection = document.getElementById("format-selection");
@@ -3527,18 +3704,27 @@ export class MoomboxApp {
       }
 
       const data = await response.json();
+      if (this._lastFormatVideoId !== videoId) return;
       await this.populateFormatSelects(data);
+      // The URL may have changed while the selects were filled: the list is
+      // then nobody's, and whoever disowned it has hidden the section.
+      if (this._lastFormatVideoId !== videoId) {
+        if (!this._formatsListedFor) this.clearFormatChoice();
+        return;
+      }
+      this._formatsListedFor = videoId;
 
       formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
     } catch (e) {
+      // A newer fetch owns the selects and the skeleton now (populate can
+      // throw after the URL changed again).
+      if (this._lastFormatVideoId !== videoId) return;
       // Clear cache so the user can retry (toggling advanced off/on)
-      if (this._lastFormatVideoId === videoId) {
-        this._lastFormatVideoId = null;
-      }
+      this._lastFormatVideoId = null;
       formatSkeleton.style.display = "none";
       // Keep format section hidden on error — empty selects are confusing
-      formatSection.style.display = "none";
+      this.clearFormatChoice();
       console.error("Failed to fetch formats:", e);
       this.showToast("Could not load format options: " + e.message, "warning");
     }
@@ -4155,6 +4341,8 @@ export class MoomboxApp {
 
       switch (e.key) {
         case "Escape":
+          // An error toast is on top of everything else on the page.
+          if (this.closeNewestToast()) return;
           if (this._activeSelectionSet().size > 0) {
             this._clearSelectionUI();
             return;
@@ -4881,12 +5069,38 @@ export class MoomboxApp {
   }
 
 
+  /**
+   * Show a toast. Every toast on the dashboard comes through here. How long
+   * it stays is toastDuration's answer (utils.js, owner ruling R2-D3): an
+   * error until it is closed, anything else for a time that grows with its
+   * length. The countdown bar runs for that same time, and an error has none.
+   *
+   * Toasts that stay until closed are kept track of (_stayingToasts): one
+   * already up with the same text is flashed, not stacked a second time (a
+   * failing button pressed five times); at most MAX_STAYING_TOASTS are up,
+   * the oldest making way; and Escape closes the newest (closeNewestToast).
+   */
   showToast(message, variant = "primary") {
+    const duration = toastDuration(message, variant);
+    const timed = Number.isFinite(duration);
+    if (!timed) {
+      // Shoelace takes a closed toast out of the document.
+      this._stayingToasts = (this._stayingToasts || []).filter((t) => t.alert.isConnected);
+      const same = this._stayingToasts.find((t) => t.message === message && t.variant === variant);
+      if (same) {
+        // Restart the flash: the class has to leave and come back.
+        same.alert.classList.remove("toast-again");
+        void same.alert.offsetWidth;
+        same.alert.classList.add("toast-again");
+        return;
+      }
+    }
     const alert = document.createElement("sl-alert");
     alert.variant = variant;
     alert.closable = true;
-    alert.duration = 3000;
+    alert.duration = duration;
     alert.className = "toast-alert";
+    if (timed) alert.style.setProperty("--toast-duration", `${duration}ms`);
 
     const icon = document.createElement("sl-icon");
     icon.slot = "icon";
@@ -4895,9 +5109,11 @@ export class MoomboxApp {
 
     alert.appendChild(document.createTextNode(message));
 
-    const countdown = document.createElement("div");
-    countdown.className = "toast-countdown";
-    alert.appendChild(countdown);
+    if (timed) {
+      const countdown = document.createElement("div");
+      countdown.className = "toast-countdown";
+      alert.appendChild(countdown);
+    }
 
     // Shoelace's `.toast()` already detaches the alert on dismiss
     // (see Shoelace docs for sl-alert.toast: "when dismissed, it will
@@ -4907,6 +5123,28 @@ export class MoomboxApp {
     // exception inside chunk.XCZS77LP.js. Removed in test.41.
     document.body.append(alert);
     alert.toast();
+
+    if (!timed) {
+      const entry = { alert, message, variant };
+      this._stayingToasts.push(entry);
+      alert.addEventListener("sl-after-hide", () => {
+        this._stayingToasts = this._stayingToasts.filter((t) => t !== entry);
+      }, { once: true });
+      while (this._stayingToasts.length > MAX_STAYING_TOASTS) this._stayingToasts.shift().alert.hide();
+    }
+  }
+
+  /**
+   * Close the newest toast that stays until closed. Its X button is the only
+   * other way, and that is at the end of the tab order. False when none is up.
+   */
+  closeNewestToast() {
+    const open = (this._stayingToasts || []).filter((t) => t.alert.isConnected);
+    const newest = open.pop();
+    this._stayingToasts = open;
+    if (!newest) return false;
+    newest.alert.hide();
+    return true;
   }
 
   getIconForVariant(variant) {
@@ -4965,8 +5203,24 @@ export class MoomboxApp {
     const bar = document.getElementById("batch-action-bar");
     if (!bar) return;
 
+    // While a batch runs its buttons are off: its targets are already being
+    // acted on, and a second click used to be dropped without a word.
+    const busy = this._batchProgress;
+    for (const id of BATCH_ACTION_BUTTON_IDS) {
+      const btn = document.getElementById(id);
+      if (btn && btn.disabled !== !!busy) btn.disabled = !!busy;
+    }
+    // The bar is a live region and the progress line is rewritten once per
+    // answered request: busy for the length of the batch, so a screen reader
+    // is not handed "Deleting 1 of 2,000…" two thousand times. The closing
+    // toast says how it ended.
+    if (busy) bar.setAttribute("aria-busy", "true");
+    else bar.removeAttribute("aria-busy");
+
     const count = this._activeSelectionSet().size;
-    if (count === 0) {
+    // The bar stays up for a running batch even once its rows have left the
+    // selection (a deleted row leaves it): it is where the progress shows.
+    if (count === 0 && !busy) {
       if (bar.style.display === "none") return; // already hidden
       bar.classList.remove("visible");
       document.body.classList.remove("batch-bar-active");
@@ -4989,9 +5243,13 @@ export class MoomboxApp {
         ?.querySelectorAll(".video-item.selected").length ?? count;
       notShown = Math.max(0, count - drawnSelected);
     }
-    document.getElementById("batch-count").textContent = notShown > 0
-      ? `${count} selected (${notShown} not shown yet)`
-      : `${count} selected`;
+    if (busy) {
+      this._drawBatchProgress();
+    } else {
+      document.getElementById("batch-count").textContent = notShown > 0
+        ? `${count} selected (${notShown} not shown yet)`
+        : `${count} selected`;
+    }
 
     // Update Select All label with count when filters are active, and on
     // Archived whenever it would select rows that are not drawn.
@@ -5036,6 +5294,35 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * Put keyboard focus back after a batch started from a batch button
+   * (`from`, null when it was not): on that button when the bar still shows
+   * it, otherwise on the list's row. Nothing moves when the operator has
+   * put focus somewhere else meanwhile, or changed tab.
+   */
+  _returnBatchFocus(from) {
+    if (!from || from.panel !== this._activePanel) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== from.button) return;
+    const bar = document.getElementById("batch-action-bar");
+    if (bar?.classList.contains("visible") && from.button.style.display !== "none" && !from.button.disabled) {
+      from.button.focus();
+      return;
+    }
+    const container = document.getElementById(from.panel === "archived" ? "archived-container" : "jobs-container");
+    const row = container?.querySelector('.video-item[tabindex="0"]') ?? container?.querySelector(".video-item");
+    row?.focus({ preventScroll: true });
+  }
+
+  /** Write the running batch's progress ("Deleting 120 of 2,000…") in the
+   *  batch bar. Only the text: it runs once per answered request. */
+  _drawBatchProgress() {
+    const p = this._batchProgress;
+    const el = document.getElementById("batch-count");
+    if (!p || !el) return;
+    el.textContent = `${p.verb} ${p.done.toLocaleString()} of ${p.total.toLocaleString()}…`;
+  }
+
   // _enterFromControl reports whether a keydown came from a control that
   // handles Enter itself — a button of any kind, a link, a form field.
   _enterFromControl(e) {
@@ -5052,6 +5339,13 @@ export class MoomboxApp {
   }
 
   async batchAction(action) {
+    // The batch button pressed, read before the confirm dialog takes focus.
+    // The batch disables it or hides the bar, which drops keyboard focus to
+    // the page; _returnBatchFocus puts it back when the batch ends.
+    const pressed = document.activeElement;
+    const focusFrom = pressed && BATCH_ACTION_BUTTON_IDS.includes(pressed.id) ? { button: pressed, panel: this._activePanel } : null;
+    // One batch at a time: the bar's buttons are disabled while one runs.
+    if (this._batchProgress) return;
     const selectedJobs = this._getSelectedJobs();
     // Strip jobs already being acted on (single-click cancel/resume/etc.
     // immediately followed by a batch op on the same id would otherwise race).
@@ -5164,11 +5458,24 @@ export class MoomboxApp {
       // Per-job API calls. Track each target in _jobActionsInFlight so a
       // concurrent single-click action is gated while the batch runs.
       for (const j of targets) this._jobActionsInFlight.add(j.id);
+      // Say how far it is: a large batch takes a while, and the bar showed
+      // nothing until the closing toast. Counted as each request is answered,
+      // whatever the answer.
+      const progress = { verb: BATCH_PROGRESS_VERBS[action], done: 0, total: targets.length };
+      this._batchProgress = progress;
+      this.updateBatchActionBar();
+      const counted = (request) => request.finally(() => {
+        progress.done++;
+        this._drawBatchProgress();
+      });
       try {
-        const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+        const results = await Promise.allSettled(targets.map(j => counted(apiCall(j.id))));
         succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
         failed = targets.length - succeeded;
       } finally {
+        // Before the bar is drawn again below (_clearSelectionUI), which
+        // turns the buttons back on.
+        this._batchProgress = null;
         for (const j of targets) this._jobActionsInFlight.delete(j.id);
       }
     }
@@ -5179,6 +5486,7 @@ export class MoomboxApp {
     // row's status change re-renders the list — so both kept a ticked box
     // and the .selected highlight with nothing behind them.
     this._clearSelectionUI();
+    this._returnBatchFocus(focusFrom);
     // The per-job actions are redrawn by the job_update each one provokes;
     // the watched pair is redrawn here, from the rows patched above, on the
     // panel the selection was made on.
@@ -5273,6 +5581,7 @@ document.addEventListener("visibilitychange", () => {
     // First: the cards the skipped progress frames changed, so the
     // timestamp refresh below runs over the cards that stay.
     window.app._repaintAfterHidden();
+    window.app.stats.onTabVisible();
     window.app.updateCheckCountdown();
     window.app.refreshRelativeTimestamps();
   }

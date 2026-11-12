@@ -645,6 +645,25 @@ func TestJobLogsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+// The open details dialog reads this route every second. Mutant: loadJob
+// ahead of the buffer read — every one of those reads costs a SELECT. The
+// buffer here has no row behind it (a state the server never holds: a row's
+// buffer is cleared with it), which is the only way to see from outside that
+// lines are answered without the row being read.
+func TestJobLogsWithLinesAreAnsweredFromTheBuffer(t *testing.T) {
+	f := newJobsFixture(t)
+	f.db.TrackJobForLogs("yt_buffered")
+	f.db.RouteLogToJobs("[yt_buffered] retrying after 403")
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_buffered/logs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs: want 200, got %d", rec.Code)
+	}
+	if want := `["[yt_buffered] retrying after 403"]` + "\n"; rec.Body.String() != want {
+		t.Errorf("logs body: want %q, got %q", want, rec.Body.String())
+	}
+}
+
 // --- POST /api/jobs/{id}/cancel ---
 
 func TestJobCancelInvalidState(t *testing.T) {

@@ -723,6 +723,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		s.needsRelogin["twitch"] = false
 	}
 	s.mu.Unlock()
+	s.announceRelogin()
 
 	if postYT.state == verifyFailed && ytHasCookies {
 		s.logger.Warn("YouTube auth verification failed after refresh — manual re-login required")

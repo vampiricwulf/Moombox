@@ -942,6 +942,30 @@ export function applyChannelOverrides(channel, { outputDirectory, archiveWindowD
 }
 
 /**
+ * How many jobs a process restart interrupts: the ones downloading, live or
+ * muxing. "Queued" and "Upcoming" are absent: nothing of theirs is running
+ * yet. The dashboard's one copy of the rule the TUI holds as
+ * activeDownloadCount (internal/tui/app.go); the status bar's active count
+ * and every restart warning read it.
+ */
+export function activeDownloadCount(jobs) {
+  return (jobs || []).filter(
+    (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
+  ).length;
+}
+
+/**
+ * The sentence every restart prompt shows while downloads are active, or ""
+ * when none are. `restart` names what restarts ("update restart" from the
+ * update dialog, "restart" from Settings), so the wording has one home.
+ */
+export function activeDownloadsRestartWarning(count, restart = "restart") {
+  if (!(count > 0)) return "";
+  const noun = count === 1 ? "download is" : "downloads are";
+  return `${count} ${noun} active — the ${restart} interrupts them, and live segments during the ~30s gap may be lost (Twitch especially).`;
+}
+
+/**
  * Job-status action sets — the dashboard's copy of which statuses each
  * quick action targets, read by the details dialog (job-details.js), the job
  * cards, and the batch action bar (app.js). Each mirrors a Go predicate in
@@ -1675,4 +1699,35 @@ export function bindPasswordSpaceWarning(input, base = "") {
   input.addEventListener("sl-input", update);
   update();
   return update;
+}
+
+/** A short success or neutral toast stays this long. */
+export const TOAST_SHORT_MS = 3000;
+/** A warning stays at least this long, however short it is. */
+export const TOAST_WARNING_MIN_MS = 6000;
+/** Reading time allowed per character of a toast's text. */
+export const TOAST_MS_PER_CHAR = 60;
+/** No timed toast stays longer than this. */
+export const TOAST_MAX_MS = 15000;
+
+/**
+ * How long a toast stays up, in milliseconds (owner ruling R2-D3). The one
+ * place that decides it: showToast in app.js reads it for every toast, and
+ * the countdown bar runs for the same time.
+ *
+ *  - danger: Infinity. An error stays until the operator closes it.
+ *  - everything else: TOAST_MS_PER_CHAR per character, never under the
+ *    variant's floor (TOAST_WARNING_MIN_MS for a warning, TOAST_SHORT_MS for
+ *    the rest) and never over TOAST_MAX_MS. A short success toast is 3 s as
+ *    it always was; a long one of any variant gets time to be read.
+ *
+ * @param {string} message
+ * @param {string} [variant]
+ * @returns {number}
+ */
+export function toastDuration(message, variant = "primary") {
+  if (variant === "danger") return Infinity;
+  const floor = variant === "warning" ? TOAST_WARNING_MIN_MS : TOAST_SHORT_MS;
+  const reading = String(message ?? "").length * TOAST_MS_PER_CHAR;
+  return Math.min(TOAST_MAX_MS, Math.max(floor, reading));
 }

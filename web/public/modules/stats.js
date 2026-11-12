@@ -1,7 +1,7 @@
 /**
  * Stats Controller — Health/Stats dashboard
  */
-import { formatBytes, formatDurationSeconds, diskGaugeLevel } from "./utils.js";
+import { activeDownloadCount, formatBytes, formatDurationSeconds, diskGaugeLevel } from "./utils.js";
 
 export class StatsController {
   constructor(app) {
@@ -11,6 +11,14 @@ export class StatsController {
     // (onAdmissionHolds) redraws them without waiting for the next reading.
     this._lastGaugeDisk = null;
     this._lastIndicatorDisk = null;
+    // loadStats: each call takes the next number, and an answer is drawn only
+    // while its number is still the newest, so a slow failure cannot replace
+    // a later success (or the reverse).
+    this._loadGen = 0;
+    // When the cards were last drawn from a successful answer (ms), or null.
+    this._lastLoadedAt = null;
+    // A 60 s refresh fell while the browser tab was hidden (onTabVisible).
+    this._skippedWhileHidden = false;
   }
 
   /** The admission holds changed: redraw what reads the disk gate. */
@@ -24,8 +32,25 @@ export class StatsController {
     this.loadStats();
     // Clear any existing interval to prevent leaks on double-activate
     if (this._refreshInterval) clearInterval(this._refreshInterval);
-    // Auto-refresh every 60 seconds while active
-    this._refreshInterval = setInterval(() => this.loadStats(), 60000);
+    // Auto-refresh every 60 seconds while active. A hidden browser tab skips
+    // the request; the numbers are read again as soon as it is shown
+    // (onTabVisible).
+    this._skippedWhileHidden = false;
+    this._refreshInterval = setInterval(() => {
+      if (document.hidden) this._skippedWhileHidden = true;
+      else this.loadStats();
+    }, 60000);
+  }
+
+  /**
+   * The browser tab is visible again. If a refresh was skipped while it was
+   * hidden, read now: the numbers on screen are older than the 60 s the tab
+   * promises.
+   */
+  onTabVisible() {
+    if (!this._refreshInterval || !this._skippedWhileHidden) return;
+    this._skippedWhileHidden = false;
+    this.loadStats();
   }
 
   /** Called when the Stats tab is hidden. */
@@ -34,17 +59,59 @@ export class StatsController {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
     }
+    this._skippedWhileHidden = false;
   }
 
   async loadStats() {
+    const gen = ++this._loadGen;
+    let data = null;
+    // The failure line. The route's own error already says what failed
+    // ("Could not read statistics: ..."), so it is shown as it is.
+    let failure = "";
     try {
       const response = await fetch("/api/stats");
-      if (!response.ok) return;
-      const data = await response.json();
-      this.render(data);
+      if (response.ok) {
+        data = await response.json();
+      } else {
+        const body = await response.json().catch(() => null);
+        failure = (body && body.error) || `Could not load statistics: HTTP ${response.status}`;
+      }
     } catch (e) {
       console.error("Failed to load stats:", e);
+      failure = `Could not load statistics: ${(e && e.message) || "the server did not answer"}`;
     }
+    if (gen !== this._loadGen) return;
+    if (data) {
+      this._lastLoadedAt = Date.now();
+      this._showLoadError("");
+      this.render(data);
+    } else {
+      this._showLoadError(failure);
+    }
+  }
+
+  /**
+   * The one failure line above the cards. The cards keep the last values
+   * that loaded, so the line says how old they are; "" hides it.
+   */
+  _showLoadError(failure) {
+    const el = document.getElementById("stats-error");
+    if (!el) return;
+    if (!failure) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    let text = failure;
+    if (this._lastLoadedAt != null) {
+      const at = new Date(this._lastLoadedAt).toLocaleString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      text += ` — the numbers below are from the last successful load, at ${at}.`;
+    }
+    // The line is a role="alert": writing the same text again on every failed
+    // refresh would have a screen reader repeat it each minute.
+    if (el.textContent === text && !el.hidden) return;
+    el.textContent = text;
+    el.hidden = false;
   }
 
   render(data) {
@@ -190,9 +257,7 @@ export class StatsController {
 
     // "Queued" is deliberately absent — a queued job is waiting for an
     // archive slot, not an active download.
-    const active = (jobs || []).filter(j =>
-      j.status === "Downloading" || j.status === "Live" || j.status === "Muxing"
-    ).length;
+    const active = activeDownloadCount(jobs);
 
     // Called where a status can have moved: every full render, a card
     // insert, move or removal. Not on a progress tick, which leaves every

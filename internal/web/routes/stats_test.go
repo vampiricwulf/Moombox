@@ -229,3 +229,28 @@ func TestComputeWarnLevelZeroThresholdsDisabled(t *testing.T) {
 		t.Errorf("CriticalPercent=95 at 95%%: want critical, got %q", got)
 	}
 }
+
+// A failed stats query must not be served as a snapshot of zeros with a 200:
+// that reads as an emptied archive. Mutant: discarding GetJobStats' error.
+func TestStatsDatabaseErrorAnswersAnError(t *testing.T) {
+	r, db := newStatsFixture(t)
+	db.Close() // every later query fails
+
+	req := httptest.NewRequest("GET", "/api/stats", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("stats on a failed query: want 500, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if msg, _ := resp["error"].(string); msg == "" {
+		t.Errorf("want the JSON error shape, got %v", resp)
+	}
+	if _, has := resp["storage"]; has {
+		t.Errorf("an error answer must carry no totals, got %v", resp)
+	}
+}

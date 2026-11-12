@@ -1,7 +1,7 @@
 /**
  * Update Controller — the version indicator (header) and the update-available dialog
  */
-import { viewerIsAtTheHost } from "./utils.js";
+import { activeDownloadCount, activeDownloadsRestartWarning, viewerIsAtTheHost } from "./utils.js";
 
 // Moombox GitHub repository page — opened by double-clicking the version
 // indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
@@ -324,13 +324,10 @@ export class UpdateController {
     // interrupted and resume on the new binary, but live segments broadcast
     // during the ~30s gap can be lost (Twitch expires them fastest). Make
     // that a deliberate choice, not a surprise.
-    const active = (this.app.jobs || []).filter(
-      (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
-    ).length;
-    if (active > 0) {
-      const noun = active === 1 ? "download is" : "downloads are";
+    const warning = activeDownloadsRestartWarning(activeDownloadCount(this.app.jobs), "update restart");
+    if (warning) {
       const ok = await this.app.showConfirm(
-        `${active} ${noun} active — the update restart interrupts them, and live segments during the ~30s gap may be lost (Twitch especially). Update anyway?`,
+        `${warning} Update anyway?`,
         { okLabel: "Update Anyway", okVariant: "warning" },
       );
       if (!ok) return;

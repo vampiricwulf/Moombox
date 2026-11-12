@@ -374,6 +374,10 @@ type AutoCookieService struct {
 	needsRelogin   AutoCookieReloginRequired
 	targetPlatform string // "youtube" or "twitch"
 
+	// reloginAnnounced is needsRelogin (youtube, twitch) as OnReloginChange
+	// last heard of it; see announceRelogin.
+	reloginAnnounced [2]bool
+
 	// suppliedThisRun is the set of platforms whose cookies the operator put
 	// in the cookie file during this process: a browser login
 	// FinishSetupDetailed ACCEPTED, or an import whose rows ImportCookies
@@ -478,6 +482,12 @@ type AutoCookieService struct {
 	// It is NOT called for a pass that outlived its goroutine's context — a
 	// shutdown, or Stop — see notePassCompleted.
 	OnPassCompleted func(ctx context.Context)
+
+	// OnReloginChange is called after a platform's re-login flag was raised
+	// or lowered, with no lock held. It carries nothing: a listener reads
+	// ReloginStatus. cmd/moombox uses it to tell open dashboards to re-read
+	// their status. Set once, before the service is used; it must not block.
+	OnReloginChange func()
 
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
 	// path as a fallback when the CDP refresh launch fails. Off by
@@ -784,6 +794,7 @@ func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBr
 // FinishSetupDetailed, by RefreshCookiesDetailed's accepted arm and by
 // ImportCookies — the gesture this flag is asking the operator to perform.
 func (s *AutoCookieService) FlagManualRelogin(platform string) {
+	defer s.announceRelogin()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// A switch rather than a bare map write: the map's two keys are the wire
@@ -804,6 +815,7 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 // healed. The flag stayed up, and both dashboards rank it above
 // "Authenticated", so they showed "Re-login required" until a restart.
 func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
+	defer s.announceRelogin()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch platform {
@@ -813,6 +825,22 @@ func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
 		return was
 	}
 	return false
+}
+
+// announceRelogin calls OnReloginChange when the re-login flags differ from
+// the ones it last announced. Every writer of needsRelogin calls it after
+// releasing mu, so the writes themselves stay plain map assignments and a
+// write that changed nothing announces nothing.
+func (s *AutoCookieService) announceRelogin() {
+	s.mu.Lock()
+	now := [2]bool{s.needsRelogin["youtube"], s.needsRelogin["twitch"]}
+	changed := now != s.reloginAnnounced
+	s.reloginAnnounced = now
+	fn := s.OnReloginChange
+	s.mu.Unlock()
+	if changed && fn != nil {
+		fn()
+	}
 }
 
 // Stop stops the auto-cookie service, permanently for this service's
