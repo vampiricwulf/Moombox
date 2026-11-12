@@ -349,9 +349,13 @@ export class MoomboxApp {
         // The listed formats belong to one video. Once the URL names another
         // they go at once, not after the debounce: the picker must not show,
         // and the submit must not send, an earlier video's rendition.
-        if (this._formatsListedFor && this.extractVideoId(e.target.value || "") !== this._formatsListedFor) {
+        // The same goes for a list still being fetched: disowned here
+        // (_lastFormatVideoId), its answer is dropped when it arrives.
+        const listedOrAsked = this._formatsListedFor ?? this._lastFormatVideoId;
+        if (listedOrAsked && this.extractVideoId(e.target.value || "") !== listedOrAsked) {
           this.clearFormatChoice();
           this._lastFormatVideoId = null;
+          document.getElementById("format-skeleton").style.display = "none";
         }
         if (document.getElementById("advanced-options-toggle").checked) {
           clearTimeout(this._formatFetchTimeout);
@@ -3678,7 +3682,14 @@ export class MoomboxApp {
       }
 
       const data = await response.json();
+      if (this._lastFormatVideoId !== videoId) return;
       await this.populateFormatSelects(data);
+      // The URL may have changed while the selects were filled: the list is
+      // then nobody's, and whoever disowned it has hidden the section.
+      if (this._lastFormatVideoId !== videoId) {
+        if (!this._formatsListedFor) this.clearFormatChoice();
+        return;
+      }
       this._formatsListedFor = videoId;
 
       formatSkeleton.style.display = "none";

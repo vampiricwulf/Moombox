@@ -301,3 +301,36 @@ test("returning to the first URL lists its formats again", { skip }, async () =>
   assert.deepEqual(options(h, "video-format-select").map(([value]) => value), ["248"]);
   assert.equal(h.el("video-format-select").value, "", "the earlier pick is not restored");
 });
+
+// The URL changes to B while A's list is still being fetched. A's answer
+// must not open the picker under a URL that names B.
+//
+// MUTANT: the sl-input handler disowning only a list already shown — A's
+// answer passes the staleness check and the section shows A's renditions for
+// the 500 ms before B's fetch starts.
+test("a list still being fetched is dropped when the URL changes to another video", { skip }, async () => {
+  let releaseA;
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/formats/:id": ({ params }) =>
+        (params.id === VIDEO_A ? new Promise((r) => { releaseA = () => r(LISTED); }) : LISTED),
+    },
+  });
+  h.el("advanced-options-toggle").checked = true;
+  const input = h.el("video-url-input");
+  input.value = `https://www.youtube.com/watch?v=${VIDEO_A}`;
+  const fetchA = h.app.fetchFormatsForAdvanced();
+  await h.flush();
+
+  input.value = `https://www.youtube.com/watch?v=${VIDEO_B}`;
+  input.dispatchEvent(new h.window.Event("sl-input"));
+  releaseA();
+  await fetchA;
+  assert.equal(h.el("format-selection").style.display, "none", "A's formats were shown under B's URL");
+  assert.deepEqual(options(h, "video-format-select"), []);
+
+  h.advance(500); // B's debounced fetch
+  await h.flush();
+  await h.flush();
+  assert.equal(h.el("format-selection").style.display, "block", "B's own list must still be shown");
+});
