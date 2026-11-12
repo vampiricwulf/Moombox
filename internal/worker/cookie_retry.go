@@ -28,7 +28,10 @@ import (
 // The count resets jobstate.CookieRetryWindow after the last retry, when a
 // run passes the playability check (processJob), and when the operator
 // deletes, cancels, resumes or reinitializes the job. It lives in memory, so
-// a restart resets it too. A membership park is never counted: an account
+// a restart resets it too. The reset is lazy: nothing fires at the 24-hour
+// mark, and the row stays parked until the next verified gesture (the
+// periodic refresh included, cmd/moombox resumeAfterAutomaticPass), a
+// credential edge or an operator verb resumes it. A membership park is never counted: an account
 // change settles it, one retry per change (cmd/moombox sweepShouldResume).
 
 // cookieRetryState is one job's automatic cookie retries so far.
@@ -158,7 +161,7 @@ func cookieRetriesSpentText(platform, errMsg string) string {
 	case "twitch":
 		name = "Twitch"
 	}
-	note := fmt.Sprintf("The cookies verify as signed in and %s still refuses this video after %d automatic retries, so the cookies are not the cause. No more automatic retries for now.",
+	note := fmt.Sprintf("The cookies verify as signed in and %s still refuses this video after %d automatic retries, so the cookies are not the cause. Automatic retries are paused for 24 hours after the last one; Resume or Reinitialize retries it now.",
 		name, jobstate.MaxCookieAutoRetries)
 	if errMsg == "" {
 		return note
@@ -176,7 +179,7 @@ func (w *DownloadWorker) parkWithCookieRetriesSpent(job *database.Job, errMsg st
 		"videoID", job.VideoID,
 		"platform", job.Platform,
 		"retries", jobstate.MaxCookieAutoRetries,
-		"next", "it retries by itself again 24 hours after the last retry; Resume or Reinitialize retries it now")
+		"next", "after 24 hours the next cookie refresh, import or setup that verifies the platform retries it; Resume or Reinitialize retries it now")
 	w.db.UpdateJobFieldsIf(job.ID, database.StatusCookies, map[string]any{
 		"error": cookieRetriesSpentText(job.Platform, errMsg),
 	})
