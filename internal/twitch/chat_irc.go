@@ -717,9 +717,6 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	// (MessageBuilder.cpp, displayName = loginName).
 	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
-		authorName = tags["login"]
-	}
-	if authorName == "" {
 		authorName = ircPrefixNick(parts[0])
 	}
 	if authorName == "" {
