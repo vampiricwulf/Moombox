@@ -1118,12 +1118,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			// The warning the update restart gives, on the confirm line and
 			// the menu's confirm (restart_warning.go).
 			ConfirmDetail: func([]string) string {
-				clause := activeRestartClause(a.activeDownloadCount(), "restart")
-				note := a.jobVerbRunningNote()
-				if clause != "" && note != "" {
-					return clause + "; " + note
-				}
-				return clause + note
+				return joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "restart"), a.jobVerbRunningNote())
 			}})
 	}
 

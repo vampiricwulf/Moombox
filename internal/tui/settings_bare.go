@@ -516,8 +516,8 @@ func (m *SettingsModel) bareRestart() string {
 	body := bareWrap("Some changes apply only after a restart.", w, h)
 	// The warning about active downloads is kept whole; where the rows run
 	// out the line above gives way to it (the header already says a restart
-	// is needed).
-	if warn := m.restartWarning(true); warn != "" {
+	// is needed). A Resume or Reinitialize still running is named after it.
+	if warn := joinRestartNotes(m.restartWarning(true), m.restartRunningNote()); warn != "" {
 		rows := bareStyled(bareWrap(warn, w, len(warn)+1), YellowStyle)
 		if 1+len(body)+len(rows)+2 > h {
 			body = nil

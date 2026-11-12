@@ -24,6 +24,16 @@ func activeRestartClause(n int, restart string) string {
 	return fmt.Sprintf("%d %s active — the %s interrupts them", n, noun, restart)
 }
 
+// joinRestartNotes puts a second note (a Resume or Reinitialize still
+// running: App.jobVerbRunningNote) after the active-downloads clause. Either
+// may be "".
+func joinRestartNotes(clause, note string) string {
+	if clause != "" && note != "" {
+		return clause + "; " + note
+	}
+	return clause + note
+}
+
 // activeRestartWarning is the whole sentence, as the dashboard's prompts
 // show it, for a prompt with room. "" when n is 0.
 func activeRestartWarning(n int, restart string) string {

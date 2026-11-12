@@ -1023,6 +1023,7 @@ func NewApp() *App {
 	// The Settings restart prompt warns from the App's own count, read when
 	// it is drawn.
 	a.settings.activeDownloads = a.activeDownloadCount
+	a.settings.runningNote = a.jobVerbRunningNote
 	return a
 }
 
@@ -1494,18 +1495,21 @@ func (a *App) activeDownloadCount() int {
 // a SECOND invocation within 5s (mirroring the confirm-chord pattern):
 // updating restarts the process, interrupting recordings — live segments
 // broadcast during the restart gap may be lost (Twitch expires fastest) —
-// so that must be a deliberate choice. Returns nil when only feedback was
+// so that must be a deliberate choice. A Resume or Reinitialize still running
+// asks for the second press too: the restart can stop a reset between its
+// row write and its file deletion. Returns nil when only feedback was
 // shown (no update, or confirmation pending).
 func (a *App) applyUpdateAction() tea.Cmd {
 	if a.updateAvailable == nil || a.OnApplyUpdate == nil {
 		a.setFeedback("No update available — use R V to check")
 		return nil
 	}
-	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
+	warn := joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "update restart"), a.jobVerbRunningNote())
+	if warn != "" && time.Since(a.updateConfirmAt) > 5*time.Second {
 		a.updateConfirmAt = time.Now()
 		// A confirm prompt, in the yellow every other confirm has: it starts
 		// with a count, so the "Press " scan never saw it.
-		a.setFeedbackWithSeverity(activeRestartClause(n, "update restart")+"; press R U again within 5s to confirm", severityWarning)
+		a.setFeedbackWithSeverity(warn+"; press R U again within 5s to confirm", severityWarning)
 		return nil
 	}
 	a.updateConfirmAt = time.Time{}

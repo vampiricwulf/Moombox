@@ -1129,6 +1129,16 @@ func (m *SettingsModel) restartWarning(short bool) string {
 	return activeRestartWarning(m.activeDownloads(), "restart")
 }
 
+// restartRunningNote says a Resume or Reinitialize is still running, ""
+// when none is: a restart can stop a reset between its row write and its
+// file deletion, so the prompt says so, as the Q prompt and R P's confirm do.
+func (m *SettingsModel) restartRunningNote() string {
+	if m.runningNote == nil {
+		return ""
+	}
+	return m.runningNote()
+}
+
 func (m *SettingsModel) renderRestartOverlay() string {
 	w := min(50, m.width-4)
 	h := 10
@@ -1146,7 +1156,11 @@ func (m *SettingsModel) renderRestartOverlay() string {
 	content.WriteString("\n\n")
 	// The warning the update restart gives (restart_warning.go): this is the
 	// same process restart.
-	if warn := m.restartWarning(false); warn != "" {
+	warn := m.restartWarning(false)
+	if note := m.restartRunningNote(); note != "" {
+		warn = strings.TrimSpace(warn + " " + note + ".")
+	}
+	if warn != "" {
 		rows := bareWrap(warn, max(w-2, 1), len(warn)+1)
 		content.WriteString(YellowStyle.Render(strings.Join(rows, "\n")))
 		content.WriteString("\n\n")

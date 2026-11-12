@@ -281,3 +281,75 @@ func TestQuitAndRestartPromptsNameARunInFlight(t *testing.T) {
 		t.Errorf("restart prompt = %q", app.feedback.msg)
 	}
 }
+
+// The update restart (R U, and U in the release notes) asks for its second
+// press while a run is in flight, as it does for active downloads, and names
+// the run. Mutant: applyUpdateAction reading the download count alone.
+func TestUpdateRestartAsksAgainWhileARunIsInFlight(t *testing.T) {
+	app := jobVerbApp()
+	app.OnReinitializeJob = func(string) error { return nil }
+	app.updateAvailable = &UpdateStatusMsg{TagName: "v9.9.9"}
+	applied := 0
+	app.OnApplyUpdate = func(string) (string, bool) { applied++; return "", false }
+
+	app.dispatchAction("A I", app.taskList.GetJobByID("a"))
+	if cmd := app.applyUpdateAction(); cmd != nil {
+		t.Fatal("the update ran mid-reset without its second press")
+	}
+	want := "Reinitialize is still running; press R U again within 5s to confirm"
+	if app.feedback.msg != want || app.feedback.sev != severityWarning {
+		t.Errorf("update line = %q (sev %v), want %q", app.feedback.msg, app.feedback.sev, want)
+	}
+	if cmd := app.applyUpdateAction(); cmd == nil {
+		t.Fatal("the second press did not apply the update")
+	}
+
+	// Nothing running, nothing active: no second press, as before.
+	idle := jobVerbApp()
+	idle.updateAvailable = &UpdateStatusMsg{TagName: "v9.9.9"}
+	idle.OnApplyUpdate = func(string) (string, bool) { return "", false }
+	if cmd := idle.applyUpdateAction(); cmd == nil {
+		t.Error("an idle update asked for a second press")
+	}
+}
+
+// The Settings restart prompt names a run in flight, at every size it draws
+// in, and keeps its keys. Mutant: SettingsModel.restartRunningNote returning
+// "".
+func TestSettingsRestartPromptNamesARunInFlight(t *testing.T) {
+	for _, size := range [][2]int{{120, 40}, {60, 20}, {40, 10}, {30, 6}} {
+		for _, downloads := range []bool{false, true} {
+			app := jobVerbApp()
+			app.OnReinitializeJob = func(string) error { return nil }
+			if downloads {
+				app.statusMap["d"] = database.StatusDownloading
+				app.statusMap["l"] = database.StatusLive
+			}
+			app.settings.SetSize(size[0], size[1])
+			app.settings.visible = true
+			app.settings.showRestartOverlay = true
+			flatten := func() (string, string) {
+				view := stripANSI(app.settings.View())
+				return view, strings.Join(strings.Fields(strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(view)), " ")
+			}
+			if _, flat := flatten(); strings.Contains(flat, "still running") {
+				t.Errorf("%v: the prompt names a run with none in flight:\n%s", size, flat)
+			}
+
+			app.dispatchAction("A I", app.taskList.GetJobByID("a"))
+			view, flat := flatten()
+			if !strings.Contains(flat, "Reinitialize is still running") {
+				t.Errorf("%v downloads=%v: the restart prompt does not name the run:\n%s", size, downloads, view)
+			}
+			if downloads && !strings.Contains(flat, "2 downloads are active — the restart interrupts them") {
+				t.Errorf("%v: the run's note pushed out the downloads warning:\n%s", size, view)
+			}
+			if !strings.Contains(strings.ToLower(flat), "enter: restart now") {
+				t.Errorf("%v downloads=%v: the note pushed the keys off the prompt:\n%s", size, downloads, view)
+			}
+			if rows := strings.Count(view, "\n") + 1; rows > size[1] {
+				t.Errorf("%v downloads=%v: the prompt is %d rows tall", size, downloads, rows)
+			}
+		}
+	}
+}
