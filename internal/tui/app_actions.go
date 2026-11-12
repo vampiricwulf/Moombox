@@ -1109,7 +1109,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "R S", Label: "Verify Signature", HintLabel: "Signature", Category: "Request"})
 	}
 	if a.OnRestart != nil {
-		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true})
+		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true,
+			// The warning the update restart gives, on the confirm line and
+			// the menu's confirm (restart_warning.go).
+			ConfirmDetail: func([]string) string {
+				return activeRestartClause(a.activeDownloadCount(), "restart")
+			}})
 	}
 
 	// Open

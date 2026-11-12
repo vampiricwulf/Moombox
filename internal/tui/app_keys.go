@@ -452,8 +452,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	if item.NeedsConfirm {
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
-		a.setFeedback(fmt.Sprintf("Press %s to confirm %s (3s)",
-			strings.ToUpper(key), strings.ToLower(item.HintLabel)))
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s%s (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel), confirmDetail(item, nil)))
 		return a, nil, true
 	}
 

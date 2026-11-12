@@ -977,7 +977,7 @@ func NewApp() *App {
 	tl := NewTaskListModel()
 	tl.progressStore = ps
 
-	return &App{
+	a := &App{
 		taskList:          tl,
 		details:           NewJobDetailsModel(),
 		logs:              NewLogViewerModel(),
@@ -1003,6 +1003,10 @@ func NewApp() *App {
 		jobVersions:       make(map[string]appliedJobVersions),
 		isDark:            true, // default to dark; updated by BackgroundColorMsg
 	}
+	// The Settings restart prompt warns from the App's own count, read when
+	// it is drawn.
+	a.settings.activeDownloads = a.activeDownloadCount
+	return a
 }
 
 // BackfillLogs seeds the log viewer with historical lines (e.g. from the logger's ring buffer).
@@ -1455,7 +1459,8 @@ func (a *App) hasActiveDownloads() bool {
 }
 
 // activeDownloadCount counts jobs currently downloading/live/muxing —
-// used by hasActiveDownloads and the update-apply confirmation.
+// used by hasActiveDownloads and by every restart warning: the update-apply
+// confirmation, R P and the Settings restart prompt (restart_warning.go).
 func (a *App) activeDownloadCount() int {
 	n := 0
 	for _, s := range a.statusMap {
@@ -1481,11 +1486,7 @@ func (a *App) applyUpdateAction() tea.Cmd {
 	}
 	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
 		a.updateConfirmAt = time.Now()
-		plural := "download is"
-		if n != 1 {
-			plural = "downloads are"
-		}
-		a.setFeedback(fmt.Sprintf("%d %s active — the update restart interrupts them; press R U again within 5s to confirm", n, plural))
+		a.setFeedback(activeRestartClause(n, "update restart") + "; press R U again within 5s to confirm")
 		return nil
 	}
 	a.updateConfirmAt = time.Time{}

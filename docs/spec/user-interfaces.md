@@ -96,6 +96,8 @@ Which tokens are chips is decided by where they came from, not their type: every
 
 **Restart warnings (Web):** every prompt that restarts the process counts the jobs a restart interrupts with `activeDownloadCount` (Downloading, Live or Muxing; `web/public/modules/utils.js`, the same rule as the TUI's `activeDownloadCount` in `internal/tui/app.go`) and, when there are any, shows the one sentence `activeDownloadsRestartWarning` builds: "2 downloads are active — the restart interrupts them, and live segments during the ~30s gap may be lost (Twitch especially)." The update dialog's Update Now asks it with "Update anyway?" (`web/public/modules/update-indicator.js`); Settings → System's **Restart Moombox** button asks it with "Restart anyway?" in place of its usual line that downloads resume, and the restart prompt after a save of a restart-required setting carries it above "Restart Moombox now?" (`web/public/modules/settings.js`). The status bar's active count reads the same function. Pinned by `web/tests/restart-active-warning.test.mjs`.
 
+**Restart warnings (TUI):** the same rule and the same words, from `internal/tui/restart_warning.go`. The count is `App.activeDownloadCount` (Downloading, Live or Muxing). `activeRestartClause` is the short form, "2 downloads are active — the restart interrupts them", for a confirm line: the update restart's (`R U`, which then asks for a second press within 5s), `R P`'s confirm line and the action menu's confirm for Restart Program (the item's `ConfirmDetail`). `activeRestartWarning` is the dashboard's whole sentence, shown in yellow by the Settings restart prompt at 60×20 and up; its bare form shows the short clause, kept whole, and where the rows run out "Some changes apply only after a restart." gives way to it. With nothing active every prompt is as it was.
+
 Persistent client-side state is stored in `localStorage`:
 - Theme preference (dark/light)
 - Any module-specific preferences
@@ -466,7 +468,7 @@ Import Chapters. The operator pastes a timestamp comment, sees it previewed agai
 | `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `Esc`/`Q` closes; beside a pending update's own notes `U` applies it and `S` skips it — the current version's notes offer neither — (`OnDismissUpdate` → `dismissUpdateFromTUI`: `routes.DismissUpdate`, the same helper `POST /api/update/dismiss` uses, then the `update_cleared` that route's `OnCleared` sends, so every open dashboard drops its badge too). |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured. Green when the signature and the release's signed manifest both verified; yellow for a signature-only check, which only a release before `updater.FirstManifestVersion` (2.9.0) gets, since it publishes no manifest; red for any failure, including a release from 2.9.0 on whose manifest or its signature is missing ([security.md](security.md) § Release Manifest). |
-| `R P` | Restart Program | Restart callback is configured. Requires confirmation. |
+| `R P` | Restart Program | Restart callback is configured. Requires confirmation. While downloads are active the confirm line names them, as the update restart's does: "Press P to confirm restart: 2 downloads are active — the restart interrupts them (3s)" (see "Restart warnings (TUI)"). |
 
 **Open chords (O prefix):**
 

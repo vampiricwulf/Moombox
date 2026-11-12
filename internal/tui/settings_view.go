@@ -1117,6 +1117,18 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 	return joinBoxRows(lines, w)
 }
 
+// restartWarning is what the restart prompt says about active downloads, ""
+// with none: the whole sentence, or the short clause for the bare form.
+func (m *SettingsModel) restartWarning(short bool) string {
+	if m.activeDownloads == nil {
+		return ""
+	}
+	if short {
+		return activeRestartClause(m.activeDownloads(), "restart")
+	}
+	return activeRestartWarning(m.activeDownloads(), "restart")
+}
+
 func (m *SettingsModel) renderRestartOverlay() string {
 	w := min(50, m.width-4)
 	h := 10
@@ -1132,6 +1144,14 @@ func (m *SettingsModel) renderRestartOverlay() string {
 	// exists to prevent.
 	content.WriteString(DimStyle.Render("port, network access, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID"))
 	content.WriteString("\n\n")
+	// The warning the update restart gives (restart_warning.go): this is the
+	// same process restart.
+	if warn := m.restartWarning(false); warn != "" {
+		rows := bareWrap(warn, max(w-2, 1), len(warn)+1)
+		content.WriteString(YellowStyle.Render(strings.Join(rows, "\n")))
+		content.WriteString("\n\n")
+		h += len(rows) + 1
+	}
 
 	content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("Enter: Restart now"))
 	content.WriteString("  ")

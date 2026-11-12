@@ -514,6 +514,16 @@ func (m *SettingsModel) bareFields(sec settingsSection) string {
 func (m *SettingsModel) bareRestart() string {
 	w, h := m.width, m.height
 	body := bareWrap("Some changes apply only after a restart.", w, h)
+	// The warning about active downloads is kept whole; where the rows run
+	// out the line above gives way to it (the header already says a restart
+	// is needed).
+	if warn := m.restartWarning(true); warn != "" {
+		rows := bareStyled(bareWrap(warn, w, len(warn)+1), YellowStyle)
+		if 1+len(body)+len(rows)+2 > h {
+			body = nil
+		}
+		body = append(body, rows...)
+	}
 	if 1+len(body)+1+2 <= h {
 		body = append(body, "")
 	}

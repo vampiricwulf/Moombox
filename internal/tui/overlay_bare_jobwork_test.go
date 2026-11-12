@@ -589,7 +589,7 @@ func TestBareMenuConfirmPagesAndEsc(t *testing.T) {
 	}
 	menuTo(t, r, "R P")
 	r.press("enter")
-	wantFrame(t, "the restart confirm", a.View().Content, 30, 6, []string{"Restart Program?", "", "", "", "", "Enter confirm  Esc cancel"})
+	wantFrame(t, "the restart confirm", a.View().Content, 30, 6, []string{"Restart Program?", "2 downloads are active — the", "restart interrupts them", "", "", "Enter confirm  Esc cancel"})
 	r.pressRunLast("enter")
 	if r.restarted != 1 {
 		t.Errorf("the confirmed restart ran %d times", r.restarted)
