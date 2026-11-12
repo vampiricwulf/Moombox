@@ -875,6 +875,9 @@ func (m *AddVideoModel) handleConfirmStep(key string) (string, string) {
 // startSubmit enters the in-flight state a submit holds until its result.
 func (m *AddVideoModel) startSubmit() {
 	m.submitting = true
+	// A refusal of the last submit is not this one's: it must not sit
+	// beside the spinner. FailSubmit sets it again if this one is refused.
+	m.errorMsg = ""
 	m.spinner = newSpinner()
 	m.textInput.Blur()
 }

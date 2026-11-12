@@ -44,6 +44,11 @@ func TestRefusedAddVideoKeepsTheDialogAndItsInput(t *testing.T) {
 		if act, _ := a.addVideo.HandleKey(keyEnter); act != "submit" {
 			t.Errorf("%v: Enter after a refusal gave %q, want a new submit", size, act)
 		}
+		// Mutant: startSubmit leaving errorMsg: the old refusal is drawn
+		// beside the spinner of the new request.
+		if got := stripANSI(a.addVideo.View()); strings.Contains(got, "Twitch channel not found") || !strings.Contains(got, "Adding") {
+			t.Errorf("%v: the resubmit still shows the last refusal, or no spinner:\n%s", size, got)
+		}
 	}
 }
 
