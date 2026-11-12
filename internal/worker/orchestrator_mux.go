@@ -1432,9 +1432,25 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// outputs use the plain template name, exactly like jobs that never split.
 	// A file this job did not write at that name is set aside first
 	// (setForeignFileAside); when it cannot be, the part keeps its suffixed
-	// name, as it does when the rename itself fails.
+	// name, as it does when the rename itself fails. The part's chat takes
+	// the plain chat's name in the same move, so a chat there is asked about
+	// too: with an archive it went aside as its sidecar, without one (a reset
+	// moved the archive and the chat could not follow, the operator deleted
+	// the video and kept the chat) nothing else looks at it. Each name is
+	// asked about only while the part's own file is still at its part name:
+	// with that gone there is nothing to rename onto it, and the file at the
+	// plain name is the part itself, moved by a run that died before its row
+	// write (renameSinglePartToPlain adopts it).
 	if len(segments) == 1 {
-		if err := o.setForeignFileAside(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4"), archiveSidecarExts); err != nil {
+		plain := filepath.Join(outputDir, filenameBase)
+		var err error
+		if fileExists(segments[0].FilePath) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".mp4", archiveSidecarExts)
+		}
+		if err == nil && fileExists(segments[0].ChatFile) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".chat.json", []string{chatRawSidecarSuffix})
+		}
+		if err != nil {
 			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
 		} else {
 			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)

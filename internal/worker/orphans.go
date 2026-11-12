@@ -267,6 +267,15 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 		return fmt.Errorf("path not found: %w", err)
 	}
 
+	// An *.owner file that is not a marker Moombox wrote (readAsideMarker) is
+	// the operator's. The sweep never lists one, so only a request built by
+	// hand names it.
+	if !info.IsDir() && strings.EqualFold(filepath.Ext(absPath), asideOwnerSuffix) {
+		if _, isMarker := readAsideMarker(absPath); !isMarker {
+			return fmt.Errorf("%s is not a file Moombox wrote: it is kept", filepath.Base(absPath))
+		}
+	}
+
 	if info.IsDir() {
 		return os.RemoveAll(absPath)
 	}
@@ -605,13 +614,14 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// The marker of an archive a Reinitialize kept (owner ruling
 		// R2-W1b): owned with its files while its job exists, listed with
 		// them once the job is gone. Only a marker Moombox wrote
-		// (readAsideMarker: either marker name, and one job ID as its whole
-		// content): any other *.owner file is the operator's, and is never
-		// offered.
+		// (readAsideMarker: either marker name, and the marker line as its
+		// whole content): any other *.owner file is the operator's, and is
+		// never offered, in a trims directory either.
 		if ext == asideOwnerSuffix {
-			if _, isMarker := readAsideMarker(absPath); isMarker {
-				isDerived = true
+			if _, isMarker := readAsideMarker(absPath); !isMarker {
+				return nil
 			}
+			isDerived = true
 		}
 		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
@@ -998,6 +1008,18 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 		return row, "kept it at a Reinitialize"
 	}
 	return "", ""
+}
+
+// fileRow returns the row that names the file absPath, in either spelling,
+// "" when none does: ownerOf's first rule alone, for a finalize asking whether
+// the file at its name is another row's (setForeignFileAside).
+func (o *outputOwners) fileRow(absPath string) string {
+	for _, n := range o.spellings(absPath) {
+		if row, ok := o.files[n]; ok {
+			return row
+		}
+	}
+	return ""
 }
 
 // asideOwner returns the row that owns path through the marker that shares

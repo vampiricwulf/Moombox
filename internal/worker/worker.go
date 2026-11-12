@@ -569,6 +569,10 @@ func NewDownloadWorker(
 	if orchestrator != nil {
 		orchestrator.waitArchiveRewrite = w.waitChapterImport
 		orchestrator.beginFinishing = w.beginFinishing
+		orchestrator.globalOutputDir = func() (dir string) {
+			w.readConfig(func(c *config.MoomboxConfig) { dir = resolveOutputDir(c) })
+			return dir
+		}
 	}
 	// A deleted row takes its backlog retry streak with it. The id is the
 	// video id, so a backlog rescan can create the row again, and it would

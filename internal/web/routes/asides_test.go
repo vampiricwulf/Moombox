@@ -281,7 +281,7 @@ func TestJobPayloadListsTheArchivesAReinitializeSetAside(t *testing.T) {
 	f.addJob(t, "j2", func(j *database.Job) { j.ChannelName = "Chan" })
 	for name, body := range map[string]string{
 		"Show.restart-1700000000.mp4":   "earlier",
-		"Show.restart-1700000000.owner": "j1\n",
+		"Show.restart-1700000000.owner": "moombox-owner j1\n",
 		"Show.restart-1600000000.mp4":   "recovered",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {

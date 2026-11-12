@@ -386,7 +386,7 @@ func TestResetKeepsWhatTheStemRuleOwned(t *testing.T) {
 	}
 
 	writeTestFile(t, filepath.Join(outputDir, "Other.restart-5.mkv"), "taken")
-	if got, ok := freeAsideName(outputDir, "Other", ".mkv", "5"); !ok || filepath.Base(got) != "Other.restart-5-2.mkv" {
+	if got, ok := freeAsideName(outputDir, "Other", ".mkv", "5", "j"); !ok || filepath.Base(got) != "Other.restart-5-2.mkv" {
 		t.Errorf("freeAsideName = (%q, %v), want the next counter in the archive's own extension", got, ok)
 	}
 }
@@ -685,27 +685,40 @@ func TestFinalizeSetsAsideAFileItDidNotWrite(t *testing.T) {
 }
 
 // The Files sweep offers a marker whose job is gone, and only a marker: a
-// *.owner file that does not hold one job ID as its whole content is the
-// operator's, whichever of the two marker names it has, and is never listed,
-// so never deleted by Delete All.
+// *.owner file whose whole content is not the marker line is the operator's,
+// whichever of the two marker names it has and wherever it is, a trims
+// directory included, and is never listed, so never deleted by Delete All.
 //
 // Mutants: every *.owner file listed (the operator's are offered); the
 // content rule dropped for the set-aside name alone; a marker with a CRLF
-// line end not read as one (it is never offered, and owns nothing).
+// line end not read as one (it is never offered, and owns nothing); a bare
+// job ID read as a marker (a one-word file of the operator's is offered);
+// the trims directory's any-extension rule left ahead of the marker rule.
 func TestFilesSweepOffersOnlyMarkersMoomboxWrote(t *testing.T) {
 	_, db := testWorkerSetup(t)
 	outputDir := t.TempDir()
+	// A job whose archive makes outputDir/trim a trims directory, where the
+	// sweep offers a file of any extension.
+	kept := &database.Job{ID: "j-kept", VideoID: "j-kept", URL: "u", Platform: "youtube", Status: database.StatusFinished,
+		OutputFile: filepath.Join(outputDir, "Kept.mp4")}
+	if _, err := db.AddJob(kept); err != nil {
+		t.Fatal(err)
+	}
 	for name, content := range map[string]string{
-		"Gone.restart-1700000000.owner": "j-gone\n",   // a set-aside archive's marker, its job deleted
-		"Old.owner":                     "j-gone\r\n", // an in-place marker, saved by an editor
+		"Kept.mp4":                      "kept",
+		"Gone.restart-1700000000.owner": asideMarkerPrefix + "j-gone\n",   // a set-aside archive's marker, its job deleted
+		"Old.owner":                     asideMarkerPrefix + "j-gone\r\n", // an in-place marker, saved by an editor
 		"notes.owner":                   "the owner of this folder is Wulf\n",
-		"Show.restart-1700000001.owner": "line one\nline two\n",
+		"bare.owner":                    "j-gone\n",
+		"Show.restart-1700000001.owner": asideMarkerPrefix + "line one\n" + asideMarkerPrefix + "line two\n",
 		"empty.owner":                   "",
-		"long.owner":                    strings.Repeat("x", asideMarkerMaxID+1) + "\n",
+		"long.owner":                    asideMarkerPrefix + strings.Repeat("x", asideMarkerMaxID+1) + "\n",
+		"trim/clip.owner":               "mine\n",
+		"trim/left.bin":                 "an encode's leftover",
 	} {
 		writeTestFile(t, filepath.Join(outputDir, name), content)
 	}
-	if got := strings.Join(offeredOutput(t, db, outputDir), "|"); got != "Gone.restart-1700000000.owner|Old.owner" {
-		t.Errorf("the sweep offers %s, want the two markers and none of the operator's files", got)
+	if got := strings.Join(offeredOutput(t, db, outputDir), "|"); got != "Gone.restart-1700000000.owner|Old.owner|left.bin" {
+		t.Errorf("the sweep offers %s, want the two markers, the trim leftover and none of the operator's files", got)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -61,6 +62,11 @@ import (
 // asideOwnerSuffix is the extension of the marker that names the job its
 // files were kept for at a Reinitialize.
 const asideOwnerSuffix = ".owner"
+
+// asideMarkerPrefix opens a marker's one line, ahead of the job ID: what
+// tells a marker Moombox wrote from any other *.owner file in the output
+// tree, a one-word one included.
+const asideMarkerPrefix = "moombox-owner "
 
 // archiveSidecarExts are the files a single-file finalize writes beside its
 // archive under the archive's stem (copyAssets): the chat and its raw
@@ -152,24 +158,24 @@ const asideMarkerMaxID = 200
 
 // readAsideMarker reads the marker file at markerPath: the job ID it holds,
 // and whether it is a marker at all — a regular file named *.owner whose
-// whole content is what writeAsideOwner writes, one job ID on one line (no
-// spaces, no control characters, at most asideMarkerMaxID bytes; the line end
-// may be missing or CRLF, for a marker that went through an editor). Any
-// other *.owner file in the output tree is the operator's: it owns nothing,
-// and the Files sweep never lists it.
+// whole content is what writeAsideOwner writes, asideMarkerPrefix and one job
+// ID on one line (no spaces, no control characters, at most asideMarkerMaxID
+// bytes; the line end may be missing or CRLF, for a marker that went through
+// an editor). Any other *.owner file in the output tree is the operator's: it
+// owns nothing, the Files sweep never lists it and its delete refuses it.
 func readAsideMarker(markerPath string) (jobID string, ok bool) {
 	if !strings.EqualFold(filepath.Ext(markerPath), asideOwnerSuffix) {
 		return "", false
 	}
-	if info, err := os.Lstat(markerPath); err != nil || !info.Mode().IsRegular() || info.Size() > asideMarkerMaxID+2 {
+	if info, err := os.Lstat(markerPath); err != nil || !info.Mode().IsRegular() || info.Size() > int64(len(asideMarkerPrefix))+asideMarkerMaxID+2 {
 		return "", false
 	}
 	b, err := os.ReadFile(markerPath)
 	if err != nil {
 		return "", false
 	}
-	id := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
-	if id == "" || len(id) > asideMarkerMaxID {
+	id, ok := strings.CutPrefix(strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r"), asideMarkerPrefix)
+	if !ok || id == "" || len(id) > asideMarkerMaxID {
 		return "", false
 	}
 	for i := 0; i < len(id); i++ {
@@ -180,17 +186,56 @@ func readAsideMarker(markerPath string) (jobID string, ok bool) {
 	return id, true
 }
 
-// writeAsideOwner writes the marker that makes the files named base.* jobID's.
-func writeAsideOwner(base, jobID string) error {
-	return os.WriteFile(base+asideOwnerSuffix, []byte(jobID+"\n"), 0o644)
+// writeAsideOwner makes the files named base.* jobID's: it creates the marker
+// base.owner, and never writes over a file already at that name. A marker
+// there that names jobID already is the one wanted (created false, no
+// error): two files of one job can share a base, an archive and the chat that
+// could not follow it. Anything else there — another job's marker, a file of
+// the operator's — is left as it is and is the error. created tells the
+// caller whether the marker is its own to take back.
+func writeAsideOwner(base, jobID string) (created bool, err error) {
+	marker := base + asideOwnerSuffix
+	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if id, ok := readAsideMarker(marker); ok && id == jobID {
+			return false, nil
+		}
+		if os.IsExist(err) {
+			return false, fmt.Errorf("%s is there and is not this job's marker", filepath.Base(marker))
+		}
+		return false, err
+	}
+	_, err = f.WriteString(asideMarkerPrefix + jobID + "\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(marker)
+		return false, err
+	}
+	return true, nil
+}
+
+// asideBaseFreeFor reports whether a file of jobID may be set aside under
+// base: no marker is there, or the one there names jobID. A base under
+// another job's marker, or beside an *.owner file that is no marker, is
+// passed over, so a set-aside file is never counted as another job's and
+// nobody's file is taken for a marker.
+func asideBaseFreeFor(base, jobID string) bool {
+	if _, err := os.Lstat(base + asideOwnerSuffix); err != nil {
+		return true
+	}
+	id, ok := readAsideMarker(base + asideOwnerSuffix)
+	return ok && id == jobID
 }
 
 // freeAsideName is asideOutputPath for an archive of any container: a free
 // "<stem>.restart-<stamp>[-N]<ext>" beside it. asideOutputPath names an
 // .mp4, which every archive a finalize writes is; an imported one keeps its
 // own extension, and a counter whose name is taken in that extension is
-// passed over like one taken as an .mp4.
-func freeAsideName(dir, stem, ext, stamp string) (string, bool) {
+// passed over like one taken as an .mp4, and so is one whose marker name is
+// not jobID's to use (asideBaseFreeFor).
+func freeAsideName(dir, stem, ext, stamp, jobID string) (string, bool) {
 	used := map[string]bool{}
 	for {
 		name, ok := asideOutputPath(dir, stem, stamp, used)
@@ -198,7 +243,7 @@ func freeAsideName(dir, stem, ext, stamp string) (string, bool) {
 			return "", false
 		}
 		name = strings.TrimSuffix(name, ".mp4") + ext
-		if _, err := os.Lstat(name); err != nil {
+		if _, err := os.Lstat(name); err != nil && asideBaseFreeFor(asideBase(name), jobID) {
 			return name, true
 		}
 	}
@@ -229,18 +274,21 @@ type asideLeft struct {
 //
 // The marker is written first and taken back when the rename fails, so an
 // aside is never on disk without it; a crash between the two leaves a marker
-// alone, which nothing lists until its job is deleted. Nothing is ever
-// renamed onto a name that is taken.
+// alone, which nothing lists until its job is deleted. A marker that was
+// already there for jobID (another file of the job set aside under the same
+// base in the same second) is used as it is and never taken back. Nothing is
+// ever renamed onto a name that is taken.
 func renameAside(jobID, file string, sidecars []string) asideMove {
 	from := asideBase(file)
-	dst, ok := freeAsideName(filepath.Dir(file), filepath.Base(from), file[len(from):], strconv.FormatInt(time.Now().Unix(), 10))
+	dst, ok := freeAsideName(filepath.Dir(file), filepath.Base(from), file[len(from):], strconv.FormatInt(time.Now().Unix(), 10), jobID)
 	if !ok {
 		return asideMove{err: fmt.Errorf("no free set-aside name beside it")}
 	}
 	to := asideBase(dst)
-	mv := asideMove{dst: dst, markerErr: writeAsideOwner(to, jobID)}
+	created, markerErr := writeAsideOwner(to, jobID)
+	mv := asideMove{dst: dst, markerErr: markerErr}
 	if err := renameArchive(file, dst); err != nil {
-		if mv.markerErr == nil {
+		if created {
 			os.Remove(to + asideOwnerSuffix)
 		}
 		return asideMove{err: err}
@@ -280,7 +328,7 @@ func (w *DownloadWorker) setArchiveAside(jobID, archive string) {
 	w.adoptStemAsides(jobID, from)
 	// keepInPlace marks what stays under the archive's own name as the job's.
 	keepInPlace := func() string {
-		if err := writeAsideOwner(from, jobID); err != nil {
+		if _, err := writeAsideOwner(from, jobID); err != nil {
 			return "; it could not be marked as this job's either, so the Files tab lists it"
 		}
 		return ""
@@ -319,7 +367,7 @@ func (w *DownloadWorker) adoptStemAsides(jobID, stem string) {
 			continue
 		}
 		if base := asideBase(p); !fileExists(base + asideOwnerSuffix) {
-			if err := writeAsideOwner(base, jobID); err != nil {
+			if _, err := writeAsideOwner(base, jobID); err != nil {
 				w.logger.Warn("reinitialize: a recovered recording beside the archive could not be marked as this job's; the Files tab lists it",
 					"path", p, "err", err, "jobID", jobID)
 			}
@@ -342,13 +390,17 @@ func (w *DownloadWorker) adoptStemAsides(jobID, stem string) {
 // left its archive on no row, and the boot's re-mux lands on it. A file
 // older than the run is from before this recording.
 //
+// Only a regular file is one. A directory or a link at the name is not set
+// aside: the write meets it as it always did (a rename onto a directory
+// fails, and the finalize ends there with its staging kept).
+//
 // A row with no run start to compare against is written as before. A reset
 // clears the stamp and the next run writes it before it downloads anything
 // (ExecuteWithChat, ExecuteTwitch, the clip download), so a finalize after a
 // reset always has one.
 func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
 	info, err := os.Lstat(path)
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
 	job, err := o.db.GetJob(jobID)
@@ -374,6 +426,33 @@ func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
 	return err == nil && info.ModTime().Before(started)
 }
 
+// otherRows is what every row but jobID's own names in the output tree
+// (outputOwners, the rule the Files sweep and its delete use): the other
+// jobs with their parts, and the trims. Read only once a finalize has found
+// a file it did not write at its name, which is rare; a finalize that finds
+// none reads nothing.
+func (o *DownloadOrchestrator) otherRows(jobID string) (*outputOwners, error) {
+	jobs, err := o.db.GetAllJobs()
+	if err != nil {
+		return nil, err
+	}
+	trims, err := o.db.GetAllTrims()
+	if err != nil {
+		return nil, err
+	}
+	others := make([]*database.Job, 0, len(jobs))
+	for _, j := range jobs {
+		if j.ID != jobID {
+			others = append(others, j)
+		}
+	}
+	root := resolveOutputDir(&config.MoomboxConfig{})
+	if o.globalOutputDir != nil {
+		root = o.globalOutputDir()
+	}
+	return newOutputOwners(others, trims, root), nil
+}
+
 // setForeignFileAside makes path free for a finalize of jobID to write. A
 // file the job did not create that is there (foreignFileAt) is set aside the
 // way a Reinitialize sets an archive aside (renameAside): renamed to
@@ -382,16 +461,34 @@ func (o *DownloadOrchestrator) foreignFileAt(jobID, path string) bool {
 // jobID, so Files does not offer it while the job exists. One Warn names the
 // old and the new path. Moombox never replaces or deletes it afterwards.
 //
-// An error only when the rename fails: the file is then still at path, and
-// the caller must not write there.
+// Not a file another row names (otherRows): two jobs whose names resolve to
+// one file — an output template without ${id} in a shared folder, two rows
+// for one video. Renaming it would leave that row naming this job's
+// recording, and its own under this job's marker. It is refused instead, as
+// is a file whose owner cannot be read, and a sidecar another row names
+// stays where it is.
+//
+// An error whenever the file is still at path afterwards — it is another
+// row's, or the rename failed: the caller must not write there.
 func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars []string) error {
 	if !o.foreignFileAt(jobID, path) {
 		return nil
 	}
+	others, err := o.otherRows(jobID)
+	if err != nil {
+		o.logger.Warn("finalize: a file that is not this job's holds the name it writes, and the rows could not be read to tell whose it is",
+			"path", path, "err", err, "jobID", jobID)
+		return fmt.Errorf("%s already exists and is not this job's: it is kept, not replaced; use Mux to try again", filepath.Base(path))
+	}
+	if row := others.fileRow(path); row != "" {
+		o.logger.Warn("finalize: another row's file holds the name it writes; it is kept where it is",
+			"path", path, "owner", row, "jobID", jobID)
+		return fmt.Errorf("%s already exists and belongs to %s: it is kept, not replaced; give one of the two another name, then use Mux", filepath.Base(path), row)
+	}
 	stem := asideBase(path)
 	var foreign []string
 	for _, ext := range sidecars {
-		if o.foreignFileAt(jobID, stem+ext) {
+		if o.foreignFileAt(jobID, stem+ext) && others.fileRow(stem+ext) == "" {
 			foreign = append(foreign, ext)
 		}
 	}
@@ -400,6 +497,12 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 		o.logger.Warn("finalize: a file that is not this job's holds the name it writes, and could not be set aside",
 			"path", path, "err", mv.err, "jobID", jobID)
 		return fmt.Errorf("%s already exists and is not this job's: it is kept, not replaced; move or rename it, then use Mux", filepath.Base(path))
+	}
+	// The marker a reset left under the file's own name when it could not
+	// rename it (setArchiveAside) has done its work once nothing of that
+	// reset's is left there: it would outlive the job as a stray in Files.
+	if id, ok := readAsideMarker(stem + asideOwnerSuffix); ok && id == jobID && len(mv.left) == 0 {
+		os.Remove(stem + asideOwnerSuffix)
 	}
 	args := []any{"from", path, "to", mv.dst, "jobID", jobID}
 	if mv.markerErr != nil {
@@ -412,20 +515,23 @@ func (o *DownloadOrchestrator) setForeignFileAside(jobID, path string, sidecars 
 	return nil
 }
 
-// SetAsideArchive is one archive a Reinitialize of a job set aside
-// (setArchiveAside), as both UIs' job details list it.
+// SetAsideArchive is one file of a job that was set aside, by a Reinitialize
+// (setArchiveAside) or by a finalize that found it at the name it writes
+// (setForeignFileAside), as both UIs' job details list it.
 type SetAsideArchive struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 }
 
-// ScanSetAsideArchives lists the archives a Reinitialize of job set aside
-// that are still where it put them: derived from the disk on each call, never
-// stored. It reads the directory of the archive the row names and the one the
-// job's next finalize resolves to (outputTargetOf, from the global output
-// directory and the output template), and returns every set-aside archive
-// there whose marker names the job, oldest first. One whose directory the job
+// ScanSetAsideArchives lists the archives set aside for job that are still
+// where they were put: derived from the disk on each call, never stored. It
+// reads the directory of the archive the row names and the one the job's next
+// finalize resolves to (outputTargetOf, from the global output directory and
+// the output template), and returns every set-aside archive there whose
+// marker names the job, oldest first — and a chat set aside with no archive
+// (a finalize found only a chat at its name), which nothing else would name
+// to the operator. One whose directory the job
 // no longer resolves to (the title's template subdirectory or the output
 // directory changed since) is not listed here; the Files sweep still counts
 // it as the job's. Never nil: the dashboard reads .length off it.
@@ -459,15 +565,28 @@ func ScanSetAsideArchives(job *database.Job, globalOutputDir, template string) [
 				mine[asideBase(p)] = asideOwnerID(p) == job.ID
 			}
 		}
+		// The archive is the file under an owned name that is neither the
+		// marker nor a sidecar, whatever its container: an imported archive
+		// keeps its own extension when it is set aside. A name that holds no
+		// archive is listed by its chat.
+		hasArchive := map[string]bool{}
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
-			// The archive is the file under an owned name that is neither the
-			// marker nor a sidecar, whatever its container: an imported
-			// archive keeps its own extension when it is set aside.
-			if !mine[asideBase(p)] || isAsideCompanion(p) {
+			if mine[asideBase(p)] && !isAsideCompanion(p) && !e.IsDir() {
+				hasArchive[asideBase(p)] = true
+			}
+		}
+		for _, e := range entries {
+			p := filepath.Join(dir, e.Name())
+			base := asideBase(p)
+			if !mine[base] || e.IsDir() {
 				continue
 			}
-			if info, err := e.Info(); err == nil && !info.IsDir() {
+			loneChat := !hasArchive[base] && strings.HasSuffix(strings.ToLower(p), ".chat.json")
+			if isAsideCompanion(p) && !loneChat {
+				continue
+			}
+			if info, err := e.Info(); err == nil {
 				out = append(out, SetAsideArchive{Name: e.Name(), Path: p, Size: info.Size()})
 			}
 		}
