@@ -3063,6 +3063,19 @@ sl-progress-bar {
     animation: toastCountdown var(--toast-duration, 3s) linear forwards;
 }
 
+/* An error toast asked for again while it is still up (showToast). */
+.toast-alert.toast-again::part(base) {
+    animation: toastAgain 0.3s ease-out;
+}
+
+@keyframes toastAgain {
+    50% { transform: scale(1.03); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .toast-alert.toast-again::part(base) { animation: none; }
+}
+
 /* Empty state enhancements */
 #empty-state sl-icon,
 #archived-empty-state sl-icon,

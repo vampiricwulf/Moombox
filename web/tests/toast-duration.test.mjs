@@ -74,3 +74,44 @@ test("a danger toast stays until closed and draws no countdown", { skip }, async
   assert.equal(alert.querySelector(".toast-countdown"), null);
   assert.equal(alert.style.getPropertyValue("--toast-duration"), "");
 });
+
+// An error toast never leaves by itself, so nothing else may let them pile
+// up. MUTANTS: no check for a toast already up (a failing button pressed
+// five times covers a phone's screen); a check that also swallows the same
+// text once the first was closed; no cap.
+test("an error already on screen is not stacked again, and at most four errors are up", { skip }, async () => {
+  const h = await harness.makeApp();
+  const texts = () => h.toasts().map((a) => a.textContent);
+  for (let i = 0; i < 5; i++) h.app.showToast("Failed to save settings", "danger");
+  assert.deepEqual(texts(), ["Failed to save settings"]);
+  assert.ok(h.toasts()[0].classList.contains("toast-again"), "the repeat is shown on the toast that is up");
+
+  h.toasts()[0].hide(); // the operator closes it
+  h.app.showToast("Failed to save settings", "danger");
+  assert.deepEqual(texts(), ["Failed to save settings"], "the same error after the first was closed is shown");
+
+  for (let i = 1; i <= 5; i++) h.app.showToast(`Failed: ${i}`, "danger");
+  assert.deepEqual(texts(), ["Failed: 2", "Failed: 3", "Failed: 4", "Failed: 5"], "the oldest make way");
+
+  h.app.showToast("Saved", "success");
+  h.app.showToast("Saved", "success");
+  assert.equal(texts().filter((t) => t === "Saved").length, 2, "timed toasts are not touched");
+});
+
+// MUTANT: no Escape case — the X button, last in the tab order, is the only
+// way to close an error from the keyboard.
+test("Escape closes the newest error toast, then does what it did before", { skip }, async () => {
+  const h = await harness.makeApp();
+  const esc = () => h.document.body.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  h.app.showToast("Failed: old", "danger");
+  h.app.showToast("Failed: new", "danger");
+  h.app._selectedTaskJobs.add("A");
+
+  esc();
+  assert.deepEqual(h.toasts().map((a) => a.textContent), ["Failed: old"]);
+  assert.equal(h.app._selectedTaskJobs.size, 1, "one press, one thing");
+  esc();
+  assert.deepEqual(h.toasts(), []);
+  esc();
+  assert.equal(h.app._selectedTaskJobs.size, 0, "with no error up, Escape clears the selection as before");
+});

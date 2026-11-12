@@ -67,6 +67,9 @@ export const ConnState = Object.freeze({
   UNAUTHORIZED: "unauthorized",
 });
 
+/** How many toasts that stay until closed may be up at once; the oldest makes way. */
+const MAX_STAYING_TOASTS = 4;
+
 export class MoomboxApp {
   constructor() {
     this.ws = null;
@@ -4319,6 +4322,8 @@ export class MoomboxApp {
 
       switch (e.key) {
         case "Escape":
+          // An error toast is on top of everything else on the page.
+          if (this.closeNewestToast()) return;
           if (this._activeSelectionSet().size > 0) {
             this._clearSelectionUI();
             return;
@@ -4907,10 +4912,27 @@ export class MoomboxApp {
    * it stays is toastDuration's answer (utils.js, owner ruling R2-D3): an
    * error until it is closed, anything else for a time that grows with its
    * length. The countdown bar runs for that same time, and an error has none.
+   *
+   * Toasts that stay until closed are kept track of (_stayingToasts): one
+   * already up with the same text is flashed, not stacked a second time (a
+   * failing button pressed five times); at most MAX_STAYING_TOASTS are up,
+   * the oldest making way; and Escape closes the newest (closeNewestToast).
    */
   showToast(message, variant = "primary") {
     const duration = toastDuration(message, variant);
     const timed = Number.isFinite(duration);
+    if (!timed) {
+      // Shoelace takes a closed toast out of the document.
+      this._stayingToasts = (this._stayingToasts || []).filter((t) => t.alert.isConnected);
+      const same = this._stayingToasts.find((t) => t.message === message && t.variant === variant);
+      if (same) {
+        // Restart the flash: the class has to leave and come back.
+        same.alert.classList.remove("toast-again");
+        void same.alert.offsetWidth;
+        same.alert.classList.add("toast-again");
+        return;
+      }
+    }
     const alert = document.createElement("sl-alert");
     alert.variant = variant;
     alert.closable = true;
@@ -4939,6 +4961,28 @@ export class MoomboxApp {
     // exception inside chunk.XCZS77LP.js. Removed in test.41.
     document.body.append(alert);
     alert.toast();
+
+    if (!timed) {
+      const entry = { alert, message, variant };
+      this._stayingToasts.push(entry);
+      alert.addEventListener("sl-after-hide", () => {
+        this._stayingToasts = this._stayingToasts.filter((t) => t !== entry);
+      }, { once: true });
+      while (this._stayingToasts.length > MAX_STAYING_TOASTS) this._stayingToasts.shift().alert.hide();
+    }
+  }
+
+  /**
+   * Close the newest toast that stays until closed. Its X button is the only
+   * other way, and that is at the end of the tab order. False when none is up.
+   */
+  closeNewestToast() {
+    const open = (this._stayingToasts || []).filter((t) => t.alert.isConnected);
+    const newest = open.pop();
+    this._stayingToasts = open;
+    if (!newest) return false;
+    newest.alert.hide();
+    return true;
   }
 
   getIconForVariant(variant) {
