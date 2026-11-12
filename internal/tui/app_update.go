@@ -251,6 +251,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenForUpdates(), a.ensureMarqueeTicking())
 
 	case JobsUpdateMsg:
+		// A list that states a floor below the one already applied was read
+		// before that one (two catch-up reads can overlap and arrive out of
+		// order). Applying it would put older rows back, and the events that
+		// would have corrected them are at or below the applied floor and are
+		// dropped as stale. The list already applied holds every write this
+		// one does, so it is dropped whole. A list with no floor still applies.
+		if msg.Floor != 0 && msg.Floor < a.snapshotFloor {
+			return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
+		}
 		// If jobs already exist, the user has used the app before — dismiss the newcomer hint.
 		if len(msg.Jobs) > 0 {
 			a.seenChordHint = true

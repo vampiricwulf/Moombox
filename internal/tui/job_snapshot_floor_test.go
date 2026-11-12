@@ -163,3 +163,35 @@ func TestSnapshotFloorRaisesTheAppliedVersions(t *testing.T) {
 		}
 	}
 }
+
+// Two catch-up reads can overlap and arrive out of order. The list read
+// first states the lower floor; applied second, it would put older rows back
+// with every correcting event already dropped as stale. It is dropped whole.
+//
+// Mutant: removing the floor comparison at the head of the JobsUpdateMsg
+// handler: the row and the status map go back to Muxing.
+func TestASnapshotOlderThanTheOneAppliedIsDropped(t *testing.T) {
+	a := floorApp()
+	a.Update(JobsUpdateMsg{Jobs: []*database.Job{floorJob("a", database.StatusFinished, 0)}, Floor: 50})
+	a.Update(JobsUpdateMsg{Jobs: []*database.Job{floorJob("a", database.StatusMuxing, 0)}, Floor: 40})
+
+	if got := a.taskList.GetJobByID("a").Status; got != database.StatusFinished {
+		t.Errorf("an older snapshot put the row back to %q", got)
+	}
+	if got := a.statusMap["a"]; got != database.StatusFinished {
+		t.Errorf("status map = %q, want Finished", got)
+	}
+	if a.progressStore.Get("a") != nil {
+		t.Error("an older snapshot re-created the finished job's progress entry")
+	}
+
+	// A list at the same floor, and one with no floor, still apply.
+	a.Update(JobsUpdateMsg{Jobs: []*database.Job{floorJob("a", database.StatusFinished, 0), floorJob("b", database.StatusFinished, 0)}, Floor: 50})
+	if a.taskList.GetJobByID("b") == nil {
+		t.Error("a snapshot at the applied floor was dropped")
+	}
+	a.Update(JobsUpdateMsg{Jobs: []*database.Job{floorJob("a", database.StatusFinished, 0)}})
+	if a.taskList.GetJobByID("b") != nil {
+		t.Error("a snapshot with no floor was dropped")
+	}
+}
