@@ -429,7 +429,7 @@ The chord system is a three-state finite automaton:
 |-------|--------|:------------:|:-------:|------------|
 | `A A` | Add Video dialog | No | No | — |
 | `A Z` | Import Archive. | No | No | — |
-| `A R` | Resume Job | Yes | No | YouTube, staging files present, and status is Error, Cancelled, COOKIES?, or Finished with an incomplete tail |
+| `A R` | Resume Job | Yes | No | YouTube, staging files present, and status is Error, Cancelled, COOKIES?, or Finished with an incomplete tail. Runs off the update loop, one run at a time (see `jobVerbResultMsg`) |
 | `A I` | Reinitialize Job. Confirm-gated, batch-capable (owner decision PR-M1): `A I` arms the confirm and its line names what the reset deletes — "Press I to confirm reinit: deletes 2 set-aside recordings, 3 recorded parts (1.2GB), 40 staged files (850.0MB) and 5 imported chapters — "Title" (3s)", or the totals over a batch's eligible jobs ("Press I to confirm reinit 2 jobs: deletes … (3s)"). The clause comes before the title, so a narrow terminal cuts the title and not the warning. The clause is from `ReinitializeSummary` (`worker.PreviewReinitialize` summed, `ReinitializePreview.Summary`); the action menu's second-Enter footer names the same (`ActionMenuItem.ConfirmDetail`). When the row waits on an automatic mux or retry (`jobstate.PendingAutoAction`, owner ruling R-D2) the line leads with what the reset cancels. `worker.PreviewReinitialize` is the one preflight: the dashboard reads the same counts at `GET /api/jobs/{id}/reinitialize/preview` | Yes | Yes | Status is Error, Cancelled, or COOKIES? |
 | `A M` | Mux Job | Yes | Yes | Status is Cancelled or Error, and segment files are present; or Finished while a split part its finalize could not mux is still in staging (`HasUnmuxedParts`) |
 | `A S` | Recover Set-aside Recordings. | Yes | Yes | Status is not Downloading, Muxing, Live or Upcoming (`JobIsActive`, `internal/tui/app_actions.go`, the twin of `IsActiveJobStatus` in `internal/worker/orphans.go`), and the job's staging directory still holds a recording the engine set aside — the status half answers the menu's "no jobs" question at open, the disk probe runs when the action is chosen |
@@ -651,6 +651,7 @@ These are returned by Bubble Tea commands that perform HTTP requests to the back
 | `createTrimResultMsg` | Trim creation result |
 | `deleteTrimResultMsg` | Trim deletion result |
 | `deleteJobsResultMsg` | Job deletion, single or batch (`A D D`) |
+| `jobVerbResultMsg` | A Resume (`A R`) or Reinitialize (`A I I`) run, single or batch. The worker's verb does its work on the caller's goroutine when the job is idle (a reinitialize deletes the staging directory), so the TUI runs it in a command (`runJobVerb`, `internal/tui/job_verb_flow.go`): the line says `Reinitializing 3 jobs...` at once and the count and any refusal follow. One run at a time (`jobVerbFlow`): a second `A R` or `A I` while one runs is refused on the feedback line, and an answer that is not the running one's is dropped |
 | `setWatchedResultMsg` | Toggle watched flag (`A W`) |
 | `fetchOrphansResultMsg` | Orphaned file list fetch |
 | `deleteOrphanResultMsg` | Orphaned file deletion |

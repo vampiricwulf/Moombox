@@ -19,8 +19,10 @@ import (
 // Mutants: the callback's error ignored (the line says "Resuming"); the
 // batch counting a refused job as done; the line not stated red.
 func TestVerbRefusalReachesTheFeedbackLine(t *testing.T) {
+	// Resume and Reinitialize run as a command (tui-5): the key's command is
+	// run and its answer delivered, as the program would.
 	press := func(app *App, r rune) {
-		app.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		pressApply(app, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	refusal := errors.New("reinitialize already pending")
 	newApp := func() *App {

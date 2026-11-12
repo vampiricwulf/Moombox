@@ -112,8 +112,8 @@ func (w *DownloadWorker) logVerbOverridden(jobID, what string, seen database.Job
 // clicked in that window used to race the run: Enqueue dropped the job as
 // still processing, handleCancellation then wrote Cancelled over the fresh
 // status, and Reinitialize deleted the staging the run was still writing its
-// chat resume sidecar into. Callers stay synchronous (the TUI calls these on
-// its update goroutine); the wait happens here, one per job.
+// chat resume sidecar into. Callers stay synchronous (an HTTP handler, or the
+// command the TUI runs a verb in); the wait happens here, one per job.
 //
 // It waits, too, for a chapter import that holds the job's claim (owner
 // decision PR-M5): a Resume, a retry or a Reinitialize let through while the

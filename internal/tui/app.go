@@ -209,6 +209,16 @@ type (
 		Filename string
 		Err      string
 	}
+	// jobVerbResultMsg is the answer of a Resume or Reinitialize run
+	// (runJobVerb, job_verb_flow.go). Gen is the run it answers; Title is
+	// set for a single job, a batch reports Count and Refused.
+	jobVerbResultMsg struct {
+		Gen     uint64
+		Chord   string // "A R" or "A I"
+		Title   string
+		Count   int
+		Refused verbRefusals
+	}
 	// deleteJobsResultMsg reports completion of an async job delete.
 	// OnDeleteJob blocks in WaitForJobExit (up to 5s per job), so deletes
 	// run off the update loop and report back here. Title is set for the
@@ -600,6 +610,10 @@ type App struct {
 	// makes structural.
 	feedback appFeedback
 
+	// jobVerb is the Resume or Reinitialize run in flight, if any
+	// (job_verb_flow.go).
+	jobVerb jobVerbFlow
+
 	// frame memoises the composed panel frame View returns, and the line
 	// measurements it is joined from (frame_compose.go). Written only by
 	// View.
@@ -737,6 +751,8 @@ type App struct {
 	// OnResumeJob and OnReinitializeJob run the worker's verbs and return
 	// its refusal (worker.ErrResetPending: a different verb already waits on
 	// the job), which the feedback line shows in red, as REST's 409 does.
+	// Both are called from a command's goroutine, never the update loop
+	// (runJobVerb, job_verb_flow.go): a reinitialize deletes staging.
 	OnResumeJob       func(jobID string) error
 	OnReinitializeJob func(jobID string) error
 	// ReinitializeSummary says what reinitializing jobIDs would delete

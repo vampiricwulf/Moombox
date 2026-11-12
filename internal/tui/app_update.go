@@ -788,6 +788,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
 		return a, nil
 
+	case jobVerbResultMsg:
+		a.finishJobVerb(msg)
+		return a, nil
+
 	case deleteJobsResultMsg:
 		// Row removal + selection refresh already happened via the
 		// JobDeleted lifecycle events; this just reports completion.

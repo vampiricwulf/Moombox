@@ -167,9 +167,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
+		// The worker's Resume and Reinitialize do their work on the caller's
+		// goroutine when the job is idle (a reinitialize deletes the staging
+		// directory there), so both run as a command, off the update loop:
+		// see runJobVerb. Which jobs are eligible is still decided here.
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnResumeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil || !jobverbs.ResumeSupported(j.Platform) {
@@ -181,29 +187,26 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
 					continue
 				}
-				if err := a.OnResumeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Resumed "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnResumeJob, ids, "")
 		} else if job != nil && a.OnResumeJob != nil {
-			if err := a.OnResumeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, job.Title)
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -212,24 +215,19 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ReinitializableStatus(j.Status) {
 					continue
 				}
-				if err := a.OnReinitializeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Reinitialized "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, ids, "")
 		} else if job != nil && a.OnReinitializeJob != nil {
-			if err := a.OnReinitializeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, job.Title)
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
