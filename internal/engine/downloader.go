@@ -830,8 +830,8 @@ type SegmentDownloader struct {
 	SplitOnRefusedSegment bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment body read, and in pieces while a
-	// whole-file chunk is being read (so a chunk that breaks off and is fetched
-	// again is counted for what arrived each time), including catch-up
+	// whole-file chunk is being read (a chunk that breaks off keeps the part
+	// that arrived, so those bytes are not fetched or counted again), including catch-up
 	// workers whose data sits in the reorder buffer long before it flushes
 	// (OnProgress only fires on the ordered flush, which goes quiet for the
 	// whole clump while a wide worker pool is saturating the connection).
