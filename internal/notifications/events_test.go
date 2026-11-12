@@ -13,7 +13,7 @@ import (
 // who has not opened the settings UI since upgrading is not warned at every
 // startup about a key Moombox itself told them to use. And it aliases to
 // connectivity_resume, so their filter keeps receiving the embed that now
-// carries the pause — for one release, after which the alias entry goes.
+// carries the pause. The alias is permanent (owner ruling R2-N3).
 //
 // THE MUTANT: deleting the key without the alias. A target filtered to
 // ["connectivity_pause"] then goes silent through every outage.

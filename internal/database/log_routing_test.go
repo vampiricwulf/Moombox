@@ -153,3 +153,74 @@ func BenchmarkRouteLogToJobs(b *testing.B) {
 		db.RouteLogToJobs(line)
 	}
 }
+
+// finishJobWithLine tracks id, routes one line to it and untracks it: the log
+// life of a job that ran and reached a terminal status.
+func finishJobWithLine(db *Database, id string) {
+	db.TrackJobForLogs(id)
+	db.RouteLogToJobs("2026-11-12 12:00:00 INFO " + id + " done")
+	db.UntrackJobForLogs(id)
+}
+
+// Finished jobs kept their buffers until their row was deleted, so a process
+// working through a backlog held 100 to 200 lines for every job it had ever
+// finished. Only the newest finishedJobLogsKept finished jobs keep theirs
+// (owner ruling R2-N2); an older one reads as empty, as it does after a
+// restart.
+//
+// Mutants: never freeing (the oldest still holds its line); freeing the newest
+// instead of the oldest; an off-by-one bound (job 1 is freed too, or job 0 is
+// kept).
+func TestOnlyTheNewestFinishedJobsKeepTheirLogs(t *testing.T) {
+	db := newLogRoutingDB()
+	id := func(i int) string { return fmt.Sprintf("fin-%04d", i) }
+
+	for i := range finishedJobLogsKept + 1 {
+		finishJobWithLine(db, id(i))
+	}
+
+	if got := db.GetJobLogs(id(0)); got != nil {
+		t.Errorf("the oldest finished job still holds %d lines, want its buffer freed", len(got))
+	}
+	for _, i := range []int{1, finishedJobLogsKept} {
+		if got := db.GetJobLogs(id(i)); len(got) != 1 {
+			t.Errorf("%s is among the newest %d finished jobs and holds %d lines, want 1", id(i), finishedJobLogsKept, len(got))
+		}
+	}
+}
+
+// A finished job that is routed to again (Resume, Reinitialize, auto-retry, a
+// worker bracket) is active: however many jobs finish while it runs, its
+// buffer stays, old lines included. One whose buffer was already freed gets a
+// working empty buffer, and when it finishes again it is the newest kept.
+//
+// Mutants: trackForLogsLocked not taking the ID out of logKept (the resumed
+// job's buffer is freed mid-run); eviction deleting a routed job's buffer;
+// track not recreating a freed buffer's entry (no lines after the resume).
+func TestAJobRoutedAgainIsNeverFreed(t *testing.T) {
+	db := newLogRoutingDB()
+	id := func(i int) string { return fmt.Sprintf("fin-%04d", i) }
+
+	finishJobWithLine(db, "resumed-a")
+	finishJobWithLine(db, "freed-b")
+	db.TrackJobForLogs("resumed-a") // resumed before anything pushed it out
+	for i := range finishedJobLogsKept {
+		finishJobWithLine(db, id(i))
+	}
+	if got := db.GetJobLogs("freed-b"); got != nil {
+		t.Fatalf("freed-b holds %d lines, want it freed: the test needs a freed buffer", len(got))
+	}
+
+	db.RouteLogToJobs("2026-11-12 12:05:00 INFO resumed-a still going")
+	if got := db.GetJobLogs("resumed-a"); len(got) != 2 {
+		t.Errorf("the resumed job holds %d lines, want its first run's line and the new one", len(got))
+	}
+
+	db.TrackJobForLogs("freed-b")
+	db.RouteLogToJobs("2026-11-12 12:06:00 INFO freed-b retried")
+	db.UntrackJobForLogs("freed-b")
+	finishJobWithLine(db, "one-more")
+	if got := db.GetJobLogs("freed-b"); len(got) != 1 || !strings.Contains(got[0], "retried") {
+		t.Errorf("a job retried after its log was freed holds %v, want the retry's one line", got)
+	}
+}

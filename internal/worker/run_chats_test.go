@@ -134,9 +134,8 @@ func TestAFailedRunStopsTheChatItLeftRunning(t *testing.T) {
 	for _, platform := range []string{"youtube", "twitch"} {
 		t.Run(platform, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
-			job := runningJob(t, w, db, "fails")
-			db.UpdateJobFields(job.ID, map[string]any{"platform": platform, "chat_status": database.ChatDownloading})
-			job.Platform = platform
+			job := runningJobOn(t, w, db, "fails", platform)
+			db.UpdateJobFields(job.ID, map[string]any{"chat_status": database.ChatDownloading})
 			src := &stoppableChat{db: db, jobID: job.ID}
 			run := w.runChats.add(job.ID, src)
 
