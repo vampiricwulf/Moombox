@@ -110,7 +110,7 @@ Three-stage build that runs the entire pipeline inside the image build — no ho
 
 1. **sidecar** (`node:24-bookworm-slim`): `npm ci --ignore-scripts` + `node build.mjs` → `sidecar.tar.gz` (mirrors release.yml).
 2. **build** (`golang:1.27-bookworm`): `go run ./tools/fetch-node`, then `CGO_ENABLED=0` cross-compile for `$TARGETOS/$TARGETARCH`. Both stages run on `$BUILDPLATFORM`, so multi-arch builds don't emulate the compile.
-3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it).
+3. **runtime** (`debian:bookworm-slim` + ffmpeg + ca-certificates + tzdata): must be glibc — the sidecar extracts an official nodejs.org Linux binary at runtime, and those are glibc-linked (Alpine/musl won't run it). Both `apt-get` calls carry `-o Acquire::Retries=3 -o Acquire::http::Timeout=30`: apt otherwise gives up only on total silence and never retries, and the arm64 install runs under emulation.
 
 Container conventions:
 - All state under a single `/data` volume (config, DB, logs, staging, output, sidecar cache — `HOME=/data` keeps the one-time sidecar extraction on the volume). `WORKDIR /data` so the binary's cwd-relative defaults land there too. The two large scratch file sets are written on the output volume, not under the container's `/tmp`: a multi-part trim's re-encoded intermediates beside the clip in the job's `trim/` directory (see [architecture.md](architecture.md) § 11. Trim Service), and a dashboard import's upload, up to 500 MB, spooled into `<output>/imports`, where its entries are extracted (`POST /api/import`, [user-interfaces.md](user-interfaces.md)). What else goes under the system temp directory is small: FFmpeg's concat lists and two-pass logs, the cipher player cache, the Firefox cookie-database snapshot, and the updater's manifest and signature checks.
@@ -247,6 +247,8 @@ Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes
 18. **Check and delete the draft** (dry run only) — requires a draft with eight assets, and deletes it first so a failed check leaves nothing behind.
 
 Every network command in the job — `go mod download`, `npm ci`, `fetch-node` and the `go-winres` install — runs through `.github/scripts/retry.sh` (three attempts, each cut off after five minutes) inside a step timeout of 10 minutes, as in the test workflow.
+
+Both jobs that publish have a job limit, `timeout-minutes: 45`: `release` here, and `docker` inside docker-publish.yml (a job that `uses:` a workflow cannot carry one). Without a limit a hung step holds the run for GitHub's six hours, with the release published and no image; with one it fails by itself and "Re-run failed jobs" can retry it. The limits are several times the longest run observed: the release job took 2.5 to 3.5 minutes in the releases v2.9.1 to v2.9.9, and the Docker job 4 to 8.5 minutes in the releases since September 2026. 45 minutes also covers every retried network step using its whole step timeout.
 
 Steps 5 and 6 run on every release, with no `actions/cache` in front of them: the embed blobs a signed binary carries are built from the tagged commit. A cache would never hit — a cache saved by one tag's run is not readable from another tag's — and a key that left out `bgutil-sidecar/src` and the vendored ejs would let a hit ship the previous sidecar JS under a new version number.
 

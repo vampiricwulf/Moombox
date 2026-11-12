@@ -72,8 +72,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
+# The apt options change nothing on a healthy mirror. Without them apt gives
+# up only on total silence and never tries a failed download again, and this
+# runs once per architecture, the arm64 one under emulation: a mirror that
+# trickled bytes once hung a CI run for 22 minutes (see ci.yml).
+RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends ffmpeg ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/moombox /usr/local/bin/moombox
