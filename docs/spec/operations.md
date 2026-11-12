@@ -658,7 +658,7 @@ A live YouTube capture's first setup in the job's first part fell to the live HL
 
 #### `connectivity_resume`
 
-Connectivity restored; the same Twitch job resumed. Only after an outage the connectivity monitor reported for `connectivity.MinOutage` (60 s) — a live capture rides a shorter one out in place and sends nothing. Carries the pause instant — when the link went down, not when the minimum ran out — as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, for one release
+Connectivity restored; the same Twitch job resumed. Only after an outage the connectivity monitor reported for `connectivity.MinOutage` (60 s) — a live capture rides a shorter one out in place and sends nothing. Carries the pause instant — when the link went down, not when the minimum ran out — as a relative timestamp and the outage duration ("Paused `<t:x:R>` · resumed after 4m12s"), which is what the retired `connectivity_pause` event used to say on its own. That embed was sent WHILE the machine was offline and so mostly never arrived; a target still filtering on the old key receives this one through the manager's event alias, permanently (owner ruling R2-N3)
 
 #### `connectivity_restored`
 
@@ -694,8 +694,9 @@ warning for any configured filter entry outside the vocabulary.
 neither UI offers it and the TUI strips it from a hand-edited config on the
 next save; it remains in `KnownEvents` (so no startup warning) and is the
 target of `eventAliases`' `connectivity_resume` entry (so an unmigrated filter
-keeps receiving the folded embed). The alias is a migration and is removed one
-release after the retirement ships.
+keeps receiving the folded embed). The alias is permanent (owner ruling R2-N3):
+it was first written as a one-release migration, and the owner ruled that a
+filter naming the retired key keeps working.
 
 ### Delivery Modes
 

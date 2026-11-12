@@ -21,79 +21,271 @@ import (
 // test in media_test.go for the resolution policy.
 var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
-// ExtractVideoID extracts a YouTube video ID from various URL formats.
-// Supported formats:
-//   - youtube.com/watch?v=ID
-//   - youtu.be/ID
-//   - youtube.com/live/ID
-//   - youtube.com/shorts/ID
-//   - youtube.com/embed/ID
-//   - youtube.com/v/ID
-//   - bare 11-character ID (see videoIDRegex godoc for the Twitch
-//     v-prefixed VOD collision)
+// ExtractVideoID extracts a YouTube video ID from a bare 11-character ID
+// (see videoIDRegex godoc for the Twitch v-prefixed VOD collision) or from
+// a YouTube URL as ExtractVideoIDFromURL reads it. It is the one parser
+// every add path uses: `moombox add` (ExtractMediaID), the TUI's add dialog
+// and, through ExtractVideoIDFromURL, the URL-only POST /api/jobs. The
+// dashboard's extractVideoId (web/public/app.js) mirrors it, and all of them
+// are tested against testdata/youtube_urls.json.
 func ExtractVideoID(input string) string {
 	input = strings.TrimSpace(input)
-	if input == "" {
-		return ""
-	}
-
-	// Check if it's already a bare video ID
 	if videoIDRegex.MatchString(input) {
 		return input
 	}
+	return ExtractVideoIDFromURL(input)
+}
 
-	// Normalize bare URLs without protocol (e.g., youtube.com/watch?v=... or youtu.be/...)
-	if strings.HasPrefix(input, "youtube.com/") || strings.HasPrefix(input, "www.youtube.com/") ||
-		strings.HasPrefix(input, "m.youtube.com/") || strings.HasPrefix(input, "youtu.be/") {
-		input = "https://" + input
+// urlSchemeRegex matches a leading URL scheme ("https://"); httpSchemeRegex
+// the two this parser reads. The letters are spelled out in both cases
+// because (?i) also folds non-ASCII letters (the long s) onto ASCII ones.
+var (
+	urlSchemeRegex  = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
+	httpSchemeRegex = regexp.MustCompile(`^[Hh][Tt][Tt][Pp][Ss]?://`)
+)
+
+// httpSchemeTailRegex matches an http(s) scheme at the end of the text
+// before a host.
+var httpSchemeTailRegex = regexp.MustCompile(`[Hh][Tt][Tt][Pp][Ss]?://$`)
+
+// embeddedLinkTries is how many YouTube links that hold no video ID are
+// read inside one run of text without whitespace before the rest of that
+// run is skipped. Each such link is read to the end of its run, so without
+// a limit a megabyte of "youtube.com/" would cost its length squared. The
+// dashboard's parser has the same limit.
+const embeddedLinkTries = 32
+
+// youtubeVideoPathPrefixes are the path forms that carry the video ID as
+// their next segment.
+var youtubeVideoPathPrefixes = []string{"/live/", "/shorts/", "/embed/", "/v/"}
+
+// ExtractVideoIDFromURL extracts the video ID from a YouTube URL, and returns
+// "" for anything else, a bare ID included. The scheme (http or https) is
+// optional, a leading "//" is read as no scheme, and the host is read in any
+// case. Supported forms:
+//   - a v= parameter anywhere in the query (or in the fragment) on any path:
+//     /watch?v=ID, /watch?app=desktop&v=ID, /watch?list=PL...&v=ID
+//   - youtu.be/ID
+//   - /live/ID, /shorts/ID, /embed/ID, /v/ID
+//
+// on youtube.com, youtube-nocookie.com and youtubekids.com and their
+// subdomains (www., m., music., gaming.), and on youtu.be. The host is
+// matched on a dot boundary, so a lookalike ("notyoutube.com") is refused.
+// An ID may be followed by anything that is not an ID character (a slash,
+// a semicolon, a stray percent sign or closing bracket from a paste); twelve
+// or more ID characters are not an ID.
+//
+// When the input as a whole is not such a URL, the first YouTube link inside
+// it is read the same way: "<https://youtu.be/ID>", "see https://youtu.be/ID",
+// a Markdown link, a second line. A link written without a scheme counts
+// only at the start of the text or after a character that cannot continue a
+// host or a path, so "example.com/youtube.com/watch?v=ID" stays refused.
+// Text that is not ASCII continues no host: the link in "見てyoutu.be/ID" is
+// read.
+//
+// The link is taken apart by hand, not by net/url, so that this parser and
+// its mirror in web/public/app.js give the same answer for every input:
+// net/url and the browser's URL disagree on a stray "%", a ";" in the query,
+// dot segments and escapes in the path. Nothing is unescaped: an ID holds
+// nothing an escape could stand for. The time taken grows with the length
+// of the input and no faster (see embeddedLinkTries): the add route hands
+// this whatever a request's url field holds.
+func ExtractVideoIDFromURL(input string) string {
+	input = strings.TrimSpace(input)
+	if id := videoIDFromLink(input); id != "" {
+		return id
 	}
+	// The links inside other text, in one pass. Each is a run of host
+	// characters and the slash after it, with an http(s) scheme, "//" or
+	// nothing before it, and it ends at the next whitespace. runEnd is the
+	// end of the run of text without whitespace being read, and tries the
+	// YouTube links in it that held no ID.
+	runEnd, tries := 0, 0
+	for off := 0; off < len(input); {
+		host, slash := off, -1
+		for i := off; i < len(input); i++ {
+			c := input[i]
+			if isHostByte(c) {
+				continue
+			}
+			if c == '/' && i > host {
+				slash = i
+				break
+			}
+			host = i + 1
+		}
+		if slash < 0 {
+			break
+		}
+		// The link starts at its scheme, when one stands right before the
+		// host and after the last link's slash.
+		start, hasScheme := host, false
+		before := input[max(off, host-len("https://")):host]
+		if m := httpSchemeTailRegex.FindStringIndex(before); m != nil {
+			start, hasScheme = host-(len(before)-m[0]), true
+		} else if strings.HasSuffix(before, "//") {
+			start = host - 2
+		}
+		if slash >= runEnd {
+			runEnd, tries = len(input), 0
+			if i := strings.IndexAny(input[slash:], " \t\n\v\f\r"); i >= 0 {
+				runEnd = slash + i
+			}
+		}
+		// Look again after this link's host next time: a link inside this
+		// one's path or query ("?u=https://youtu.be/ID") is still found.
+		off = slash + 1
 
-	// Try parsing as URL
-	u, err := url.Parse(input)
-	if err != nil {
-		return ""
-	}
-
-	host := strings.ToLower(u.Hostname())
-
-	// youtu.be/ID
-	if host == "youtu.be" {
-		id := strings.TrimPrefix(u.Path, "/")
-		if videoIDRegex.MatchString(id) {
+		if !hasScheme && continuesLink(input, start) {
+			continue
+		}
+		short, ok := youtubeHost(input[host:slash])
+		if !ok {
+			continue
+		}
+		if id := videoIDAfterHost(input[slash:runEnd], short); id != "" {
 			return id
 		}
-		return ""
-	}
-
-	// youtube.com variants
-	if host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com" {
-		return ""
-	}
-
-	path := u.Path
-
-	// /watch?v=ID
-	if path == "/watch" {
-		v := u.Query().Get("v")
-		if videoIDRegex.MatchString(v) {
-			return v
+		if tries++; tries >= embeddedLinkTries {
+			off = runEnd
 		}
+	}
+	return ""
+}
+
+// continuesLink reports whether the character before position i of s could
+// be part of a host, a path or user info that the text at i then continues,
+// which makes a scheme-less link starting at i part of something else.
+func continuesLink(s string, i int) bool {
+	if i == 0 {
+		return false
+	}
+	c := s[i-1]
+	if c == ':' && strings.HasPrefix(s[i:], "//") {
+		return true // another scheme's "://"
+	}
+	return isVideoIDByte(c) || c == '.' || c == '/' || c == '\\' || c == '@'
+}
+
+// videoIDFromLink reads the video ID from s when all of s is one YouTube
+// link (see ExtractVideoIDFromURL for the forms).
+func videoIDFromLink(s string) string {
+	switch {
+	case httpSchemeRegex.MatchString(s):
+		s = s[strings.Index(s, "://")+3:]
+	case urlSchemeRegex.MatchString(s):
 		return ""
+	case strings.HasPrefix(s, "//"):
+		s = s[2:]
 	}
 
-	// /live/ID, /shorts/ID, /embed/ID, /v/ID
-	prefixes := []string{"/live/", "/shorts/", "/embed/", "/v/"}
-	for _, prefix := range prefixes {
-		if id, ok := strings.CutPrefix(path, prefix); ok {
-			// Remove trailing path segments
-			id, _, _ = strings.Cut(id, "/")
-			if videoIDRegex.MatchString(id) {
-				return id
+	// host[:port], after any user info, up to the path, query or fragment.
+	authority, rest := s, ""
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		authority, rest = s[:i], s[i:]
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = authority[i+1:]
+	}
+	host := authority
+	if i := strings.LastIndexByte(authority, ':'); i >= 0 {
+		host = authority[:i]
+		for _, c := range []byte(authority[i+1:]) {
+			if c < '0' || c > '9' {
+				return ""
 			}
 		}
 	}
+	for _, c := range []byte(host) {
+		if !isHostByte(c) {
+			return ""
+		}
+	}
+	short, ok := youtubeHost(host)
+	if !ok {
+		return ""
+	}
+	return videoIDAfterHost(rest, short)
+}
 
+// youtubeHost reports whether host, in any case, is one of YouTube's, and
+// whether it is the short one (youtu.be), whose path is the video ID.
+func youtubeHost(host string) (short, ok bool) {
+	// The longest domain below, with the dot before it, is all of a long
+	// host that can matter.
+	if n := len(".youtube-nocookie.com"); len(host) > n {
+		host = host[len(host)-n:]
+	}
+	host = strings.ToLower(host)
+	if hostIsOrUnder(host, "youtu.be") {
+		return true, true
+	}
+	return false, hostIsOrUnder(host, "youtube.com") ||
+		hostIsOrUnder(host, "youtube-nocookie.com") || hostIsOrUnder(host, "youtubekids.com")
+}
+
+// videoIDAfterHost reads the video ID from the path, query and fragment that
+// follow a YouTube host.
+func videoIDAfterHost(rest string, short bool) string {
+	rest, fragment, _ := strings.Cut(rest, "#")
+	path, query, _ := strings.Cut(rest, "?")
+	if id := videoIDParam(query); id != "" {
+		return id
+	}
+	// The old "#!v=ID" and "#v=ID" forms.
+	if id := videoIDParam(strings.TrimPrefix(fragment, "!")); id != "" {
+		return id
+	}
+	if short {
+		return leadingVideoID(strings.TrimPrefix(path, "/"))
+	}
+	for _, prefix := range youtubeVideoPathPrefixes {
+		if after, ok := strings.CutPrefix(path, prefix); ok {
+			return leadingVideoID(after)
+		}
+	}
 	return ""
+}
+
+// isHostByte reports whether c can be part of a host name.
+func isHostByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-'
+}
+
+// videoIDParam returns the video ID the first v= pair of a raw query string
+// starts with. Pairs are split on "&" only and the value is read as written,
+// so "v=ID;t=3" and "v=ID%" still name ID.
+func videoIDParam(query string) string {
+	for pair := range strings.SplitSeq(query, "&") {
+		if value, ok := strings.CutPrefix(pair, "v="); ok {
+			return leadingVideoID(value)
+		}
+	}
+	return ""
+}
+
+// hostIsOrUnder reports whether host is domain or a subdomain of it.
+func hostIsOrUnder(host, domain string) bool {
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+// isVideoIDByte reports whether c can be part of a video ID.
+func isVideoIDByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+}
+
+// leadingVideoID returns the video ID s starts with: exactly 11 ID
+// characters, followed by nothing or by a character that cannot be part of
+// an ID.
+func leadingVideoID(s string) string {
+	n := 0
+	for n < len(s) && isVideoIDByte(s[n]) {
+		n++
+	}
+	if n != 11 {
+		return ""
+	}
+	return s[:n]
 }
 
 // IsVideoID returns true if the string is a valid YouTube video ID.

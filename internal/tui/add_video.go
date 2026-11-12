@@ -1241,8 +1241,9 @@ func extractMediaID(input string) (string, string) {
 		return twitch.VodJobID(input[1:]), "twitch"
 	}
 
-	// Try YouTube
-	vid := extractYouTubeVideoID(input)
+	// Try YouTube: the one parser every add path uses (utils.ExtractVideoID,
+	// tested against internal/utils/testdata/youtube_urls.json).
+	vid := utils.ExtractVideoID(input)
 	if vid != "" {
 		return vid, "youtube"
 	}
@@ -1254,40 +1255,6 @@ func extractMediaID(input string) (string, string) {
 	}
 
 	return "", ""
-}
-
-// extractYouTubeVideoID extracts video ID from various YouTube URL formats or validates a raw 11-char ID.
-// Supports: youtube.com/watch?v=, youtu.be/, /live/, /shorts/, /embed/, /v/
-func extractYouTubeVideoID(input string) string {
-	input = strings.TrimSpace(input)
-
-	// Direct 11-character ID
-	if len(input) == 11 && isVideoIDChar(input) {
-		return input
-	}
-
-	// v= parameter (most common)
-	if _, after, ok := strings.Cut(input, "v="); ok {
-		vid, _, _ := strings.Cut(after, "&")
-		vid = strings.TrimRight(vid, "/")
-		if len(vid) == 11 && isVideoIDChar(vid) {
-			return vid
-		}
-	}
-
-	// Path-based patterns: youtu.be/, /live/, /shorts/, /embed/, /v/
-	pathPatterns := []string{"youtu.be/", "/live/", "/shorts/", "/embed/", "/v/"}
-	for _, pat := range pathPatterns {
-		if _, after, ok := strings.Cut(input, pat); ok {
-			vid, _, _ := strings.Cut(after, "?")
-			vid = strings.TrimRight(vid, "/")
-			if len(vid) == 11 && isVideoIDChar(vid) {
-				return vid
-			}
-		}
-	}
-
-	return ""
 }
 
 // extractTwitchTarget extracts a Twitch channel, VOD, clip or listing from a
@@ -1317,15 +1284,6 @@ func extractTwitchTarget(input string) (string, string) {
 		return strings.TrimSpace(input), "twitch_listing"
 	}
 	return "", "twitch_clips"
-}
-
-func isVideoIDChar(s string) bool {
-	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
 }
 
 func isNumeric(s string) bool {

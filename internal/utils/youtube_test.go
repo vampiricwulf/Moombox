@@ -2,61 +2,100 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestExtractVideoID(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		// Bare ID
-		{"dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Standard watch URLs
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"http://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// With extra params
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", "dQw4w9WgXcQ"},
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtest", "dQw4w9WgXcQ"},
-		// Short URLs
-		{"https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"http://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Live URLs
-		{"https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Shorts URLs
-		{"https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Embed URLs
-		{"https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// V URLs
-		{"https://www.youtube.com/v/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// IDs with hyphens and underscores (must be exactly 11 chars)
-		{"abc-_12-_AB", "abc-_12-_AB"},
-		// Invalid inputs
-		{"", ""},
-		{"not-a-url", ""},
-		{"https://example.com/watch?v=dQw4w9WgXcQ", ""},
-		{"https://www.youtube.com/watch", ""},
-		{"https://www.youtube.com/watch?v=tooshort", ""},
-		{"https://www.youtube.com/watch?v=toolooooooong", ""},
-	}
+// youtubeURLRow is one row of testdata/youtube_urls.json, the table the Go
+// parser, the TUI, the add route and the dashboard are all tested against.
+type youtubeURLRow struct {
+	Input string `json:"input"`
+	ID    string `json:"id"`
+	Bare  bool   `json:"bare"`
+}
 
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := ExtractVideoID(tt.input)
-			if result != tt.expected {
-				t.Errorf("ExtractVideoID(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
+func loadYouTubeURLTable(t *testing.T) []youtubeURLRow {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []youtubeURLRow `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Rows) == 0 {
+		t.Fatal("the shared YouTube URL table is empty")
+	}
+	return table.Rows
+}
+
+// TestExtractVideoIDSharedURLTable runs ExtractVideoID over the shared
+// table: every form any add path took before there was one parser (watch
+// with v anywhere in the query, youtu.be, /live/, /shorts/, /embed/, /v/,
+// music. and -nocookie hosts, no scheme, a host in any case) and the inputs
+// that must stay refused (another host, a lookalike host, a 12-character
+// ID). It also holds the links the old unanchored regexes took and a whole-
+// input URL parse refused: a link inside other text ("<https://youtu.be/ID>",
+// "see https://…", a second line), and a link net/url rejects or misreads
+// (a stray "%", "v=ID;t=3"). ExtractVideoIDFromURL reads the same rows,
+// except that a bare ID is not a URL: the add route must not take an
+// 11-character Twitch login for a video.
+//
+// Mutants: requiring path == "/watch" for the v parameter, a case-sensitive
+// scheme-less prefix test, an exact host list without music., a suffix match
+// without the dot (notyoutube.com), truncating a long ID to 11 characters,
+// dropping the embedded-link pass, letting a scheme-less embedded link start
+// after "/" or "_" (example.com/youtube.com/, foo_youtube.com), refusing one
+// after text that is not ASCII, counting embeddedLinkTries over the whole
+// input and not per run of text without whitespace, a different limit than
+// the dashboard's, or parsing with net/url each fails its rows.
+func TestExtractVideoIDSharedURLTable(t *testing.T) {
+	for _, row := range loadYouTubeURLTable(t) {
+		if got := ExtractVideoID(row.Input); got != row.ID {
+			t.Errorf("ExtractVideoID(%q) = %q, want %q", row.Input, got, row.ID)
+		}
+		wantURL := row.ID
+		if row.Bare {
+			wantURL = ""
+		}
+		if got := ExtractVideoIDFromURL(row.Input); got != wantURL {
+			t.Errorf("ExtractVideoIDFromURL(%q) = %q, want %q", row.Input, got, wantURL)
+		}
+	}
+}
+
+// TestExtractVideoIDFromURLTimeGrowsWithLength: the add route hands the
+// parser a request's url field as it came, up to the body cap. Looking for a
+// link inside the text used to start again after every "/" and read to the
+// next whitespace each time, so a megabyte of "a/" took over an hour. A megabyte of
+// each shape that makes the embedded pass work now takes milliseconds; the
+// budget is wide so a loaded machine never fails it.
+//
+// Mutant: no embeddedLinkTries limit (the third shape alone takes seven
+// seconds).
+func TestExtractVideoIDFromURLTimeGrowsWithLength(t *testing.T) {
+	start := time.Now()
+	for _, unit := range []string{"a/", "//a/", "https://youtu.be/?a&", "https://youtube.com/x https://"} {
+		if got := ExtractVideoIDFromURL(strings.Repeat(unit, (1<<20)/len(unit))); got != "" {
+			t.Errorf("a megabyte of %q read as video %q", unit, got)
+		}
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("four megabyte inputs took %v, want well under a second", took)
 	}
 }
 

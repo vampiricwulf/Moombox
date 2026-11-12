@@ -33,8 +33,9 @@ var EventGroups = []EventGroup{
 	// when the outage was shorter than the send. connectivity_resume now
 	// carries the pause instant and the outage duration. Unlike
 	// connectivity_lost, the retired key is ALIASED (below) rather than simply
-	// dropped, so a filter naming it keeps receiving the folded embed for one
-	// release instead of going silent through every outage.
+	// dropped, so a filter naming it keeps receiving the folded embed instead of
+	// going silent through every outage. The alias is permanent (owner ruling
+	// R2-N3).
 	{"Connectivity", []string{"connectivity_resume", "connectivity_split", "connectivity_restored"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
 	// captcha_required is the YouTube session's captcha spell, told once a
@@ -76,9 +77,9 @@ var KnownEvents = func() map[string]bool {
 // The same table serves a second idiom: RETIREMENT. When an event is folded
 // into another and its key disappears from EventGroups, the retired key goes
 // in as the alias VALUE and the survivor as the KEY, so a filter still naming
-// the retired one receives the folded embed instead of going silent. A
-// retirement entry is a migration with an expiry — it names the release it
-// should be deleted in — where a split entry is permanent.
+// the retired one receives the folded embed instead of going silent. Like a
+// split entry, a retirement entry is permanent (owner ruling R2-N3): a config
+// that names the retired key keeps working for as long as it exists.
 //
 // A third idiom: the CLOSE. A recovery key (e.g. "disk_ok") is aliased to the
 // alert it ends, so a target that already filters the alert also receives the
@@ -90,8 +91,10 @@ var eventAliases = map[string]string{
 	// C8: the pause embed was undeliverable by construction (it was sent
 	// during the outage it reported), so the resume embed now carries the
 	// pause instant and the duration. A target that filtered on the pause key
-	// keeps receiving that folded embed. DELETE THIS ENTRY one release after
-	// the retirement ships — it is a migration, not a permanent mapping.
+	// keeps receiving that folded embed. This entry is PERMANENT (owner ruling
+	// R2-N3): it was first written as a migration to delete one release later,
+	// and the owner ruled that a filter naming the retired key keeps working.
+	// Do not delete it.
 	"connectivity_resume": "connectivity_pause",
 	// The recovery halves. Each close is its own key, so a target can
 	// subscribe to the all-clear alone; the alias means a target that already

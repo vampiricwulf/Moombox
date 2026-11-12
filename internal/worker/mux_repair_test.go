@@ -226,10 +226,16 @@ func probeStreams(t *testing.T, ffprobePath, path string) probedStreams {
 // operator reads in the job dialog.
 func routedRepairJob(t *testing.T, w *DownloadWorker, db *database.Database, jobID string) (stagingDir, outputDir string) {
 	t.Helper()
+	return routedRepairJobOn(t, w, db, jobID, "youtube")
+}
+
+// routedRepairJobOn is routedRepairJob for a row of the given platform.
+func routedRepairJobOn(t *testing.T, w *DownloadWorker, db *database.Database, jobID, platform string) (stagingDir, outputDir string) {
+	t.Helper()
 	w.logger = routingLogger{db: db}
 	w.orchestrator.logger = routingLogger{db: db}
 	untrackOnTerminal(t, db)
-	stagingDir, outputDir = muxFixtureJob(t, w, db, jobID)
+	stagingDir, outputDir = muxFixtureJobOn(t, w, db, jobID, platform)
 	db.TrackJobForLogs(jobID)
 	return stagingDir, outputDir
 }
@@ -516,8 +522,7 @@ func TestDamagedTwitchFMP4FinishesWithAGap(t *testing.T) {
 	ffmpegPath, ffprobePath := requireFFmpegTools(t)
 	w, db := testWorkerSetup(t)
 	const id = "j-gap-twitch"
-	staging, _ := routedRepairJob(t, w, db, id)
-	db.UpdateJobFields(id, map[string]any{"platform": "twitch"})
+	staging, _ := routedRepairJobOn(t, w, db, id, "twitch")
 	media := filepath.Join(staging, "video_stream")
 	src := fragmentedFixture(t, ffmpegPath, "muxed", 300)
 	stageFragmented(t, media, src, len(src.frags)/3, damageZeroed)

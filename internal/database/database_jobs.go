@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -1191,6 +1192,10 @@ func (db *Database) clearJobLogsOf(jobIDs []string) {
 		delete(db.jobLogs, id)
 		delete(db.logRouted, id)
 	}
+	db.logKept = slices.DeleteFunc(db.logKept, func(id string) bool {
+		_, has := db.jobLogs[id]
+		return !has
+	})
 }
 
 // RouteLogToJobs checks if a log line contains any TRACKED job ID and routes
@@ -1229,11 +1234,39 @@ func (db *Database) TrackJobForLogs(jobID string) {
 
 // UntrackJobForLogs stops routing to a job while KEEPING its buffer: a job
 // that just failed is exactly the one whose log the operator opens next
-// (CORE-12). ClearJobLogs is what drops the buffer.
+// (CORE-12). The buffers of the newest finishedJobLogsKept untracked jobs are
+// kept; an older one is freed. ClearJobLogs drops one buffer outright.
 func (db *Database) UntrackJobForLogs(jobID string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
+	db.untrackForLogsLocked(jobID)
+}
+
+// finishedJobLogsKept is how many untracked (finished) jobs keep their log
+// buffer in memory (owner ruling R2-N2). Without a bound every job finished
+// since the process started held its 100 to 200 lines until its row was
+// deleted. A freed log reads as empty in both UIs, as every log does after a
+// restart; the lines themselves are still in moombox.log.
+const finishedJobLogsKept = 200
+
+// untrackForLogsLocked is UntrackJobForLogs' body; callers hold jobLogsMu.
+// The job joins logKept as its newest entry unless it is already there, and
+// the oldest entries beyond finishedJobLogsKept lose their buffers. Only an
+// untracked job is ever in logKept, so a routed (active) job is never freed.
+func (db *Database) untrackForLogsLocked(jobID string) {
 	delete(db.logRouted, jobID)
+	if len(db.jobLogs[jobID]) == 0 {
+		delete(db.jobLogs, jobID) // nothing to keep: it takes no place among the kept
+		return
+	}
+	if slices.Contains(db.logKept, jobID) {
+		return
+	}
+	db.logKept = append(db.logKept, jobID)
+	for len(db.logKept) > finishedJobLogsKept {
+		delete(db.jobLogs, db.logKept[0])
+		db.logKept = slices.Delete(db.logKept, 0, 1)
+	}
 }
 
 // SyncJobLogTracking brings the routed set in line with a job list: every
@@ -1253,17 +1286,26 @@ func (db *Database) SyncJobLogTracking(jobs []*Job) {
 			continue
 		}
 		if j.IsTerminal() {
-			delete(db.logRouted, j.ID)
+			db.untrackForLogsLocked(j.ID)
 			continue
 		}
 		db.trackForLogsLocked(j.ID)
 	}
 }
 
-// trackForLogsLocked is TrackJobForLogs' body; callers hold jobLogsMu.
+// trackForLogsLocked is TrackJobForLogs' body; callers hold jobLogsMu. A job
+// tracked again (Resume, Reinitialize, auto-retry, a worker bracket on a
+// finished job) leaves logKept, so its buffer cannot be freed while it is
+// routed to; one whose buffer was already freed starts an empty one.
 func (db *Database) trackForLogsLocked(jobID string) {
+	if _, routed := db.logRouted[jobID]; routed {
+		return // already routed: it has a buffer and is not in logKept
+	}
 	db.logRouted[jobID] = struct{}{}
 	if _, ok := db.jobLogs[jobID]; !ok {
 		db.jobLogs[jobID] = nil
+	}
+	if i := slices.Index(db.logKept, jobID); i >= 0 {
+		db.logKept = slices.Delete(db.logKept, i, i+1)
 	}
 }

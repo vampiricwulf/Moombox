@@ -612,6 +612,23 @@ Any other setup failure, a job already cancelled, and a VOD's own failure (which
 
 ---
 
+### Video URL Forms
+
+Every add path reads a YouTube video link through one parser: `utils.ExtractVideoID` (`internal/utils/youtube.go`), which the CLI's `moombox add` (`utils.ExtractMediaID`) and the TUI's Add Video (`extractMediaID`, `internal/tui/add_video.go`) call, `utils.ExtractVideoIDFromURL` for the API's url-only `POST /api/jobs` (the same reading, except that a bare ID is not a URL there: an 11-character word may be a Twitch login), and its mirror in the dashboard, `extractVideoId` (`web/public/app.js`). All four are tested against one table, `internal/utils/testdata/youtube_urls.json`. When the input as a whole is not a YouTube link, the first one inside it is read (a link in a sentence, in brackets, on a second line, or straight after text that is not ASCII), in one pass over the text: both parsers stop reading a run of text without whitespace after 32 YouTube links in it that hold no video ID, so the time taken grows only with the input's length (`TestExtractVideoIDFromURLTimeGrowsWithLength`). Before there was one parser each path had its own, so a link with `v` not first in the query was refused by the dashboard and the API and taken by the TUI and the CLI, and the TUI made a YouTube job of any text holding `v=` and 11 ID characters.
+
+| Form | Example |
+|---|---|
+| A bare ID | `dQw4w9WgXcQ` (exactly 11 of `A-Z a-z 0-9 _ -`) |
+| A `v` parameter anywhere in the query, on any path | `/watch?v=ID`, `/watch?app=desktop&v=ID`, `/watch?list=PL…&v=ID`; also the old `#v=ID` fragment |
+| Short link | `youtu.be/ID` |
+| Path forms | `/live/ID`, `/shorts/ID`, `/embed/ID`, `/v/ID` |
+
+The scheme (`http` or `https`) is optional and the host is read in any case. The hosts are `youtube.com`, `youtube-nocookie.com` and `youtubekids.com` with any subdomain (`www.`, `m.`, `music.`, `gaming.`), and `youtu.be`, matched on a dot boundary so a lookalike host (`notyoutube.com`, `youtube.com.example.com`) is refused. A leading `//` is read as no scheme. An ID may be followed by anything that cannot be part of one (a slash, a `;`, a stray `%` or bracket from a paste, more text after a space); twelve or more ID characters are not an ID and are refused, where the dashboard's and the API's old regexes cut them to the first eleven. A link on any other host is not a YouTube video.
+
+When the input as a whole is not such a link, the first YouTube link inside it is read the same way: `<https://youtu.be/ID>` (Discord's no-embed form), a quoted link, `see https://youtu.be/ID`, a Markdown link, a link on a later line, a link inside another link's query (`?u=https://youtu.be/ID`). A link written without `http(s)://` counts only at the start of the text or after a character that cannot continue a host, a path or user info, so `example.com/youtube.com/watch?v=ID`, `ftp://www.youtube.com/…` and `foo_youtube.com/…` stay refused. A bare ID is the whole input only: an 11-character word in a sentence is not a video.
+
+Both parsers take the link apart by hand (`videoIDFromLink`; scheme, host and port, path, query, fragment) and unescape nothing, because Go's `net/url` and the browser's `URL` disagree on a stray `%`, a `;` in the query, dot segments, escapes in the path and an out-of-range port, and the dashboard decides in JS what the route decides in Go. So `v=ID;t=3`, `v=ID%` and port `:99999` are read, and `/shorts/%64…` (an escaped ID character), `#v%3DID` and `/./live/ID` are not, on both sides. Which of a bare `v` and digits is a Twitch VOD is decided before this parser is asked (§ Twitch URL Forms, owner decision FE-6).
+
 ## Twitch Service (`internal/twitch/`)
 
 ### Architecture
@@ -1980,6 +1997,10 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 - A live capture on the no-JS path: `TestNoJSCaptureRefreshesOnTheNoJSFormats`
 - A live path switch: `TestAFallbackCaptureSwitchesBackOnce`, `TestRunRecordSwitchBack`, `TestLiveHlsFallbackMarksTheRun`, `internal/worker/live_switch_back_test.go`
 - A live path switch: `TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart`, `TestLivePathSwitchesAreBounded`, `TestASwitchBackReArmsTheFallbackItLeaves`, `internal/worker/live_path_switch_test.go`
+
+**Video URL Forms**
+
+- All four are tested against `internal/utils/testdata/youtube_urls.json`: `TestExtractVideoIDSharedURLTable` (`internal/utils/youtube_test.go`), `TestExtractMediaIDSharedYouTubeURLTable` (`internal/tui/tui_test.go`), `TestExtractVideoIDFromURLSharedYouTubeURLTable` (`internal/web/routes/jobs_test.go`) and `web/tests/youtube-urls.test.mjs`.
 
 **Twitch URL Forms**
 
