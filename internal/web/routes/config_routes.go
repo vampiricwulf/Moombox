@@ -615,7 +615,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// Channels — audit R-4: PUT /config accepts a channels[] replace, and
 	// POST /api/config/channels is the other writer. Validate each entry here
 	// so a bulk replace can't smuggle in empty IDs, duplicates, or unknown
-	// platforms (the platform rule is validChannelPlatform, shared with POST).
+	// platforms (the platform rule is config.ValidChannelPlatform, shared with POST and config.Validate).
 	if chs, ok := updates["channels"].([]any); ok {
 		// The decode gate, ahead of the per-field rules. applyConfigUpdates
 		// decodes this array through the same helper and assigns nothing when
@@ -655,8 +655,15 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				continue
 			}
 			seen[id] = true
-			if v, ok := obj["platform"].(string); ok && !validChannelPlatform(v) {
-				errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
+			// config.Validate's rule: an unknown platform is refused on an
+			// enabled channel only. A hand-edited file's unknown platform is
+			// loaded as a disabled channel that keeps its string (owner
+			// ruling R2-M2), and the settings form sends every channel back,
+			// so refusing that entry would 400 every later save.
+			if v, ok := obj["platform"].(string); ok && !config.ValidChannelPlatform(v) {
+				if enabled, isBool := obj["enabled"].(bool); !isBool || enabled {
+					errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
+				}
 			}
 		}
 	}

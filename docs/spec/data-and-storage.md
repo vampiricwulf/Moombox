@@ -797,7 +797,7 @@ The targets are not the only hosts the probe dials. When none of them has connec
 |-------|------|---------|----------|
 | ID | string | "" | `id` | YouTube channel ID or Twitch username. Every writer stores it through `utils.NormalizeChannelID` — trimmed, a URL or bare `@handle` resolved — and `Validate` refuses an ID with surrounding whitespace or one another entry has, compared case-insensitively, so `Save` refuses either; `Normalize` (Load) trims it and drops the later duplicate. |
 | Name | string | "" | `name` | Display name |
-| Platform | string | "youtube" | `platform` | "youtube" or "twitch" |
+| Platform | string | "youtube" | `platform` | "youtube" or "twitch", the one rule `config.ValidChannelPlatform` for the file and both web writers. From a hand-edited file (owner ruling R2-M2): a value that is right once trimmed and lower-cased (`"Twitch"`) is rewritten on load; any other value disables the channel (`enabled = false`), leaving its line, its platform string and its Twitch switches in the file, with a boot Warn naming the channel and the value. `Validate` refuses an unknown platform on an enabled channel only, and so does `PUT /api/config`, so the disabled entry does not fail later saves. |
 | Enabled | *bool | nil (true) | `enabled` | nil defaults to true |
 | Terms | ChannelTerms | empty | `terms` | Regex filter (string or map of named patterns) |
 | NumDescLookbehind | *int | nil | `num_desc_lookbehind` | Retired: terms match titles only, so nothing reads it. Not on either channel editor; kept so an existing config loads and saves unchanged. |
