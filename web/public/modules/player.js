@@ -1861,7 +1861,13 @@ export class PlayerController {
       div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
     }
     div.appendChild(this._timeSpan(msg));
-    div.appendChild(this._authorSpan(msg, true));
+    // A Twitch /me message (isAction, set by the recorder or by the legacy
+    // repair in chat-timeline.js) reads "Name waves", not "Name: waves", with
+    // the text in italics as Twitch draws it.
+    const isAction = msg.isAction === true;
+    const author = this._authorSpan(msg, !isAction);
+    if (isAction) author.textContent += " ";
+    div.appendChild(author);
     // K3: a cheer's amount, coloured by Twitch's scale. Gated on the count
     // rather than on messageType === "bits": a bits message with no count has
     // nothing to put in a chip, and a cheer that arrived typed as ordinary
@@ -1869,6 +1875,9 @@ export class PlayerController {
     const bits = Number(msg.bits) || 0;
     if (bits > 0) div.appendChild(this._cheerChip(bits));
     const contentSpan = document.createElement("span");
+    // On the content span itself, never a wrapper: _markChatChange strikes a
+    // deleted row's last child.
+    if (isAction) contentSpan.classList.add("chat-msg-action");
     this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
     div.appendChild(contentSpan);
   }

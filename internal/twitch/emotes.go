@@ -29,9 +29,22 @@ const emoteCacheTTL = 24 * time.Hour
 // emoteCacheEntry is one channel's resolved set plus WHEN it was resolved.
 // The timestamp is the whole reason this is a struct rather than the bare
 // pointer it used to be.
+//
+// retryAfter is set when the fetch that wrote the entry left a provider
+// unanswered: the entry is then fresh only until that time (see
+// resolveChannel), not for emoteCacheTTL. Zero when all three answered.
 type emoteCacheEntry struct {
-	data      *TwitchEmoteData
-	fetchedAt time.Time
+	data       *TwitchEmoteData
+	fetchedAt  time.Time
+	retryAfter time.Time
+}
+
+// fresh reports whether the entry is served without a fetch.
+func (e emoteCacheEntry) fresh(now time.Time) bool {
+	if !e.retryAfter.IsZero() {
+		return now.Before(e.retryAfter)
+	}
+	return now.Sub(e.fetchedAt) < emoteCacheTTL
 }
 
 // EmoteResolver fetches and caches third-party emotes for Twitch channels.
@@ -129,6 +142,16 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 //   - AN ANSWER GOES STALE. An entry older than emoteCacheTTL is refetched on
 //     the next Resolve. If that refetch fails outright the STALE set is served
 //     and kept: an emote set from yesterday beats none.
+//   - ONE PROVIDER FAILING IS NOT "NO EMOTES" EITHER. When some providers
+//     answer and others fail, the answers are cached, each failed provider
+//     keeps the list the entry already had for it (none on a first fetch),
+//     and the entry is refetched after globalEmoteRetryFloor rather than after
+//     emoteCacheTTL. Without this a provider's bad minute at one stream's end
+//     left the channel's archives without that provider's emotes for a day,
+//     and a refresh replaced a complete set with the poorer one. A fetch that
+//     ended because the caller's own ctx did says nothing about a provider: it
+//     starts no floor, so the next Resolve fetches at once (the global sets'
+//     rule, globalEmotes).
 //
 // Returns nil only when nothing is cached and no provider answered, so the
 // caller (resolveEmotes, chat_recording.go) can retry later.
@@ -150,12 +173,13 @@ func (er *EmoteResolver) resolveChannel(ctx context.Context, channelID string, c
 				break
 			}
 		}
-		if er.now().Sub(cached.fetchedAt) < emoteCacheTTL {
+		if cached.fresh(er.now()) {
 			er.mu.Unlock()
 			return cached.data
 		}
-		// Expired: keep it in hand as the fallback for a refetch that fails,
-		// and leave it in the map so a concurrent caller keeps being served.
+		// Expired, or due a retry for a provider that failed: keep it in hand
+		// as the fallback for a refetch that fails, and leave it in the map so
+		// a concurrent caller keeps being served.
 		stale = cached.data
 	}
 	// Dedup: if another goroutine is already fetching this key, wait for it.
@@ -225,15 +249,38 @@ func (er *EmoteResolver) resolveChannel(ctx context.Context, channelID string, c
 
 	wg.Wait()
 
+	answered := bttvOK || ffzOK || sevenTVOK
+	complete := bttvOK && ffzOK && sevenTVOK
+	// A provider that failed keeps the list the entry had for it. stale is
+	// never written to after it is stored, so its slices can be shared.
+	if stale != nil {
+		if !bttvOK {
+			bttvResult = stale.BTTV
+		}
+		if !ffzOK {
+			ffzResult = stale.FFZ
+		}
+		if !sevenTVOK {
+			sevenTVResult = stale.SevenTV
+		}
+	}
 	data := &TwitchEmoteData{
 		BTTV:    bttvResult,
 		FFZ:     ffzResult,
 		SevenTV: sevenTVResult,
 	}
-	answered := bttvOK || ffzOK || sevenTVOK
 
 	er.mu.Lock()
 	if answered {
+		entry := emoteCacheEntry{data: data, fetchedAt: er.now()}
+		if !complete {
+			// Due again after the floor, or at once when the failures were
+			// the caller's ctx ending rather than the providers'.
+			entry.retryAfter = entry.fetchedAt
+			if ctx.Err() == nil {
+				entry.retryAfter = entry.fetchedAt.Add(globalEmoteRetryFloor)
+			}
+		}
 		// Refreshing an EXPIRED entry must not evict anything and must not
 		// append a second order entry: the key is already in both, and the LRU
 		// promotion above already moved it to the end.
@@ -241,7 +288,7 @@ func (er *EmoteResolver) resolveChannel(ctx context.Context, channelID string, c
 			er.evictIfFullLocked()
 			er.cacheOrder = append(er.cacheOrder, cacheKey)
 		}
-		er.cache[cacheKey] = emoteCacheEntry{data: data, fetchedAt: er.now()}
+		er.cache[cacheKey] = entry
 	}
 	delete(er.inflight, cacheKey)
 	er.mu.Unlock()

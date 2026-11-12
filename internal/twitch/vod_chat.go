@@ -23,6 +23,10 @@ const (
 // re-asks the probe. A variable so tests need not sleep it out.
 var vodChatOnlinePoll = 5 * time.Second
 
+// vodChatErrorBackoff is the wait after a failed page fetch, multiplied by the
+// count of consecutive failures. A variable so tests need not sleep it out.
+var vodChatErrorBackoff = 2 * time.Second
+
 // VodChatDownloader downloads chat messages from a Twitch VOD.
 //
 // **Concurrency contract** (audit twitch.md #1):
@@ -341,7 +345,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) (retErr error) {
 			case <-ctx.Done():
 				vcd.finishInterrupted(contentOffset)
 				return ctx.Err()
-			case <-time.After(2 * time.Duration(consecutiveErrors) * time.Second):
+			case <-time.After(time.Duration(consecutiveErrors) * vodChatErrorBackoff):
 			}
 			continue
 		}
