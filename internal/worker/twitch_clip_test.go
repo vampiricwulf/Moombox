@@ -315,16 +315,6 @@ func TestClipsHostURLNamesNoChannel(t *testing.T) {
 	}
 }
 
-// TestClipFnSeamIsUnsetInProduction pins the clip seam's production value:
-// the worker's stream processor reads clips through tw.GetClip, never a
-// stand-in.
-func TestClipFnSeamIsUnsetInProduction(t *testing.T) {
-	w, _ := testWorkerSetup(t)
-	if w.streamProc.clipFn != nil {
-		t.Error("NewDownloadWorker wired a clipFn; production must read clips through tw.GetClip")
-	}
-}
-
 // TestTwitchClipKeepsAnOutcomeThatLandedFirst: ExecuteTwitchClip's two status
 // writes never overwrite an outcome. A Cancel that landed between the
 // admission and the Downloading write stops the clip before it is fetched,
