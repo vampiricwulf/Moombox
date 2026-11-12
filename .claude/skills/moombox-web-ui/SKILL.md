@@ -102,7 +102,7 @@ Every file under `web/public/` and what it owns is in `docs/spec/user-interfaces
 ```javascript
 showToast(message, variant = "primary") // variants: "success", "warning", "danger", "primary"
 ```
-Uses `<sl-alert>` with `alert.toast()`. Auto-closes after 3s with countdown animation. Icons mapped per variant.
+Uses `<sl-alert>` with `alert.toast()`. Always go through `showToast`: it is the one place a toast is made, and `toastDuration` (`web/public/modules/utils.js`) decides how long each stays. A `danger` toast stays until closed; any other stays 60 ms per character, at least 6 s for a `warning` and 3 s for the rest, at most 15 s, with a countdown bar that runs for the same time. Icons mapped per variant.
 
 ## Theme System
 

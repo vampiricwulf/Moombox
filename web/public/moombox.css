@@ -3058,7 +3058,9 @@ sl-progress-bar {
     height: 2px;
     background-color: currentColor;
     opacity: 0.3;
-    animation: toastCountdown 3s linear forwards;
+    /* How long the toast stays: showToast sets --toast-duration from
+       toastDuration (utils.js). A toast that stays until closed has no bar. */
+    animation: toastCountdown var(--toast-duration, 3s) linear forwards;
 }
 
 /* Empty state enhancements */

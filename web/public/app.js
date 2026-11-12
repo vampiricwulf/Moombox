@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -4798,12 +4798,21 @@ export class MoomboxApp {
   }
 
 
+  /**
+   * Show a toast. Every toast on the dashboard comes through here. How long
+   * it stays is toastDuration's answer (utils.js, owner ruling R2-D3): an
+   * error until it is closed, anything else for a time that grows with its
+   * length. The countdown bar runs for that same time, and an error has none.
+   */
   showToast(message, variant = "primary") {
+    const duration = toastDuration(message, variant);
+    const timed = Number.isFinite(duration);
     const alert = document.createElement("sl-alert");
     alert.variant = variant;
     alert.closable = true;
-    alert.duration = 3000;
+    alert.duration = duration;
     alert.className = "toast-alert";
+    if (timed) alert.style.setProperty("--toast-duration", `${duration}ms`);
 
     const icon = document.createElement("sl-icon");
     icon.slot = "icon";
@@ -4812,9 +4821,11 @@ export class MoomboxApp {
 
     alert.appendChild(document.createTextNode(message));
 
-    const countdown = document.createElement("div");
-    countdown.className = "toast-countdown";
-    alert.appendChild(countdown);
+    if (timed) {
+      const countdown = document.createElement("div");
+      countdown.className = "toast-countdown";
+      alert.appendChild(countdown);
+    }
 
     // Shoelace's `.toast()` already detaches the alert on dismiss
     // (see Shoelace docs for sl-alert.toast: "when dismissed, it will
