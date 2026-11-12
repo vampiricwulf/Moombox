@@ -14,7 +14,30 @@ name: Build and Publish Docker Image
 #                      release dry run calls it with push: false.
 #   workflow_dispatch  builds and pushes an `edge` tag from main — useful
 #                      for testing image changes without cutting a release.
-#                      Untick "push" to only build both architectures.
+#                      Untick "push" to only build both architectures. On
+#                      any other ref it only builds, whatever "push" says.
+#
+# What may push (owner ruling R2-O2). The `push` input asks; the job's PUBLISH
+# value decides, and it is true only for
+#
+#   - a tag PUSH, which reaches this file through release.yml (under
+#     workflow_call github.event_name is the caller's event), or
+#   - a run on refs/heads/main, which the tag rules below give `edge` alone.
+#
+# So `latest` and the version tags move only on a real tag push. A manual run
+# with a tag selected builds both architectures and stops: before this gate
+# it rebuilt that tag and pushed it as X.Y.Z, X.Y and `latest`, which moved
+# `latest` back to an old version for everyone who pulls it. To publish the
+# image for an existing tag again, open that tag's release run and re-run the
+# docker job: "Re-run failed jobs" when it failed, otherwise the re-run button
+# on the docker job alone. Either is still a push event. Do not use "Re-run
+# all jobs", which runs the release job again too. Do this only for the newest
+# release tag: a re-run pushes `latest` (and X.Y) again, so on an older tag it
+# moves them back to that version.
+#
+# The gate covers only tags created from the commit that added it on. A manual
+# run on a tag executes THAT TAG'S copy of this file, so for v2.9.9 and older
+# the copy has no gate and still pushes: never "Run workflow" on one of those.
 
 on:
   workflow_call:
@@ -37,7 +60,31 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    # Without a limit a stalled Debian mirror or registry upload holds the
+    # run for GitHub's six hours, with the release already published and no
+    # image. The job took 4 to 8.5 minutes in the releases since September
+    # 2026, before the start check added its load and one short run.
+    timeout-minutes: 45
+    env:
+      # The one place that decides whether this run pushes; see the header.
+      PUBLISH: ${{ inputs.push && (github.event_name == 'push' || github.ref == 'refs/heads/main') }}
     steps:
+      - name: Say whether this run publishes
+        env:
+          ASKED: ${{ inputs.push }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "Tag push of $GITHUB_REF_NAME: the image is built and pushed under the release's tags."
+            else
+              echo "Run on main: the image is built and pushed as edge."
+            fi
+          elif [ "$ASKED" = "true" ]; then
+            echo "::notice::Build only. A $GITHUB_EVENT_NAME run on $GITHUB_REF does not push: only a tag push or a run on main does."
+          else
+            echo "Build only: push was not asked for."
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v4
@@ -56,7 +103,9 @@ jobs:
           images: ghcr.io/vampiricwulf/moombox
           # Release tag vX.Y.Z → X.Y.Z, X.Y, and latest (latest=auto skips
           # pre-release tags like v2.9.0-test.1, matching release.yml's
-          # prerelease handling). workflow_dispatch on a branch → edge.
+          # prerelease handling). A run on main → edge. The semver rules
+          # also match a manual run on a tag, which is why PUBLISH, not
+          # these rules, is what keeps such a run from pushing.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -76,11 +125,41 @@ jobs:
           fi
           echo "MOOMBOX_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
+      # Build-and-start check (owner ruling R2-O3). Until this step nothing
+      # ever ran the image: the multi-arch build below only proves it
+      # builds, and a break in docker/entrypoint.sh or in the binary's start
+      # inside the image was left for a user to find. The amd64 image is
+      # built into the runner's own Docker (load), with the same build args,
+      # and started once. The multi-arch build then reuses these layers from
+      # the same builder, so the cost is the load and one short run. It runs
+      # in every use of this workflow, so in a release, a release dry run
+      # and a manual run, and in no pull request.
+      - name: Build the amd64 image for the start check
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          # Never pushed, so it needs no attestation, and an image with one
+          # cannot be loaded into the runner's Docker.
+          provenance: false
+          tags: moombox:start-check
+          build-args: |
+            VERSION=${{ env.MOOMBOX_VERSION }}
+            COMMIT=${{ env.MOOMBOX_COMMIT }}
+
+      - name: Start the image once
+        # `--version` through the entrypoint on an empty /data: the
+        # entrypoint seeds config.toml and README-docker.txt, then the
+        # binary answers before it reads the config or opens a database.
+        timeout-minutes: 5
+        run: bash .github/scripts/image-smoke.sh moombox:start-check "$MOOMBOX_COMMIT" "$MOOMBOX_VERSION"
+
       - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.push }}
+          push: ${{ env.PUBLISH }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |

@@ -7,6 +7,7 @@
 // Usage (from repo root):
 //
 //	go run ./tools/fetch-node
+//	go run ./tools/fetch-node -check-security   # is the pin behind a security release?
 //
 // Idempotent: if the gitignored stamp beside the blobs (node-blobs.stamp)
 // matches the pinned manifest and every blob is present, nothing is fetched.
@@ -30,6 +31,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,7 +43,9 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// Pinned Node.js v24 LTS release. Bump quarterly or on critical CVE.
+// Pinned Node.js v24 LTS release. Bump quarterly or on critical CVE. The
+// weekly vulnerability scan fails when this is behind a v24 security release
+// (-check-security, security.go).
 //
 // Last bumped: 2026-10-29 — v24.22.2, the latest v24 LTS (Krypton), on top
 // of the v24.22.1 security release: its bundled undici 7.30.1 closes the
@@ -109,6 +113,14 @@ func blobsUpToDate(embedDir, wantStamp string) bool {
 }
 
 func main() {
+	// -check-security asks only whether the pin is behind a Node security
+	// release, and fetches no binary (security.go). Without it the tool does
+	// what it always did.
+	check := flag.Bool("check-security", false, "only report whether a newer Node security release than the pin exists")
+	flag.Parse()
+	if *check {
+		os.Exit(checkSecurity(nodeVersion, fetchNodeIndex, os.Stdout))
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fetch-node:", err)
 		os.Exit(1)
