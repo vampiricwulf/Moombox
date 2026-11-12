@@ -83,12 +83,15 @@ func (s *AutoCookieService) periodicRefreshHasSource() bool {
 // publish that as the status. Nothing is lost by skipping it: the next boot's
 // first check reads the file this pass wrote.
 //
+// result is the pass's own, handed on whole: the hook resumes the jobs
+// parked on a platform this pass verified (owner ruling R2-C2).
+//
 // A named method rather than an inline nil check so the decision has a seam a
 // test can drive: the tick that calls it needs a browser profile, a browser
 // and a network, so the branch is otherwise unreachable offline.
-func (s *AutoCookieService) notePassCompleted(ctx context.Context) {
+func (s *AutoCookieService) notePassCompleted(ctx context.Context, result RefreshResult) {
 	if s.OnPassCompleted != nil && ctx.Err() == nil {
-		s.OnPassCompleted(ctx)
+		s.OnPassCompleted(ctx, result)
 	}
 }
 
@@ -255,7 +258,7 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 		// not read the import's verdict half a minute after the re-check's
 		// output.
 		if result.Ran {
-			s.notePassCompleted(ctx)
+			s.notePassCompleted(ctx, result)
 		}
 	}()
 }
@@ -401,6 +404,6 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	// DECLINED pass (eight refreshDeclined() exits) wrote nothing, so
 	// there is nothing to re-read.
 	if result.Ran {
-		s.notePassCompleted(ctx)
+		s.notePassCompleted(ctx, result)
 	}
 }

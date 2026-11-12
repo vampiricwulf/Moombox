@@ -31,10 +31,10 @@ import (
 // TestNotePassCompletedHasExactlyItsTwoWritingCallers below.
 func TestNotePassCompletedFiresTheHook(t *testing.T) {
 	calls := 0
-	s := &AutoCookieService{OnPassCompleted: func(context.Context) { calls++ }}
+	s := &AutoCookieService{OnPassCompleted: func(context.Context, RefreshResult) { calls++ }}
 
-	s.notePassCompleted(context.Background())
-	s.notePassCompleted(context.Background())
+	s.notePassCompleted(context.Background(), RefreshResult{})
+	s.notePassCompleted(context.Background(), RefreshResult{})
 
 	if calls != 2 {
 		t.Errorf("the hook fired %d times for two completed passes, want 2", calls)
@@ -51,11 +51,11 @@ func TestNotePassCompletedFiresTheHook(t *testing.T) {
 // hook fires for the cancelled pass.
 func TestNotePassCompletedAfterItsLoopEndedFiresNothing(t *testing.T) {
 	calls := 0
-	s := &AutoCookieService{OnPassCompleted: func(context.Context) { calls++ }}
+	s := &AutoCookieService{OnPassCompleted: func(context.Context, RefreshResult) { calls++ }}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s.notePassCompleted(ctx)
+	s.notePassCompleted(ctx, RefreshResult{})
 
 	if calls != 0 {
 		t.Errorf("the hook fired %d time(s) for a pass whose loop had already ended, want 0", calls)
@@ -75,13 +75,31 @@ func TestNotePassCompletedAfterItsLoopEndedFiresNothing(t *testing.T) {
 func TestNotePassCompletedHandsTheHookItsContext(t *testing.T) {
 	type key struct{}
 	var got context.Context
-	s := &AutoCookieService{OnPassCompleted: func(ctx context.Context) { got = ctx }}
+	s := &AutoCookieService{OnPassCompleted: func(ctx context.Context, _ RefreshResult) { got = ctx }}
 	ctx := context.WithValue(context.Background(), key{}, "the loop's")
 
-	s.notePassCompleted(ctx)
+	s.notePassCompleted(ctx, RefreshResult{})
 
 	if got == nil || got.Value(key{}) != "the loop's" {
 		t.Errorf("the hook was handed %v, want the calling goroutine's context", got)
+	}
+}
+
+// TestNotePassCompletedHandsTheHookThePassResult: the hook gets the result of
+// the pass that just ran. cmd/moombox resumes the jobs parked on each platform
+// that result verified (owner ruling R2-C2); a job that failed while the timer
+// or the seed held the refresh slot was left parked on the promise of it.
+//
+// Mutant: notePassCompleted handing on RefreshResult{} — nothing is ever
+// verified, so nothing is resumed.
+func TestNotePassCompletedHandsTheHookThePassResult(t *testing.T) {
+	var got RefreshResult
+	s := &AutoCookieService{OnPassCompleted: func(_ context.Context, r RefreshResult) { got = r }}
+
+	s.notePassCompleted(context.Background(), RefreshResult{Ran: true, YouTube: RefreshOK, Twitch: RefreshFailed})
+
+	if !got.Ran || got.YouTube != RefreshOK || got.Twitch != RefreshFailed {
+		t.Errorf("the hook was handed %+v, want the pass's own result", got)
 	}
 }
 
@@ -94,7 +112,7 @@ func TestNotePassCompletedHandsTheHookItsContext(t *testing.T) {
 // process.
 func TestNotePassCompletedWithNoHookIsSafe(t *testing.T) {
 	s := &AutoCookieService{}
-	s.notePassCompleted(context.Background()) // must not panic
+	s.notePassCompleted(context.Background(), RefreshResult{}) // must not panic
 }
 
 // TestNotePassCompletedHasExactlyItsTwoWritingCallers is the structural half
@@ -189,7 +207,7 @@ const (
 //
 // WHAT IS RECOGNISED as a gate: the call sits inside the BODY of an `if` whose
 // condition is a bare field selector, and the reported name is that field.
-// `if result.Ran { s.notePassCompleted(ctx) }` reports "Ran".
+// `if result.Ran { s.notePassCompleted(ctx, RefreshResult{}) }` reports "Ran".
 //
 // WHAT IS NOT, each with its own sentinel: no enclosing `if`; a condition that
 // is not a bare selector, which covers `if true`, `if !result.Ran`, and

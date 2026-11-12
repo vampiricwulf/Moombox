@@ -191,8 +191,9 @@ func (s *runState) cookieBudget() cookieRetryBudget {
 
 // resumeAfterCookieGesture resumes the jobs parked in COOKIES? on platform's
 // credentials after a gesture that wrote cookies.txt and ended with the
-// platform verified: a browser refresh (a job's, the operator's or the
-// recovery's), an import, a finished setup (owner ruling R2-C2).
+// platform verified: a browser refresh (a job's, the operator's, the
+// recovery's, or the periodic one), the boot profile import, an import, a
+// finished setup (owner ruling R2-C2).
 //
 // The two edge sweeps do not cover this. OnAuthRecovered needs the refresh
 // service to have seen the platform signed out first, and OnCredentialsChanged
@@ -230,6 +231,25 @@ func (s *runState) resumeAfterVerifiedCookies(youtube, twitch cookies.RefreshVer
 	if twitch == cookies.RefreshOK {
 		s.resumeAfterCookieGesture("twitch", gesture)
 	}
+}
+
+// resumeAfterAutomaticPass is the gesture sweep for the two refresh passes
+// with no caller outside internal/cookies: the periodic headless refresh and
+// the boot profile seed (AutoCookieService.OnPassCompleted). Both claim the
+// one refresh slot, so a job that failed while either ran was answered
+// worker.CookieRefreshInFlight and left parked to be resumed "if it ends with
+// working cookies"; without this nothing resumed it when the pass verified.
+// It is also what retries a job left parked by a skipped or unconfirmed
+// refresh, and a spent job once its 24 hours have passed, on an install
+// nobody is watching.
+//
+// Nothing is swept once ctx has ended: that is the shutdown, and a job
+// resumed then would be written into a database that is closing.
+func (s *runState) resumeAfterAutomaticPass(ctx context.Context, result cookies.RefreshResult) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "an automatic cookie refresh")
 }
 
 // schedulerWake returns the backlog scheduler's Wake, or nil when no worker is

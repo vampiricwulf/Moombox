@@ -498,7 +498,7 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 	if outcome == CookieRefreshInFlight {
-		// Another job's refresh, the operator's, or an import holds the one
+		// Another job's refresh, the operator's, the periodic one, or an import holds the one
 		// refresh slot, and the callback's line says so. This used to be
 		// answered NotRestored, so the advice below ("the cookie file has to
 		// be replaced by hand") was logged for cookies a refresh was repairing

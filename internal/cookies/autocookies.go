@@ -505,7 +505,13 @@ type AutoCookieService struct {
 	//
 	// It is NOT called for a pass that outlived its goroutine's context — a
 	// shutdown, or Stop — see notePassCompleted.
-	OnPassCompleted func(ctx context.Context)
+	//
+	// result is that pass's result. The pass claimed the one refresh slot, so
+	// a job that failed while it ran was told a refresh is in flight and left
+	// parked (worker.CookieRefreshInFlight); the hook resumes the jobs parked
+	// on each platform the pass verified, as every other cookie-writing
+	// gesture does (owner ruling R2-C2).
+	OnPassCompleted func(ctx context.Context, result RefreshResult)
 
 	// OnReloginChange is called after a platform's re-login flag was raised
 	// or lowered, with no lock held. It carries nothing: a listener reads

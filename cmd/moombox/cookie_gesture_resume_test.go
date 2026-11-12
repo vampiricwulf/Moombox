@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -138,5 +139,37 @@ func TestCookieGestureLeavesAJobWithNoRetryLeft(t *testing.T) {
 	}
 	if got := statusOf(t, s.db, "spent"); got != database.StatusUpcoming {
 		t.Errorf("spent = %s after a real auth recovery, want it resumed", got)
+	}
+}
+
+// TestAutomaticCookiePassResumesTheJobsItVerified: the periodic headless
+// refresh and the boot profile seed hold the refresh slot like any other
+// refresh, so a job that failed while one ran was left parked on the promise
+// of a resume (worker.CookieRefreshInFlight), and their hook only re-checked:
+// nothing resumed it when the pass verified. The hook now sweeps for each
+// platform its pass verified (owner ruling R2-C2), and for none once its
+// context has ended, which is the shutdown.
+//
+// Mutants: resumeAfterAutomaticPass sweeping under an ended context — the
+// first step resumes; it reading the wrong verdict — the Twitch job moves.
+func TestAutomaticCookiePassResumesTheJobsItVerified(t *testing.T) {
+	s, seed := gestureResumeState(t)
+	seed("yt_parked", "youtube", database.ParkReasonAuth, false)
+	seed("tw_parked", "twitch", database.ParkReasonAuth, false)
+	verified := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshOK, Twitch: cookies.RefreshUnknown}
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.resumeAfterAutomaticPass(ended, verified)
+	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusCookies {
+		t.Fatalf("yt_parked = %s after a pass whose loop had ended, want it still parked", got)
+	}
+
+	s.resumeAfterAutomaticPass(context.Background(), verified)
+	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusUpcoming {
+		t.Errorf("yt_parked = %s after an automatic pass that verified YouTube, want it resumed", got)
+	}
+	if got := statusOf(t, s.db, "tw_parked"); got != database.StatusCookies {
+		t.Errorf("tw_parked = %s after a pass that could not tell for Twitch, want it still parked", got)
 	}
 }
