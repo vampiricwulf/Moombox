@@ -27,6 +27,18 @@ type AuthRoutesDeps struct {
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
 	}
+	// CloseAuthenticatedSockets closes every WebSocket whose upgrade had to
+	// authenticate (web.WebSocketHub.CloseAuthenticated). Called wherever a
+	// credential stops being good: a socket is checked only when it opens.
+	// Nil closes nothing.
+	CloseAuthenticatedSockets func()
+}
+
+// closeAuthenticatedSockets calls CloseAuthenticatedSockets when it is set.
+func (deps *AuthRoutesDeps) closeAuthenticatedSockets() {
+	if deps.CloseAuthenticatedSockets != nil {
+		deps.CloseAuthenticatedSockets()
+	}
 }
 
 // AuthRoutes registers authentication endpoints. The Store carries both
@@ -245,17 +257,21 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		}
 		mu.Unlock()
 
+		// Clear all client tokens — password changed, all remotes must
+		// re-auth. Before the sessions go: a token still in the table when
+		// they are cleared would mint a fresh one on its next request.
+		if deps.DB != nil {
+			deps.DB.DeleteAllClientTokens()
+		}
 		// Invalidate other sessions (keep current if authenticated)
 		if isAuthenticated && token != "" {
 			deps.Auth.InvalidateOtherSessions(token)
 		} else {
 			deps.Auth.InvalidateAllSessions()
 		}
-
-		// Clear all client tokens — password changed, all remotes must re-auth
-		if deps.DB != nil {
-			deps.DB.DeleteAllClientTokens()
-		}
+		// Open sockets were authenticated under the old password. The
+		// caller's own reconnects on the session it keeps.
+		deps.closeAuthenticatedSockets()
 		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
@@ -321,10 +337,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		}
 		mu.Unlock()
 
-		deps.Auth.InvalidateAllSessions()
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
+		deps.Auth.InvalidateAllSessions()
+		deps.closeAuthenticatedSockets()
 		clearSessionCookie(rw, req)
 		clearClientCookie(rw, req)
 
@@ -371,7 +388,16 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		jsonResponse(rw, out)
 	})
 
-	// DELETE /api/client-tokens/{id} — revoke one token
+	// DELETE /api/client-tokens/{id} — revoke one token.
+	//
+	// Deleting the row is not enough: the session the token minted is good
+	// for 24 hours and slides for as long as it is used, and a socket is
+	// checked only when it opens, so a tab left open on the revoked device
+	// kept full access. Every session is ended and every authenticated
+	// socket closed. A browser whose own token is still good notices
+	// nothing: AuthMiddleware's client-token fallback hands it a fresh
+	// session on its next request and its socket reconnects. The revoked
+	// device has neither.
 	r.Delete("/api/client-tokens/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		id := chi.URLParam(req, "id")
 		if id == "" {
@@ -386,6 +412,10 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			jsonError(rw, "failed to delete token", http.StatusInternalServerError)
 			return
 		}
+		if deps.Auth != nil {
+			deps.Auth.InvalidateAllSessions()
+		}
+		deps.closeAuthenticatedSockets()
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 }

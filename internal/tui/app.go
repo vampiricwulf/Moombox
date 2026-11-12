@@ -805,10 +805,14 @@ type App struct {
 	OnRestart          func()
 	OnHashPassword     func(password string) string
 	OnVerifyPassword   func(password, hash string) bool
-	OnFetchFormats     func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile       func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans      func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan     func(path string) error                           // delete orphaned file
+	// OnPasswordChanged runs after Settings, Security set or removed the
+	// dashboard password, so the wiring can end what the old one admitted
+	// (client tokens, sessions, open sockets).
+	OnPasswordChanged func()
+	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan    func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error

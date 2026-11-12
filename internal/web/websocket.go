@@ -152,6 +152,11 @@ type wsClient struct {
 	// C-7.
 	writes chan wsFrame
 
+	// authenticated says the upgrade had to pass AuthCheck: the peer is not
+	// one the network_access mode trusts as local. Set once, before the
+	// client joins the hub. CloseAuthenticated closes exactly these.
+	authenticated bool
+
 	// drops counts frames this client will never receive. Incremented on
 	// every queue-overflow drop; see noteLag for why the LINE is rate
 	// limited while the count is not.
@@ -210,6 +215,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
+	authenticated := false
 	if hub.AuthCheck != nil {
 		ip := ExtractIP(r)
 		if hub.ClientIP != nil {
@@ -225,6 +231,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Authentication required", http.StatusUnauthorized)
 				return
 			}
+			authenticated = true
 		}
 	}
 
@@ -286,6 +293,8 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		ctx:    ctx,
 		cancel: cancel,
 		writes: make(chan wsFrame, wsWriteQueueSize),
+
+		authenticated: authenticated,
 	}
 	// Start the resync rate-limit clock BEFORE the client joins hub.clients:
 	// the snapshot sendInitialState is about to write IS a resync, and from the
@@ -584,22 +593,79 @@ func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame, resync bool) boo
 // removes it from the hub, and closes the underlying websocket. Safe
 // to call multiple times — idempotent on the closed-channel guard.
 func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
+	defer func() {
+		_ = recover()
+	}()
+	if hub.detachClient(client) {
+		client.conn.Close(websocket.StatusInternalError, reason)
+	}
+}
+
+// detachClient takes a client out of the hub, cancels its ctx and closes its
+// write queue, leaving the connection itself to the caller. It reports
+// whether this call was the one that removed it. From its return on, no
+// broadcast reaches the client.
+func (hub *WebSocketHub) detachClient(client *wsClient) bool {
 	hub.mu.Lock()
 	if _, ok := hub.clients[client]; !ok {
 		hub.mu.Unlock()
-		return
+		return false
 	}
 	delete(hub.clients, client)
 	hub.mu.Unlock()
 
 	client.cancel()
-	// Close on a closed channel panics; the recover() in queueOrDrop
-	// guards the senders. The drain in writePump exits on `!ok`.
+	// Close on a closed channel panics; the recover() in enqueue guards the
+	// senders. The drain in writePump exits on `!ok`.
 	defer func() {
 		_ = recover()
 	}()
 	close(client.writes)
-	client.conn.Close(websocket.StatusInternalError, reason)
+	return true
+}
+
+// CloseAuthenticated closes every socket whose upgrade had to authenticate,
+// and returns how many. It is called when a credential stops being good (a
+// client token revoked or expired, the password changed or removed): the
+// upgrade is the only place a socket's credential is checked, so one opened
+// with a credential that has since been revoked would otherwise keep
+// receiving job titles, logs and state for as long as its tab stays open.
+//
+// A browser that still holds a good credential reconnects within a second or
+// two and passes AuthCheck again; one that does not is refused. Sockets of
+// loopback and other local peers never authenticated, and are not touched.
+//
+// By the time it returns, no broadcast reaches a closed client. The close
+// handshake itself waits on the peer, so it runs on its own goroutine.
+func (hub *WebSocketHub) CloseAuthenticated() int {
+	hub.mu.RLock()
+	var targets []*wsClient
+	for c := range hub.clients {
+		if c.authenticated {
+			targets = append(targets, c)
+		}
+	}
+	hub.mu.RUnlock()
+
+	closed := 0
+	for _, c := range targets {
+		if !hub.detachClient(c) {
+			continue
+		}
+		closed++
+		go func(c *wsClient) {
+			defer func() {
+				if r := recover(); r != nil && hub.logger != nil {
+					hub.logger.Error("panic closing an authenticated websocket", "panic", r)
+				}
+			}()
+			c.conn.Close(websocket.StatusPolicyViolation, "session ended")
+		}(c)
+	}
+	if closed > 0 && hub.logger != nil {
+		hub.logger.Info("closed authenticated websockets: a credential was revoked or changed", "count", closed)
+	}
+	return closed
 }
 
 // initialStateBytes marshals the snapshot a freshly-connected client receives.

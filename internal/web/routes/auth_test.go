@@ -36,6 +36,8 @@ type authFixture struct {
 	store  *config.Store
 	auth   *web.AuthService
 	db     *database.Database
+	// socketCloses counts CloseAuthenticatedSockets calls.
+	socketCloses int
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -63,7 +65,10 @@ func newAuthFixture(t *testing.T) *authFixture {
 	t.Cleanup(pwRL.Close)
 
 	r := chi.NewRouter()
+	f := &authFixture{router: r, store: store, auth: auth, db: db}
 	deps := &AuthRoutesDeps{
+		CloseAuthenticatedSockets: func() { f.socketCloses++ },
+
 		Auth:       auth,
 		DB:         db,
 		LoginRL:    loginRL,
@@ -73,7 +78,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 	AuthRoutes(r, deps, store)
 	ClientTokenRoutes(r, deps)
 
-	return &authFixture{router: r, store: store, auth: auth, db: db}
+	return f
 }
 
 // setPasswordHash bypasses the route layer to seed a password hash for
@@ -641,5 +646,81 @@ func TestRedactIP(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("redactIP(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// --- what a revoked or changed credential ends ---
+
+// TestRevokingAClientTokenEndsSessionsAndSockets: revoke used to delete the
+// row and nothing else, so the session the token had minted (24 hours,
+// sliding for as long as it is used) and the socket opened with it went on
+// working on the device the operator had just cut off.
+//
+// Mutant: delete only the row again: the session still validates and no
+// socket is closed.
+func TestRevokingAClientTokenEndsSessionsAndSockets(t *testing.T) {
+	f := newAuthFixture(t)
+	if err := f.db.AddClientToken(&database.ClientToken{
+		ID: "lost-phone", TokenPrefix: "abcd1234", TokenHash: "x:y", Label: "phone",
+		CreatedAt: "2026-11-01T00:00:00Z", LastUsedAt: "2026-11-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := f.auth.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, loopbackRequest("DELETE", "/api/client-tokens/lost-phone", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if f.auth.ValidateSession(session) {
+		t.Error("a session is still valid after a token was revoked")
+	}
+	if f.socketCloses != 1 {
+		t.Errorf("authenticated sockets closed %d times, want 1", f.socketCloses)
+	}
+}
+
+// TestAPasswordChangeClosesAuthenticatedSockets: a socket is checked only
+// when it opens, so one opened under the old password stayed open after
+// set-password and remove-password had ended every session.
+//
+// Mutant: drop closeAuthenticatedSockets from either handler.
+func TestAPasswordChangeClosesAuthenticatedSockets(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/api/auth/set-password", map[string]any{"currentPassword": "current-secret", "newPassword": "newsecret123"}},
+		{"/api/auth/remove-password", map[string]any{"currentPassword": "current-secret"}},
+	} {
+		f := newAuthFixture(t)
+		f.setPasswordHash(t, "current-secret")
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, loopbackRequest("POST", tc.path, tc.body))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: want 200, got %d (body: %s)", tc.path, rec.Code, rec.Body.String())
+		}
+		if f.socketCloses != 1 {
+			t.Errorf("%s: authenticated sockets closed %d times, want 1", tc.path, f.socketCloses)
+		}
+	}
+}
+
+// A refused password change ends nothing.
+func TestARefusedPasswordChangeClosesNoSockets(t *testing.T) {
+	f := newAuthFixture(t)
+	f.setPasswordHash(t, "current-secret")
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, loopbackRequest("POST", "/api/auth/set-password",
+		map[string]any{"currentPassword": "wrong", "newPassword": "newsecret123"}))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", rec.Code)
+	}
+	if f.socketCloses != 0 {
+		t.Errorf("a refused change closed sockets %d times", f.socketCloses)
 	}
 }
