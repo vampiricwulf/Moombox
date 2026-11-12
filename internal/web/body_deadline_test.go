@@ -160,16 +160,19 @@ func TestALongHandlerOutlivesTheBodyDeadline(t *testing.T) {
 }
 
 // trickle sends an n-byte body one byte at a time, every gap, on path, and
-// stops early once stop is closed.
+// stops early once stop is closed, then keeps the connection open until stop
+// is. It runs on its own goroutine, so it reports with Error.
 func trickle(t *testing.T, srv *httptest.Server, path string, n int, gap time.Duration, stop <-chan struct{}) {
-	t.Helper()
 	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
+		return
 	}
-	t.Cleanup(func() { conn.Close() })
+	defer conn.Close()
+	defer func() { <-stop }()
 	if _, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n", path, n); err != nil {
-		t.Fatal(err)
+		t.Error(err)
+		return
 	}
 	for range n {
 		select {
@@ -201,14 +204,16 @@ func TestTheImportUploadIsBoundedPerReadNotInTotal(t *testing.T) {
 			_, err := io.ReadAll(r.Body)
 			readErr <- err
 		})
-		stop := make(chan struct{})
-		go trickle(t, srv, path, n, gap, stop)
+		stop, sent := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(sent)
+			trickle(t, srv, path, n, gap, stop)
+		}()
+		defer func() { close(stop); <-sent }()
 		select {
 		case err := <-readErr:
-			close(stop)
 			return err
 		case <-time.After(20 * time.Second):
-			close(stop)
 			t.Fatalf("the handler's read on %s never returned", path)
 			return nil
 		}
