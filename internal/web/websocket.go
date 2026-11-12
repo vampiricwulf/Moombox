@@ -622,6 +622,13 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
 // was sent megabytes back to back for as long as a download ran. The frames
 // themselves are queued exactly as often as before.
 //
+// That loop is narrower now, not gone. A log line, job_update or any other
+// frame nothing restates that is queued while a slow snapshot write is in
+// progress is still pushed out by the progress ticks behind it, and that
+// eviction arms the next snapshot. So a client whose snapshot takes longer to
+// write than the gap between such frames is still sent one snapshot after
+// another, at most one per wsResyncMinInterval, while a download runs.
+//
 // The recover here is narrow BY DESIGN: it exists for exactly one thing, the
 // send-on-closed-channel race with removeClient, and stays silent because
 // that race is expected. Nothing that can fail in an interesting way — the
