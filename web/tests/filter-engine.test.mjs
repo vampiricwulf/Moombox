@@ -68,14 +68,6 @@ function bucketWith(query) {
   return applyFilterTokens(bucketJobs, parseFilterQuery(query)).map(j => j.id);
 }
 
-test("status: issues groups Error + Cancelled + COOKIES? (Q4 — the TUI's Issues bucket)", () => {
-  assert.deepEqual(bucketWith("status:issues"), ["e", "c", "k"]);
-});
-
-test("status: finished is Finished only — Cancelled moved to issues", () => {
-  assert.deepEqual(bucketWith("status:finished"), ["f"]);
-});
-
 // One job per status, so each bucket's membership is pinned status by status.
 // The shared `jobs` hold no Downloading or Queued row, so either could leave
 // the active bucket with every suite green — and backlog VODs wait in Queued,

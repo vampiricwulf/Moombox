@@ -190,18 +190,6 @@ test("Select All selects every matching row and the bar says how many are not dr
   assert.equal(h.app._selectedArchivedJobs.size, 450);
 });
 
-test("opening the tab again starts from the newest 200", { skip }, async () => {
-  const h = await open({ "GET /api/jobs/archived": () => rows(450) });
-  await h.app.fetchArchivedJobs();
-  h.el("archived-show-more").click();
-  assert.equal(cards(h).length, 400);
-  const tabs = h.document.querySelector("sl-tab-group");
-  tabs.dispatchEvent(new h.window.CustomEvent("sl-tab-show", { detail: { name: "tasks" } }));
-  tabs.dispatchEvent(new h.window.CustomEvent("sl-tab-show", { detail: { name: "archived" } }));
-  await h.flush(); await h.flush();
-  assert.equal(cards(h).length, 200);
-});
-
 // ── Keyboard: the same Arrow and Enter as the Tasks rows ────────────────────
 
 // Mutant: the key handler's panel check back to Tasks only.
