@@ -114,10 +114,10 @@ VISIONOS ranks above ANDROID_VR deliberately. yt-dlp removed android_vr from eve
 All Innertube player requests go to:
 
 ```
-POST https://www.youtube.com/youtubei/v1/player?key={apiKey}
+POST https://www.youtube.com/youtubei/v1/player?key={apiKey}&prettyPrint=false
 ```
 
-The API key defaults to `AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8` and can be overridden by extracting `INNERTUBE_API_KEY` from the YouTube homepage.
+The API key defaults to `AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8` and can be overridden by extracting `INNERTUBE_API_KEY` from the YouTube homepage. `prettyPrint=false` has YouTube answer without indentation, as yt-dlp's `_call_api` asks (`_base.py:862-866`); the `/browse` calls carry it too (`innertubeURL`, `internal/youtube/player_api.go`). Chat's `get_live_chat` calls send the key alone, as upstream's chat downloader does.
 
 #### Request Structure
 
