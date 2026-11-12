@@ -21,8 +21,27 @@ import (
 // minTermWidth; the untruncated text is in moombox.log.
 const maxOverlayReasonRunes = 80
 
-// Update implements tea.Model.
+// Update implements tea.Model. It runs update and then hands Bubble Tea the
+// commands update queued for the details panel's disk probe (setAsideCmds):
+// updateSelectedJob is reached from twenty call sites that return no command.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case setAsideArchivesMsg:
+		a.handleSetAsideArchives(msg)
+	case setAsideReaskMsg:
+		a.handleSetAsideReask(msg)
+	default:
+		_, cmd = a.update(msg)
+	}
+	if len(a.setAsideCmds) > 0 {
+		cmd = tea.Batch(append(a.setAsideCmds, cmd)...)
+		a.setAsideCmds = nil
+	}
+	return a, cmd
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// A prefix hint still on the feedback line was written for the old
@@ -1777,27 +1796,83 @@ func (a *App) updateSelectedJob() {
 }
 
 // setAsideArchivesFor is the archives a Reinitialize of job set aside, for
-// the details panel: asked of JobSetAsideArchives once per job and status
-// (see setAsideJobID). An active job is asked too: the files are in the
-// output tree, not its staging, and the new recording is when the operator
-// looks for them.
+// the details panel: the last answer for this job, and never a disk read.
+// The probe (JobSetAsideArchives: a row read and one or two directory reads
+// of the output tree, which can be a slow or unreachable volume) runs in a
+// command. One is queued when the selected job or its status changes, and one
+// more setAsideReaskDelay after a status change; nothing asks periodically.
+// An active job is asked too: the files are in the output tree, not its
+// staging, and the new recording is when the operator looks for them.
+//
+// The same job in a new status keeps showing its last answer until the new
+// one arrives; another job shows none.
 func (a *App) setAsideArchivesFor(job *database.Job) []SetAsideArchiveEntry {
 	if job == nil || a.JobSetAsideArchives == nil {
+		if a.setAsideJobID != "" {
+			a.setAsideJobID, a.setAsideStatus, a.setAsideCache = "", "", nil
+			a.setAsideGen++
+		}
 		return nil
 	}
-	stale := len(a.setAsideCache) == 0 && time.Since(a.setAsideAskedAt) >= setAsideEmptyTTL
-	if a.setAsideJobID != job.ID || a.setAsideStatus != job.Status || stale {
-		a.setAsideJobID, a.setAsideStatus, a.setAsideAskedAt = job.ID, job.Status, time.Now()
-		a.setAsideCache = a.JobSetAsideArchives(job.ID)
+	if a.setAsideJobID == job.ID && a.setAsideStatus == job.Status {
+		return a.setAsideCache
+	}
+	statusChange := a.setAsideJobID == job.ID
+	if !statusChange {
+		a.setAsideCache = nil
+	}
+	a.setAsideJobID, a.setAsideStatus = job.ID, job.Status
+	a.setAsideGen++
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(job.ID, a.setAsideGen))
+	if statusChange {
+		gen := a.setAsideGen
+		a.setAsideCmds = append(a.setAsideCmds, tea.Tick(setAsideReaskDelay, func(time.Time) tea.Msg {
+			return setAsideReaskMsg{Gen: gen}
+		}))
 	}
 	return a.setAsideCache
 }
 
-// setAsideEmptyTTL is how long setAsideArchivesFor keeps an empty answer. A
-// Reinitialize writes the new status, which is what the panel hears, before
-// it renames the archive aside: an answer read in between is empty, and
-// nothing else would ask again until the status next changed.
-const setAsideEmptyTTL = 2 * time.Second
+// setAsideReaskDelay is how long after a status change of the selected job
+// its set-aside archives are asked for once more. A Reinitialize writes the
+// new status, which is what the panel hears, before it renames the archive
+// aside: the ask the status change starts can read the directory in between.
+// A variable so a test need not wait for it; production never assigns it.
+var setAsideReaskDelay = 2 * time.Second
+
+// setAsideProbeCmd asks JobSetAsideArchives for jobID off the update
+// goroutine. The callback and the IDs are captured here; the closure touches
+// no App field.
+func (a *App) setAsideProbeCmd(jobID string, gen int) tea.Cmd {
+	fn := a.JobSetAsideArchives
+	return safeCmd(func() tea.Msg {
+		return setAsideArchivesMsg{JobID: jobID, Gen: gen, List: fn(jobID)}
+	})
+}
+
+// handleSetAsideArchives shows a probe's answer, unless the selection or the
+// status has moved on since it was asked (State machines rule 6): every such
+// move takes a new generation, so the generation alone decides.
+func (a *App) handleSetAsideArchives(msg setAsideArchivesMsg) {
+	if msg.Gen != a.setAsideGen {
+		return
+	}
+	a.setAsideCache = msg.List
+	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == msg.JobID {
+		a.details.SetSetAsideArchives(msg.List)
+	}
+}
+
+// handleSetAsideReask starts the one delayed ask after a status change. It
+// takes a new generation, so the first ask's answer, should it still be on
+// its way from a slow volume, cannot land over this one's.
+func (a *App) handleSetAsideReask(msg setAsideReaskMsg) {
+	if msg.Gen != a.setAsideGen || a.JobSetAsideArchives == nil {
+		return
+	}
+	a.setAsideGen++
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(a.setAsideJobID, a.setAsideGen))
+}
 
 // gapFillFor is job's gap-fill for the details panel: asked of JobGapFill
 // only for a Finished live Twitch job, the only kind that has one.
