@@ -12,6 +12,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -111,6 +113,36 @@ func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] 
 // This predicate must stay precise: any OTHER Finished job's staging is a
 // genuine orphan (e.g. a stale dir left by an old/removed job) and must
 // remain cleanable, so this does NOT protect Finished jobs unconditionally.
+// jobHoldsStaging is the one rule for "this job's staging is not an orphan",
+// read by the sweep that lists staging orphans (scanStagingOrphans) and by
+// the recheck a delete runs (findActiveJobUnder), so a directory the list
+// leaves out is one the delete refuses. Three ways a job holds its staging:
+//
+//   - it is still on its way (jobverbs.Cancellable): waiting, recording,
+//     muxing, or parked for credentials. That is wider than
+//     activeJobStatuses by Queued and COOKIES? — a backlog VOD requeued with
+//     its resume checkpoint, a live capture parked with its segments for the
+//     credential sweep's resume. activeJobStatuses itself stays as it is: the
+//     delete-job route, the chapter import, the boot cleanup and the TUI read
+//     it for a different question;
+//   - the Twitch monitor will mux it automatically once the broadcast is
+//     confirmed over (jobstate.PendingAutoAction is the automatic mux);
+//   - it is Finished and the post-mux cleanup kept it (jobNeedsStaging).
+//
+// The operator reclaims such staging through the job: Cancel or Delete it
+// (Reinitialize for a row waiting on the automatic mux, whose confirm names
+// that mux), after which the directory is listed again. Any other Error or
+// Cancelled job's staging stays listed.
+func jobHoldsStaging(db *database.Database, cfg *config.MoomboxConfig, job *database.Job, jobStagingDir string) bool {
+	if job == nil {
+		return false
+	}
+	if jobverbs.Cancellable(job.Status) || jobstate.PendingAutoAction(job) == jobstate.AutoActionMux {
+		return true
+	}
+	return jobNeedsStaging(db, cfg, job, jobStagingDir)
+}
+
 func jobNeedsStaging(db *database.Database, cfg *config.MoomboxConfig, job *database.Job, jobStagingDir string) bool {
 	if job == nil || job.Status != database.StatusFinished {
 		return false
@@ -297,7 +329,7 @@ func orphanOwner(absPath string, db *database.Database, cfg *config.MoomboxConfi
 }
 
 // findActiveJobForPath returns the ID of the job whose staging the given path
-// is, while that job is active or keeps its staging (jobNeedsStaging), or ""
+// is, while that job holds its staging (jobHoldsStaging), or ""
 // otherwise. The job is the first path component under the staging directory
 // (staging/<jobID>/...). An output path is never a staging path: the rows
 // that name output files are orphanOwner's outputOwners.
@@ -341,7 +373,7 @@ func findActiveJobUnder(absPath, stagingDir string, db *database.Database, cfg *
 			}
 			if job != nil {
 				jobStagingDir := filepath.Join(stagingDir, jobID)
-				if activeJobStatuses[job.Status] || jobNeedsStaging(db, cfg, job, jobStagingDir) {
+				if jobHoldsStaging(db, cfg, job, jobStagingDir) {
 					return jobID, nil
 				}
 			}
@@ -430,15 +462,9 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 		// Check if job exists and its status
 		job, err := db.GetJob(jobID)
 		if err == nil && job != nil {
-			if IsActiveJobStatus(job.Status) {
-				// Active job — skip, staging is in use
-				continue
-			}
-			if jobNeedsStaging(db, cfg, job, absPath) {
-				// Finished but deliberately preserved (IncompleteTail, an
-				// incomplete chat capture, a set-aside recording, an unmuxed
-				// part, a root recording the finalize did not use, or a mux gap) — not
-				// a genuine orphan, skip.
+			if jobHoldsStaging(db, cfg, job, absPath) {
+				// Still on its way, waiting for the automatic mux, or
+				// Finished with staging the cleanup kept: not an orphan.
 				continue
 			}
 		}
