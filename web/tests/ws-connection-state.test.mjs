@@ -192,3 +192,62 @@ test("a probe answering after a newer socket opened changes nothing", { skip }, 
     assert.equal(h.sockets.length, sockets, "a stale probe queued a reconnect");
   }
 });
+
+// web-api-3: the first frame of a socket is the initial_state snapshot,
+// megabytes on a busy instance, and the server gives its write up to two
+// minutes on a slow link. A pong cannot overtake it, so the 45 s heartbeat
+// used to close a socket that was still delivering the job list.
+//
+// MUTANTS: one 45 s limit for both (the first assertion fails); no limit at
+// all before the first frame (the last one fails).
+test("the heartbeat waits longer for a socket's first frame than for a pong after it", { skip }, async () => {
+  const open = async () => {
+    const h = await harness.makeApp();
+    const ws = lastSocket(h);
+    ws.readyState = 1;
+    ws.onopen();
+    await h.flush();
+    return { h, ws };
+  };
+  // No pong for `ms`, with a ping outstanding, at the next 15 s tick.
+  const silentFor = (h, ms) => {
+    h.app._lastPingSent = Date.now();
+    h.app._lastPong = Date.now() - ms;
+    h.advance(15000);
+  };
+
+  const { h, ws } = await open();
+  silentFor(h, 60000);
+  assert.equal(ws.readyState, 1, "a socket still receiving its first frame was closed after 60 s");
+  assert.ok(ws.sent.some((m) => JSON.parse(m).type === "ping"), "the heartbeat stopped pinging");
+
+  ws.onmessage({ data: JSON.stringify({ type: "pong" }) });
+  silentFor(h, 60000);
+  assert.equal(ws.readyState, 3, "60 s without a pong after the first frame did not close the socket");
+
+  const second = await open();
+  silentFor(second.h, 200000);
+  assert.equal(second.ws.readyState, 3, "a socket that never delivers a frame is never closed");
+});
+
+// The snapshot itself is the first frame, and the pongs for the pings sent
+// while it was arriving are queued behind it. A heartbeat tick that runs
+// between the two used to see the 45 s limit with a pong clock still dating
+// from onopen, and close the socket it had just finished reading.
+//
+// MUTANT: do not restart the pong clock on the first frame (the socket is
+// closed at the tick).
+test("a slow first frame is proof of life: the next heartbeat tick keeps the socket", { skip }, async () => {
+  const h = await harness.makeApp();
+  const ws = lastSocket(h);
+  ws.readyState = 1;
+  ws.onopen();
+  await h.flush();
+
+  // 60 s without a pong, a ping outstanding, and then the snapshot lands.
+  h.app._lastPong = Date.now() - 60000;
+  h.app._lastPingSent = Date.now();
+  ws.onmessage({ data: JSON.stringify({ type: "initial_state", payload: { jobs: [], logs: [] } }) });
+  h.advance(15000);
+  assert.equal(ws.readyState, 1, "the socket was closed right after its first frame arrived");
+});

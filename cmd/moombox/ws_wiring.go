@@ -28,8 +28,8 @@ func (s *runState) wireWebSocket() {
 		if ct == nil {
 			return false, ""
 		}
-		sessionToken, err := s.authSvc.CreateSession()
-		if err != nil {
+		sessionToken, ok := s.sessionForClientToken(ct)
+		if !ok {
 			return false, ""
 		}
 		// Fire-and-forget usage update
@@ -163,7 +163,8 @@ func (s *runState) wireWebSocket() {
 // to ignore: a value captured once (a plain-HTTP external install, a proxy
 // log, a copied browser profile) authenticated forever with `curl -b`,
 // minting a fresh session per request. An expired row is deleted, so the
-// client-token list stops showing it too.
+// client-token list stops showing it too, and the sessions it minted and any
+// socket opened with it are ended (endRemoteSessions).
 func (s *runState) clientTokenFor(raw string) *database.ClientToken {
 	ct, err := s.db.GetClientTokenByPrefix(web.TokenPrefix(raw))
 	if err != nil || ct == nil || !web.VerifyToken(raw, ct.TokenHash) {
@@ -176,9 +177,57 @@ func (s *runState) clientTokenFor(raw string) *database.ClientToken {
 			s.log.Debug("expired client token delete failed", "error", err)
 		}
 		s.log.Info("expired client token refused and removed", "label", ct.Label, "createdAt", ct.CreatedAt)
+		s.endRemoteSessions()
 		return nil
 	}
 	return ct
+}
+
+// sessionForClientToken mints the session a verified client token earns, and
+// then checks that the token's row is still there. A revoke deletes the row
+// and then ends every session; a request from the revoked device that passed
+// clientTokenFor just before the delete could otherwise mint its session just
+// after the sessions were ended, and keep it. With the row read again AFTER
+// the session exists, either this sees the row gone and drops the session,
+// or the revoke's InvalidateAllSessions runs after the session was made and
+// ends it.
+func (s *runState) sessionForClientToken(ct *database.ClientToken) (string, bool) {
+	sessionToken, err := s.authSvc.CreateSession()
+	if err != nil {
+		return "", false
+	}
+	if still, err := s.db.GetClientTokenByPrefix(ct.TokenPrefix); err != nil || still == nil || still.ID != ct.ID {
+		s.authSvc.InvalidateSession(sessionToken)
+		return "", false
+	}
+	return sessionToken, true
+}
+
+// endRemoteSessions ends every dashboard session and closes every WebSocket
+// whose upgrade had to authenticate. It runs after a client token stops being
+// good (revoked from Settings or the TUI, or expired): sessions carry no link
+// to the token that minted them, a session slides for as long as it is used,
+// and a socket is checked only when it opens, so deleting the row alone left
+// a tab on the revoked device with full access.
+//
+// A browser whose own token is still good notices nothing: AuthMiddleware's
+// client-token fallback (ClientTokenCheck) hands it a fresh session on its
+// next request and its socket reconnects through AuthCheck. Loopback and
+// other local peers hold no session and their sockets are not closed.
+//
+// Call it AFTER the token row is gone, or the token mints a session again.
+//
+// A request or an upgrade that is part-way through authenticating on the dead
+// token while this runs does not slip past it: sessionForClientToken reads
+// the row again after it mints, and the hub refuses to register a socket
+// whose AuthCheck ran before CloseAuthenticated (its generation counter).
+func (s *runState) endRemoteSessions() {
+	if s.authSvc != nil {
+		s.authSvc.InvalidateAllSessions()
+	}
+	if s.wsHub != nil {
+		s.wsHub.CloseAuthenticated()
+	}
 }
 
 // clientTokenExpired reports whether a token created at createdAt (RFC 3339,
@@ -195,4 +244,15 @@ func clientTokenExpired(createdAt string, ttlDays int, now time.Time) bool {
 		return true
 	}
 	return now.Sub(t) > time.Duration(ttlDays)*24*time.Hour
+}
+
+// passwordChanged is what a password set or removed in the TUI does to what
+// the old password admitted, in the order POST /api/auth/set-password does it:
+// the client tokens first (one left in the table would mint a fresh session
+// on its next request), then the sessions and the authenticated sockets.
+func (s *runState) passwordChanged() {
+	if err := s.db.DeleteAllClientTokens(); err != nil {
+		s.log.Warn("client tokens not deleted after a password change", "error", err)
+	}
+	s.endRemoteSessions()
 }

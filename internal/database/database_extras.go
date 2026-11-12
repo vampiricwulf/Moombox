@@ -96,8 +96,11 @@ func (db *Database) ListOrphanedHistory() ([]OrphanedHistoryEntry, error) {
 }
 
 // DeleteHistoryEntries removes the given video IDs from the processing history
-// and returns the number of rows deleted. Batched to stay under SQLite's bound
-// on parameters per statement.
+// and returns the number of rows deleted. Only an orphaned row goes: one whose
+// video has a job (the rule ListOrphanedHistory lists by) is left, so a list
+// fetched before the video was added again cannot take the history row of a
+// job that now exists. Batched to stay under SQLite's bound on parameters per
+// statement; the batches are separate statements, not one transaction.
 func (db *Database) DeleteHistoryEntries(videoIDs []string) (int, error) {
 	if len(videoIDs) == 0 {
 		return 0, nil
@@ -118,7 +121,8 @@ func (db *Database) DeleteHistoryEntries(videoIDs []string) (int, error) {
 			args[i] = id
 		}
 		res, err := db.db.ExecContext(db.getCtx(),
-			"DELETE FROM history WHERE video_id IN ("+strings.Join(placeholders, ",")+")", args...)
+			"DELETE FROM history WHERE video_id IN ("+strings.Join(placeholders, ",")+")"+
+				" AND video_id NOT IN (SELECT id FROM jobs)", args...)
 		if err != nil {
 			return total, err
 		}

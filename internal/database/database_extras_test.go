@@ -1591,6 +1591,21 @@ func TestOrphanedHistory(t *testing.T) {
 	if p, _ := db.HasProcessed("vidOrphan03"); !p {
 		t.Error("untouched orphan should remain")
 	}
+	// A row whose video has a job is not an orphan and is never deleted,
+	// whoever asks: a list fetched before the job existed must not take it.
+	// Asked for together with a real orphan, only the orphan goes.
+	n, err = db.DeleteHistoryEntries([]string{"vidHasJob02", "tw_stream999", "vidOrphan03"})
+	if err != nil || n != 1 {
+		t.Fatalf("delete of two rows with jobs and one orphan: n=%d err=%v, want 1", n, err)
+	}
+	for _, id := range []string{"vidHasJob02", "tw_stream999"} {
+		if p, _ := db.HasProcessed(id); !p {
+			t.Errorf("%s has a job: its history row must survive the delete", id)
+		}
+	}
+	if p, _ := db.HasProcessed("vidOrphan03"); p {
+		t.Error("the orphan asked for beside them should be gone")
+	}
 	// Empty delete is a no-op.
 	if n, err := db.DeleteHistoryEntries(nil); err != nil || n != 0 {
 		t.Errorf("empty delete: n=%d err=%v", n, err)
