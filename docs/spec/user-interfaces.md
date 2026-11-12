@@ -1379,7 +1379,7 @@ These routes provide PO token generation for external yt-dlp instances. They use
 | `POST` | `/invalidate_caches` | Loopback only | Invalidate all PO token caches. |
 | `POST` | `/invalidate_it` | Loopback only | Invalidate a specific identity token. |
 | `GET` | `/ping` | Public | Health check for yt-dlp plugin discovery. |
-| `GET` | `/minter_cache` | Loopback only | List cached minter keys (diagnostic). The keys name internal PO token cache entries, so the route carries the same `LoopbackOnly` gate as the rest of the block (audit Q-23) even though only `/ping` has to stay public for plugin discovery. |
+| `GET` | `/minter_cache` | Loopback only | List cached minter keys (diagnostic). The keys name internal PO token cache entries, so the route carries the same `LoopbackOnly` gate as the rest of the block (audit Q-23) even though only `/ping` has to stay public for plugin discovery. `/ping` is the one route of this block on `AuthMiddleware`'s no-login list: `/minter_cache` left it, because behind a reverse proxy on the Moombox host the gate sees the proxy's loopback address and a remote visitor could list the keys without logging in. The local plugin is a loopback peer, which is never asked for a session. |
 | `GET` | `/pot_stats` | Loopback only | PO token observability counters — session/minter cache hits, minter create/evict/invalidate counts, generate errors, inflight waits, and the current cached-minter count. Monotonic; operators sample and diff externally. |
 
 ### System

@@ -263,7 +263,15 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Unauthenticated paths (login page and the two files it loads, auth
-		// endpoints, POT read-only, favicon).
+		// endpoints, the plugin's /ping, favicon).
+		//
+		// /minter_cache is NOT here. It is LoopbackOnly, and a direct
+		// loopback caller (the yt-dlp plugin) is waived above before this
+		// list is read, so the entry only ever applied to a non-local
+		// client. Behind a reverse proxy on the same host the gate sees the
+		// proxy's loopback address, and the entry let a remote visitor read
+		// the PO token cache keys with no login. It now needs a session
+		// there, as every other loopback-gated route does.
 		//
 		// /boot-theme.js and /login.js are here because this middleware answers
 		// every OTHER path with login.html itself: without them the browser
@@ -273,7 +281,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		p := r.URL.Path
 		if p == "/api/auth/login" ||
 			p == "/api/auth/status" ||
-			p == "/ping" || p == "/minter_cache" ||
+			p == "/ping" ||
 			p == "/favicon.svg" || p == "/login.html" ||
 			p == "/boot-theme.js" || p == "/login.js" {
 			next.ServeHTTP(w, r)

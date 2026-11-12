@@ -172,7 +172,7 @@ The certificate-SAN widening is held to the same port. The dashboard's own fetch
 1. Resolve the client IP via `EffectiveClientIP(s.configStore, r)`.
 2. If the IP is loopback or private: skip auth, serve the request.
 3. If `IsAuthRequired` returns false (network_access is neither `external` nor `public`, or no password hash is configured): skip auth.
-4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/minter_cache`, `/favicon.svg`, `/login.html`, and the two credential-free scripts the login page loads, `/boot-theme.js` and `/login.js`): skip auth.
+4. If the request path is a public endpoint (`/api/auth/login`, `/api/auth/status`, `/ping`, `/favicon.svg`, `/login.html`, and the two credential-free scripts the login page loads, `/boot-theme.js` and `/login.js`): skip auth.
 5. Check the `moombox_session` cookie. If valid (exists in the in-memory session map and not expired): serve the request — and when `ValidateSessionAndSlide` just renewed the session (see Session Management), re-issue the cookie with a fresh `Max-Age`.
 6. Fallback: check the `moombox_client` cookie. If the `ClientTokenCheck` callback validates the persistent client token: issue a fresh session cookie and serve the request.
 7. If unauthenticated:
@@ -294,7 +294,7 @@ For every incoming request:
 1. Resolve the client IP with `EffectiveClientIP` — `RemoteAddr` unless the peer is a declared trusted proxy.
 2. If IP is loopback (127.0.0.1, ::1) or private (LAN ranges): **skip auth entirely**.
 3. If `network_access` is neither `external` nor `public`, or no password hash is configured: **skip auth**.
-4. If the path is a public endpoint (login, status, ping, minter cache, favicon, the login page and its two scripts): **skip auth**.
+4. If the path is a public endpoint (login, status, ping, favicon, the login page and its two scripts): **skip auth**.
 5. Check `moombox_session` cookie → validate against in-memory session map → if valid: **authenticated**.
 6. Check `moombox_client` cookie → validate via `ClientTokenCheck` callback → if valid: issue fresh session, **authenticated**.
 7. Otherwise: **unauthenticated**. API paths get `401 JSON`. Browser paths get `login.html` served inline.
