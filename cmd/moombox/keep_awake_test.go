@@ -21,9 +21,10 @@ func (keepAwakeTestLog) Error(string, ...any) {}
 func newTestKeepAwake(enabled bool) (k *keepAwake, calls *[]bool) {
 	calls = new([]bool)
 	k = &keepAwake{
-		enabled: enabled,
-		hold:    func(on bool) bool { *calls = append(*calls, on); return true },
-		logger:  keepAwakeTestLog{},
+		enabled:   enabled,
+		supported: true,
+		hold:      func(on bool) bool { *calls = append(*calls, on); return true },
+		logger:    keepAwakeTestLog{},
 	}
 	return k, calls
 }
@@ -101,12 +102,17 @@ func TestKeepAwakeSettingAndStop(t *testing.T) {
 // TestKeepAwakeIsRebuiltFromTheDatabase: the hold is derived from the rows as
 // they stand. The boot seed takes one for a row a previous run left
 // Downloading; a hold whose job ended without an event is dropped by the
-// reconcile; a read that fails changes nothing; and nothing is read while
-// nothing is held.
+// reconcile; a read that fails changes nothing; a hold that was lost while its job
+// is still capturing (a stale bulk list, two events delivered out of order) is
+// taken again by the reconcile; a bulk change re-reads the database instead
+// of trusting the list it is handed; and nothing is read with the setting off
+// or after stop.
 //
 // Mutants: seed without reading (no hold at boot); reconcile that keeps the
-// old set (the hold outlives its job); reconcile that reads while nothing is
-// held (the read count moves).
+// old set (the hold outlives its job); reconcile that reads only while held
+// (the lost hold is never taken back); reconcile that reads with the setting
+// off (the read count moves); jobsChanged that rebuilds from the list it is
+// handed (the stale list releases the hold of a running capture).
 func TestKeepAwakeIsRebuiltFromTheDatabase(t *testing.T) {
 	k, calls := newTestKeepAwake(true)
 	rows := []*database.Job{awakeJob("a", database.StatusDownloading), awakeJob("f", database.StatusFinished)}
@@ -131,16 +137,42 @@ func TestKeepAwakeIsRebuiltFromTheDatabase(t *testing.T) {
 		t.Fatalf("reconcile after the job ended unreported: OS calls %v, want %v", *calls, want)
 	}
 
+	// A bulk change's list was read before this job started capturing and is
+	// delivered after: the hold stays, because the database is read instead.
+	rows = []*database.Job{awakeJob("s", database.StatusDownloading)}
+	k.jobChanged(rows[0])
+	k.jobsChanged([]*database.Job{awakeJob("s", database.StatusUpcoming)})
+	if want := []bool{true, false, true}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("a stale bulk list after the job went Downloading: OS calls %v, want %v", *calls, want)
+	}
+	rows = nil
+	k.jobsChanged(nil)
+
+	// The job is capturing but the controller lost it: the reconcile takes the
+	// hold back.
+	rows = []*database.Job{awakeJob("m", database.StatusMuxing)}
+	k.reconcile()
+	if want := []bool{true, false, true, false, true}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("reconcile with a mux running and no hold: OS calls %v, want %v", *calls, want)
+	}
+
+	k.setEnabled(false)
 	before := reads
 	k.reconcile()
 	if reads != before {
-		t.Errorf("reconcile read the jobs %d time(s) with nothing held", reads-before)
+		t.Errorf("reconcile read the jobs %d time(s) with the setting off", reads-before)
 	}
-
-	k.rebuild([]*database.Job{awakeJob("m", database.StatusMuxing)})
-	k.rebuild(nil)
-	if want := []bool{true, false, true, false}; !reflect.DeepEqual(*calls, want) {
-		t.Fatalf("bulk change lists: OS calls %v, want %v", *calls, want)
+	k.setEnabled(true)
+	k.stop()
+	before = reads
+	k.reconcile()
+	if reads != before {
+		t.Errorf("reconcile read the jobs %d time(s) after stop", reads-before)
+	}
+	k.supported, k.stopped = false, false
+	k.reconcile()
+	if reads != before {
+		t.Errorf("reconcile read the jobs %d time(s) where holding does nothing", reads-before)
 	}
 }
 

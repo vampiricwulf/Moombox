@@ -780,7 +780,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// interval — close enough to the 5-min target while reusing the
 				// existing ticker).
 				// A keep-awake hold in place is checked against the jobs'
-				// statuses (nothing is read while none is held).
+				// statuses, in both directions.
 				if s.keepAwake != nil {
 					s.keepAwake.reconcile()
 				}
