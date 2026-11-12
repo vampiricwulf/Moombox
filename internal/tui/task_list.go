@@ -724,6 +724,10 @@ func (m *TaskListModel) resetMarquee() {
 // "⟳ mux" or "⟳ retry" (jobstate.PendingAutoAction, owner ruling R-D2) — the
 // row hint for the sentence the details pane spells out.
 //
+// A COOKIES? row parked on its credentials shows a dim "⟳ 2/3" once an
+// automatic cookie retry has resumed it (jobstate.AdmissionHolds.
+// CookieRetryFor, owner ruling R2-C1).
+//
 // A Muxing row whose line is the mux readout shows the copy's percent, then a
 // dim "⋯ final" (jobstate.MuxReadout, owner ruling R-D1 of 2026-11-10).
 func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
@@ -737,6 +741,14 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text string, isWait bool) {
 	if job.Status == database.StatusQueued {
 		return queuedHoldTag(m.holds.For(job, now)), true
+	}
+	if job.Status == database.StatusCookies {
+		// The automatic cookie retries the parked job has used (owner ruling
+		// R2-C1): the row hint for the Cookies line of the details pane.
+		if r := m.holds.CookieRetryFor(job, now); r.Count > 0 {
+			return fmt.Sprintf("⟳ %d/%d ", r.Count, r.Of), true
+		}
+		return "", false
 	}
 	if job.Status == database.StatusError {
 		switch jobstate.PendingAutoAction(job) {

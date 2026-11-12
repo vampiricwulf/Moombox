@@ -932,7 +932,8 @@ sl-badge.status.cookies::part(base) {
     word-break: break-word;
 }
 
-.details-auto-action {
+.details-auto-action,
+.details-cookie-retry {
     color: var(--sl-color-primary-800);
     background-color: var(--sl-color-primary-100);
     padding: var(--sl-spacing-small);
@@ -940,7 +941,8 @@ sl-badge.status.cookies::part(base) {
     margin-top: var(--sl-spacing-x-small);
 }
 
-.details-auto-action[hidden] {
+.details-auto-action[hidden],
+.details-cookie-retry[hidden] {
     display: none;
 }
 
