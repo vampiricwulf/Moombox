@@ -1097,6 +1097,15 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
+	// A file this job did not write is at this name — the archive a
+	// Reinitialize could not set aside (owner ruling R2-W1b), another
+	// recording's under a reused name: it is set aside with its sidecars,
+	// and the finalize goes on to write its own. Only when it cannot be
+	// renamed does the finalize stop, before anything is muxed and with the
+	// staging kept, so a Mux tries again once the operator has moved it.
+	if err := o.setForeignFileAside(jobCtx.Job.ID, outputFile, archiveSidecarExts); err != nil {
+		return err
+	}
 	// relBase preserves the full relative path (including channel subdir) for DB
 	// storage, so the web handler can resolve files via Join(outputDir, filename).
 	relBase := filenameBase
@@ -1421,8 +1430,31 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
+	// A file this job did not write at that name is set aside first
+	// (setForeignFileAside); when it cannot be, the part keeps its suffixed
+	// name, as it does when the rename itself fails. The part's chat takes
+	// the plain chat's name in the same move, so a chat there is asked about
+	// too: with an archive it went aside as its sidecar, without one (a reset
+	// moved the archive and the chat could not follow, the operator deleted
+	// the video and kept the chat) nothing else looks at it. Each name is
+	// asked about only while the part's own file is still at its part name:
+	// with that gone there is nothing to rename onto it, and the file at the
+	// plain name is the part itself, moved by a run that died before its row
+	// write (renameSinglePartToPlain adopts it).
 	if len(segments) == 1 {
-		segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		plain := filepath.Join(outputDir, filenameBase)
+		var err error
+		if fileExists(segments[0].FilePath) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".mp4", archiveSidecarExts)
+		}
+		if err == nil && fileExists(segments[0].ChatFile) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".chat.json", []string{chatRawSidecarSuffix})
+		}
+		if err != nil {
+			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
+		} else {
+			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		}
 	}
 
 	// Calculate total file size and duration from segments
@@ -1617,7 +1649,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	if _, err := os.Stat(chatSrc); err == nil && !skipChat {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
-		if err := copyFile(chatSrc, chatDst); err != nil {
+		// Not over a chat this job did not write (foreignFileAt): the one a
+		// Reinitialize could not set aside. It is set aside under the
+		// archive's set-aside name, with its raw sidecar; when it cannot be
+		// renamed the copy is refused like a failed one, so the capture is
+		// kept in staging.
+		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{chatRawSidecarSuffix})
+		// A chat still at the name is the job's own, and the raw sidecar
+		// beside it is that chat's: both are replaced.
+		ownChat := foreign == nil && fileExists(chatDst)
+		err := foreign
+		if err == nil {
+			err = copyFile(chatSrc, chatDst)
+		}
+		if err != nil {
 			// The archive has no chat, and the capture in staging is the
 			// only copy: "incomplete" is what keeps it. With no chat_status
 			// written the row read as it was, the staging cleanup saw no
@@ -1642,8 +1687,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// does above, logged at Error (owner decision PR-M6). It used to be a
 		// Warn, and the staging cleanup then deleted the only copy.
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
-		if _, err := os.Stat(rawSrc); err == nil {
-			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
+		// Not over a raw sidecar this job did not write either, one with no
+		// chat of the job's beside it (a reset moved the chat and the raw
+		// could not follow): it is set aside first, and when it cannot be the
+		// copy is refused like a failed one.
+		if _, err := os.Stat(rawSrc); err == nil && foreign == nil {
+			rawDst := filepath.Join(outputDir, filenameBase+chatRawSidecarSuffix)
+			var err error
+			if !ownChat {
+				err = o.setForeignFileAside(jobCtx.Job.ID, rawDst, nil)
+			}
+			if err == nil {
+				err = copyFile(rawSrc, rawDst)
+			}
+			if err != nil {
 				updates["chat_status"] = database.ChatIncomplete
 				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",
 					"err", err, "raw", rawSrc, "jobID", jobCtx.Job.ID)

@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -226,6 +226,8 @@ export class JobDetailsController {
       // The kept recording the archive was not made from
       // (worker.ScanUnusedRoot): null, not absent, for the same reason.
       job.unusedRootRecording = enriched.unusedRootRecording || null;
+      // The archives a Reinitialize set aside (worker.ScanSetAsideArchives).
+      job.setAsideArchives = Array.isArray(enriched.setAsideArchives) ? enriched.setAsideArchives : [];
       // The status the facts above were computed under (the server's, from
       // the same answer): a status change after it makes them stale.
       job.factsStatus = enriched.status;
@@ -238,8 +240,8 @@ export class JobDetailsController {
         if (content) this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
         // A drawn section the answer no longer supports (a Reinitialize
         // deleted the asides) needs the rebuild as much as a new one does.
-        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section, #details-unused-recording-section");
-        if (job.asides.length > 0 || job.muxGaps.length > 0 || job.unusedRootRecording || shown) {
+        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section, #details-unused-recording-section, #details-set-aside-archives-section");
+        if (job.asides.length > 0 || job.muxGaps.length > 0 || job.unusedRootRecording || job.setAsideArchives.length > 0 || shown) {
           // The sections are part of the rendered body, not static elements,
           // so they can only appear on a rebuild. Rare by construction: only a
           // job that restarted mid-stream has asides at all, and only one
@@ -1010,6 +1012,21 @@ export class JobDetailsController {
           <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording">${this.app.escapeHtml(unusedRecordingText(kept))}</span></div>
           <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording-path" style="color: var(--sl-color-neutral-600); font-size: 0.9em; word-break: break-all;">${this.app.escapeHtml(kept.path)}</span></div>
         </div>`;
+      })()}${(() => {
+        // The files set aside for this job (the archive a Reinitialize
+        // renamed aside, a file a finalize found at the name it writes),
+        // still beside where the job writes (worker.ScanSetAsideArchives, GET
+        // /api/jobs/{id}'s setAsideArchives, owner ruling R2-W1b). Moombox
+        // never replaces or deletes them and Files does not offer them while
+        // the job exists, so this is where the operator learns their names.
+        // No button: there is nothing to recover, the file is whole.
+        const archives = Array.isArray(job.setAsideArchives) ? job.setAsideArchives : [];
+        if (archives.length === 0) return "";
+        const rows = archives.map((a) => `<div class="details-row"><span class="details-label"></span><span class="details-value" data-field="set-aside-archive" title="${this.app.escapeHtml(a.path || "")}">${this.app.escapeHtml(setAsideArchiveText(a))}</span></div>`).join("");
+        return `<div class="details-section" id="details-set-aside-archives-section">
+          <strong>Set-aside Archives (${archives.length}):</strong>
+          ${rows}
+        </div>`;
       })()}
 
       ${
@@ -1296,7 +1313,7 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps/unusedRootRecording
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps/unusedRootRecording/setAsideArchives
    * (and factsStatus, the status they were fetched under)
    * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
@@ -1331,6 +1348,9 @@ export class JobDetailsController {
       }
       if (job.unusedRootRecording === undefined && old.unusedRootRecording !== undefined) {
         job.unusedRootRecording = old.unusedRootRecording;
+      }
+      if (job.setAsideArchives === undefined && old.setAsideArchives !== undefined) {
+        job.setAsideArchives = old.setAsideArchives;
       }
       if (job.factsStatus === undefined && old.factsStatus !== undefined) {
         job.factsStatus = old.factsStatus;

@@ -474,6 +474,7 @@ func TestEveryWaitLineCarriesTheMarker(t *testing.T) {
 		"rate limit":          rateLimitWaitLine(24 * time.Minute),
 		"captcha":             captchaWaitLine(24 * time.Minute),
 		"pre-roll":            playbackWaitLine(12 * time.Second),
+		"mux slot":            muxSlotWaitLine(3 * time.Minute),
 	}
 	for _, a := range []engine.DownloadActivity{engine.ActivityVerifyingEnd, engine.ActivityReconnecting,
 		engine.ActivityRateLimited, engine.ActivityFindingFirstSegment, engine.ActivityWaitingForSegment,

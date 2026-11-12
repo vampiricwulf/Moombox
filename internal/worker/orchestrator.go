@@ -108,6 +108,13 @@ type DownloadOrchestrator struct {
 	// orchestrator a test builds by struct literal) never waits.
 	waitArchiveRewrite func(ctx context.Context, jobID, what string) bool
 
+	// globalOutputDir is paths.output_directory as it stands now, absolute
+	// (resolveOutputDir; set by the worker): what the rows' relative columns
+	// are read against when a finalize asks whether another row names a file
+	// (otherRowNaming). nil (an orchestrator a test builds by struct literal)
+	// reads as the default directory.
+	globalOutputDir func() string
+
 	// beginFinishing marks a finalize whose archive is written, so a late
 	// Cancel is refused rather than land before the Finished write
 	// (DownloadWorker.beginFinishing, set by the worker; owner ruling R-C1).

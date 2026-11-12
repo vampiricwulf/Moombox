@@ -114,15 +114,21 @@ func TestReinitializePreviewSummary(t *testing.T) {
 		{ReinitializePreview{StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1}, "cancels the pending automatic mux, and deletes 1 staged file (10B)"},
 		{ReinitializePreview{PendingAutoRetry: 1}, "cancels the pending automatic retry, and deletes nothing recorded"},
 		{ReinitializePreview{PendingAutoMux: 2, PendingAutoRetry: 3}, "cancels 2 pending automatic muxes and 3 pending automatic retries, and deletes nothing recorded"},
+		// The archive the reset sets aside (owner ruling R2-W1b), after what it cancels.
+		{ReinitializePreview{ExistingArchives: 1, ExistingArchiveBytes: 2048}, "sets the existing archive (2.0KB) aside, and deletes nothing recorded"},
+		// One whose size could not be read (its drive cannot be reached).
+		{ReinitializePreview{ExistingArchives: 1}, "sets the existing archive aside, and deletes nothing recorded"},
+		{ReinitializePreview{ExistingArchives: 2, ExistingArchiveBytes: 4096, StagedFiles: 1, StagedBytes: 10, PendingAutoMux: 1},
+			"cancels the pending automatic mux, sets 2 existing archives (4.0KB) aside, and deletes 1 staged file (10B)"},
 	} {
 		if got := tc.p.Summary(); got != tc.want {
 			t.Errorf("Summary(%+v) = %q, want %q", tc.p, got, tc.want)
 		}
 	}
 	var sum ReinitializePreview
-	sum.Add(ReinitializePreview{1, 2, 3, 4, 5, 6, 7, 8})
-	sum.Add(ReinitializePreview{1, 1, 1, 1, 1, 1, 1, 1})
-	if sum != (ReinitializePreview{2, 3, 4, 5, 6, 7, 8, 9}) {
+	sum.Add(ReinitializePreview{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+	sum.Add(ReinitializePreview{1, 1, 1, 1, 1, 1, 1, 1, 1, 1})
+	if sum != (ReinitializePreview{2, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
 		t.Errorf("Add = %+v", sum)
 	}
 }

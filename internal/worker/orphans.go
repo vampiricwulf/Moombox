@@ -12,6 +12,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
+	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -82,6 +84,36 @@ var activeJobStatuses = map[database.JobStatus]bool{
 // recovery on a live job without re-listing the four statuses — the list lives
 // here, beside the deletion refusal that has always used it.
 func IsActiveJobStatus(s database.JobStatus) bool { return activeJobStatuses[s] }
+
+// jobHoldsStaging is the one rule for "this job's staging is not an orphan",
+// read by the sweep that lists staging orphans (scanStagingOrphans) and by
+// the recheck a delete runs (findActiveJobUnder), so a directory the list
+// leaves out is one the delete refuses. Three ways a job holds its staging:
+//
+//   - it is still on its way (jobverbs.Cancellable): waiting, recording,
+//     muxing, or parked for credentials. That is wider than
+//     activeJobStatuses by Queued and COOKIES? — a backlog VOD requeued with
+//     its resume checkpoint, a live capture parked with its segments for the
+//     credential sweep's resume. activeJobStatuses itself stays as it is: the
+//     delete-job route, the chapter import, the boot cleanup and the TUI read
+//     it for a different question;
+//   - the Twitch monitor will mux it automatically once the broadcast is
+//     confirmed over (jobstate.PendingAutoAction is the automatic mux);
+//   - it is Finished and the post-mux cleanup kept it (jobNeedsStaging).
+//
+// The operator reclaims such staging through the job: Cancel or Delete it
+// (Reinitialize for a row waiting on the automatic mux, whose confirm names
+// that mux), after which the directory is listed again. Any other Error or
+// Cancelled job's staging stays listed.
+func jobHoldsStaging(db *database.Database, cfg *config.MoomboxConfig, job *database.Job, jobStagingDir string) bool {
+	if job == nil {
+		return false
+	}
+	if jobverbs.Cancellable(job.Status) || jobstate.PendingAutoAction(job) == jobstate.AutoActionMux {
+		return true
+	}
+	return jobNeedsStaging(db, cfg, job, jobStagingDir)
+}
 
 // jobNeedsStaging reports whether a Finished job's staging directory
 // was deliberately preserved rather than cleaned up, and so must NOT
@@ -235,6 +267,15 @@ func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxC
 		return fmt.Errorf("path not found: %w", err)
 	}
 
+	// An *.owner file that is not a marker Moombox wrote (readAsideMarker) is
+	// the operator's. The sweep never lists one, so only a request built by
+	// hand names it.
+	if !info.IsDir() && strings.EqualFold(filepath.Ext(absPath), asideOwnerSuffix) {
+		if _, isMarker := readAsideMarker(absPath); !isMarker {
+			return fmt.Errorf("%s is not a file Moombox wrote: it is kept", filepath.Base(absPath))
+		}
+	}
+
 	if info.IsDir() {
 		return os.RemoveAll(absPath)
 	}
@@ -290,14 +331,21 @@ func orphanOwner(absPath string, db *database.Database, cfg *config.MoomboxConfi
 	if err != nil {
 		return nil, err
 	}
-	if owner, how := newOutputOwners(jobs, trims, resolveOutputDir(cfg)).ownerOf(absPath); owner != "" {
+	owners := newOutputOwners(jobs, trims, resolveOutputDir(cfg))
+	if owner, how := owners.ownerOf(absPath); owner != "" {
 		return &NotOrphanError{Owner: owner, How: how}, nil
+	}
+	// A directory holding files a job kept at a Reinitialize. Asked here and
+	// not by ownerOf: the sweep never lists a directory, and the answer costs
+	// a walk.
+	if owner := owners.asideOwnerUnder(absPath); owner != "" {
+		return &NotOrphanError{Owner: owner, How: "kept a file in it at a Reinitialize"}, nil
 	}
 	return nil, nil
 }
 
 // findActiveJobForPath returns the ID of the job whose staging the given path
-// is, while that job is active or keeps its staging (jobNeedsStaging), or ""
+// is, while that job holds its staging (jobHoldsStaging), or ""
 // otherwise. The job is the first path component under the staging directory
 // (staging/<jobID>/...). An output path is never a staging path: the rows
 // that name output files are orphanOwner's outputOwners.
@@ -341,7 +389,7 @@ func findActiveJobUnder(absPath, stagingDir string, db *database.Database, cfg *
 			}
 			if job != nil {
 				jobStagingDir := filepath.Join(stagingDir, jobID)
-				if activeJobStatuses[job.Status] || jobNeedsStaging(db, cfg, job, jobStagingDir) {
+				if jobHoldsStaging(db, cfg, job, jobStagingDir) {
 					return jobID, nil
 				}
 			}
@@ -430,15 +478,9 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 		// Check if job exists and its status
 		job, err := db.GetJob(jobID)
 		if err == nil && job != nil {
-			if IsActiveJobStatus(job.Status) {
-				// Active job — skip, staging is in use
-				continue
-			}
-			if jobNeedsStaging(db, cfg, job, absPath) {
-				// Finished but deliberately preserved (IncompleteTail, an
-				// incomplete chat capture, a set-aside recording, an unmuxed
-				// part, a root recording the finalize did not use, or a mux gap) — not
-				// a genuine orphan, skip.
+			if jobHoldsStaging(db, cfg, job, absPath) {
+				// Still on its way, waiting for the automatic mux, or
+				// Finished with staging the cleanup kept: not an orphan.
 				continue
 			}
 		}
@@ -569,6 +611,18 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// FE-16): owned while the archive they derive from is
 		// (archiveDerivedStem), listed once it is gone, as its chat is.
 		_, isDerived := archiveDerivedStem(path)
+		// The marker of an archive a Reinitialize kept (owner ruling
+		// R2-W1b): owned with its files while its job exists, listed with
+		// them once the job is gone. Only a marker Moombox wrote
+		// (readAsideMarker: either marker name, and the marker line as its
+		// whole content): any other *.owner file is the operator's, and is
+		// never offered, in a trims directory either.
+		if ext == asideOwnerSuffix {
+			if _, isMarker := readAsideMarker(absPath); !isMarker {
+				return nil
+			}
+			isDerived = true
+		}
 		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
 		}
@@ -650,8 +704,9 @@ func trimDirsOf(job *database.Job, absOutputDir string) []string {
 // otherwise; so that is the first base it resolves against. A job carries an
 // output_directory far more often than an override implies: the monitor and
 // an import store the global directory there at creation when the channel has
-// none of its own (resolveOutputDir, cmd/moombox), and buildJobContext writes
-// under it from then on. The file was written beside the job's output, or
+// none of its own (resolveOutputDir, cmd/moombox), buildJobContext brings a
+// monitor's row up to the current settings when its download starts
+// (output_dir.go), and writes under that from then on. The file was written beside the job's output, or
 // beside the part the range began in, so those spellings count too.
 //
 // The current global directory is a candidate as well, added to those rather
@@ -792,6 +847,11 @@ type outputOwners struct {
 	// canon caches canonicalDir by normalised directory, so each distinct
 	// directory is resolved once however many rows and walked files sit in it.
 	canon map[string]string
+	// jobIDs is every job row, and asideOwners caches asideOwner by marker
+	// path: an archive a Reinitialize set aside is owned through the marker
+	// beside it, which names its job (owner ruling R2-W1b, reset_archive.go).
+	jobIDs      map[string]bool
+	asideOwners map[string]string
 }
 
 // newOutputOwners builds outputOwners from rows already read: every job with
@@ -813,6 +873,7 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 	o := &outputOwners{
 		files: map[string]string{}, stems: map[string]string{}, dirs: map[string]string{},
 		trimDirs: map[string]bool{}, canon: map[string]string{},
+		jobIDs: map[string]bool{}, asideOwners: map[string]string{},
 	}
 	first := func(m map[string]string, k, owner string) {
 		if _, ok := m[k]; !ok {
@@ -849,6 +910,7 @@ func newOutputOwners(jobs []*database.Job, trims []database.TrimRecord, absOutpu
 	jobsByID := make(map[string]*database.Job, len(jobs))
 	for _, job := range jobs {
 		jobsByID[job.ID] = job
+		o.jobIDs[job.ID] = true
 		owner := "job " + job.ID
 		for _, p := range jobFileLocations(job, absOutputDir) {
 			own(p, owner)
@@ -913,6 +975,8 @@ func (o *outputOwners) isTrimDir(dir string) bool {
 //
 //   - a row names the file;
 //   - it is a recovered set-aside recording named after a file a row names;
+//   - it is a file a Reinitialize kept, whose marker names a job that still
+//     exists (asideOwner);
 //   - it is a directory holding a file a row names, which deleting it would
 //     take along. The sweep never lists a directory under the output tree, so
 //     only a request built by hand can name one.
@@ -940,7 +1004,60 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 			return row, "names a file in it"
 		}
 	}
+	if row := o.asideOwner(absPath); row != "" {
+		return row, "kept it at a Reinitialize"
+	}
 	return "", ""
+}
+
+// fileRow returns the row that names the file absPath, in either spelling,
+// "" when none does: ownerOf's first rule alone, for a finalize asking whether
+// the file at its name is another row's (setForeignFileAside).
+func (o *outputOwners) fileRow(absPath string) string {
+	for _, n := range o.spellings(absPath) {
+		if row, ok := o.files[n]; ok {
+			return row
+		}
+	}
+	return ""
+}
+
+// asideOwner returns the row that owns path through the marker that shares
+// its name ("<stem>.restart-<ts>.owner" for an archive a Reinitialize set
+// aside, "<stem>.owner" for one it could not rename; asideOwnerID), "" when
+// there is no marker or the job it names is gone.
+func (o *outputOwners) asideOwner(path string) string {
+	marker := normalizePath(asideBase(path) + asideOwnerSuffix)
+	row, ok := o.asideOwners[marker]
+	if !ok {
+		if id := asideOwnerID(path); o.jobIDs[id] {
+			row = "job " + id
+		}
+		o.asideOwners[marker] = row
+	}
+	return row
+}
+
+// asideOwnerUnder returns the row that owns a file somewhere under dir
+// through a marker (asideOwner), "" when dir is not a directory or holds
+// none: deleting the directory would take that file along. Only a delete
+// request built by hand names a directory under the output tree, so the
+// delete's recheck asks this (orphanOwner) and the sweep does not.
+func (o *outputOwners) asideOwnerUnder(dir string) string {
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	found := ""
+	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), asideOwnerSuffix) {
+			return nil
+		}
+		if found = o.asideOwner(p); found != "" {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // Derived sidecars (owner decision FE-16): files the finalize writes beside an

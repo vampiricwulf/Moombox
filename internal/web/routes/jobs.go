@@ -71,6 +71,11 @@ type jobWithStaging struct {
 	// every row that is not Finished. On this route only: list rows and
 	// WebSocket frames never carry it.
 	UnusedRootRecording *worker.UnusedRecording `json:"unusedRootRecording,omitempty"`
+	// SetAsideArchives lists the archives a Reinitialize of this job set
+	// aside that are still beside where the job writes
+	// (worker.ScanSetAsideArchives, owner ruling R2-W1b): name, path and
+	// size. Read from the disk, never stored. Never null. On this route only.
+	SetAsideArchives []worker.SetAsideArchive `json:"setAsideArchives"`
 	// PendingAutoAction is the automatic action the Twitch monitor will take
 	// for this row (jobstate.PendingAutoAction, owner ruling R-D2):
 	// "auto_mux" once the broadcast is confirmed over, "auto_retry" when it
@@ -81,7 +86,7 @@ type jobWithStaging struct {
 }
 
 // enrichJob adds computed staging fields to a job response.
-func enrichJob(db *database.Database, job *database.Job, stagingBase string) jobWithStaging {
+func enrichJob(db *database.Database, job *database.Job, stagingBase, outputDir, outputTemplate string) jobWithStaging {
 	report := worker.ScanAsides(stagingBase, job.ID)
 	return jobWithStaging{
 		Job:             job,
@@ -94,6 +99,7 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		GapFill:         worker.TwitchGapFillStateOf(db, job),
 
 		UnusedRootRecording: worker.ScanUnusedRoot(db, stagingBase, job),
+		SetAsideArchives:    worker.ScanSetAsideArchives(job, outputDir, outputTemplate),
 
 		PendingAutoAction: jobstate.PendingAutoAction(job),
 	}
@@ -314,12 +320,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// /api/jobs/{id}/thumbnail is the only long-lived cache left.
 		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 
-		var stagingBase string
+		var stagingBase, outputDir, outputTemplate string
 		store.Read(func(c *config.MoomboxConfig) {
 			stagingBase = c.Paths.EffectiveStagingDir()
+			outputDir = c.Paths.OutputDirectory
+			outputTemplate = c.Downloader.OutputTemplate
 		})
 
-		jsonResponse(rw, enrichJob(db, job, stagingBase))
+		jsonResponse(rw, enrichJob(db, job, stagingBase, outputDir, outputTemplate))
 	})
 
 	// GET /api/jobs/:id/video — range-request video streaming

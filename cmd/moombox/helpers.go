@@ -113,7 +113,10 @@ func youtubeThumbnailURL(videoID string) string {
 
 // resolveOutputDir returns the channel-specific output directory if set,
 // otherwise falls back to the global default under store.Read (per audit
-// reports/cmd-moombox.md D-5).
+// reports/cmd-moombox.md D-5). It is what the monitors store on a new row;
+// the worker resolves the same two settings again when the row's download
+// starts, so a row that waited follows a change made meanwhile (owner ruling
+// R2-X1, internal/worker/output_dir.go).
 func resolveOutputDir(ch *config.ChannelConfig, store *config.Store) string {
 	if ch.OutputDirectory != "" {
 		return ch.OutputDirectory

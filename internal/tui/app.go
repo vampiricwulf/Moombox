@@ -399,6 +399,27 @@ type (
 		Err error
 	}
 
+	// setAsideArchivesMsg is the async answer of JobSetAsideArchives for
+	// the details panel. Gen is the App.setAsideGen it was asked under: an
+	// answer for a job the cursor has left, or for an older ask, is dropped.
+	setAsideArchivesMsg struct {
+		JobID string
+		Gen   int
+		List  []SetAsideArchiveEntry
+	}
+	// setAsideReaskMsg fires once, setAsideReaskDelay after a status change
+	// of the selected job, to ask again (see setAsideReaskDelay). Dropped
+	// when the selection or the status has moved on since.
+	setAsideReaskMsg struct {
+		Gen int
+	}
+	// setAsideSelectMsg fires once, setAsideSelectDelay after the cursor
+	// came to a job, to ask for its set-aside archives. Dropped when the
+	// cursor has moved on, so only the job it rests on is asked about.
+	setAsideSelectMsg struct {
+		Gen int
+	}
+
 	// statsSnapshotMsg is the async result of OnGetStats — the E T overlay's
 	// open, its r key, and the 60 s refresh tick all go through it. Epoch is
 	// the App.statsEpoch the fetch started under; a result that outlives its
@@ -753,6 +774,20 @@ type App struct {
 	asidesJobID     string
 	asidesUpdatedAt string // the row version the memo was probed for
 	asidesCache     AsideSummary
+	// setAsideJobID / setAsideStatus are the selected job and status the
+	// JobSetAsideArchives answer was last asked for, and setAsideCache the
+	// answer shown. The probe reads the output directory, so it never runs
+	// on the update goroutine: updateSelectedJob queues a command
+	// (setAsideCmds, flushed by Update) when the job or its status changes,
+	// and the answer comes back as a setAsideArchivesMsg. setAsideGen is
+	// the ask the panel is waiting on; an answer under another is dropped.
+	// Single writer: setAsideArchivesFor and the three message arms in
+	// Update.
+	setAsideJobID  string
+	setAsideStatus database.JobStatus
+	setAsideCache  []SetAsideArchiveEntry
+	setAsideGen    int
+	setAsideCmds   []tea.Cmd
 
 	// Callbacks for actions
 	OnAddVideo func(url string)
@@ -816,10 +851,17 @@ type App struct {
 	// (worker.TwitchGapFillStateOf, the job API's gapFill; owner decision
 	// PR-R5), nil for none. One row read; asked on selection, and only for
 	// a Finished live Twitch job, the only kind that has one.
-	JobGapFill   func(jobID string) *GapFillView
-	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim func(jobID, trimID string) error
-	OnOpenFolder func(jobID string)
+	JobGapFill func(jobID string) *GapFillView
+	// JobSetAsideArchives reports the archives set aside for a job
+	// (worker.ScanSetAsideArchives, the job API's setAsideArchives; owner
+	// ruling R2-W1b). A disk probe: called from a command's goroutine, never
+	// the update goroutine, once for the job the cursor rests on
+	// (setAsideSelectDelay), once per status change and once more shortly
+	// after a status change (setAsideReaskDelay).
+	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
+	OnCreateTrim        func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
+	OnDeleteTrim        func(jobID, trimID string) error
+	OnOpenFolder        func(jobID string)
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).

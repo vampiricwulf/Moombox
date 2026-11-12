@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
@@ -357,6 +358,10 @@ type DownloadWorker struct {
 	// is running or waiting to run, so the same verb again is a no-op and a
 	// different one is refused with ErrResetPending rather than dropped.
 	afterExitPending sync.Map
+	// runCtx is Start's context, which ends at shutdown: what a deferred verb
+	// stops waiting on (awaitJobExit). Nil until Start, and in tests that
+	// never call it, where such a wait ends only with the run.
+	runCtx atomic.Pointer[context.Context]
 
 	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
 	// monitor poll that lands while one is in flight does not start another;
@@ -564,6 +569,10 @@ func NewDownloadWorker(
 	if orchestrator != nil {
 		orchestrator.waitArchiveRewrite = w.waitChapterImport
 		orchestrator.beginFinishing = w.beginFinishing
+		orchestrator.globalOutputDir = func() (dir string) {
+			w.readConfig(func(c *config.MoomboxConfig) { dir = resolveOutputDir(c) })
+			return dir
+		}
 	}
 	// A deleted row takes its backlog retry streak with it. The id is the
 	// video id, so a backlog rescan can create the row again, and it would
@@ -587,6 +596,7 @@ func NewDownloadWorker(
 
 // Start begins the worker loop, processing jobs from the queue.
 func (w *DownloadWorker) Start(ctx context.Context) {
+	w.runCtx.Store(&ctx)
 	w.logger.Info("download worker started")
 
 	// Incomplete-tail flags from before the end-of-stream margin
@@ -1041,10 +1051,18 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			// not show a prior error alongside the fresh state (per audit
 			// reports/worker.md Finding 24). Only while the row is still
 			// Muxing, like every write decided on an earlier status read.
-			if !w.stillMuxingAfter(job.ID, map[string]any{
+			// A mux that died while it waited for a download slot left its
+			// wait line on the row (acquireMuxSlot): taken off here, or the
+			// Downloading row shows "Waiting for a download slot to mux..."
+			// until its run writes progress of its own.
+			reset := map[string]any{
 				"status": database.StatusDownloading,
 				"error":  "",
-			}) {
+			}
+			if isMuxSlotWaitLine(job.Progress) {
+				reset["progress"] = ""
+			}
+			if !w.stillMuxingAfter(job.ID, reset) {
 				continue
 			}
 			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
@@ -2158,8 +2176,11 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgProgressMS                            int
 		cfgPrefer60, cfgChat, cfgPreferHDR       bool
 		cfgInterruptionTimeout                   config.FlexDuration
+		channelOutputDir                         string
+		channelConfigured                        bool
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
+		channelOutputDir, channelConfigured = channelOutputOverride(c.Channels, job)
 		cfgOutputDir = c.Paths.OutputDirectory
 		cfgStagingDir = c.Paths.EffectiveStagingDir()
 		cfgTemplate = c.Downloader.OutputTemplate
@@ -2173,50 +2194,31 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgInterruptionTimeout = c.Downloader.InterruptionTimeout
 	})
 
-	outputDir := cfgOutputDir
-	if job.OutputDirectory != "" {
-		outputDir = job.OutputDirectory
+	var firstPart string
+	hasParts := false
+	if w.db != nil {
+		if segs, err := w.db.GetSegments(job.ID); err != nil {
+			hasParts = true // unknown: the row's directory stays as it is
+		} else if len(segs) > 0 {
+			firstPart = segs[0].FilePath
+			hasParts = true
+		}
 	}
-	if outputDir == "" {
-		outputDir = "./output"
-	}
+
+	// A monitor-detected row that has not started takes the directory the
+	// settings name now, and keeps it from here on (owner ruling R2-X1,
+	// output_dir.go).
+	w.settleOutputDirectory(job, hasParts, cfgOutputDir, channelOutputDir, channelConfigured)
 
 	// Use config staging directory (defaults to ./staging)
 	stagingBase := cfgStagingDir
 	stagingDir := filepath.Join(stagingBase, job.ID)
 
-	// Resolve filename from output_template config
 	template := cfgTemplate
 	if template == "" {
-		template = "${title} [${id}]"
+		template = defaultOutputTemplate
 	}
-	var dateStr *string
-	if job.StreamStartTime != "" {
-		dateStr = &job.StreamStartTime
-	} else if job.CreatedAt != "" {
-		dateStr = &job.CreatedAt
-	}
-	// Use job.ID for Twitch (VideoID is "tw_{login}", not the stream ID). Matches TS.
-	templateID := job.VideoID
-	if job.Platform == "twitch" {
-		templateID = job.ID
-	}
-	filename := config.ResolveTemplate(template, config.TemplateVariables{
-		Title:   job.Title,
-		ID:      templateID,
-		Channel: job.ChannelName,
-		Date:    dateStr,
-	})
-	if filename == "" {
-		filename = job.VideoID
-	}
-	var firstPart string
-	if w.db != nil {
-		if segs, err := w.db.GetSegments(job.ID); err == nil && len(segs) > 0 {
-			firstPart = segs[0].FilePath
-		}
-	}
-
+	outputDir, filename := outputTargetOf(job, cfgOutputDir, template)
 	return &JobContext{
 		Job: job,
 		DB:  w.db,
@@ -2243,6 +2245,50 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 
 		RecordedFirstPart: firstPart,
 	}
+}
+
+// defaultOutputTemplate names a job's files when downloader.output_template
+// is empty.
+const defaultOutputTemplate = "${title} [${id}]"
+
+// outputTargetOf returns where a job's finalize writes as the row and the
+// settings stand: the directory (the row's own, else globalOutputDir) and the
+// file name the output template resolves to, without its extension and with
+// any subdirectory the template names. buildJobContext's rule, and what the
+// details views read to find the files a Reinitialize set aside
+// (ScanSetAsideArchives).
+func outputTargetOf(job *database.Job, globalOutputDir, template string) (outputDir, filename string) {
+	outputDir = globalOutputDir
+	if job.OutputDirectory != "" {
+		outputDir = job.OutputDirectory
+	}
+	if outputDir == "" {
+		outputDir = "./output"
+	}
+	if template == "" {
+		template = defaultOutputTemplate
+	}
+	var dateStr *string
+	if job.StreamStartTime != "" {
+		dateStr = &job.StreamStartTime
+	} else if job.CreatedAt != "" {
+		dateStr = &job.CreatedAt
+	}
+	// Use job.ID for Twitch (VideoID is "tw_{login}", not the stream ID). Matches TS.
+	templateID := job.VideoID
+	if job.Platform == "twitch" {
+		templateID = job.ID
+	}
+	filename = config.ResolveTemplate(template, config.TemplateVariables{
+		Title:   job.Title,
+		ID:      templateID,
+		Channel: job.ChannelName,
+		Date:    dateStr,
+	})
+	if filename == "" {
+		filename = job.VideoID
+	}
+	return outputDir, filename
 }
 
 // fetchURL is a helper to download a URL's body.
