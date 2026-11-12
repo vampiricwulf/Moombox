@@ -333,7 +333,14 @@ export class MoomboxApp {
     // fire after submit/close and re-populate a closed dialog.
     document
       .getElementById("video-url-input")
-      .addEventListener("sl-input", () => {
+      .addEventListener("sl-input", (e) => {
+        // The listed formats belong to one video. Once the URL names another
+        // they go at once, not after the debounce: the picker must not show,
+        // and the submit must not send, an earlier video's rendition.
+        if (this._formatsListedFor && this.extractVideoId(e.target.value || "") !== this._formatsListedFor) {
+          this.clearFormatChoice();
+          this._lastFormatVideoId = null;
+        }
         if (document.getElementById("advanced-options-toggle").checked) {
           clearTimeout(this._formatFetchTimeout);
           this._formatFetchTimeout = setTimeout(() => {
@@ -3394,11 +3401,16 @@ export class MoomboxApp {
           const startInput = document.getElementById("start-time-input");
           const endInput = document.getElementById("end-time-input");
 
-          if (videoSelect.value) {
-            body.selectedVideoItag = parseInt(videoSelect.value, 10);
-          }
-          if (audioSelect.value) {
-            body.selectedAudioItag = parseInt(audioSelect.value, 10);
+          // A rendition is sent only for the video it was listed for: the
+          // selects can still hold an earlier URL's choice while the new
+          // URL's formats are being fetched, or after that fetch failed.
+          if (this._formatsListedFor === target.videoId) {
+            if (videoSelect.value) {
+              body.selectedVideoItag = parseInt(videoSelect.value, 10);
+            }
+            if (audioSelect.value) {
+              body.selectedAudioItag = parseInt(audioSelect.value, 10);
+            }
           }
 
           const startTime = this.parseTimeInput(startInput.value);
@@ -3506,21 +3518,30 @@ export class MoomboxApp {
     document.getElementById("format-selection").style.display = "none";
     document.getElementById("format-skeleton").style.display = "none";
 
-    // Clear selections
-    const videoSelect = document.getElementById("video-format-select");
-    const audioSelect = document.getElementById("audio-format-select");
-    videoSelect.value = "";
-    audioSelect.value = "";
-
-    // Remove dynamic options (keep the "None" option)
-    videoSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
-    audioSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    this.clearFormatChoice();
 
     document.getElementById("start-time-input").value = "";
     document.getElementById("end-time-input").value = "";
 
     // Reset cached video ID
     this._lastFormatVideoId = null;
+  }
+
+  /**
+   * Forget the listed formats and whatever was picked from them: both selects
+   * back on Auto with no renditions, the section hidden, and no video named
+   * as the one they were listed for (_formatsListedFor, which addVideo checks
+   * before it sends an itag). Run whenever the URL stops being that video's.
+   */
+  clearFormatChoice() {
+    this._formatsListedFor = null;
+    document.getElementById("format-selection").style.display = "none";
+    for (const id of ["video-format-select", "audio-format-select"]) {
+      const select = document.getElementById(id);
+      select.value = "";
+      // Remove dynamic options (keep the "None" option)
+      select.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    }
   }
 
   /**
@@ -3535,7 +3556,7 @@ export class MoomboxApp {
     if (!videoId) {
       // Non-YouTube URL (e.g. Twitch) — hide stale format options
       document.getElementById("format-skeleton").style.display = "none";
-      document.getElementById("format-selection").style.display = "none";
+      this.clearFormatChoice();
       this._lastFormatVideoId = null;
       return;
     }
@@ -3543,6 +3564,9 @@ export class MoomboxApp {
     // Don't re-fetch if same video
     if (this._lastFormatVideoId === videoId) return;
     this._lastFormatVideoId = videoId;
+    // Another video: the earlier one's renditions and choice go now, not
+    // when (and if) this one's list arrives.
+    this.clearFormatChoice();
 
     const formatSkeleton = document.getElementById("format-skeleton");
     const formatSection = document.getElementById("format-selection");
@@ -3562,17 +3586,19 @@ export class MoomboxApp {
 
       const data = await response.json();
       await this.populateFormatSelects(data);
+      this._formatsListedFor = videoId;
 
       formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
     } catch (e) {
+      // A newer fetch owns the selects and the skeleton now (populate can
+      // throw after the URL changed again).
+      if (this._lastFormatVideoId !== videoId) return;
       // Clear cache so the user can retry (toggling advanced off/on)
-      if (this._lastFormatVideoId === videoId) {
-        this._lastFormatVideoId = null;
-      }
+      this._lastFormatVideoId = null;
       formatSkeleton.style.display = "none";
       // Keep format section hidden on error — empty selects are confusing
-      formatSection.style.display = "none";
+      this.clearFormatChoice();
       console.error("Failed to fetch formats:", e);
       this.showToast("Could not load format options: " + e.message, "warning");
     }
