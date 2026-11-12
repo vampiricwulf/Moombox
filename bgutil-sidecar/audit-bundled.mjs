@@ -19,7 +19,9 @@ import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Every package vendor/ejs/src imports by name.
-// test/audit-bundled.test.mjs fails when this list and those imports differ.
+// test/audit-bundled.test.mjs fails when this list and those imports differ,
+// and when one of them gains a dependency: npm lists an advisory under the
+// vulnerable package's own name, which would then have to be in this list.
 export const bundledLibraries = ["astring", "meriyah"];
 
 const failing = new Set(["moderate", "high", "critical"]);

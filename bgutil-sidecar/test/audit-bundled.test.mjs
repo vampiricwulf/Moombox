@@ -88,3 +88,21 @@ test("the audited names are exactly the packages vendor/ejs/src imports", () => 
     walk(join(root, "vendor", "ejs", "src"));
     assert.deepEqual([...imported].sort(), [...bundledLibraries].sort());
 });
+
+// npm keys an advisory by the vulnerable package. A dependency of a bundled
+// library is bundled with it, but its advisory would sit under its own name,
+// which bundledFindings never reads.
+test("no bundled library has a dependency the audit would not read", () => {
+    const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+    for (const name of bundledLibraries) {
+        const entry = lock.packages?.[`node_modules/${name}`];
+        assert.ok(entry, `${name} is not in package-lock.json`);
+        for (const kind of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+            assert.deepEqual(
+                Object.keys(entry[kind] ?? {}),
+                [],
+                `${name} gained ${kind}: a bundled library gained a dependency: add it to bundledLibraries`,
+            );
+        }
+    }
+});
