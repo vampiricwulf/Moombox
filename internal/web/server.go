@@ -478,13 +478,14 @@ func interceptUpgrades(store *config.Store, router http.Handler, wsHandler http.
 
 // serverHandler is the http.Server's handler: the router, with WebSocket
 // upgrades taken ahead of it (interceptUpgrades) when a handler for them is
-// installed, all of it inside outermostRecovery.
+// installed, under bodyReadDeadline (a stalled request body is cut at
+// bodyReadTimeout), all of it inside outermostRecovery.
 func (s *Server) serverHandler() http.Handler {
 	var handler http.Handler = s.router
 	if s.wsHandler != nil {
 		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
 	}
-	return outermostRecovery(s.logger, handler)
+	return outermostRecovery(s.logger, bodyReadDeadline(bodyReadTimeout, handler))
 }
 
 // Start begins listening for HTTP connections.
@@ -511,8 +512,10 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.serverHandler(),
 		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
 		WriteTimeout:      0,                // Disable for WebSocket and video streaming
-		IdleTimeout:       120 * time.Second,
-		ErrorLog:          log.New(io.Discard, "", 0), // Suppress HTTP server errors from stdout/stderr (routed through app logger via middleware)
+		// No ReadTimeout either (it would cut long handlers and streams): a
+		// request body is bounded per request by bodyReadDeadline instead.
+		IdleTimeout: 120 * time.Second,
+		ErrorLog:    log.New(io.Discard, "", 0), // Suppress HTTP server errors from stdout/stderr (routed through app logger via middleware)
 	}
 
 	// Configure TLS if enabled

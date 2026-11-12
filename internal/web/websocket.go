@@ -321,9 +321,9 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Set read limit to prevent oversized messages
 	conn.SetReadLimit(int64(wsMaxMessageSize))
 
-	// Use a detached context so the WebSocket connection is NOT killed by the
-	// HTTP server's ReadTimeout. The request context (r.Context()) is cancelled
-	// after ReadTimeout (30s), which would close the WebSocket prematurely.
+	// Use a detached context: the request context (r.Context()) ends when this
+	// handler returns, and must not take the socket with it. The server sets
+	// no ReadTimeout, and bodyReadDeadline leaves upgrades alone.
 	// The connection lifetime is managed by pingPump/readPump instead.
 	ctx, cancel := context.WithCancel(context.Background())
 	client = &wsClient{
