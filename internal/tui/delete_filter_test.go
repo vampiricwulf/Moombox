@@ -1,6 +1,8 @@
 package tui
 
 import (
+	tea "charm.land/bubbletea/v2"
+
 	"strings"
 	"testing"
 
@@ -99,5 +101,83 @@ func TestDeleteBatchSkipsActiveJobs(t *testing.T) {
 	}
 	if !strings.Contains(app.feedback.msg, "No deletable jobs in selection") {
 		t.Errorf("feedback = %q, want it to say the selection held nothing deletable", app.feedback.msg)
+	}
+}
+
+// openDeletePicker opens the action menu on an app holding one Error job and
+// walks it to the Delete Job picker, armed on that job (first Enter pressed).
+func openDeletePicker(t *testing.T, app *App) {
+	t.Helper()
+	app.width, app.height = 120, 40
+	app.taskList.SetJobs([]*database.Job{{ID: "e1", Title: "Failed one", Status: database.StatusError, Version: 1}})
+	app.actionMenu.SetJobs(app.taskList.Jobs())
+	app.actionMenu.SetSize(120, 40)
+	app.actionMenu.Open(app.buildMenuItems())
+	for i, it := range app.actionMenu.mainList.Items() {
+		if mi, ok := it.(menuActionItem); ok && mi.action != nil && mi.action.Chord == "A D" {
+			app.actionMenu.mainList.Select(i)
+		}
+	}
+	app.keyActionMenu(tea.KeyPressMsg{}, keyEnter) // choose Delete Job: the picker
+	if app.actionMenu.mode != menuJobSelect {
+		t.Fatalf("menu mode = %v, want the job picker", app.actionMenu.mode)
+	}
+	app.keyActionMenu(tea.KeyPressMsg{}, keyEnter) // arm the confirm
+}
+
+// The picker waits for its confirming Enter with no time limit. A job that
+// went active meanwhile must not be cancelled and deleted (owner ruling R3):
+// the menu judges the job as it is now, as the chord's confirm key does.
+// Mutant: dispatching with the picker's job unchecked.
+func TestMenuDeleteRefusesAJobThatWentActiveInThePicker(t *testing.T) {
+	app := NewApp()
+	var deleted []string
+	app.OnDeleteJob = func(id string) { deleted = append(deleted, id) }
+	openDeletePicker(t, app)
+
+	app.Update(JobUpdateMsg{Change: &database.JobChange{Changes: []string{"status"},
+		Job: &database.Job{ID: "e1", Title: "Failed one", Status: database.StatusDownloading, Version: 2}}})
+
+	if _, cmd := app.keyActionMenu(tea.KeyPressMsg{}, keyEnter); cmd != nil {
+		cmd()
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("the menu deleted %v, a job that is downloading", deleted)
+	}
+	if !strings.Contains(app.feedback.msg, "Delete Job not done") || !strings.Contains(app.feedback.msg, "Downloading") {
+		t.Errorf("feedback = %q, want the refusal naming the job's status", app.feedback.msg)
+	}
+	if app.feedback.sev != severityWarning {
+		t.Errorf("a refusal must not be drawn in success green (severity %v)", app.feedback.sev)
+	}
+}
+
+// The unchanged case still deletes.
+func TestMenuDeleteStillDeletesAnUnchangedJob(t *testing.T) {
+	app := NewApp()
+	var deleted []string
+	app.OnDeleteJob = func(id string) { deleted = append(deleted, id) }
+	openDeletePicker(t, app)
+	if _, cmd := app.keyActionMenu(tea.KeyPressMsg{}, keyEnter); cmd != nil {
+		cmd()
+	}
+	if len(deleted) != 1 || deleted[0] != "e1" {
+		t.Fatalf("deleted %v, want e1", deleted)
+	}
+}
+
+// The single-job arm is the last check before OnDeleteJob, whoever calls it.
+func TestDeleteSingleArmRefusesAnActiveJob(t *testing.T) {
+	app := NewApp()
+	called := false
+	app.OnDeleteJob = func(string) { called = true }
+	if _, cmd := app.dispatchAction("A D", &database.Job{ID: "l", Title: "Live one", Status: database.StatusLive}); cmd != nil {
+		cmd()
+	}
+	if called {
+		t.Fatal("A D deleted a live job")
+	}
+	if !strings.Contains(app.feedback.msg, "Delete Job not done") {
+		t.Errorf("feedback = %q", app.feedback.msg)
 	}
 }

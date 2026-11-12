@@ -336,6 +336,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return deleteJobsResultMsg{Count: len(ids)}
 			})
 		} else if job != nil && a.OnDeleteJob != nil {
+			// The last check before the row is cancelled and deleted: every
+			// caller has already run the A D filter, but the server accepts a
+			// delete in any state, so nothing after this line would stop one
+			// aimed at a job that is recording.
+			if !isDeletableStatus(job.Status) {
+				a.setFeedbackWithSeverity(fmt.Sprintf("Delete Job not done: %s is now %s", job.Title, job.Status), severityWarning)
+				return a, nil
+			}
 			a.setFeedback(fmt.Sprintf("Deleting: %s", job.Title))
 			deleteFn := a.OnDeleteJob
 			id, title := job.ID, job.Title

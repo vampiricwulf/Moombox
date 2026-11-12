@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -266,16 +267,37 @@ func (a *App) keyActionMenu(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd
 		chord, jobID, hasJob := strings.Cut(action, ":")
 		var job *database.Job
 		if hasJob {
-			for _, j := range a.actionMenu.jobs {
-				if j.ID == jobID {
-					job = j
-					break
-				}
+			// The picker was built when the action was chosen and waits for
+			// Enter with no time limit, so the job is judged again here as it
+			// is NOW, by the same JobFilter the chord path re-runs on its
+			// confirm key. Without this a row that went active while the
+			// picker sat open (an auto-retry, a Resume from the dashboard)
+			// was still deleted. A job that has gone is refused too: a nil
+			// job would send a batch verb down its selection arm.
+			job = a.taskList.GetJobByID(jobID)
+			item := a.menuItem(chord)
+			switch {
+			case job == nil:
+				a.setFeedbackWithSeverity(menuActionLabel(item, chord)+" not done: the job is gone", severityWarning)
+				return a, nil
+			case item != nil && item.JobFilter != nil && !item.JobFilter(job):
+				a.setFeedbackWithSeverity(fmt.Sprintf("%s not done: %s is now %s",
+					menuActionLabel(item, chord), job.Title, job.Status), severityWarning)
+				return a, nil
 			}
 		}
 		return a.dispatchAction(chord, job)
 	}
 	return a, nil
+}
+
+// menuActionLabel names a menu action on a refusal line: the item's label, or
+// the chord when the item is not registered.
+func menuActionLabel(item *ActionMenuItem, chord string) string {
+	if item != nil && item.Label != "" {
+		return item.Label
+	}
+	return chord
 }
 
 func (a *App) keyImport(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
