@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,8 +59,10 @@ func loadYouTubeURLTable(t *testing.T) []youtubeURLRow {
 // scheme-less prefix test, an exact host list without music., a suffix match
 // without the dot (notyoutube.com), truncating a long ID to 11 characters,
 // dropping the embedded-link pass, letting a scheme-less embedded link start
-// after "/" or "_" (example.com/youtube.com/, foo_youtube.com), or parsing
-// with net/url each fails its rows.
+// after "/" or "_" (example.com/youtube.com/, foo_youtube.com), refusing one
+// after text that is not ASCII, counting embeddedLinkTries over the whole
+// input and not per run of text without whitespace, a different limit than
+// the dashboard's, or parsing with net/url each fails its rows.
 func TestExtractVideoIDSharedURLTable(t *testing.T) {
 	for _, row := range loadYouTubeURLTable(t) {
 		if got := ExtractVideoID(row.Input); got != row.ID {
@@ -72,6 +75,27 @@ func TestExtractVideoIDSharedURLTable(t *testing.T) {
 		if got := ExtractVideoIDFromURL(row.Input); got != wantURL {
 			t.Errorf("ExtractVideoIDFromURL(%q) = %q, want %q", row.Input, got, wantURL)
 		}
+	}
+}
+
+// TestExtractVideoIDFromURLTimeGrowsWithLength: the add route hands the
+// parser a request's url field as it came, up to the body cap. Looking for a
+// link inside the text used to start again after every "/" and read to the
+// next whitespace each time, so a megabyte of "a/" took over an hour. A megabyte of
+// each shape that makes the embedded pass work now takes milliseconds; the
+// budget is wide so a loaded machine never fails it.
+//
+// Mutant: no embeddedLinkTries limit (the third shape alone takes seven
+// seconds).
+func TestExtractVideoIDFromURLTimeGrowsWithLength(t *testing.T) {
+	start := time.Now()
+	for _, unit := range []string{"a/", "//a/", "https://youtu.be/?a&", "https://youtube.com/x https://"} {
+		if got := ExtractVideoIDFromURL(strings.Repeat(unit, (1<<20)/len(unit))); got != "" {
+			t.Errorf("a megabyte of %q read as video %q", unit, got)
+		}
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("four megabyte inputs took %v, want well under a second", took)
 	}
 }
 

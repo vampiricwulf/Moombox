@@ -13,8 +13,13 @@
 // MUTANT: the regexes this replaced (watch\?v= with v first, on any host
 // that contains "youtube.com") fail the app=desktop, list=, watch/ and
 // -nocookie rows and take the notyoutube.com and example.com/youtube.com/
-// rows; dropping the "https://" prefix for an input without a scheme fails
-// every scheme-less row.
+// rows. Of the code as it stands: dropping the pass that looks for a link
+// inside other text fails the "<https://youtu.be/ID>" and "see https://…"
+// rows; reading the link with `new URL` fails the "v=ID;t=3", stray "%" and
+// port 99999 rows; treating text that is not ASCII as part of a host fails
+// the "見てyoutu.be/ID" row; a try limit other than the Go parser's 32, or
+// one counted over the whole input, fails the long rows; and no limit at all
+// fails the second test (23 s, not 150 ms).
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -44,4 +49,19 @@ test("extractVideoId follows the shared YouTube URL table", { skip }, async () =
   for (const row of TABLE) {
     assert.equal(h.app.extractVideoId(row.input), row.id || null, row.input);
   }
+});
+
+// The add box parses on the page's own thread, so a huge paste must not hold
+// it: looking for a link inside the text used to start again after every "/"
+// and took two minutes for a megabyte of "a/". The budget is wide so a loaded
+// machine never fails it.
+test("extractVideoId takes time in step with the input's length", { skip }, async () => {
+  const h = await harness.makeApp();
+  const start = performance.now();
+  for (const unit of ["a/", "//a/", "https://youtu.be/?a&", "https://youtube.com/x https://"]) {
+    const input = unit.repeat(Math.floor((1 << 20) / unit.length));
+    assert.equal(h.app.extractVideoId(input), null, `a megabyte of ${JSON.stringify(unit)}`);
+  }
+  const took = performance.now() - start;
+  assert.ok(took < 3_000, `four megabyte inputs took ${Math.round(took)} ms, want well under a second`);
 });

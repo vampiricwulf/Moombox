@@ -4417,7 +4417,8 @@ export class MoomboxApp {
    * and /v/ID on youtube.com, youtube-nocookie.com, youtubekids.com and
    * their subdomains. When the input as a whole is not such a URL, the first
    * YouTube link inside it is read the same way ("<https://youtu.be/ID>",
-   * "see https://youtu.be/ID").
+   * "see https://youtu.be/ID"). The time taken grows with the length of the
+   * input and no faster: a pasted megabyte must not hold the page.
    *
    * Like the Go parser this takes the link apart by hand and unescapes
    * nothing: the browser's URL and Go's net/url disagree on a stray "%", a
@@ -4454,6 +4455,33 @@ export class MoomboxApp {
       return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)];
     };
 
+    // Whether host, in any case, is one of YouTube's: "short" for youtu.be,
+    // whose path is the video ID, "long" for the others, null for none. The
+    // longest domain, with the dot before it, is all of a long host that can
+    // matter.
+    const youtubeHost = (host) => {
+      host = host.slice(-".youtube-nocookie.com".length).toLowerCase();
+      const isOrUnder = (domain) => host === domain || host.endsWith("." + domain);
+      if (isOrUnder("youtu.be")) return "short";
+      return isOrUnder("youtube.com") || isOrUnder("youtube-nocookie.com") || isOrUnder("youtubekids.com") ? "long" : null;
+    };
+    // The ID in the path, query and fragment that follow a YouTube host.
+    const afterHost = (rest, kind) => {
+      let fragment, path, query;
+      [rest, fragment] = cut(rest, "#");
+      [path, query] = cut(rest, "?");
+      let id = idParam(query);
+      if (id) return id;
+      // The old "#!v=ID" and "#v=ID" forms.
+      id = idParam(fragment.startsWith("!") ? fragment.slice(1) : fragment);
+      if (id) return id;
+      if (kind === "short") return leadingId(path.startsWith("/") ? path.slice(1) : path);
+      for (const prefix of ["/live/", "/shorts/", "/embed/", "/v/"]) {
+        if (path.startsWith(prefix)) return leadingId(path.slice(prefix.length));
+      }
+      return null;
+    };
+
     // The ID of s when all of s is one YouTube link.
     const fromLink = (s) => {
       if (httpScheme.test(s)) s = s.slice(s.indexOf("://") + 3);
@@ -4472,50 +4500,76 @@ export class MoomboxApp {
         if (!/^[0-9]*$/.test(authority.slice(colon + 1))) return null;
       }
       if (!/^[a-zA-Z0-9.-]*$/.test(host)) return null;
-      host = host.toLowerCase();
-      const isOrUnder = (domain) => host === domain || host.endsWith("." + domain);
-      const short = isOrUnder("youtu.be");
-      if (!short && !isOrUnder("youtube.com") && !isOrUnder("youtube-nocookie.com") && !isOrUnder("youtubekids.com")) {
-        return null;
-      }
-
-      let fragment, path, query;
-      [rest, fragment] = cut(rest, "#");
-      [path, query] = cut(rest, "?");
-      let id = idParam(query);
-      if (id) return id;
-      // The old "#!v=ID" and "#v=ID" forms.
-      id = idParam(fragment.startsWith("!") ? fragment.slice(1) : fragment);
-      if (id) return id;
-      if (short) return leadingId(path.startsWith("/") ? path.slice(1) : path);
-      for (const prefix of ["/live/", "/shorts/", "/embed/", "/v/"]) {
-        if (path.startsWith(prefix)) return leadingId(path.slice(prefix.length));
-      }
-      return null;
+      const kind = youtubeHost(host);
+      return kind ? afterHost(rest, kind) : null;
     };
 
     const whole = fromLink(trimmed);
     if (whole) return whole;
 
-    // The first YouTube link inside other text. A link written without a
-    // scheme counts only at the start or after a character that cannot
-    // continue a host, a path or user info, so
-    // "example.com/youtube.com/watch?v=ID" stays refused.
-    const embedded = /((?:[Hh][Tt][Tt][Pp][Ss]?:\/\/|\/\/)?[A-Za-z0-9.-]+)\/[^ \t\n\v\f\r]*/g;
+    // The links inside other text, in one pass, as the Go parser reads
+    // them. Each is a run of host characters and the slash after it, with
+    // an http(s) scheme, "//" or nothing before it, and it ends at the next
+    // whitespace. A link written without a scheme counts only at the start
+    // or after a character that cannot continue a host, a path or user
+    // info, so "example.com/youtube.com/watch?v=ID" stays refused; text
+    // that is not ASCII continues no host.
     const continuesLink = (i) => {
       if (i === 0) return false;
-      const c = trimmed.charCodeAt(i - 1);
-      if (c === 0x3a && trimmed.startsWith("//", i)) return true; // another scheme's "://"
-      return c >= 0x80 || /[a-zA-Z0-9_.\/\\@-]/.test(trimmed[i - 1]);
+      if (trimmed[i - 1] === ":" && trimmed.startsWith("//", i)) return true; // another scheme's "://"
+      return /[a-zA-Z0-9_.\/\\@-]/.test(trimmed[i - 1]);
     };
-    for (let m; (m = embedded.exec(trimmed)); ) {
-      if (httpScheme.test(m[0]) || !continuesLink(m.index)) {
-        const id = fromLink(m[0]);
-        if (id) return id;
+    const isHostCode = (c) =>
+      (c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || (c >= 0x30 && c <= 0x39) || c === 0x2e || c === 0x2d;
+    const whitespace = /[ \t\n\v\f\r]/g;
+    // YouTube links that hold no ID are each read to the end of their run
+    // of text without whitespace, so only this many are read in one run
+    // (embeddedLinkTries in the Go parser): a megabyte of them would
+    // otherwise cost its length squared.
+    const tryLimit = 32;
+    let runEnd = 0; // the end of the run of text without whitespace being read
+    let tries = 0; // the YouTube links in it that held no ID
+    for (let off = 0; off < trimmed.length; ) {
+      let host = off;
+      let slash = -1;
+      for (let i = off; i < trimmed.length; i++) {
+        const c = trimmed.charCodeAt(i);
+        if (isHostCode(c)) continue;
+        if (c === 0x2f && i > host) {
+          slash = i;
+          break;
+        }
+        host = i + 1;
       }
-      // Look again after this link's host: a link inside this one's path
-      // or query ("?u=https://youtu.be/ID") is still found.
-      embedded.lastIndex = m.index + m[1].length + 1;
+      if (slash < 0) break;
+      // The link starts at its scheme, when one stands right before the
+      // host and after the last link's slash.
+      let start = host;
+      let hasScheme = false;
+      const before = trimmed.slice(Math.max(off, host - "https://".length), host);
+      const scheme = /[Hh][Tt][Tt][Pp][Ss]?:\/\/$/.exec(before);
+      if (scheme) {
+        start = host - (before.length - scheme.index);
+        hasScheme = true;
+      } else if (before.endsWith("//")) {
+        start = host - 2;
+      }
+      if (slash >= runEnd) {
+        whitespace.lastIndex = slash;
+        const ws = whitespace.exec(trimmed);
+        runEnd = ws ? ws.index : trimmed.length;
+        tries = 0;
+      }
+      // Look again after this link's host next time: a link inside this
+      // one's path or query ("?u=https://youtu.be/ID") is still found.
+      off = slash + 1;
+
+      if (!hasScheme && continuesLink(start)) continue;
+      const kind = youtubeHost(trimmed.slice(host, slash));
+      if (!kind) continue;
+      const id = afterHost(trimmed.slice(slash, runEnd), kind);
+      if (id) return id;
+      if (++tries >= tryLimit) off = runEnd;
     }
     return null;
   }
