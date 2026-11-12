@@ -31,7 +31,9 @@ name: Build and Publish Docker Image
 # image for an existing tag again, open that tag's release run and re-run the
 # docker job: "Re-run failed jobs" when it failed, otherwise the re-run button
 # on the docker job alone. Either is still a push event. Do not use "Re-run
-# all jobs", which runs the release job again too.
+# all jobs", which runs the release job again too. Do this only for the newest
+# release tag: a re-run pushes `latest` (and X.Y) again, so on an older tag it
+# moves them back to that version.
 #
 # The gate covers only tags created from the commit that added it on. A manual
 # run on a tag executes THAT TAG'S copy of this file, so for v2.9.9 and older
