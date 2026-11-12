@@ -733,18 +733,42 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 // roundTenth rounds x to a tenth, for the drift's log fields.
 func roundTenth(x float64) float64 { return math.Round(x*10) / 10 }
 
+// recoveredPartPath is the first "<base> - recovered<n>.mp4" in outDir, from
+// n = k, that no file holds. Only a Stat answering "not found" frees a name,
+// and only one that succeeds takes it: any other answer (access denied, a
+// network share that dropped) ends the search with that error, and the look
+// is rescheduled with it. The search is bounded (asideOutputCollisionLimit
+// names) and ends with ctx.
+func recoveredPartPath(ctx context.Context, outDir, base string, k int) (string, error) {
+	for n := k; n < k+asideOutputCollisionLimit; n++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		p := filepath.Join(outDir, fmt.Sprintf("%s - recovered%d.mp4", base, n))
+		_, err := gapFillStat(p)
+		if err == nil {
+			continue
+		}
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		return "", fmt.Errorf("the archive's directory could not be read: %w", err)
+	}
+	return "", fmt.Errorf("no free name for a recovered part in %d tries", asideOutputCollisionLimit)
+}
+
+// gapFillStat is os.Stat, replaced by recoveredPartPath's test.
+var gapFillStat = os.Stat
+
 // cutSpan fetches segs into one MPEG-TS beside the archive and muxes it into
 // the recovered part's MP4 (base + " - recovered<k>.mp4", the first k not
-// taken). The TS is removed either way; the MP4 only on failure.
+// taken, recoveredPartPath). The TS is removed either way; the MP4 only on
+// failure.
 func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment, outDir, base string, k int) (recoveredPart, error) {
 	var part recoveredPart
-	outPath := ""
-	for n := k; ; n++ {
-		p := filepath.Join(outDir, fmt.Sprintf("%s - recovered%d.mp4", base, n))
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			outPath = p
-			break
-		}
+	outPath, err := recoveredPartPath(ctx, outDir, base, k)
+	if err != nil {
+		return part, err
 	}
 	tsPath := outPath + ".gapfill.ts"
 	ts, err := os.Create(tsPath)
@@ -790,7 +814,7 @@ func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment,
 	if part.refused == len(segs) {
 		return part, errSpanRefused
 	}
-	if err := f.mux(ctx, tsPath, outPath); err != nil {
+	if err = f.mux(ctx, tsPath, outPath); err != nil {
 		_ = os.Remove(outPath)
 		return part, err
 	}
