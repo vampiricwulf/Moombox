@@ -1520,8 +1520,10 @@ export function reinitializeDeletesText(p) {
   const lead = [];
   if (cancels.length) lead.push(`cancels ${cancels.join(" and ")}`);
   const archives = n("existingArchives");
-  if (archives === 1) lead.push(`sets the existing archive (${formatBytes(n("existingArchiveBytes"))}) aside`);
-  else if (archives > 1) lead.push(`sets ${archives} existing archives (${formatBytes(n("existingArchiveBytes"))}) aside`);
+  // No size when none could be read (the archive's drive cannot be reached now).
+  const archiveSize = n("existingArchiveBytes") > 0 ? ` (${formatBytes(n("existingArchiveBytes"))})` : "";
+  if (archives === 1) lead.push(`sets the existing archive${archiveSize} aside`);
+  else if (archives > 1) lead.push(`sets ${archives} existing archives${archiveSize} aside`);
   return lead.length ? `${lead.join(", ")}, and ${deletes}` : deletes;
 }
 

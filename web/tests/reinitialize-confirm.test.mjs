@@ -45,8 +45,9 @@ test("reinitializeDeletesText words the preview as the TUI does", () => {
   // the same two cases as TestReinitializePreviewSummary.
   assert.equal(reinitializeDeletesText({ existingArchives: 1, existingArchiveBytes: 2048 }),
     "sets the existing archive (2.0KB) aside, and deletes nothing recorded");
+  assert.equal(reinitializeDeletesText({ existingArchives: 1 }), "sets the existing archive aside, and deletes nothing recorded");
   assert.equal(
-    reinitializeDeletesText({ existingArchives: 2, existingArchiveBytes: 4096, stagedFiles: 1, stagedBytes: 10, pendingAutoMux: 1 }),
+    reinitializeDeletesText({ existingArchives: 2,existingArchiveBytes: 4096, stagedFiles: 1, stagedBytes: 10, pendingAutoMux: 1 }),
     "cancels the pending automatic mux, sets 2 existing archives (4.0KB) aside, and deletes 1 staged file (10B)",
   );
 });

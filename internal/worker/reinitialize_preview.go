@@ -125,8 +125,10 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 		lists[p] = true
 	}
 	if p := archiveKeptByReset(job, hasParts); p != "" {
+		// One that cannot be reached now (its drive is unplugged) is kept
+		// too, and named without a size.
+		out.ExistingArchives = 1
 		if info, err := os.Stat(p); err == nil {
-			out.ExistingArchives = 1
 			out.ExistingArchiveBytes = info.Size()
 		}
 	}
@@ -209,15 +211,20 @@ func (p ReinitializePreview) Summary() string {
 
 // keepsClause is Summary's clause naming the archive the job already has,
 // which the reset keeps and the new recording sets aside (owner ruling
-// R2-W1), "" when there is none.
+// R2-W1), "" when there is none. No size is named when none could be read:
+// the archive is on a drive that cannot be reached now.
 func (p ReinitializePreview) keepsClause() string {
+	size := ""
+	if p.ExistingArchiveBytes > 0 {
+		size = " (" + utils.FormatFileSize(p.ExistingArchiveBytes) + ")"
+	}
 	switch {
 	case p.ExistingArchives <= 0:
 		return ""
 	case p.ExistingArchives == 1:
-		return "sets the existing archive (" + utils.FormatFileSize(p.ExistingArchiveBytes) + ") aside"
+		return "sets the existing archive" + size + " aside"
 	}
-	return fmt.Sprintf("sets %d existing archives (%s) aside", p.ExistingArchives, utils.FormatFileSize(p.ExistingArchiveBytes))
+	return fmt.Sprintf("sets %d existing archives%s aside", p.ExistingArchives, size)
 }
 
 // cancelsClause is Summary's head naming the automatic actions the reset

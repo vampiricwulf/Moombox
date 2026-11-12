@@ -315,3 +315,73 @@ func TestSweepForgetsARemovedSetAsideArchive(t *testing.T) {
 		}
 	}
 }
+
+// An archive tree that was moved, with paths.output_directory repointed at it
+// while the old directory still exists: the row's earlier archive is at the
+// re-rooted path, where the Files sweep counts it as the row's
+// (rowAbsoluteLocations). The sweep must not drop the column for it, and a
+// finalize sets it aside where it is.
+//
+// Mutants: either reader deciding from the stored spelling alone (the sweep
+// clears the column; the finalize clears it and leaves the file at the name
+// the new recording may take).
+func TestPriorArchiveInAMovedArchiveTree(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	oldDir, newDir := t.TempDir(), t.TempDir()
+	add := func(id string, status database.JobStatus, prior string) *database.Job {
+		job := &database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube", Status: status, OutputDirectory: oldDir}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		db.UpdateJobFields(id, map[string]any{"prior_output_file": prior})
+		return job
+	}
+
+	writeTestFile(t, filepath.Join(newDir, "show.restart-1700000000.mp4"), "x")
+	stored := filepath.Join(oldDir, "show.restart-1700000000.mp4")
+	add("j-swept", database.StatusFinished, stored)
+	if got := offeredOutput(t, db, newDir); len(got) != 0 {
+		t.Errorf("the Files sweep offers %v; the row owns the moved file", got)
+	}
+	if got, _ := db.GetJob("j-swept"); got.PriorOutputFile != stored {
+		t.Errorf("the sweep changed prior_output_file to %q, want %q kept", got.PriorOutputFile, stored)
+	}
+
+	moved := filepath.Join(newDir, "pending.mp4")
+	writeTestFile(t, moved, "earlier")
+	job := add("j-finalized", database.StatusMuxing, filepath.Join(oldDir, "pending.mp4"))
+	w.orchestrator.setAsidePriorArchive(&JobContext{Job: job, GlobalOutputDir: newDir})
+	got, _ := db.GetJob("j-finalized")
+	if filepath.Dir(got.PriorOutputFile) != newDir || !priorArchiveSetAside(got.PriorOutputFile) ||
+		readTestFile(t, got.PriorOutputFile) != "earlier" || fileExists(moved) {
+		t.Errorf("prior_output_file = %q, file still at %s = %v; want it set aside in the moved tree", got.PriorOutputFile, moved, fileExists(moved))
+	}
+}
+
+// A second reset of a row whose earlier archive was already set aside, after a
+// recording that took another name (the title changed): the set-aside file
+// shares no stem with the archive the column moves on to, so it is renamed
+// under that archive's stem and stays the row's.
+//
+// Mutant: a set-aside older archive left as it is (the Files sweep offers it
+// under Delete All, with nothing logged).
+func TestResetKeepsAnAlreadySetAsideArchiveOwned(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	_, dir := muxFixtureJob(t, w, db, "j-twice")
+	newer, older := filepath.Join(dir, "New title.mp4"), filepath.Join(dir, "Old title.restart-1700000000.mp4")
+	writeTestFile(t, newer, "newer")
+	writeTestFile(t, older, "older")
+	db.UpdateJobFields("j-twice", map[string]any{
+		"status": database.StatusError, "output_file": newer, "prior_output_file": older})
+	w.reinitializeNow("j-twice", database.StatusError)
+	if job, _ := db.GetJob("j-twice"); job.PriorOutputFile != newer {
+		t.Fatalf("prior_output_file = %q, want %q", job.PriorOutputFile, newer)
+	}
+	asides, _ := filepath.Glob(filepath.Join(dir, "New title.restart-*.mp4"))
+	if len(asides) != 1 || readTestFile(t, asides[0]) != "older" || fileExists(older) {
+		t.Fatalf("set-aside files under the newer stem = %v, want the older archive moved there", asides)
+	}
+	if got := offeredOutput(t, db, dir); len(got) != 0 {
+		t.Errorf("the Files sweep offers %v; the row still owns both archives", got)
+	}
+}

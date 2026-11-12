@@ -45,8 +45,14 @@ func priorArchiveSetAside(path string) bool {
 // keeps rather than disowns, "" when there is none: the file output_file
 // names, when the job has no recorded parts (a part is deleted by the reset,
 // and counted by the preview as one — clearJobParts), or the one an earlier
-// reset already recorded that no finalize has set aside yet. Only a file that
-// is on disk counts. hasParts is whether the job has segment rows.
+// reset already recorded that no finalize has set aside yet. hasParts is
+// whether the job has segment rows.
+//
+// A file that is definitely gone (priorArchiveGone) is not kept. One that
+// cannot be reached — its drive is unplugged — is: the reset would otherwise
+// clear output_file with nothing recorded, and when the drive came back the
+// file was on no row and a finalize of the same name wrote over it. The
+// finalize settles a path it cannot reach (setAsidePriorArchive).
 //
 // The one rule PreviewReinitialize names the archive by and the reset keeps
 // it by.
@@ -55,12 +61,12 @@ func archiveKeptByReset(job *database.Job, hasParts bool) string {
 		return ""
 	}
 	if job.OutputFile != "" {
-		if !hasParts && fileExists(job.OutputFile) {
+		if !hasParts && !priorArchiveGone(job.OutputFile) {
 			return job.OutputFile
 		}
 		return ""
 	}
-	if p := job.PriorOutputFile; p != "" && !priorArchiveSetAside(p) && fileExists(p) {
+	if p := job.PriorOutputFile; p != "" && !priorArchiveSetAside(p) && !priorArchiveGone(p) {
 		return p
 	}
 	return ""
@@ -93,12 +99,13 @@ func priorArchiveSidecars(path string) []string {
 // cleared. prior is the row as read just before the reset's claim, under the
 // staging claim the verb holds. It touches no file.
 //
-// A row can hold both an archive of its own and an earlier one no finalize
-// managed to set aside (the rename failed and the two did not share a name).
-// The column holds one path and moves on to the newer archive; older is that
-// earlier one, "" when there is none, for the caller to set aside once its
-// claim has applied (setOlderArchiveAside), and keep is the archive the
-// column now names.
+// A row can hold both an archive of its own and an earlier one: one no
+// finalize managed to set aside (the rename failed and the two did not share
+// a name), or one a finalize did set aside before the recording it made was
+// in turn kept by this reset. The column holds one path and moves on to the
+// newer archive; older is that earlier one, "" when there is none or it is
+// definitely gone, for the caller to settle once its claim has applied
+// (setOlderArchiveAside), and keep is the archive the column now names.
 func (w *DownloadWorker) resetFieldsKeepingArchive(fields map[string]any, prior *database.Job) (out map[string]any, older, keep string) {
 	if prior == nil {
 		return fields, "", ""
@@ -108,32 +115,52 @@ func (w *DownloadWorker) resetFieldsKeepingArchive(fields map[string]any, prior 
 	if keep == "" {
 		return fields, "", ""
 	}
-	if old := prior.PriorOutputFile; old != "" && !priorArchiveSetAside(old) &&
-		normalizePath(old) != normalizePath(keep) && fileExists(old) {
+	if old := prior.PriorOutputFile; old != "" && normalizePath(old) != normalizePath(keep) && !priorArchiveGone(old) {
 		older = old
 	}
 	fields["prior_output_file"] = keep
 	return fields, older, keep
 }
 
-// setOlderArchiveAside renames the archive a reset's column moved on from
-// (resetFieldsKeepingArchive's older) to a set-aside name, with its sidecars.
-// Called only after the reset's conditional claim applied: a refused reset
-// leaves the file, and the row that names it, as they were.
+// setOlderArchiveAside settles the archive a reset's column moved on from
+// (resetFieldsKeepingArchive's older): it is renamed to a set-aside name,
+// with its sidecars. Called only after the reset's conditional claim applied:
+// a refused reset leaves the file, and the row that names it, as they were.
 //
 // In the directory of keep, the archive the column names now, it takes that
 // archive's stem, so the row goes on owning it as a set-aside sibling of the
 // archive it names (newOutputOwners). In another directory it is renamed
 // where it is and no row names it: the log line is the record of where it
 // went, and the Files tab lists it.
+//
+// One a finalize already set aside ("<stem>.restart-<ts>.mp4") is renamed
+// only when that keeps it owned: under the stem of keep it is owned as it
+// is, and in another directory it stays where it is, on no row, and the log
+// line says so. One that cannot be reached stays too, and is logged.
 func (w *DownloadWorker) setOlderArchiveAside(jobID, older, keep string) {
 	if older == "" {
 		return
 	}
-	stem := strings.TrimSuffix(filepath.Base(older), filepath.Ext(older))
+	keepStem := strings.TrimSuffix(keep, filepath.Ext(keep))
 	owned := normalizePath(filepath.Dir(older)) == normalizePath(filepath.Dir(keep))
+	if !fileExists(older) {
+		w.logger.Warn("reinitialize: an archive from before the one this job now keeps cannot be reached; it is kept, not deleted, but no row names it now: job details do not list it and the Files tab does",
+			"path", older, "jobID", jobID)
+		return
+	}
+	if from, ok := asideSiblingStem(older); ok {
+		if owned && from == normalizePath(keepStem) {
+			return // a set-aside sibling of the archive the row names: owned as it is
+		}
+		if !owned {
+			w.logger.Warn("reinitialize: an archive set aside before the one this job now keeps is kept, not deleted, but no row names it now: job details do not list it and the Files tab does",
+				"path", older, "jobID", jobID)
+			return
+		}
+	}
+	stem := strings.TrimSuffix(filepath.Base(older), filepath.Ext(older))
 	if owned {
-		stem = strings.TrimSuffix(filepath.Base(keep), filepath.Ext(keep))
+		stem = filepath.Base(keepStem)
 	}
 	dst, err := moveArchiveAsideAs(older, stem)
 	switch {
@@ -210,6 +237,29 @@ func priorArchiveGone(path string) bool {
 	return os.IsNotExist(err)
 }
 
+// priorArchiveLocations returns where the row's prior_output_file can be:
+// the path as stored, and where a moved archive tree puts it
+// (rowAbsoluteLocations), which is how the Files sweep decides the row owns
+// the file. absOutputDir is the current global output directory, absolute;
+// "" names the stored path alone.
+func priorArchiveLocations(job *database.Job, absOutputDir string) []string {
+	if absOutputDir == "" {
+		return []string{job.PriorOutputFile}
+	}
+	return rowAbsoluteLocations(job, job.PriorOutputFile, absOutputDir)
+}
+
+// priorArchiveGoneEverywhere reports whether the row's earlier archive is
+// definitely gone from every place it can be (priorArchiveLocations).
+func priorArchiveGoneEverywhere(job *database.Job, absOutputDir string) bool {
+	for _, p := range priorArchiveLocations(job, absOutputDir) {
+		if !priorArchiveGone(p) {
+			return false
+		}
+	}
+	return true
+}
+
 // setAsideNameOf returns the set-aside archive beside path that carries its
 // stem ("<stem>.restart-<ts>[-N].mp4"), the latest by name when there are
 // several, "" when there is none.
@@ -245,15 +295,17 @@ func setAsideNameOf(path string) string {
 // before the reset. An archive already set aside is left alone (a second
 // finalize after a failed mux).
 //
-// One that is not at the path the row names:
+// One that is not at the path the row names but is where a moved archive tree
+// puts it (priorArchiveLocations) is set aside there, and the row names it
+// there. Otherwise:
 //
 //   - a set-aside file with its stem is beside it: the row takes that name.
 //     This is a process that died between the rename and the column write.
 //     (A recording the engine set aside and the finalize recovered has the
 //     same form; a row whose archive was removed by hand then names that
 //     one, which is also an earlier file of the job that is kept);
-//   - its directory can be read and the file is not there: removed by hand,
-//     and dropped from the row;
+//   - every place it can be is readable and the file is in none: removed by
+//     hand, and dropped from the row;
 //   - anything else (the volume is not mounted): the row keeps naming it.
 //
 // A rename that fails does not stop the finalize here: the path is recorded
@@ -270,6 +322,18 @@ func (o *DownloadOrchestrator) setAsidePriorArchive(jobCtx *JobContext) {
 	if prior == "" || priorArchiveSetAside(prior) {
 		return
 	}
+	absOutputDir := ""
+	if jobCtx.GlobalOutputDir != "" {
+		absOutputDir, _ = filepath.Abs(jobCtx.GlobalOutputDir)
+	}
+	if !fileExists(prior) {
+		for _, alt := range priorArchiveLocations(job, absOutputDir) {
+			if fileExists(alt) {
+				prior = alt
+				break
+			}
+		}
+	}
 	if !fileExists(prior) {
 		switch aside := setAsideNameOf(prior); {
 		case aside != "":
@@ -277,7 +341,7 @@ func (o *DownloadOrchestrator) setAsidePriorArchive(jobCtx *JobContext) {
 			moveSidecarsAside(prior, aside, o.logger, job.ID)
 			o.logger.Info("the archive an earlier recording of this job left is already set aside; the row names it there",
 				"was", prior, "now", aside, "jobID", job.ID)
-		case priorArchiveGone(prior):
+		case priorArchiveGoneEverywhere(job, absOutputDir):
 			o.db.UpdateJobFields(job.ID, map[string]any{"prior_output_file": ""})
 		default:
 			o.logger.Warn("the archive an earlier recording of this job left cannot be reached; the row goes on naming it",
@@ -309,9 +373,11 @@ func (jobCtx *JobContext) blockedByPriorArchive(path string) error {
 }
 
 // forgetMissingPriorArchives drops prior_output_file from every row whose
-// set-aside archive is definitely gone (priorArchiveGone): removing that file
-// by hand is how the operator gets rid of it, and both UIs' job details went
-// on showing "Earlier file" for it. Run by the Files sweep, which reads every
+// set-aside archive is definitely gone from every place the sweep would find
+// it (priorArchiveGoneEverywhere: the stored path, and the same file under
+// absOutputDir once the archive tree was moved): removing that file by hand
+// is how the operator gets rid of it, and both UIs' job details went on
+// showing "Earlier file" for it. Run by the Files sweep, which reads every
 // row anyway, on the rows it read.
 //
 // Only a row that is Finished, Error or Cancelled, written only while it
@@ -319,10 +385,10 @@ func (jobCtx *JobContext) blockedByPriorArchive(path string) error {
 // moves the row to Upcoming, so this never clears a path a reset just wrote.
 // One still waiting for its finalize (not yet a set-aside name) is the
 // finalize's to settle. A cleared row's copy in jobs is cleared too.
-func forgetMissingPriorArchives(db *database.Database, jobs []*database.Job) {
+func forgetMissingPriorArchives(db *database.Database, jobs []*database.Job, absOutputDir string) {
 	for _, job := range jobs {
 		p := job.PriorOutputFile
-		if p == "" || !priorArchiveSetAside(p) || !priorArchiveGone(p) {
+		if p == "" || !priorArchiveSetAside(p) || !priorArchiveGoneEverywhere(job, absOutputDir) {
 			continue
 		}
 		switch job.Status {

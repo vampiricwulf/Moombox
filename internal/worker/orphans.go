@@ -548,7 +548,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	}
 	// A set-aside earlier archive the operator has removed by hand comes off
 	// its row here, where every row is read anyway (owner ruling R2-W1).
-	forgetMissingPriorArchives(db, jobs)
+	forgetMissingPriorArchives(db, jobs, absOutputDir)
 	owners := newOutputOwners(jobs, trims, absOutputDir)
 
 	var entries, trimEntries []OrphanedEntry

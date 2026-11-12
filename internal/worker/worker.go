@@ -172,16 +172,21 @@ type logger = interface {
 
 // JobContext holds the context needed to process a single job.
 type JobContext struct {
-	Job           *database.Job
-	Config        *JobConfig
-	YT            *youtube.Service
-	DB            *database.Database
-	StagingDir    string
-	OutputDir     string
-	Filename      string
-	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
-	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
-	Logger        logger
+	Job        *database.Job
+	Config     *JobConfig
+	YT         *youtube.Service
+	DB         *database.Database
+	StagingDir string
+	OutputDir  string
+	// GlobalOutputDir is paths.output_directory as it stood when the context
+	// was built, whatever directory the job itself writes to (OutputDir): the
+	// second place an archive the row names can be once the archive tree was
+	// moved (priorArchiveLocations). "" on a context built by hand.
+	GlobalOutputDir string
+	Filename        string
+	VideoStartSeq   int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
+	AudioStartSeq   int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
+	Logger          logger
 	// priorArchiveStuck is the archive an earlier recording of the job left
 	// (prior_output_file) when this finalize could not rename it aside, and
 	// priorArchiveStuckErr why: the finalize writes nothing at that path
@@ -2265,13 +2270,14 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 			InterruptionTimeout: cfgInterruptionTimeout.AsDuration(time.Minute),
 			ProgressInterval:    time.Duration(cfgProgressMS) * time.Millisecond,
 		},
-		YT:           w.yt,
-		StagingDir:   stagingDir,
-		OutputDir:    outputDir,
-		Filename:     filename,
-		Logger:       w.logger,
-		Interruption: &interruptionSignal{},
-		Run:          &runRecord{},
+		YT:              w.yt,
+		StagingDir:      stagingDir,
+		OutputDir:       outputDir,
+		GlobalOutputDir: cfgOutputDir,
+		Filename:        filename,
+		Logger:          w.logger,
+		Interruption:    &interruptionSignal{},
+		Run:             &runRecord{},
 
 		RecordedFirstPart: firstPart,
 	}

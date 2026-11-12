@@ -132,6 +132,12 @@ func TestArchiveKeptByReset(t *testing.T) {
 		}
 	}
 	gone := filepath.Join(dir, "gone.mp4")
+	// A directory that cannot be read stands in for an unplugged drive: the
+	// archive is kept on the row, and the confirm names it without a size.
+	unreachable := filepath.Join(dir, "unplugged", "show.mp4")
+	if p := PreviewReinitialize(nil, t.TempDir(), &database.Job{ID: "j", OutputFile: unreachable}); p.ExistingArchives != 1 || p.ExistingArchiveBytes != 0 {
+		t.Errorf("preview of an archive that cannot be reached = %+v, want it named with no size", p)
+	}
 	for _, tc := range []struct {
 		name     string
 		job      *database.Job
@@ -141,6 +147,8 @@ func TestArchiveKeptByReset(t *testing.T) {
 		{"single file", &database.Job{OutputFile: archive}, false, archive},
 		{"a part", &database.Job{OutputFile: archive}, true, ""},
 		{"file gone", &database.Job{OutputFile: gone}, false, ""},
+		{"drive not reachable", &database.Job{OutputFile: unreachable}, false, unreachable},
+		{"reset once, drive not reachable", &database.Job{PriorOutputFile: unreachable}, false, unreachable},
 		{"reset once, not yet set aside", &database.Job{PriorOutputFile: archive}, false, archive},
 		{"already set aside", &database.Job{PriorOutputFile: aside}, false, ""},
 		{"no archive", &database.Job{}, false, ""},
