@@ -47,14 +47,19 @@ func loadYouTubeURLTable(t *testing.T) []youtubeURLRow {
 // with v anywhere in the query, youtu.be, /live/, /shorts/, /embed/, /v/,
 // music. and -nocookie hosts, no scheme, a host in any case) and the inputs
 // that must stay refused (another host, a lookalike host, a 12-character
-// ID). ExtractVideoIDFromURL reads the same rows, except that a bare ID is
-// not a URL: the add route must not take an 11-character Twitch login for a
-// video.
+// ID). It also holds the links the old unanchored regexes took and a whole-
+// input URL parse refused: a link inside other text ("<https://youtu.be/ID>",
+// "see https://…", a second line), and a link net/url rejects or misreads
+// (a stray "%", "v=ID;t=3"). ExtractVideoIDFromURL reads the same rows,
+// except that a bare ID is not a URL: the add route must not take an
+// 11-character Twitch login for a video.
 //
 // Mutants: requiring path == "/watch" for the v parameter, a case-sensitive
 // scheme-less prefix test, an exact host list without music., a suffix match
-// without the dot (notyoutube.com), or truncating a long ID to 11
-// characters each fails its rows.
+// without the dot (notyoutube.com), truncating a long ID to 11 characters,
+// dropping the embedded-link pass, letting a scheme-less embedded link start
+// after "/" or "_" (example.com/youtube.com/, foo_youtube.com), or parsing
+// with net/url each fails its rows.
 func TestExtractVideoIDSharedURLTable(t *testing.T) {
 	for _, row := range loadYouTubeURLTable(t) {
 		if got := ExtractVideoID(row.Input); got != row.ID {

@@ -4415,46 +4415,107 @@ export class MoomboxApp {
    * host is read in any case, and the forms are a v= parameter anywhere in
    * the query (or the fragment), youtu.be/ID, and /live/, /shorts/, /embed/
    * and /v/ID on youtube.com, youtube-nocookie.com, youtubekids.com and
-   * their subdomains.
+   * their subdomains. When the input as a whole is not such a URL, the first
+   * YouTube link inside it is read the same way ("<https://youtu.be/ID>",
+   * "see https://youtu.be/ID").
+   *
+   * Like the Go parser this takes the link apart by hand and unescapes
+   * nothing: the browser's URL and Go's net/url disagree on a stray "%", a
+   * ";" in the query, dot segments and escapes, and the two parsers must
+   * give one answer. Keep the two step for step alike.
    */
   extractVideoId(input) {
     const trimmed = input.trim();
 
-    // Direct video ID (11 chars)
+    // Direct video ID (11 chars): the whole input only, never a word in a
+    // sentence.
     if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
       return trimmed;
     }
-    if (!trimmed) return null;
 
-    let u;
-    try {
-      u = new URL(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : "https://" + trimmed);
-    } catch {
-      return null;
-    }
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-
-    const host = u.hostname.toLowerCase();
-    const isOrUnder = (domain) => host === domain || host.endsWith("." + domain);
-    const short = isOrUnder("youtu.be");
-    if (!short && !isOrUnder("youtube.com") && !isOrUnder("youtube-nocookie.com") && !isOrUnder("youtubekids.com")) {
-      return null;
-    }
+    const httpScheme = /^[Hh][Tt][Tt][Pp][Ss]?:\/\//;
 
     // Exactly 11 ID characters, then nothing or a character no ID holds.
     const leadingId = (s) => {
-      const m = /^[a-zA-Z0-9_-]+/.exec(s || "");
+      const m = /^[a-zA-Z0-9_-]+/.exec(s);
       return m && m[0].length === 11 ? m[0] : null;
     };
+    // The ID the first v= pair of a raw query string starts with. Pairs are
+    // split on "&" only and the value is read as written, so "v=ID;t=3" and
+    // "v=ID%" still name ID.
+    const idParam = (query) => {
+      for (const pair of query.split("&")) {
+        if (pair.startsWith("v=")) return leadingId(pair.slice(2));
+      }
+      return null;
+    };
+    const cut = (s, sep) => {
+      const i = s.indexOf(sep);
+      return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)];
+    };
 
-    let id = leadingId(u.searchParams.get("v"));
-    if (id) return id;
-    // The old "#!v=ID" and "#v=ID" forms.
-    id = leadingId(new URLSearchParams(u.hash.replace(/^#!?/, "")).get("v"));
-    if (id) return id;
-    if (short) return leadingId(u.pathname.slice(1));
-    for (const prefix of ["/live/", "/shorts/", "/embed/", "/v/"]) {
-      if (u.pathname.startsWith(prefix)) return leadingId(u.pathname.slice(prefix.length));
+    // The ID of s when all of s is one YouTube link.
+    const fromLink = (s) => {
+      if (httpScheme.test(s)) s = s.slice(s.indexOf("://") + 3);
+      else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) return null;
+      else if (s.startsWith("//")) s = s.slice(2);
+
+      // host[:port], after any user info, up to the path, query or fragment.
+      const end = s.search(/[/?#]/);
+      let authority = end < 0 ? s : s.slice(0, end);
+      let rest = end < 0 ? "" : s.slice(end);
+      authority = authority.slice(authority.lastIndexOf("@") + 1);
+      let host = authority;
+      const colon = authority.lastIndexOf(":");
+      if (colon >= 0) {
+        host = authority.slice(0, colon);
+        if (!/^[0-9]*$/.test(authority.slice(colon + 1))) return null;
+      }
+      if (!/^[a-zA-Z0-9.-]*$/.test(host)) return null;
+      host = host.toLowerCase();
+      const isOrUnder = (domain) => host === domain || host.endsWith("." + domain);
+      const short = isOrUnder("youtu.be");
+      if (!short && !isOrUnder("youtube.com") && !isOrUnder("youtube-nocookie.com") && !isOrUnder("youtubekids.com")) {
+        return null;
+      }
+
+      let fragment, path, query;
+      [rest, fragment] = cut(rest, "#");
+      [path, query] = cut(rest, "?");
+      let id = idParam(query);
+      if (id) return id;
+      // The old "#!v=ID" and "#v=ID" forms.
+      id = idParam(fragment.startsWith("!") ? fragment.slice(1) : fragment);
+      if (id) return id;
+      if (short) return leadingId(path.startsWith("/") ? path.slice(1) : path);
+      for (const prefix of ["/live/", "/shorts/", "/embed/", "/v/"]) {
+        if (path.startsWith(prefix)) return leadingId(path.slice(prefix.length));
+      }
+      return null;
+    };
+
+    const whole = fromLink(trimmed);
+    if (whole) return whole;
+
+    // The first YouTube link inside other text. A link written without a
+    // scheme counts only at the start or after a character that cannot
+    // continue a host, a path or user info, so
+    // "example.com/youtube.com/watch?v=ID" stays refused.
+    const embedded = /((?:[Hh][Tt][Tt][Pp][Ss]?:\/\/|\/\/)?[A-Za-z0-9.-]+)\/[^ \t\n\v\f\r]*/g;
+    const continuesLink = (i) => {
+      if (i === 0) return false;
+      const c = trimmed.charCodeAt(i - 1);
+      if (c === 0x3a && trimmed.startsWith("//", i)) return true; // another scheme's "://"
+      return c >= 0x80 || /[a-zA-Z0-9_.\/\\@-]/.test(trimmed[i - 1]);
+    };
+    for (let m; (m = embedded.exec(trimmed)); ) {
+      if (httpScheme.test(m[0]) || !continuesLink(m.index)) {
+        const id = fromLink(m[0]);
+        if (id) return id;
+      }
+      // Look again after this link's host: a link inside this one's path
+      // or query ("?u=https://youtu.be/ID") is still found.
+      embedded.lastIndex = m.index + m[1].length + 1;
     }
     return null;
   }
