@@ -223,9 +223,11 @@ test("the focused Archived row survives a redraw and follows its job", { skip },
   key(h, "ArrowDown");
   key(h, "ArrowDown"); // a1
   h.app.handleMessage({ type: "job_deleted", payload: { id: "a0" } });
+  h.flushRaf(); // the redraw waits for a frame
   assert.equal(h.app.focusedArchivedIndex, 0);
   assert.ok(h.el("archived-container").querySelector('[data-job-id="a1"]').hasAttribute("data-focused"));
   h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
+  h.flushRaf();
   assert.equal(h.app.focusedArchivedIndex, -1, "a deleted focused row leaves no focus");
 });
 
@@ -321,6 +323,7 @@ test("a redraw does not rewrite the failure line", { skip }, async () => {
   assert.match(text.textContent, /Could not refresh/);
   h.app.renderArchivedJobs();
   h.app.handleMessage({ type: "job_deleted", payload: { id: "a2" } });
+  h.flushRaf();
   assert.equal(text.firstChild, node, "the alert text was written again");
 });
 
@@ -382,6 +385,7 @@ test("one Archived row is a tab stop: the first, then the highlighted one", { sk
 
   // The highlighted row leaves: the first row is the tab stop again.
   h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
+  h.flushRaf();
   assert.deepEqual(tabStops(h), ["a0"]);
 });
 
@@ -426,4 +430,43 @@ test("Show more that draws the last page moves focus to the first new row", { sk
   assert.ok(!shown(h.el("archived-more")));
   assert.equal(h.document.activeElement?.dataset.jobId, "a400");
   assert.match(h.el("archived-more-count").textContent, /Showing 450 of 450/);
+});
+
+// A batch delete of K rows sends K job_deleted frames. Each used to rebuild
+// every drawn card; now the rows leave the list at once and the cards are
+// redrawn once, in the next frame (sweep 2, dashboard-4).
+//
+// MUTANT: _removeArchivedJob calling renderArchivedJobs directly, as it did —
+// three redraws for three frames.
+test("rows deleted in one burst redraw the Archived cards once", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(5) });
+  await h.app.fetchArchivedJobs();
+  let redraws = 0;
+  const render = h.app.renderArchivedJobs.bind(h.app);
+  h.app.renderArchivedJobs = () => { redraws++; render(); };
+
+  for (const id of ["a0", "a2", "a4"]) h.app.handleMessage({ type: "job_deleted", payload: { id } });
+  assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["a1", "a3"], "the rows leave the list at once");
+  assert.equal(redraws, 0, "a deleted row redrew the cards before the frame");
+  h.flushRaf();
+  assert.equal(redraws, 1);
+  assert.deepEqual(cards(h).map((c) => c.dataset.jobId), ["a1", "a3"]);
+
+  // A redraw from elsewhere before the frame leaves the frame nothing to do.
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
+  h.app.renderArchivedJobs();
+  h.flushRaf();
+  assert.equal(redraws, 2, "the waiting frame redrew cards that were already current");
+});
+
+// A hidden tab gets no animation frames, so the redraw cannot wait for one.
+//
+// MUTANT: _scheduleArchivedRender without its document.hidden arm — the cards
+// of a background tab keep the deleted row until something else redraws them.
+test("a row deleted while the tab is hidden is redrawn at once", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(3) });
+  await h.app.fetchArchivedJobs();
+  Object.defineProperty(h.document, "hidden", { value: true, configurable: true });
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
+  assert.deepEqual(cards(h).map((c) => c.dataset.jobId), ["a0", "a2"]);
 });

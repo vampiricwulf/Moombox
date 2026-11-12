@@ -171,3 +171,50 @@ test("typing a filter that is already a chip does not add it twice", { skip }, a
   input.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   assert.equal(h.app.filterBar.tasksFilterTokens.length, 1, JSON.stringify(h.app.filterBar.tasksFilterTokens));
 });
+
+// A batch of per-job requests showed nothing until its closing toast, and a
+// second click while it ran was dropped without a word. The bar now counts
+// the answered requests and its action buttons are off until the batch ends
+// (sweep 2, dashboard-4).
+//
+// MUTANTS: the progress counted from nothing (the line stays "0 of 3");
+// updateBatchActionBar not disabling the buttons; _batchProgress not cleared
+// when the batch ends (the buttons stay off for good).
+test("a running batch delete shows its progress and turns the batch buttons off", { skip }, async () => {
+  const held = new Map();
+  const h = await boot({
+    // Answered when the test says so.
+    "DELETE /api/jobs/:id": ({ params }) => new Promise((answer) => {
+      held.set(params.id, () => answer({ success: true }));
+    }),
+  });
+  h.app.jobs = ["e1", "e2", "e3"].map((id) => fin({ id, videoId: id, status: "Error" }));
+  h.app.renderJobs();
+  for (const j of h.app.jobs) h.app._selectedTaskJobs.add(j.id);
+  h.app.updateBatchActionBar();
+  assert.equal(h.el("batch-count").textContent, "3 selected");
+  h.app.showConfirm = async () => true;
+
+  const done = h.app.batchAction("delete");
+  await h.flush();
+  assert.equal(h.el("batch-count").textContent, "Deleting 0 of 3…");
+  assert.equal(h.el("batch-delete").disabled, true, "Delete stayed on while its batch ran");
+  assert.equal(h.el("batch-cancel").disabled, true);
+
+  // A second click is not a second batch.
+  await h.app.batchAction("delete");
+  assert.equal(h.fetchLog.filter((c) => c.method === "DELETE").length, 3);
+
+  held.get("e2")();
+  await h.flush();
+  assert.equal(h.el("batch-count").textContent, "Deleting 1 of 3…");
+  // The row's frame arrives mid-batch; the bar keeps the progress line.
+  h.app.handleMessage({ type: "job_deleted", payload: { id: "e2" } });
+  assert.equal(h.el("batch-count").textContent, "Deleting 1 of 3…");
+
+  held.get("e1")();
+  held.get("e3")();
+  await done;
+  assert.equal(h.el("batch-delete").disabled, false, "the batch ended and Delete stayed off");
+  assert.equal(h.app._selectedTaskJobs.size, 0);
+});

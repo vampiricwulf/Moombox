@@ -23,6 +23,11 @@ const TASK_STATUS_PRIORITY = {
   "Live": 4, "Upcoming": 5, "Queued": 6, "Cancelled": 7, "Finished": 8,
 };
 
+// The batch bar's action buttons, disabled while a per-job batch runs, and
+// the word its progress line opens with for each of those actions.
+const BATCH_ACTION_BUTTON_IDS = ["batch-cancel", "batch-resume", "batch-reinit", "batch-delete", "batch-watched", "batch-unwatched"];
+const BATCH_PROGRESS_VERBS = { cancel: "Cancelling", resume: "Resuming", reinitialize: "Reinitializing", delete: "Deleting" };
+
 /**
  * The dashboard WebSocket's states. _setConnState is the only writer of the
  * status bar's #connection-status. CONNECTING: a socket was created and has
@@ -149,6 +154,13 @@ export class MoomboxApp {
     // True when archivedJobs changed while the Archived panel was hidden —
     // the panel re-renders on activation instead of on every change.
     this._archivedRenderDirty = false;
+    // A redraw of the Archived cards is waiting for the next animation frame
+    // (_scheduleArchivedRender). Cleared by renderArchivedJobs itself, so a
+    // direct redraw in between makes the waiting frame a no-op.
+    this._archivedFramePending = false;
+    // The per-job batch action that is running, as { verb, done, total }, or
+    // null. Written by batchAction only; the batch bar draws it.
+    this._batchProgress = null;
     // Which platforms the status bar was last told have a job parked in
     // COOKIES?. null means "never computed", which is distinct from
     // {youtube:false,twitch:false} — see _syncParkedBadge, where the first
@@ -2735,8 +2747,30 @@ export class MoomboxApp {
     const idx = this.archivedJobs.findIndex(j => j.id === id);
     if (idx === -1) return false;
     this.archivedJobs.splice(idx, 1);
-    this.renderArchivedJobs();
+    this._scheduleArchivedRender();
     return true;
+  }
+
+  /**
+   * Redraw the Archived cards once in the next animation frame, however many
+   * rows left the list before it: a batch delete of K rows sends K
+   * job_deleted frames, and a redraw each rebuilt up to 200 cards K times.
+   * Until the frame a card whose row is gone can still be on screen; a click
+   * or key on it looks its row up in archivedJobs and finds nothing to act
+   * on. Redraws at once where no frame would come: a hidden tab (frames are
+   * paused there), or a panel that is not shown (renderArchivedJobs only
+   * marks it dirty).
+   */
+  _scheduleArchivedRender() {
+    if (this._activePanel !== "archived" || document.hidden || typeof requestAnimationFrame !== "function") {
+      this.renderArchivedJobs();
+      return;
+    }
+    if (this._archivedFramePending) return;
+    this._archivedFramePending = true;
+    requestAnimationFrame(() => {
+      if (this._archivedFramePending) this.renderArchivedJobs();
+    });
   }
 
   /**
@@ -2829,6 +2863,7 @@ export class MoomboxApp {
   }
 
   renderArchivedJobs() {
+    this._archivedFramePending = false;
     // Defer DOM work while the Archived panel isn't visible. On a 24/7
     // recorder the archive grows continuously (60s sweep + job updates), and
     // this method rebuilds every drawn archived card via innerHTML — destroying
@@ -4893,8 +4928,18 @@ export class MoomboxApp {
     const bar = document.getElementById("batch-action-bar");
     if (!bar) return;
 
+    // While a batch runs its buttons are off: its targets are already being
+    // acted on, and a second click used to be dropped without a word.
+    const busy = this._batchProgress;
+    for (const id of BATCH_ACTION_BUTTON_IDS) {
+      const btn = document.getElementById(id);
+      if (btn && btn.disabled !== !!busy) btn.disabled = !!busy;
+    }
+
     const count = this._activeSelectionSet().size;
-    if (count === 0) {
+    // The bar stays up for a running batch even once its rows have left the
+    // selection (a deleted row leaves it): it is where the progress shows.
+    if (count === 0 && !busy) {
       if (bar.style.display === "none") return; // already hidden
       bar.classList.remove("visible");
       document.body.classList.remove("batch-bar-active");
@@ -4917,9 +4962,13 @@ export class MoomboxApp {
         ?.querySelectorAll(".video-item.selected").length ?? count;
       notShown = Math.max(0, count - drawnSelected);
     }
-    document.getElementById("batch-count").textContent = notShown > 0
-      ? `${count} selected (${notShown} not shown yet)`
-      : `${count} selected`;
+    if (busy) {
+      this._drawBatchProgress();
+    } else {
+      document.getElementById("batch-count").textContent = notShown > 0
+        ? `${count} selected (${notShown} not shown yet)`
+        : `${count} selected`;
+    }
 
     // Update Select All label with count when filters are active, and on
     // Archived whenever it would select rows that are not drawn.
@@ -4964,6 +5013,15 @@ export class MoomboxApp {
     }
   }
 
+  /** Write the running batch's progress ("Deleting 120 of 2,000…") in the
+   *  batch bar. Only the text: it runs once per answered request. */
+  _drawBatchProgress() {
+    const p = this._batchProgress;
+    const el = document.getElementById("batch-count");
+    if (!p || !el) return;
+    el.textContent = `${p.verb} ${p.done.toLocaleString()} of ${p.total.toLocaleString()}…`;
+  }
+
   // _enterFromControl reports whether a keydown came from a control that
   // handles Enter itself — a button of any kind, a link, a form field.
   _enterFromControl(e) {
@@ -4980,6 +5038,8 @@ export class MoomboxApp {
   }
 
   async batchAction(action) {
+    // One batch at a time: the bar's buttons are disabled while one runs.
+    if (this._batchProgress) return;
     const selectedJobs = this._getSelectedJobs();
     // Strip jobs already being acted on (single-click cancel/resume/etc.
     // immediately followed by a batch op on the same id would otherwise race).
@@ -5092,11 +5152,24 @@ export class MoomboxApp {
       // Per-job API calls. Track each target in _jobActionsInFlight so a
       // concurrent single-click action is gated while the batch runs.
       for (const j of targets) this._jobActionsInFlight.add(j.id);
+      // Say how far it is: a large batch takes a while, and the bar showed
+      // nothing until the closing toast. Counted as each request is answered,
+      // whatever the answer.
+      const progress = { verb: BATCH_PROGRESS_VERBS[action], done: 0, total: targets.length };
+      this._batchProgress = progress;
+      this.updateBatchActionBar();
+      const counted = (request) => request.finally(() => {
+        progress.done++;
+        this._drawBatchProgress();
+      });
       try {
-        const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+        const results = await Promise.allSettled(targets.map(j => counted(apiCall(j.id))));
         succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
         failed = targets.length - succeeded;
       } finally {
+        // Before the bar is drawn again below (_clearSelectionUI), which
+        // turns the buttons back on.
+        this._batchProgress = null;
         for (const j of targets) this._jobActionsInFlight.delete(j.id);
       }
     }
