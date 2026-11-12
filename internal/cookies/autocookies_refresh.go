@@ -760,9 +760,9 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		case lostMsg != "":
 			// A loss is something THIS pass observed, so it is recorded
 			// whether or not the pass renewed anything.
-			s.lastError = &lostMsg
+			s.setLastErrorLocked(lostMsg, lastErrorCredential, lost...)
 		case renewed:
-			s.lastError = nil
+			s.clearLastErrorLocked()
 		default:
 			// Withheld for the same reason lastRefresh is. Clearing lastError
 			// is an assertion — "whatever was wrong is not wrong any more" —
@@ -883,7 +883,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			// cause, an empty credential file must never be reported as a
 			// clean no-op.
 			errMsg := cookiesLostMessage(lost)
-			s.setError(errMsg)
+			s.setCredentialError(errMsg, lost...)
 			s.logger.Warn("cookie refresh left no auth cookies on disk",
 				"platforms", strings.Join(lost, ","), "detail", errMsg)
 		case fetchedRows > 0:
@@ -921,7 +921,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			// "nothing happened and nothing was lost".
 			s.logger.Debug("cookie refresh completed with no cookies to verify")
 			s.mu.Lock()
-			s.lastError = nil
+			s.clearLastErrorLocked()
 			s.mu.Unlock()
 		}
 		return result, nil
@@ -974,6 +974,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		[]string{"youtube", "twitch"},
 		map[string]platformAuth{"youtube": postYT, "twitch": postTW})
 	var errMsg string
+	credentialOnly := false
 	switch {
 	case len(restoredPlatforms) > 0 && rollbackWasInconclusive:
 		errMsg = "kept the previous cookies for " + strings.Join(restoredPlatforms, " + ") +
@@ -1022,6 +1023,10 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 			strings.Join(failed, " + "), fetchedRows)
 	default:
 		errMsg = strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
+		// The one arm that is about the credentials alone: every other arm
+		// also reports on the browser profile or on a check that did not
+		// finish, which a later verification of the platform does not disprove.
+		credentialOnly = true
 	}
 	// A platform can be LOST while another is merely rejected, and the
 	// rejection message would otherwise be the only thing said — naming the
@@ -1030,7 +1035,11 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	if len(lost) > 0 {
 		errMsg = cookiesLostMessage(lost) + ". " + errMsg
 	}
-	s.setError(errMsg)
+	if credentialOnly {
+		s.setCredentialError(errMsg, append(append([]string{}, failed...), lost...)...)
+	} else {
+		s.setError(errMsg)
+	}
 	s.logger.Warn("refresh completed but auth verification failed",
 		"platforms", strings.Join(failed, ","), "lost", strings.Join(lost, ","), "detail", errMsg)
 	return result, nil

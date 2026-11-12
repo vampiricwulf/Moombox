@@ -455,6 +455,13 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("auth recovered — cleared the re-login flag", "platform", platform)
 			s.resendTUICookieStatus()
 		}
+		// Same reasoning for a "Last cookie error" that says this platform's
+		// credentials were rejected or lost: the re-check has just seen them
+		// work. Messages about the browser refresh or the cookie file stay
+		// (R2-C3).
+		if s.autoCookieSvc != nil && s.autoCookieSvc.ClearCredentialError(platform) {
+			s.log.Info("auth recovered — cleared the last cookie error", "platform", platform)
+		}
 		// A YouTube session that has just come back from not-authenticated
 		// may have left non-member memos behind, and each one suppresses the
 		// only path by which members-only content is discovered at all. The
