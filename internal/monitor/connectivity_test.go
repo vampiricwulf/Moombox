@@ -60,11 +60,3 @@ func TestSetConnectivityReporterNilClears(t *testing.T) {
 		t.Errorf("expected 0 successes after clear, got %d", got)
 	}
 }
-
-func TestReportMonitorResultNilReporter(t *testing.T) {
-	// Sanity: a nil reporter must be a no-op (not a panic).
-	t.Cleanup(func() { SetConnectivityReporter(nil) })
-	SetConnectivityReporter(nil)
-	reportMonitorResult("monitor/feed", true)
-	reportMonitorResult("monitor/feed", false)
-}

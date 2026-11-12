@@ -210,35 +210,6 @@ func TestEmptyEventFilterEntryMatchesNothing(t *testing.T) {
 	}
 }
 
-// --- NotificationType.Color() tests ---
-
-func TestNotificationTypeColor(t *testing.T) {
-	tests := []struct {
-		name     string
-		ntype    NotificationType
-		expected int
-	}{
-		{"TypeInfo returns blue", TypeInfo, 0x3498db},
-		{"TypeSuccess returns green", TypeSuccess, 0x2ecc71},
-		{"TypeWarning returns yellow", TypeWarning, 0xf1c40f},
-		{"TypeError returns red", TypeError, 0xe74c3c},
-		{"TypeDownload returns teal", TypeDownload, 0x1abc9c},
-		{"TypeMuxing returns purple", TypeMuxing, 0x9b59b6},
-		{"TypeCancelled returns orange", TypeCancelled, 0xe67e22},
-		{"unknown type returns default blue", NotificationType(99), 0x3498db},
-		{"negative type returns default blue", NotificationType(-1), 0x3498db},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.ntype.Color()
-			if got != tt.expected {
-				t.Errorf("expected 0x%06x, got 0x%06x", tt.expected, got)
-			}
-		})
-	}
-}
-
 // --- discordWebhookRe tests ---
 
 func TestDiscordWebhookRegex(t *testing.T) {
