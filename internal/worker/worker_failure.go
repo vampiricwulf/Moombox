@@ -365,9 +365,9 @@ func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, next jo
 		AddInline("Staging", staging).
 		AddIf(job.AutoRetryCount > 0, "Automatic Retries",
 			fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+		AddIf(next != jobstate.AutoActionNone, "Next", next.Text()).
 		AddIf(asides > 0, "Set-aside recordings",
 			fmt.Sprintf("%d — Recover to mux them", asides)).
-		AddIf(next != jobstate.AutoActionNone, "Next", next.Text()).
 		Build()
 	w.notifier.Send("Job Failed",
 		fmt.Sprintf("Job failed for: %s", notifications.EscapeMarkdown(job.Title)),
