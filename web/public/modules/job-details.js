@@ -23,9 +23,14 @@ export function stampFactsStatus(job) {
   return job;
 }
 
+/** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
+const JOB_LOG_POLL_MS = 1000;
+
 export class JobDetailsController {
   constructor(app) {
     this.app = app;
+    // The Job Log's re-read timer; set only while the dialog is open.
+    this._jobLogsTimer = null;
   }
 
   /** Wire up the details dialog: action buttons, dismissal cleanup, delegated clicks. */
@@ -71,6 +76,7 @@ export class JobDetailsController {
       // callback, the dialog is already re-opening for a new job. Don't clear.
       const dlg = document.getElementById("details-dialog");
       if (dlg.open) return;
+      this._stopJobLogPolling();
       this.app.selectedJobId = null;
       // Clear content to stop YouTube/Twitch iframe embeds from running in background
       const content = document.getElementById("job-details-content");
@@ -171,6 +177,7 @@ export class JobDetailsController {
     this._factsAskedFor = null;
     this.renderJobDetails(job);
     this.loadJobLogs(job.id);
+    this._startJobLogPolling();
     document.getElementById("details-dialog").show();
     this._fetchStagingFields(job.id);
   }
@@ -1102,7 +1109,57 @@ export class JobDetailsController {
     this.updateDetailsButtons(job);
   }
 
-  async loadJobLogs(jobId) {
+  /**
+   * Re-read the open job's log every second (owner ruling R2-D2), the
+   * cadence of the TUI's O L overlay. Without it the lines were those of the
+   * click: a job that stays Live or Downloading for hours looked calm while
+   * it retried. Runs only while the dialog is open; a hidden browser tab
+   * skips the request.
+   */
+  _startJobLogPolling() {
+    this._stopJobLogPolling();
+    this._jobLogsTimer = setInterval(() => {
+      const jobId = this.app.selectedJobId;
+      if (!jobId) {
+        this._stopJobLogPolling();
+        return;
+      }
+      // One read at a time: a slow answer is waited for, not stacked on.
+      if (document.hidden || this._jobLogsAbort) return;
+      this.loadJobLogs(jobId, { poll: true });
+    }, JOB_LOG_POLL_MS);
+  }
+
+  _stopJobLogPolling() {
+    if (this._jobLogsTimer !== null) {
+      clearInterval(this._jobLogsTimer);
+      this._jobLogsTimer = null;
+    }
+  }
+
+  /**
+   * Write a poll's answer into the Job Log. Nothing is written when the text
+   * is unchanged, or while the operator has text selected in it (replacing
+   * the text would drop the selection; the next poll writes). The view
+   * follows the newest line only when it was already at the bottom, and
+   * otherwise stays where the operator scrolled it.
+   */
+  _writePolledJobLogs(logsEl, text) {
+    if (logsEl.textContent === text) return;
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0 && logsEl.contains(sel.getRangeAt(0).commonAncestorContainer)) return;
+    const top = logsEl.scrollTop;
+    const atBottom = top + logsEl.clientHeight >= logsEl.scrollHeight - 4;
+    logsEl.textContent = text;
+    logsEl.scrollTop = atBottom ? logsEl.scrollHeight : top;
+  }
+
+  /**
+   * Read the job's log into the dialog. `poll` marks the every-second
+   * re-read: it goes through _writePolledJobLogs and, when it fails, leaves
+   * the lines already shown.
+   */
+  async loadJobLogs(jobId, { poll = false } = {}) {
     // Abort any in-flight log fetch (e.g. user switched to a different job)
     if (this._jobLogsAbort) this._jobLogsAbort.abort();
     const abort = new AbortController();
@@ -1122,15 +1179,20 @@ export class JobDetailsController {
       if (this.app.selectedJobId !== jobId || abort.signal.aborted) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
-        logsEl.textContent =
-          Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
+        const text = Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
+        if (poll) this._writePolledJobLogs(logsEl, text);
+        else logsEl.textContent = text;
       }
     } catch (e) {
       if (e.name === "AbortError") return; // Superseded by a new fetch
+      if (poll) return; // the lines already shown stay; the next poll asks again
       console.error("Failed to load job logs:", e);
       if (this.app.selectedJobId !== jobId) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
+    } finally {
+      // Not in flight any more, unless a newer read has taken its place.
+      if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
     }
   }
 
