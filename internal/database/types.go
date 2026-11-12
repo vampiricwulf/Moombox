@@ -359,10 +359,11 @@ type Job struct {
 	// recording's finalize would write over it. The reset moves the path here
 	// instead (the worker's resetFieldsKeepingArchive), which keeps the file
 	// owned by the row, and the new recording's finalize renames it aside
-	// beside itself under the set-aside name "<stem>.restart-<unix ts>.mp4"
-	// (setAsidePriorArchive) and stores that name here. Never replaced, never
-	// deleted by Moombox. Both UIs' job details show it as "Earlier recording
-	// kept: <file>". "" for a job with no such archive.
+	// where it is under the set-aside name "<stem>.restart-<unix ts>.mp4"
+	// (setAsidePriorArchive), with its chat, thumbnail and description, and
+	// stores that name here. Never replaced, never deleted by Moombox. Both
+	// UIs' job details show it as "Earlier file: <name> (kept, not
+	// replaced)". "" for a job with no such archive.
 	PriorOutputFile string `json:"priorOutputFile,omitempty"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
