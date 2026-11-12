@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // TestGapFillSegmentRetryPauses: a VOD segment that fails in passing is tried
@@ -198,3 +200,113 @@ type gapFillConn struct{ online bool }
 
 func (c *gapFillConn) IsOnline() bool                  { return c.online }
 func (c *gapFillConn) OnStateChange(func(bool)) func() { return func() {} }
+
+// TestGapFillMediaPlaylistIsRetried: the VOD's media playlist is fetched with
+// the same pauses a segment is, so a passing failure there does not cost the
+// look (and a step up the three-hour VOD backoff).
+//
+// Mutant: the playlist fetched once (the look ends "could not be read").
+func TestGapFillMediaPlaylistIsRetried(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	fetch := f.filler.fetch
+	fails := 2
+	f.filler.fetch = func(ctx context.Context, url string) ([]byte, error) {
+		if url == "https://vod.example/chunked/index-dvr.m3u8" && fails > 0 {
+			fails--
+			return nil, errors.New("connection reset")
+		}
+		return fetch(ctx, url)
+	}
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+	if out := f.outcome(t); out == nil || out.State != GapFillFilled {
+		t.Fatalf("outcome %+v (plan %+v), want the span filled once the playlist answered", out, f.row(t))
+	}
+}
+
+// TestGapFillCommitFailureIsACutFailure: a look that cut every span and then
+// could not record the parts (the job left Finished while it downloaded)
+// found the VOD complete, so it waits on the cut backoff, not the VOD's.
+//
+// Mutant: the commit failure counted in Attempts.
+func TestGapFillCommitFailureIsACutFailure(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	mux := f.filler.mux
+	f.filler.mux = func(ctx context.Context, ts, out string) error {
+		f.db.UpdateJobFields("tw_1", map[string]any{"status": database.StatusMuxing})
+		return mux(ctx, ts, out)
+	}
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(70*time.Minute))
+	p := f.row(t)
+	if p == nil || p.Attempts != 0 || p.CutFailures != 1 || !strings.Contains(p.LastReason, "could not be recorded") {
+		t.Fatalf("plan %+v, want one cut failure and no attempt counted", p)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(f.dir, "*recovered*")); len(matches) != 0 {
+		t.Errorf("the failed look left %v", matches)
+	}
+}
+
+// TestGapFillLastLookWaitsOutAnUnreportedOutage (owner ruling R2-F1): the
+// look past the deadline settles the plan for good, and the connectivity
+// monitor needs a poll or two to report an outage. A last look whose Twitch
+// request failed outright waits once and asks the monitor again: offline by
+// then, the plan stays due and uncounted; still online, it is settled.
+//
+// Mutants: no second reading (the plan is settled inside the outage's first
+// seconds); the wait taken for a look that reached Twitch (a VOD that is
+// still recording costs every last look 14 s).
+func TestGapFillLastLookWaitsOutAnUnreportedOutage(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	online := true
+	f.filler.online = func() bool { return online }
+	var waits []time.Duration
+	f.filler.pause = func(_ context.Context, d time.Duration) bool { waits = append(waits, d); online = false; return true }
+	down := true
+	f.filler.findVod = func(context.Context, string, time.Time, time.Time) (string, error) {
+		if down {
+			return "", errors.New("dial tcp: no route to host")
+		}
+		return f.vodID, nil
+	}
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	after, _ := f.db.GetGapFill("tw_1")
+	if p := f.row(t); p == nil || p.Attempts != 0 || after.NextCheckAt != row.NextCheckAt {
+		t.Fatalf("plan %+v, want it still due and uncounted after a last look that failed into an outage", p)
+	}
+	if len(waits) != 1 || waits[0] != 14*time.Second {
+		t.Errorf("waits %v, want one of 14 s", waits)
+	}
+
+	// Still online after the wait: the failure was Twitch's, and the window
+	// is final.
+	waits = nil
+	online = true
+	f.filler.pause = func(_ context.Context, d time.Duration) bool { waits = append(waits, d); return true }
+	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	if out := f.outcome(t); out == nil || out.State != GapFillKept || !strings.Contains(out.Reason, "lookup failed") {
+		t.Fatalf("outcome %+v, want the archive kept with the lookup's failure", out)
+	}
+	if len(waits) != 1 {
+		t.Errorf("waits %v, want one", waits)
+	}
+}
+
+// TestGapFillLastLookDoesNotWaitWhenTwitchAnswered: a last look that reached
+// Twitch (the VOD is still recording) is settled without the outage wait.
+func TestGapFillLastLookDoesNotWaitWhenTwitchAnswered(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	f.vodInfo.IsRecording = true
+	waited := 0
+	f.filler.pause = func(context.Context, time.Duration) bool { waited++; return true }
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	if out := f.outcome(t); out == nil || out.State != GapFillKept || waited != 0 {
+		t.Fatalf("outcome %+v after %d waits, want it kept with no wait", out, waited)
+	}
+}

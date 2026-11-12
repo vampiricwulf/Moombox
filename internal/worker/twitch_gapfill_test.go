@@ -514,10 +514,12 @@ func TestGapFillGivesUpAtTheDeadline(t *testing.T) {
 // that could not look inside its 24 hours — Moombox was off, offline, the
 // volume full — is not written off unseen. Its first look past the deadline
 // is a real one, and a VOD that is complete by then is filled. While the
-// device is offline that look is not taken, and the plan waits for it.
+// device is offline, or the output volume critically full, that look is not
+// taken, and the plan waits for it.
 //
 // Mutants: the plan settled as kept before the look (nothing is filled); the
-// plan settled while offline (no look was ever taken).
+// plan settled while offline, or while the volume is full (no look was ever
+// taken).
 func TestGapFillTakesOneLastLookPastTheDeadline(t *testing.T) {
 	f := newGapFillFixture(t)
 	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
@@ -532,6 +534,18 @@ func TestGapFillTakesOneLastLookPastTheDeadline(t *testing.T) {
 	}
 
 	online = true
+	full := true
+	f.filler.diskCritical = func() bool { return full }
+	f.filler.step(context.Background(), *row, gapStart.Add(72*time.Hour+30*time.Minute))
+	p := f.row(t)
+	if p == nil || f.fetched != 0 || p.Attempts != 0 || p.LastReason != "the output volume is critically full" {
+		t.Fatalf("plan %+v after %d fetches, want it still pending, uncounted and saying why, and no look taken on a full volume", p, f.fetched)
+	}
+	if g, _ := f.db.GetGapFill("tw_1"); g == nil || g.NextCheckAt != row.NextCheckAt {
+		t.Fatalf("row %+v, want it still due at %s", g, row.NextCheckAt)
+	}
+
+	full = false
 	f.filler.step(context.Background(), *row, gapStart.Add(73*time.Hour))
 	if out := f.outcome(t); out == nil || out.State != GapFillFilled || out.Spans != 1 {
 		t.Fatalf("outcome %+v, want the span filled at the look past the deadline", out)
