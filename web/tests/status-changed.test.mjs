@@ -95,3 +95,81 @@ test("a status answer that is no longer the newest read's is dropped", { skip },
   await older;
   assert.doesNotMatch(warnings(h), /sidecar down/, "the late answer of the older read was drawn");
 });
+
+// The frame's read takes only what the frame is about. Mutant: the frame
+// running loadStatus — its snapshot, fetched before an admission_holds frame
+// arrived, is written over that frame's newer holds.
+test("a status_changed read does not write over state that has frames of its own", { skip }, async () => {
+  const held = heldStatus({});
+  const h = await harness.makeApp({ routes: { "GET /api/status": held.route } });
+  nudge(h);
+  await settle(h);
+  const newer = { diskCritical: true };
+  h.app.handleMessage({ type: "admission_holds", payload: newer });
+  held.pending.shift()({ admissionHolds: { diskCritical: false }, botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 }, activePlatforms: { youtube: true } });
+  await settle(h);
+  assert.match(warnings(h), /sidecar down/, "the frame's read was not applied at all");
+  assert.equal(h.app.admissionHolds, newer, "the read's older snapshot replaced the frame's holds");
+});
+
+// Mutant: Recheck's answer not taking a number — the frame's read, asked for
+// before the recheck and answered after it, draws its older verdict over the
+// recheck's.
+test("a status read in flight does not draw over a recheck that answered meanwhile", { skip }, async () => {
+  const held = heldStatus({});
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/status": held.route,
+      "POST /api/cookies/recheck": () => ({
+        success: true,
+        activePlatforms: { youtube: true },
+        cookieStatus: { checked: true, isAuthenticated: true },
+      }),
+    },
+  });
+  nudge(h);
+  await settle(h);
+  await h.app.recheckCookies();
+  const fromRecheck = h.app.cookieStatus;
+  held.pending.shift()({ activePlatforms: { youtube: true }, cookieStatus: { checked: true, isAuthenticated: false } });
+  await settle(h);
+  assert.equal(h.app.cookieStatus, fromRecheck);
+});
+
+// Mutant: no deadline — a read that never settles holds the busy latch, and
+// every later frame is only queued behind it for the life of the tab.
+test("a status read that never answers is given up, and later frames read again", { skip }, async () => {
+  const aborted = [];
+  const h = await harness.makeApp({ routes: { "GET /api/status": () => ({}) } });
+  const realFetch = h.window.fetch;
+  // The harness's fetch ignores an abort signal; a browser's rejects on it.
+  const hang = (url, opts) => new Promise((_, reject) => {
+    opts.signal.addEventListener("abort", () => { aborted.push(url); reject(new DOMException("aborted", "AbortError")); });
+  });
+  globalThis.fetch = h.window.fetch = hang;
+  nudge(h);
+  await settle(h);
+  h.advance(15000);
+  await settle(h);
+  assert.equal(aborted.length, 1, "the hung read was not given up");
+
+  globalThis.fetch = h.window.fetch = realFetch;
+  const before = reads(h);
+  nudge(h);
+  await settle(h);
+  assert.equal(reads(h) - before, 1, "the frame after a given-up read did not read");
+});
+
+// Mutant: the toast on every status load — each cookie or reconnect read
+// while Settings holds unsaved edits stacks another copy.
+test("the reload-after-saving toast is shown once per version", { skip }, async () => {
+  let version = "1.0.0";
+  const h = await harness.makeApp({ routes: { "GET /api/status": () => ({ version }) } });
+  h.app.settings.isDirty = () => true;
+  version = "1.0.1";
+  const toasts = () => [...h.document.querySelectorAll("sl-alert")].filter((a) => /was updated to v1.0.1/.test(a.textContent)).length;
+  await h.app.loadStatus();
+  await h.app.loadStatus();
+  await settle(h);
+  assert.equal(toasts(), 1);
+});

@@ -735,24 +735,59 @@ export class MoomboxApp {
     }
   }
 
+  /**
+   * GET /api/status, given up after 15 s: fetch has no timeout of its own,
+   * and a read that never settles (a stalled proxy, a laptop back from sleep)
+   * would hold onStatusChanged's busy latch for the life of the tab.
+   * Resolves the parsed body, or null for a non-ok answer; rejects when the
+   * server cannot be reached or the deadline passes.
+   */
+  async _fetchStatus() {
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), 15000);
+    try {
+      const response = await fetch("/api/status", { signal: abort.signal });
+      return response.ok ? await response.json() : null;
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
+
+  /**
+   * The cookie, re-login and sidecar fields have several writers: loadStatus,
+   * the status_changed read (_loadAuthStatus), the first-check poll
+   * (_pollCookieCheck) and the answers of Recheck and Refresh. Each takes the
+   * next number here; a read applies its answer only while its number is
+   * still the newest, so an older read never draws over a newer answer.
+   */
+  _nextAuthGen() {
+    return (this._authGen = (this._authGen || 0) + 1);
+  }
+
+  /** The auth half of a status answer: what a status_changed frame is about. */
+  _applyAuthStatus(status) {
+    this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
+    this.cookieStatus = status.cookieStatus;
+    this.twitchAuthStatus = status.twitchAuthStatus;
+    this.activePlatforms = status.activePlatforms || {};
+    // Tri-state on purpose. `null` means the server published nothing —
+    // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
+    // as a fault; only an explicit `healthy: false` raises the warning.
+    this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
+  }
+
   async loadStatus() {
     // Each read takes the next number and its answer is applied only while
     // that number is still the newest: of two reads that overlap, the one
     // asked for first can answer last, with the older status.
     const gen = (this._statusGen = (this._statusGen || 0) + 1);
+    const authGen = this._nextAuthGen();
     try {
-      const response = await fetch("/api/status");
-      if (response.ok) {
-        const status = await response.json();
+      const status = await this._fetchStatus();
+      if (status) {
         if (gen !== this._statusGen) return;
-        this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
-        this.cookieStatus = status.cookieStatus;
-        this.twitchAuthStatus = status.twitchAuthStatus;
-        this.activePlatforms = status.activePlatforms || {};
-        // Tri-state on purpose. `null` means the server published nothing —
-        // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
-        // as a fault; only an explicit `healthy: false` raises the warning.
-        this.sidecarHealthy = status.botguardSidecar ? status.botguardSidecar.healthy === true : null;
+        // Skipped when another writer of these fields answered meanwhile.
+        if (authGen === this._authGen) this._applyAuthStatus(status);
         // The server's zone, which recordings are named in: the Settings
         // template example renders its date there (renderTemplatePreview).
         // The config may have drawn it already, with the browser's.
@@ -768,7 +803,12 @@ export class MoomboxApp {
             // unsaved settings edits: defer (retry on the next status load)
             // and tell the user instead of discarding their changes.
             if (this.settings?.isDirty()) {
-              this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
+              // Said once per version: this branch runs again on every
+              // status load until the settings are saved.
+              if (this._updateToastShownFor !== status.version) {
+                this._updateToastShownFor = status.version;
+                this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
+              }
             } else {
               window.location.reload();
               return;
@@ -805,7 +845,9 @@ export class MoomboxApp {
    * or the sidecar's health changed. The frame carries nothing; the status is
    * read again, so the badges are only ever drawn from an answer this tab
    * asked for. One read is in flight at a time, and frames that arrive during
-   * it ask for one more after it, however many they were.
+   * it ask for one more after it, however many they were. Only the fields
+   * the frame is about are taken from the answer (_loadAuthStatus): the rest
+   * of the status has its own frames, which this read could be older than.
    */
   async onStatusChanged() {
     if (this._statusNudgeBusy) {
@@ -816,10 +858,24 @@ export class MoomboxApp {
     try {
       do {
         this._statusNudgeAgain = false;
-        await this.loadStatus();
+        await this._loadAuthStatus();
       } while (this._statusNudgeAgain);
     } finally {
       this._statusNudgeBusy = false;
+    }
+  }
+
+  /** Read the status and apply its auth half only, unless a newer writer answered first. */
+  async _loadAuthStatus() {
+    const authGen = this._nextAuthGen();
+    try {
+      const status = await this._fetchStatus();
+      if (!status || authGen !== this._authGen) return;
+      this._applyAuthStatus(status);
+      this.updateStatusBar();
+    } catch (e) {
+      // Unreachable or too slow: the reconnect's status load, or the next
+      // frame, reads again.
     }
   }
 
@@ -831,6 +887,7 @@ export class MoomboxApp {
       const response = await fetch("/api/cookies/recheck", { method: "POST" });
       if (response.ok) {
         const data = await response.json();
+        this._nextAuthGen(); // a status read still in flight is older than this answer
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         this.cookieStatus = data.cookieStatus;
         this.twitchAuthStatus = data.twitchAuthStatus;
@@ -888,6 +945,7 @@ export class MoomboxApp {
         this.config?.cookies?.acquisition,
       );
       if (response.ok && !data.error) {
+        this._nextAuthGen(); // a status read still in flight is older than this answer
         if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
         if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
@@ -1187,10 +1245,10 @@ export class MoomboxApp {
       this._cookieCheckTimer = null;
       // Only the cookie keys are taken: loadStatus also acts on the version
       // and the zone, which this poll has no business repeating.
+      const authGen = this._nextAuthGen();
       try {
-        const response = await fetch("/api/status");
-        if (response.ok) {
-          const status = await response.json();
+        const status = await this._fetchStatus();
+        if (status && authGen === this._authGen) {
           this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
           this.cookieStatus = status.cookieStatus;
           this.twitchAuthStatus = status.twitchAuthStatus;
