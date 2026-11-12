@@ -4,57 +4,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/vampiricwulf/Moombox/internal/config"
 )
-
-// -log-level is a one-off diagnostic. Writing it into cfg.Logs.LogLevel (as
-// initServices did) made the boot auto-persist, the password auto-hash
-// Store.Update and every later UI save write it to disk, so a single
-// `-log-level=debug` run permanently changed the configured level (CORE-10).
-//
-// Mutant: restoring `cfg.Logs.LogLevel = logLevelOverride` — the saved file
-// reads DEBUG.
-func TestLogLevelOverrideNeverReachesDisk(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[logs]\nlog_level = \"INFO\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := config.NewStore(cfg, path)
-
-	// The boot sequence initServices runs, with the override applied the way
-	// the fix applies it: to the logger's level only.
-	level := effectiveLogLevel(cfg.Logs.LogLevel, "DEBUG")
-	if level != "DEBUG" {
-		t.Fatalf("effectiveLogLevel = %q, want the override DEBUG", level)
-	}
-	if err := store.SaveLocked(); err != nil {
-		t.Fatalf("SaveLocked: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(strings.ToUpper(string(data)), "DEBUG") {
-		t.Errorf("the override reached disk:\n%s", data)
-	}
-	// The same struct the store just wrote is what every later saver holds,
-	// so the configured level has to have survived the boot untouched.
-	if cfg.Logs.LogLevel != "INFO" {
-		t.Errorf("cfg.Logs.LogLevel = %q, want the configured INFO", cfg.Logs.LogLevel)
-	}
-}
 
 // The helper only holds the rule if the boot path actually uses it that way.
 // TestBootKeepsTheLogLevelOverrideOutOfTheConfigFile runs the boot's config
