@@ -42,17 +42,29 @@ const importPath = "/api/import"
 //   - A handler that returns without finishing the body leaves the deadline
 //     armed, so net/http's drain is bounded. The server replaces it with the
 //     idle deadline before it waits for the next request.
-//   - A WebSocket upgrade is left alone: the socket outlives any deadline
-//     set here.
+//   - A real WebSocket upgrade is a GET with no body, so the first rule
+//     already leaves it without a deadline; the socket outlives the request
+//     and a deadline set here would cut it. A request that carries the
+//     Upgrade header AND a body is not a handshake: it is refused here with
+//     400, deadline armed, and never reaches the upgrade handler. Skipping
+//     the deadline on the header alone let any peer opt out of it, and
+//     hijacking a connection with a deadline armed would carry the deadline
+//     onto the socket.
 func bodyReadDeadline(timeout time.Duration, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ContentLength == 0 || r.Body == nil || r.Body == http.NoBody ||
-			strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		if r.ContentLength == 0 || r.Body == nil || r.Body == http.NoBody {
 			next.ServeHTTP(w, r)
 			return
 		}
 		rc := http.NewResponseController(w)
-		if err := rc.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		err := rc.SetReadDeadline(time.Now().Add(timeout))
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"a WebSocket upgrade must not carry a request body"}`))
+			return
+		}
+		if err != nil {
 			// A writer that cannot reach its connection (a test recorder):
 			// nothing to bound.
 			next.ServeHTTP(w, r)

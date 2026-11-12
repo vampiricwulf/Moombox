@@ -323,7 +323,8 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	// Use a detached context: the request context (r.Context()) ends when this
 	// handler returns, and must not take the socket with it. The server sets
-	// no ReadTimeout, and bodyReadDeadline leaves upgrades alone.
+	// no ReadTimeout, and bodyReadDeadline sets no deadline on an upgrade: it
+	// has no body, and one that claims a body is refused before it gets here.
 	// The connection lifetime is managed by pingPump/readPump instead.
 	ctx, cancel := context.WithCancel(context.Background())
 	client = &wsClient{
