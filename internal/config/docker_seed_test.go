@@ -13,12 +13,13 @@ import (
 )
 
 // The Docker image's config seed and its guidance live in a shell heredoc
-// (docker/entrypoint.sh), which nothing in CI runs: ci.yml never builds or
-// starts the image, so a typo in the seed — `network_acess = "lan"` leaves
-// every new install's dashboard bound to 127.0.0.1 and unreachable through
-// the published port, while the healthcheck, which connects from inside,
-// stays green — passed every suite. These tests read the heredocs out of the
-// file the image copies.
+// (docker/entrypoint.sh), which no push or pull request runs: ci.yml never
+// builds or starts the image (the release and its dry run start it once, and
+// check only that the two files were written, not what they say), so a typo
+// in the seed — `network_acess = "lan"` leaves every new install's dashboard
+// bound to 127.0.0.1 and unreachable through the published port, while the
+// healthcheck, which connects from inside, stays green — passed every suite.
+// These tests read the heredocs out of the file the image copies.
 
 // entrypointPath is docker/entrypoint.sh, from this package's directory.
 var entrypointPath = filepath.Join("..", "..", "docker", "entrypoint.sh")
