@@ -402,7 +402,7 @@ The kept `.failed` file is swept by `CleanupOldBinary` at the next boot's first-
 
 | Scenario | Behavior |
 |----------|----------|
-| GitHub API unreachable | Error returned, no update attempted |
+| GitHub API unreachable | Error returned, no update attempted. The automatic check tries again after 15 minutes and after an hour, then at the next daily check (`runUpdateCheckLoop`) |
 | Running on a platform `releaseAssetMap` does not list | Error returned ("auto-update unsupported on <os>/<arch>") |
 | No binary asset for this platform in the release | Error returned ("no <asset> asset found in release <tag>", e.g. "no moombox-linux-arm64 asset found in release v2.8.10") |
 | No `.sig` asset in release | Error returned ("no signature file found") |

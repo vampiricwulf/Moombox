@@ -388,7 +388,7 @@
 
 # ─── Updates ────────────────────────────────────────────────────────────────
 # [updates]
-# auto_check_updates = true                  # Check GitHub for a new version on startup and every 24 hours.
+# auto_check_updates = true                  # Check GitHub for a new version on startup and every 24 hours (a failed check is retried after 15 minutes and after an hour).
 
 # ─── Connectivity ───────────────────────────────────────────────────────────
 # [connectivity]

@@ -584,7 +584,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}
 
 	// Auto-update check: initial check + daily ticker, plus a check within a
-	// minute of the toggle turning on (runUpdateCheckLoop). The goroutine runs
+	// minute of the toggle turning on (runUpdateCheckLoop). A failed check is
+	// tried again after 15 minutes and then an hour, and a check due while the
+	// connectivity monitor reports offline waits for it to report online (at
+	// most updateCheckOfflineGrace). The goroutine runs
 	// whenever the updater exists and re-reads auto_check_updates every time
 	// — previously the flag was consulted once at boot, so disabling checks
 	// (the dismiss route / settings toggle) couldn't stop an armed ticker
@@ -606,9 +609,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// One notification per pending version, not one per tick —
 			// state lives here because this goroutine is the only caller.
 			var lastNotifiedTag string
-			runUpdateCheckLoop(ctx, checkEnabled, func() {
-				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
+			runUpdateCheckLoop(ctx, checkEnabled, func() bool {
+				return checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
+			}, updateCheckTiming{
+				initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute,
+				retry: updateCheckRetry, online: s.connMon.IsOnline, offlineGrace: updateCheckOfflineGrace,
+			})
 		}()
 	}
 

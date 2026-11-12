@@ -165,7 +165,27 @@ type updateCheckTiming struct {
 	initialDelay time.Duration // before the boot check, so it does not slow startup
 	period       time.Duration // between scheduled checks
 	poll         time.Duration // how often the toggle is re-read for a false→true flip
+	// retry is the wait before each further try after a failed check; when
+	// it is used up the next try is the next scheduled check. Empty: no retry.
+	retry []time.Duration
+	// online reports whether the connectivity monitor calls the network up
+	// (nil: always). A check that falls due while it says no is held, without
+	// a request or a Warn, and made at the first poll that finds it up, or
+	// after offlineGrace whatever it says: the monitor can be wrong, and a
+	// wrong one must not stop update checks for good.
+	online       func() bool
+	offlineGrace time.Duration
 }
+
+// updateCheckRetry is the production ladder after a failed automatic check
+// (a boot before the network is up, one 403 or 429 from GitHub): 15 minutes,
+// then an hour, then the normal daily check. A failing day costs two more
+// unauthenticated GitHub requests.
+var updateCheckRetry = []time.Duration{15 * time.Minute, time.Hour}
+
+// updateCheckOfflineGrace is how long a due check waits for the connectivity
+// monitor to report online before it is made anyway.
+const updateCheckOfflineGrace = 10 * time.Minute
 
 // runUpdateCheckLoop runs the auto-update check: once shortly after boot, then
 // every period, each only while enabled() — re-read every time, so disabling
@@ -176,16 +196,58 @@ type updateCheckTiming struct {
 // covers every writer of the flag — the web Settings save
 // (config_routes.go) and the TUI's — and any added later. (The dismiss route
 // is not one: it records SkippedVersion and leaves the toggle alone.)
+// check reports whether the check got an answer. A failed one is tried again
+// on t.retry, the same day, rather than at the next daily tick; a check due
+// while t.online says the network is down is held for the poll that finds it
+// up (see updateCheckTiming). Only this schedule knows about either: the
+// check itself, and everything an update does after it, is unchanged.
 // Returns when ctx ends.
-func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), t updateCheckTiming) {
+func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func() bool, t updateCheckTiming) {
 	select {
 	case <-time.After(t.initialDelay):
 	case <-ctx.Done():
 		return
 	}
+	var (
+		held      bool             // a due check is waiting for the network
+		heldSince time.Time        // when that check fell due
+		retries   int              // rungs of t.retry used since the last scheduled check
+		retryT    *time.Timer      // armed after a failed check
+		retryC    <-chan time.Time // retryT.C, nil while not armed
+	)
+	stopRetry := func() {
+		if retryT != nil {
+			retryT.Stop()
+		}
+		retryC = nil
+	}
+	defer stopRetry()
+	// attempt makes the check that is due, or holds it while offline.
+	attempt := func() {
+		if t.online != nil && !t.online() && time.Since(heldSince) < t.offlineGrace {
+			held = true
+			return
+		}
+		held = false
+		stopRetry()
+		if check() {
+			retries = 0
+			return
+		}
+		if retries < len(t.retry) {
+			retryT = time.NewTimer(t.retry[retries])
+			retryC = retryT.C
+			retries++
+		}
+	}
+	// due starts a check that has just fallen due.
+	due := func() {
+		heldSince = time.Now()
+		attempt()
+	}
 	wasEnabled := enabled()
 	if wasEnabled {
-		check()
+		due()
 	}
 	ticker := time.NewTicker(t.period)
 	defer ticker.Stop()
@@ -196,13 +258,28 @@ func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			retries = 0 // a scheduled check starts the ladder afresh
 			if wasEnabled = enabled(); wasEnabled {
-				check()
+				due()
+			}
+		case <-retryC:
+			retryC = nil
+			if wasEnabled = enabled(); wasEnabled {
+				due()
 			}
 		case <-poll.C:
 			on := enabled()
-			if on && !wasEnabled {
-				check()
+			switch {
+			case !on:
+				// Turned off: nothing is owed, held or to be retried.
+				held = false
+				retries = 0
+				stopRetry()
+			case !wasEnabled:
+				retries = 0
+				due()
+			case held:
+				attempt()
 			}
 			wasEnabled = on
 		}
@@ -240,6 +317,9 @@ var checkForUpdate = (*updater.Updater).CheckForUpdate
 // effect. lastNotifiedTag (single check-goroutine state) suppresses the
 // daily re-ping: one notification per NEW version, not one per 24h tick
 // while the same update sits pending.
+//
+// It reports whether the check got an answer; false only for a failed check
+// (not one cut short by shutdown), which runUpdateCheckLoop tries again.
 func checkAndBroadcastUpdate(
 	ctx context.Context,
 	upd *updater.Updater,
@@ -249,17 +329,17 @@ func checkAndBroadcastUpdate(
 	log *logger.Logger,
 	configStore *config.Store,
 	lastNotifiedTag *string,
-) {
+) bool {
 	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
 	release, err := checkForUpdate(upd, ctx)
 	if err != nil {
 		// A check cut short by shutdown is not a failure worth a warning.
 		if ctx.Err() != nil {
 			log.Debug("[Updater] Check cancelled", slog.String("error", err.Error()))
-			return
+			return true
 		}
 		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
-		return
+		return false
 	}
 	if release == nil {
 		// Already up to date — and so a release still pending names one that
@@ -267,7 +347,7 @@ func checkAndBroadcastUpdate(
 		if tag := routes.ClearPendingUpdate(seen); tag != "" {
 			announceUpdateCleared(wsHub, tuiCh, tag)
 		}
-		return
+		return true
 	}
 
 	var enabled bool
@@ -277,7 +357,7 @@ func checkAndBroadcastUpdate(
 		skipped = c.Updates.SkippedVersion
 	})
 	if !enabled {
-		return // disabled while the check was in flight
+		return true // disabled while the check was in flight
 	}
 
 	if release.TagName == skipped {
@@ -287,7 +367,7 @@ func checkAndBroadcastUpdate(
 		// operator's explicit override is the manual "Check for updates"
 		// button (POST /api/update/check), which stores unconditionally.
 		log.Debug("[Updater] Suppressing user-skipped version", slog.String("tag", release.TagName))
-		return
+		return true
 	}
 
 	routes.SharedUpdateInfo.Store(release)
@@ -303,7 +383,7 @@ func checkAndBroadcastUpdate(
 	}
 
 	if *lastNotifiedTag == release.TagName {
-		return // already pinged the operator about this exact version
+		return true // already pinged the operator about this exact version
 	}
 	if notifyMgr.HasTargets() {
 		// Link the embed title to the GitHub release page and carry the
@@ -320,6 +400,7 @@ func checkAndBroadcastUpdate(
 		)
 	}
 	*lastNotifiedTag = release.TagName
+	return true
 }
 
 // filterJobsByAge removes finished jobs older than hide_finished_age_days from
