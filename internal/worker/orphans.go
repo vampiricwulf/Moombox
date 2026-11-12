@@ -676,8 +676,9 @@ func trimDirsOf(job *database.Job, absOutputDir string) []string {
 // otherwise; so that is the first base it resolves against. A job carries an
 // output_directory far more often than an override implies: the monitor and
 // an import store the global directory there at creation when the channel has
-// none of its own (resolveOutputDir, cmd/moombox), and buildJobContext writes
-// under it from then on. The file was written beside the job's output, or
+// none of its own (resolveOutputDir, cmd/moombox), buildJobContext brings a
+// monitor's row up to the current settings when its download starts
+// (output_dir.go), and writes under that from then on. The file was written beside the job's output, or
 // beside the part the range began in, so those spellings count too.
 //
 // The current global directory is a candidate as well, added to those rather

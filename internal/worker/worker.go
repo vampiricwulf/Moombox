@@ -2164,8 +2164,10 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgProgressMS                            int
 		cfgPrefer60, cfgChat, cfgPreferHDR       bool
 		cfgInterruptionTimeout                   config.FlexDuration
+		channelOutputDir                         string
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
+		channelOutputDir = channelOutputOverride(c.Channels, job)
 		cfgOutputDir = c.Paths.OutputDirectory
 		cfgStagingDir = c.Paths.EffectiveStagingDir()
 		cfgTemplate = c.Downloader.OutputTemplate
@@ -2178,6 +2180,22 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgProgressMS = c.Downloader.ProgressIntervalMS
 		cfgInterruptionTimeout = c.Downloader.InterruptionTimeout
 	})
+
+	var firstPart string
+	hasParts := false
+	if w.db != nil {
+		if segs, err := w.db.GetSegments(job.ID); err != nil {
+			hasParts = true // unknown: the row's directory stays as it is
+		} else if len(segs) > 0 {
+			firstPart = segs[0].FilePath
+			hasParts = true
+		}
+	}
+
+	// A monitor-detected row that has not started takes the directory the
+	// settings name now, and keeps it from here on (owner ruling R2-X1,
+	// output_dir.go).
+	w.settleOutputDirectory(job, hasParts, cfgOutputDir, channelOutputDir)
 
 	outputDir := cfgOutputDir
 	if job.OutputDirectory != "" {
@@ -2216,13 +2234,6 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	if filename == "" {
 		filename = job.VideoID
 	}
-	var firstPart string
-	if w.db != nil {
-		if segs, err := w.db.GetSegments(job.ID); err == nil && len(segs) > 0 {
-			firstPart = segs[0].FilePath
-		}
-	}
-
 	return &JobContext{
 		Job: job,
 		DB:  w.db,
