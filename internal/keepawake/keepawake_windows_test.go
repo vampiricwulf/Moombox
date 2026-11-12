@@ -2,7 +2,10 @@
 
 package keepawake
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestHoldSetsAndClearsTheStateOnOneThread: SetThreadExecutionState answers
 // with the state the CALLING THREAD had before the call, so the answers show
@@ -43,5 +46,34 @@ func TestHoldSetsAndClearsTheStateOnOneThread(t *testing.T) {
 	h.Close()
 	if h.Hold(true) {
 		t.Error("Hold reported success after Close")
+	}
+}
+
+// TestAPanicOnTheKeepAwakeThreadRefusesInsteadOfHanging: Hold is called under
+// the controller's lock from the database's job callbacks, so a request the
+// dead thread will never answer has to come back refused. Before, the request
+// in flight waited for its answer forever and every later one blocked on the
+// send, each holding the Holder's lock.
+//
+// Mutants: do not close dead in run's defer (the first Hold never returns);
+// select on dead for the answer only (the second Hold never returns).
+func TestAPanicOnTheKeepAwakeThreadRefusesInsteadOfHanging(t *testing.T) {
+	orig := setState
+	setState = func(uint32) (uint32, bool) { panic("boom") }
+	defer func() { setState = orig }()
+
+	h := New()
+	defer h.Close()
+	for i, name := range []string{"the request in flight", "a later request"} {
+		got := make(chan bool, 1)
+		go func() { got <- h.Hold(true) }()
+		select {
+		case ok := <-got:
+			if ok {
+				t.Errorf("%s (%d) reported success after the thread panicked", name, i)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s is still waiting on a thread that has ended", name)
+		}
 	}
 }

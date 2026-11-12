@@ -31,15 +31,23 @@ func setThreadExecutionState(state uint32) (prev uint32, ok bool) {
 	return uint32(r), r != 0
 }
 
+// setState is the call the thread makes; a test swaps it.
+var setState = setThreadExecutionState
+
 // The execution state belongs to the THREAD that set it, and ends when that
 // thread does. A goroutine moves between threads, so every call is made by one
 // goroutine locked to one thread for the Holder's whole life; it never unlocks,
 // so the thread ends with it, and the state with the thread.
+//
+// dead is closed when that goroutine ends, a panic included: ask is called
+// under the controller's lock from the database's job callbacks, so a request
+// nobody will answer must be refused, never waited on.
 type holderImpl struct {
 	mu      *sync.Mutex
 	reqs    chan holdReq
 	closed  *bool
 	started *bool
+	dead    chan struct{}
 }
 
 type holdReq struct {
@@ -55,7 +63,7 @@ type holdAns struct {
 }
 
 func newHolderImpl() holderImpl {
-	return holderImpl{mu: &sync.Mutex{}, reqs: make(chan holdReq), closed: new(bool), started: new(bool)}
+	return holderImpl{mu: &sync.Mutex{}, reqs: make(chan holdReq), closed: new(bool), started: new(bool), dead: make(chan struct{})}
 }
 
 func (h holderImpl) hold(on bool) bool {
@@ -76,8 +84,17 @@ func (h holderImpl) ask(on bool) holdAns {
 		go h.run()
 	}
 	req := holdReq{on: on, done: make(chan holdAns, 1)}
-	h.reqs <- req
-	return <-req.done
+	select {
+	case h.reqs <- req:
+	case <-h.dead:
+		return holdAns{}
+	}
+	select {
+	case ans := <-req.done:
+		return ans
+	case <-h.dead:
+		return holdAns{}
+	}
 }
 
 func (h holderImpl) close() {
@@ -92,6 +109,7 @@ func (h holderImpl) close() {
 
 func (h holderImpl) run() {
 	defer func() {
+		close(h.dead) // before anything else: a caller may be waiting on it
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "panic in keep-awake thread: %v\n", r)
 		}
@@ -102,8 +120,8 @@ func (h holderImpl) run() {
 		if req.on {
 			state |= esSystemRequired
 		}
-		prev, ok := setThreadExecutionState(state)
+		prev, ok := setState(state)
 		req.done <- holdAns{ok: ok, prev: prev}
 	}
-	setThreadExecutionState(esContinuous)
+	setState(esContinuous)
 }
