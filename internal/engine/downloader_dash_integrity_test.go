@@ -930,6 +930,127 @@ func TestDashCatchUpRetriesAnEmptySegment(t *testing.T) {
 	})
 }
 
+// A segment catch-up gives up on (a 410, which its workers never retry) and
+// the sequential loop then fetches leaves a complete recording, so no gap is
+// reported for it. Catch-up used to call OnGap as it stopped there: the worker
+// logged a "segment gap" warning and stored a gap row, and the job details of
+// a complete archive showed gaps.
+//
+// Mutant: runParallelCatchUp calling OnGap for the unflushed claimed range —
+// OnGap fires although the file holds every segment.
+func TestDashCatchUpStopAtASegmentTheLoopFetchesIsNoGap(t *testing.T) {
+	const head, hole = 80, 7
+	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		switch {
+		case seq == hole && attempt == 1:
+			return gvsGone
+		case seq <= head:
+			return gvsServe
+		default:
+			return gvsForbidden
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "video_stream")
+		var gaps []DownloadGap
+		var gapMu sync.Mutex
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("catchupgap"),
+			OutputFile:        out,
+			InitInlineAtStart: true,
+			CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+		})
+		d.OnGap = func(g DownloadGap) {
+			gapMu.Lock()
+			defer gapMu.Unlock()
+			gaps = append(gaps, g)
+		}
+		var caughtUp atomic.Bool
+		d.OnProgress = func(p DownloadProgress) {
+			if p.CatchingUp {
+				caughtUp.Store(true)
+			}
+		}
+
+		if err := d.Start(t.Context()); err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+		if !caughtUp.Load() {
+			t.Fatal("the download never entered catch-up — the scenario did not run")
+		}
+		if n := g.attemptsFor(hole); n < 2 {
+			t.Fatalf("segment %d was asked %d time(s) — catch-up never failed it", hole, n)
+		}
+		wantFile(t, out, gvsRecording(0, head))
+		gapMu.Lock()
+		defer gapMu.Unlock()
+		if len(gaps) != 0 {
+			t.Errorf("OnGap fired with %+v for a recording that holds every segment", gaps)
+		}
+	})
+}
+
+// A segment below the head that outlasts catch-up's retries belongs to the
+// sequential loop until it is written: catch-up is not entered again at that
+// sequence. It used to be, on every loop iteration, and each round fetched the
+// segments after the stuck one again only to drop them when it returned.
+//
+// Mutant: runDashLoop entering catch-up whatever sequence the last
+// zero-progress round stopped at — the segment after the hole is asked once
+// per round, four times here.
+func TestDashCatchUpIsNotReEnteredAtASegmentItCouldNotFetch(t *testing.T) {
+	// The hole answers 503 seventeen times. Catch-up's first round writes up to
+	// it and spends five attempts there, and the round that starts at it spends
+	// five more and writes nothing; the last seven are the sequential loop's.
+	// Before the fix they were one sequential attempt, a third round's five
+	// and another sequential one, and a fourth round got the segment.
+	const head, hole, failures = 80, 7, 17
+	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		switch {
+		case seq == hole && attempt <= failures:
+			return gvsUnavailable
+		case seq <= head:
+			return gvsServe
+		default:
+			return gvsForbidden
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "video_stream")
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("catchupstuck"),
+			OutputFile:        out,
+			InitInlineAtStart: true,
+			CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+		})
+		var catchUps atomic.Int32
+		var inCatchUp atomic.Bool
+		d.OnProgress = func(p DownloadProgress) {
+			if was := inCatchUp.Swap(p.CatchingUp); p.CatchingUp && !was {
+				catchUps.Add(1)
+			}
+		}
+
+		if err := d.Start(t.Context()); err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+		wantFile(t, out, gvsRecording(0, head))
+		if n := g.attemptsFor(hole); n != failures+1 {
+			t.Fatalf("segment %d was asked %d times, want %d — the scenario did not run", hole, n, failures+1)
+		}
+		// Fetched and dropped by each of the two rounds that met the hole, and
+		// written by the round after the hole was.
+		if n := g.attemptsFor(hole + 1); n != 3 {
+			t.Errorf("segment %d was asked %d times, want 3 — catch-up ran again while segment %d was still failing", hole+1, n, hole)
+		}
+		if n := catchUps.Load(); n != 3 {
+			t.Errorf("catch-up ran %d time(s), want 3: two that met segment %d and one once it was written", n, hole)
+		}
+	})
+}
+
 // TestDashInlineInitGuardWritesSq0InitFirst pins step 2 of G3: an
 // InitInlineAtStart file that is still empty never takes media for a
 // sequence above 0 before sq=0's ftyp+moov (ensureInlineInit), on the
