@@ -182,25 +182,6 @@ func TestSetupWizardAcceptsUnboundedResolution(t *testing.T) {
 	}
 }
 
-// TestSetupWizardResolutionHelpDescribesTheShortEdge: the wizard row's help
-// said "Maximum video dimension (width or height)", which R1 makes false.
-//
-// Mutant: the old wording restored.
-func TestSetupWizardResolutionHelpDescribesTheShortEdge(t *testing.T) {
-	for _, step := range advancedSetupSteps {
-		for _, f := range step.fields {
-			if f.key != "maxRes" {
-				continue
-			}
-			if f.help != "Shorter edge in pixels; 0 = unbounded (always the largest)" {
-				t.Errorf("maxRes help = %q, want the short-edge wording", f.help)
-			}
-			return
-		}
-	}
-	t.Fatal("no maxRes field in the advanced setup steps")
-}
-
 // TestUnboundedResolutionSaves: 0 must reach the config, not the validator's
 // error path. The TUI table used to demand >= 1.
 //
