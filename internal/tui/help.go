@@ -53,6 +53,7 @@ var navigationKeys = helpSection{
 		{"End", "Resume auto-scroll (Logs · Job Log)"},
 		{"Enter", "Expand/collapse archives"},
 		{"Space", "Select task for batch actions (Tasks)"},
+		{"Ctrl+A", "Select every task shown (Tasks)"},
 		{"Esc", "Clear batch selection · filter · armed chord · close Job Log"},
 		{"/", "Filter query (Tasks) · Find text (Logs · Job Log)"},
 		{"", "Filter: status:live channel:\"name\" platform:youtube"},

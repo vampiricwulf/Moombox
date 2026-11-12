@@ -100,7 +100,7 @@ Adding a new chord:
 
 That's it. Hints, help screen, action menu, and chord feedback all derive from `buildMenuItems()` automatically.
 
-**Prefixes:** A (Action), R (Request), O (Open), Q (Quit). **Single keys:** F, M, `, ?.
+**Prefixes:** A (Action), R (Request), O (Open), Q (Quit). **Single keys:** F, M, `, ?. On the Tasks panel, Space ticks the cursor row for a batch and Ctrl+A ticks every row shown (`TaskListModel.SelectAllShown`); Esc is the only way to clear.
 
 ### Async Operations
 Long-running work returns a `tea.Cmd` that sends a custom message:

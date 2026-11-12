@@ -190,6 +190,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return a, nil
+	case keyCtrlA:
+		// Ctrl+A: select every row the Tasks list shows (owner ruling R2-T1).
+		// It never clears: Esc is the one way out of a selection. An armed
+		// chord never gets here (handleChord answers any other key as an
+		// invalid chord), so a confirm that named its count cannot grow.
+		if a.focusedPanel == PanelTasks {
+			if n := a.taskList.SelectAllShown(); n > 0 {
+				a.setFeedback("Selected " + jobCount(n) + " · Esc clears")
+			} else {
+				a.setFeedback("No tasks to select")
+			}
+		}
+		return a, nil
 	}
 
 	// "c" clears the log view (history, filtered lines, and any active
