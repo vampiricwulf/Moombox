@@ -2206,9 +2206,9 @@ func (s *runState) wireMonitorCallbacks() {
 			s.decapiMon.CheckNow()
 			s.twitchMon.CheckNow()
 			// Runs the hourly cycle the backlog owes when its tick landed
-			// offline; otherwise spaced like any kick.
+			// offline; nothing when none is owed.
 			if s.twitchBacklog != nil {
-				s.twitchBacklog.CheckNow()
+				s.twitchBacklog.CheckOwed()
 			}
 		}
 		s.wsHub.BroadcastConnectivity(online)

@@ -63,6 +63,8 @@ type TwitchBacklog struct {
 	// nil on a TwitchBacklog built without NewTwitchBacklog: CheckNow is then
 	// a no-op.
 	wake chan struct{}
+	// restored carries CheckOwed's kicks the same way.
+	restored chan struct{}
 	// Zero means the constant of the same name; a test shortens them.
 	interval, firstDelay, kickGap time.Duration
 }
@@ -99,7 +101,7 @@ func NewTwitchBacklog(store *config.Store, db *database.Database, tw *twitch.Ser
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *TwitchBacklog {
-	b := &TwitchBacklog{configStore: store, db: db, logger: logger, wake: make(chan struct{}, 1)}
+	b := &TwitchBacklog{configStore: store, db: db, logger: logger, wake: make(chan struct{}, 1), restored: make(chan struct{}, 1)}
 	if tw != nil {
 		b.ListVideos = func(ctx context.Context, login string) ([]twitch.TwitchVideo, error) {
 			return tw.API.ListChannelVideos(ctx, login, "", "time", 1, tw.Auth.GetAuthToken())
@@ -109,13 +111,22 @@ func NewTwitchBacklog(store *config.Store, db *database.Database, tw *twitch.Ser
 }
 
 // CheckNow asks for a cycle now rather than at the next hourly tick: a channel
-// was saved (twitch_vod_backlog may just have been turned on) or connectivity
-// came back. It never blocks and never runs the cycle on the caller's
+// was saved (twitch_vod_backlog may just have been turned on). It never blocks and never runs the cycle on the caller's
 // goroutine. Kicks coalesce, and the loop spaces kicked cycles by
 // twitchBacklogKickGap.
 func (b *TwitchBacklog) CheckNow() {
 	select {
 	case b.wake <- struct{}{}:
+	default:
+	}
+}
+
+// CheckOwed is the connectivity-restored kick: it runs the cycle that came due
+// while offline, at once, and does nothing when none is owed, so a network
+// that flaps costs no request. It never blocks.
+func (b *TwitchBacklog) CheckOwed() {
+	select {
+	case b.restored <- struct{}{}:
 	default:
 	}
 }
@@ -134,10 +145,12 @@ func orDuration(d, def time.Duration) time.Duration {
 // CheckNow adds a cycle between ticks without moving the hourly tick. A kick
 // before the first cycle is dropped (that cycle is at most two minutes away,
 // and the boot's own saves should not pull it into the boot burst); one
-// inside twitchBacklogKickGap of the last cycle runs when the gap has passed.
-// A cycle that falls due while offline, by tick or by kick, is owed: the
-// connectivity handler's kick on the way back runs it at once, gap or not,
-// rather than an hour later.
+// inside twitchBacklogKickGap of the last cycle runs when the gap has passed,
+// unless the hourly tick ran a cycle first. Only a cycle that listed a channel
+// starts the gap: one that found nothing opted in sent no request, so turning
+// the switch on right after it lists at once. A cycle that falls due while
+// offline, by tick or by kick, is owed: CheckOwed, the connectivity handler's
+// call on the way back, runs it at once, gap or not, rather than an hour later.
 func (b *TwitchBacklog) Start(ctx context.Context) {
 	go func() {
 		defer func() {
@@ -152,7 +165,7 @@ func (b *TwitchBacklog) Start(ctx context.Context) {
 		var (
 			started bool             // the first scheduled cycle has come due
 			owed    bool             // a cycle came due while offline
-			last    time.Time        // when the last cycle ran
+			last    time.Time        // when the last cycle that listed a channel ran
 			gapT    *time.Timer      // armed while a kick waits out the gap
 			gapC    <-chan time.Time // gapT.C, nil while not armed
 		)
@@ -162,13 +175,20 @@ func (b *TwitchBacklog) Start(ctx context.Context) {
 			}
 		}()
 		run := func() {
+			// Whatever runs now is the cycle a waiting kick asked for.
+			if gapT != nil {
+				gapT.Stop()
+				gapT, gapC = nil, nil
+			}
 			if b.IsOnline != nil && !b.IsOnline() {
 				owed = true
 				return
 			}
 			owed = false
-			last = time.Now()
-			b.RunCycle(ctx, last)
+			now := time.Now()
+			if b.RunCycle(ctx, now) {
+				last = now
+			}
 		}
 		for {
 			select {
@@ -188,8 +208,11 @@ func (b *TwitchBacklog) Start(ctx context.Context) {
 					gapT = time.NewTimer(wait)
 					gapC = gapT.C
 				}
+			case <-b.restored:
+				if started && owed {
+					run()
+				}
 			case <-gapC:
-				gapC = nil
 				run()
 			}
 		}
@@ -197,10 +220,12 @@ func (b *TwitchBacklog) Start(ctx context.Context) {
 }
 
 // RunCycle lists every opted-in, enabled Twitch channel once and queues what
-// it finds. One channel's failure is logged and the next is tried.
-func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
+// it finds. One channel's failure is logged and the next is tried. It reports
+// whether it asked Twitch for anything: false when offline or when no channel
+// is opted in.
+func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) (listed bool) {
 	if b.ListVideos == nil || (b.IsOnline != nil && !b.IsOnline()) {
-		return
+		return false
 	}
 	var channels []config.ChannelConfig
 	var opted []config.ChannelConfig
@@ -213,15 +238,16 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 		}
 	}
 	if len(opted) == 0 {
-		return
+		return false
 	}
 	starts := b.capturedStarts()
 	total := 0
 	for _, ch := range opted {
 		if ctx.Err() != nil {
-			return
+			return listed
 		}
 		login := strings.ToLower(ch.ID)
+		listed = true
 		videos, err := b.ListVideos(ctx, login)
 		if err != nil {
 			b.logger.Warn("twitch VOD backlog: could not list the channel's videos; trying again next cycle",
@@ -261,6 +287,7 @@ func (b *TwitchBacklog) RunCycle(ctx context.Context, now time.Time) {
 	if total > 0 && b.OnQueued != nil {
 		b.OnQueued(total)
 	}
+	return listed
 }
 
 // capturedBroadcast is one live capture's broadcast: its stream_start_time
