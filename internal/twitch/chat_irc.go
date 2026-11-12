@@ -666,6 +666,21 @@ func (cd *ChatDownloader) parseLine(line string) *TwitchChatMessage {
 	}
 }
 
+// ircPrefixNick returns the nick of an IRC sender prefix
+// (":nick!user@host" gives "nick"), or "" when the prefix names no user: a
+// server prefix such as ":tmi.twitch.tv" has no '!'.
+func ircPrefixNick(prefix string) string {
+	rest, ok := strings.CutPrefix(prefix, ":")
+	if !ok {
+		return ""
+	}
+	nick, _, ok := strings.Cut(rest, "!")
+	if !ok {
+		return ""
+	}
+	return nick
+}
+
 func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
 	id := tags["id"]
 	if id == "" {
@@ -696,10 +711,16 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	// renders the word "ACTION" as part of the message.
 	messageText, isAction := stripActionWrapper(messageText)
 
-	// Author name fallback chain
+	// Author name fallback chain. display-name can be empty (an account that
+	// never set one), and a PRIVMSG has no login tag: the login is the nick in
+	// the line's prefix, which is what chatterino7 falls back to
+	// (MessageBuilder.cpp, displayName = loginName).
 	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
 		authorName = tags["login"]
+	}
+	if authorName == "" {
+		authorName = ircPrefixNick(parts[0])
 	}
 	if authorName == "" {
 		authorName = "Anonymous"
