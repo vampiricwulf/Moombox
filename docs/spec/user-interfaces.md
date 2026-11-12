@@ -874,6 +874,8 @@ The WebSocket hub throttles nothing. The only high-frequency caller is `OnJobCha
 
 All routes use the `/api/` prefix unless otherwise noted. PO Token routes use bare paths for yt-dlp plugin compatibility.
 
+**Errors are JSON.** A refusal from a route handler or from the middleware in front of it (CSRF, the host gate, auth, the rate limiter, drain) is `{"error": "<message>"}` with `Content-Type: application/json`; some routes add fields beside `error`, documented with the route. The router's own two answers have the same shape under `/api/`: a path no route claims is `404 {"error":"not found"}`, and a registered path asked with a method it does not take is `405 {"error":"method not allowed"}` with an `Allow` header naming the methods it does (`methodNotAllowed`, `internal/web/server.go`). Outside `/api/` an unknown path is the dashboard shell and a wrong method an empty `405`. One refusal is plain text: the IP gate's `403 Forbidden`, which answers a peer `network_access` does not admit on every path, before any route is looked at.
+
 ### Authentication
 
 This is **dashboard** authentication — the operator's password and session. It is unrelated to the platform credentials in §Cookies below, which is why the two never share a payload.

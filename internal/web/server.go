@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -135,8 +136,52 @@ func NewServer(store *config.Store, logger interface {
 	r.Use(CSRFMiddleware(store, token, logger))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
+	r.MethodNotAllowed(s.methodNotAllowed)
 
 	return s
+}
+
+// apiError writes the {"error": msg} JSON body every route handler answers a
+// refusal with.
+func apiError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// isAPIPath reports whether p is under the REST prefix.
+func isAPIPath(p string) bool {
+	return strings.HasPrefix(p, "/api/")
+}
+
+// allowProbeMethods are the methods methodNotAllowed asks the router about,
+// in the order the Allow header lists them.
+var allowProbeMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+}
+
+// methodNotAllowed answers a request whose path is registered but not for
+// its method: 405 with the Allow header chi's own handler sets (a custom
+// handler replaces that one, so the methods are asked of the router here)
+// and, under /api/, the same {"error": ...} JSON body the handlers answer
+// with, where chi's default sent no body at all. Other paths keep the empty
+// body.
+func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
+		path = rctx.RoutePath
+	}
+	for _, m := range allowProbeMethods {
+		if s.router.Match(chi.NewRouteContext(), m, path) {
+			w.Header().Add("Allow", m)
+		}
+	}
+	if isAPIPath(r.URL.Path) {
+		apiError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
 // InternalToken returns the secret token that same-process clients (TUI) must
@@ -323,8 +368,14 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 	s.loginHTML, _ = fs.ReadFile(staticFS, "login.html")
 
 	s.router.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		// Don't serve SPA for API or WebSocket paths
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
+		// Don't serve SPA for API or WebSocket paths. An unknown API path
+		// answers the JSON error body every handler does, not net/http's
+		// plain-text one.
+		if isAPIPath(r.URL.Path) {
+			apiError(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/ws" {
 			http.NotFound(w, r)
 			return
 		}
