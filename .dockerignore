@@ -1,5 +1,10 @@
-# Keep the build context small and reproducible. Anchored paths refer to
-# the repo root; unanchored patterns apply everywhere.
+# Keep the build context small and reproducible.
+#
+# Docker does not match these the way .gitignore does: every pattern is
+# relative to the context root (the repo root) and matches there only. A
+# leading or trailing slash changes nothing, so `staging/` is the root's
+# staging and `*.md` is the root's markdown files. A pattern meant for any
+# depth has to start with `**/`.
 
 # VCS / tooling state
 .git
@@ -9,40 +14,45 @@
 .idea
 .vscode
 
+# Git worktrees (.github/scripts/new-worktree.sh): each is a whole copy of the
+# source with its own embed blobs and web/tests/node_modules.
+.worktrees/
+
 # Upstream reference checkouts (gitignored, can be gigabytes locally)
 references/
 
 # Docs and repo meta not needed to compile
 docs/
+reports/
 screenshots/
 /*.md
 
-# Build outputs and binaries
-*.exe
-*.syso
+# Build outputs and binaries, wherever they are (go-winres writes its .syso
+# files into cmd/moombox)
+**/*.exe
+**/*.syso
 /moombox
 /dist/
 /build/
 bgutil-sidecar/dist/
 
-# Dependencies rebuilt inside the image (sidecar stage runs npm ci)
-bgutil-sidecar/node_modules/
+# Dependencies rebuilt inside the image (sidecar stage runs npm ci), and the
+# frontend test harness's (`npm ci` in web/tests): nothing in the image uses
+# the second, and copying them invalidated the source layer.
+**/node_modules/
 bgutil-sidecar/vendor/ejs.bundle.js
-
-# The frontend test harness's dependencies (`npm ci` in web/tests): nothing
-# in the image uses them, and copying them invalidated the source layer.
-web/tests/node_modules/
 
 # Embed blobs are regenerated inside the image (fetch-node + build.mjs);
 # excluding local copies keeps the build reproducible regardless of what a
 # dev checkout happens to contain. version.txt stays (committed).
 internal/bgutils/embed/*.gz
 
-# Runtime data a local checkout may have accumulated
+# Runtime data a local checkout may have accumulated: what Moombox writes
+# when it is run from the repo root, and logs anywhere
 config.toml
 cookies.txt
 moombox.db
-*.log
+**/*.log
 staging/
 output/
 browser-profile/

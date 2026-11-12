@@ -2,7 +2,7 @@
 # The checks to run before a branch is merged, from any checkout or worktree.
 #
 #   local-gate.sh [--quick | --full]   run the gates on the tree you are in
-#   local-gate.sh --prune-gotmp        delete Go's leftovers from GOTMPDIR, run nothing
+#   local-gate.sh --prune-gotmp        delete what go build and go test left in GOTMPDIR, run nothing
 #
 # --quick (the default) is what CI's lint job checks, and runs no tests: gofmt,
 # `go mod tidy -diff`, go vet and go build for linux/amd64, windows/amd64 and
@@ -29,9 +29,19 @@
 # .superpowers/gotmp in the main checkout (gitignored, shared by every
 # worktree) and passes it in the Windows spelling, with backslashes: tests
 # that compare paths fail when the temp root is spelled with forward slashes.
-# Set GOTMPDIR yourself to use another directory. Nothing in it is deleted
-# unless you ask with --prune-gotmp, and only ask while no go command is
-# running in any worktree, since they share it.
+# Set GOTMPDIR yourself to use another directory.
+#
+# Two things collect there. The go command builds in go-build<digits>, and
+# t.TempDir (b.TempDir, f.TempDir) makes its directories there too, not under
+# TMP: <test name><digits>/001, /002 and so on. (os.TempDir and os.MkdirTemp
+# inside a test still use TMP.) Both are removed when the run ends normally, so
+# what stays is from runs that were killed or crashed: test databases, staging
+# files, test binaries. Nothing is deleted unless you ask with --prune-gotmp,
+# which removes those two kinds of directory, leaves every other entry alone
+# and lists what it left. Only ask while no go command is running in any
+# worktree: they share the directory, and the prune would delete the temp
+# directories of a test that is still running. Keep your own scratch files
+# somewhere else: the prune never removes them, so here they only pile up.
 set -uo pipefail
 
 usage() {
@@ -60,6 +70,18 @@ if [ -z "${GOTMPDIR:-}" ] && command -v cygpath >/dev/null 2>&1; then
 fi
 export NO_COLOR=1
 
+# only_numbered_dirs <dir>: everything in it is a directory named with three
+# or more digits, as t.TempDir numbers them. An empty directory passes.
+only_numbered_dirs() {
+	local child
+	for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+		[ -e "$child" ] || [ -L "$child" ] || continue
+		[ -d "$child" ] && [ ! -L "$child" ] || return 1
+		[[ ${child##*/} =~ ^[0-9]{3,}$ ]] || return 1
+	done
+	return 0
+}
+
 if [ "$mode" = prune ]; then
 	[ -n "${GOTMPDIR:-}" ] || {
 		echo "local-gate.sh: GOTMPDIR is not set, so there is nothing of this script's to prune" >&2
@@ -67,15 +89,39 @@ if [ "$mode" = prune ]; then
 	}
 	dir=$GOTMPDIR
 	if command -v cygpath >/dev/null 2>&1; then dir=$(cygpath -u "$dir"); fi
-	# Only what the go command itself leaves at the top level: its build work
-	# directories. A test's own temp directories are under TMP, not here.
-	n=0
-	for entry in "$dir"/go-build*; do
-		[ -e "$entry" ] || continue
-		rm -rf -- "$entry"
-		n=$((n + 1))
+	# Only what Go itself leaves at the top level, told by name and, for a test's
+	# directories, by content as well, so that nothing a person put here goes:
+	#   go-build<digits>     the go command's build directory
+	#   <name><digits>       what t.TempDir makes: the name starts with Test,
+	#                        Benchmark or Fuzz (a subtest's name follows, so it
+	#                        may hold - = . and the like), and the directory
+	#                        holds nothing but directories named 001, 002, ...
+	# An example function has no TempDir, so Example* is not on the list.
+	builds=0
+	tests=0
+	left=()
+	for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		name=${entry##*/}
+		if [ -d "$entry" ] && [ ! -L "$entry" ]; then
+			if [[ $name =~ ^go-build[0-9]+$ ]]; then
+				rm -rf -- "$entry"
+				builds=$((builds + 1))
+				continue
+			fi
+			if [[ $name =~ ^(Test|Benchmark|Fuzz).*[0-9]$ ]] && only_numbered_dirs "$entry"; then
+				rm -rf -- "$entry"
+				tests=$((tests + 1))
+				continue
+			fi
+		fi
+		left+=("$name")
 	done
-	echo "pruned $n entries from $GOTMPDIR"
+	echo "pruned $builds build directories and $tests test temp directories from $GOTMPDIR"
+	if [ "${#left[@]}" -gt 0 ]; then
+		echo "left ${#left[@]} other entries, which Go did not make:"
+		printf '  %s\n' "${left[@]}"
+	fi
 	exit 0
 fi
 

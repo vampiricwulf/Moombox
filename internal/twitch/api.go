@@ -1299,6 +1299,15 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 	)
 }
 
+// ErrVodCommentsVideoGone is GetVodComments' answer when Twitch returns a null
+// video: the VOD no longer exists, so the chat already saved is all there will
+// be, and it is not known to be all of it.
+var ErrVodCommentsVideoGone = errors.New("twitch answered a null video for the VOD's comments (the VOD is gone)")
+
+// ErrVodCommentsMissing is GetVodComments' answer when Twitch returns a null
+// comments object for a page past the start of the VOD.
+var ErrVodCommentsMissing = errors.New("twitch answered null comments for a page past the start of the VOD")
+
 // GetVodComments fetches one page of VOD chat comments.
 //
 // The operation is VideoCommentsByOffsetOrCursor and the OR is the point: a
@@ -1309,6 +1318,12 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 // (a fresh start, or a resume from the sidecar's LastOffsetSeconds).
 //
 // The persisted-query hash is unchanged: both forms are the same operation.
+//
+// A null `video` (the VOD was deleted or expired; Twitch answers null, not an
+// error) is ErrVodCommentsVideoGone on any page. A null `comments` is
+// ErrVodCommentsMissing on a cursor page or a non-zero offset, and an empty
+// result only when entering at offset 0, where it is a VOD with no chat.
+// Neither error is the natural end of chat: that is hasNextPage=false.
 func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, cursor, authToken string) ([]VodCommentEdge, bool, error) {
 	vars := map[string]any{"videoID": vodID}
 	if cursor != "" {
@@ -1325,8 +1340,8 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 
 	var resp struct {
 		Data struct {
-			Video struct {
-				Comments struct {
+			Video *struct {
+				Comments *struct {
 					Edges []struct {
 						Cursor string `json:"cursor"`
 						Node   struct {
@@ -1364,6 +1379,15 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 		return nil, false, fmt.Errorf("parse vod comments: %w", err)
 	}
 
+	if resp.Data.Video == nil {
+		return nil, false, ErrVodCommentsVideoGone
+	}
+	if resp.Data.Video.Comments == nil {
+		if cursor != "" || contentOffsetSeconds != 0 {
+			return nil, false, ErrVodCommentsMissing
+		}
+		return nil, false, nil
+	}
 	edges := resp.Data.Video.Comments.Edges
 	hasNext := resp.Data.Video.Comments.PageInfo.HasNextPage
 

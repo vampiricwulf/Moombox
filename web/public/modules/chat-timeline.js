@@ -319,7 +319,7 @@ export function correctLegacyTwitchEmotes(data) {
       if (text.endsWith(TWITCH_SOH)) text = text.slice(0, -1);
       m.message = text;
       // Parity with the Go writer's TwitchChatMessage.IsAction, which is the
-      // file format's truth; no renderer in web/ reads it yet.
+      // file format's truth; the player's flat row reads it (_fillPlainRow).
       m.isAction = true;
     }
     const emotes = m.emotes;
