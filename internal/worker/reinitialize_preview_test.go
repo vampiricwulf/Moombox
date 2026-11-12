@@ -41,6 +41,10 @@ func TestPreviewReinitializeCountsWhatTheResetDeletes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stagingDir, displayAspectFile), []byte("16:9"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Nor the thumbnail a live capture staged as it started.
+	if err := os.WriteFile(filepath.Join(stagingDir, startThumbnailFile), make([]byte, 50), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	part1 := filepath.Join(outputDir, "show - part1.mp4")
 	part2 := filepath.Join(outputDir, "show - part2.mp4")
