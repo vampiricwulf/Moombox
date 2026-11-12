@@ -1785,12 +1785,19 @@ func (a *App) setAsideArchivesFor(job *database.Job) []SetAsideArchiveEntry {
 	if job == nil || a.JobSetAsideArchives == nil {
 		return nil
 	}
-	if a.setAsideJobID != job.ID || a.setAsideStatus != job.Status {
-		a.setAsideJobID, a.setAsideStatus = job.ID, job.Status
+	stale := len(a.setAsideCache) == 0 && time.Since(a.setAsideAskedAt) >= setAsideEmptyTTL
+	if a.setAsideJobID != job.ID || a.setAsideStatus != job.Status || stale {
+		a.setAsideJobID, a.setAsideStatus, a.setAsideAskedAt = job.ID, job.Status, time.Now()
 		a.setAsideCache = a.JobSetAsideArchives(job.ID)
 	}
 	return a.setAsideCache
 }
+
+// setAsideEmptyTTL is how long setAsideArchivesFor keeps an empty answer. A
+// Reinitialize writes the new status, which is what the panel hears, before
+// it renames the archive aside: an answer read in between is empty, and
+// nothing else would ask again until the status next changed.
+const setAsideEmptyTTL = 2 * time.Second
 
 // gapFillFor is job's gap-fill for the details panel: asked of JobGapFill
 // only for a Finished live Twitch job, the only kind that has one.

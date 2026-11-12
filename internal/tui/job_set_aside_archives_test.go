@@ -65,7 +65,8 @@ func TestDetailsPanelListsTheArchivesAReinitializeSetAside(t *testing.T) {
 //
 // Mutants: no memo (a probe per update); the status left out of the key (the
 // archive a Reinitialize has just set aside is not shown until the cursor
-// moves); an active job not asked.
+// moves); an active job not asked; an empty answer kept for good (an archive
+// set aside just after the read is not shown).
 func TestSetAsideArchivesAreProbedOncePerJobAndStatus(t *testing.T) {
 	a := NewApp()
 	probes := 0
@@ -85,5 +86,20 @@ func TestSetAsideArchivesAreProbedOncePerJobAndStatus(t *testing.T) {
 	}
 	if got := a.setAsideArchivesFor(&database.Job{ID: "j2", Status: database.StatusDownloading}); probes != 3 || got[0].Name != "j2" {
 		t.Errorf("another job: %d probes, answer %+v; want its own", probes, got)
+	}
+
+	// An empty answer is kept only briefly: the reset writes the status
+	// before it renames the archive, so the first read can come too early.
+	var answer []SetAsideArchiveEntry
+	a.JobSetAsideArchives = func(string) []SetAsideArchiveEntry { probes++; return answer }
+	reset := &database.Job{ID: "j3", Status: database.StatusUpcoming}
+	a.setAsideArchivesFor(reset)
+	answer = []SetAsideArchiveEntry{{Name: "aside", Size: 1}}
+	if got := a.setAsideArchivesFor(reset); probes != 4 || len(got) != 0 {
+		t.Errorf("a fresh empty answer: %d probes, answer %+v; want it kept", probes, got)
+	}
+	a.setAsideAskedAt = a.setAsideAskedAt.Add(-setAsideEmptyTTL)
+	if got := a.setAsideArchivesFor(reset); probes != 5 || len(got) != 1 {
+		t.Errorf("an old empty answer: %d probes, answer %+v; want it asked again", probes, got)
 	}
 }

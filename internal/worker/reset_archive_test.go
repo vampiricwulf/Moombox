@@ -244,11 +244,17 @@ func TestAutoReinitializeSetsTheArchiveAside(t *testing.T) {
 }
 
 // A set-aside rename that fails does not undo the reset: the row is reset,
-// the file is exactly where it was with no marker beside it, and one Warn
-// says so.
+// the file and its sidecars are exactly where they were, one Warn says so,
+// and a marker under the archive's own name keeps them the job's: the Files
+// sweep offers none of them until the job row is deleted. A job's only part
+// under the archive's name is left in place the same way, not deleted as a
+// part.
 //
-// Mutants: the marker left behind on a failed rename; the failure not logged;
-// the sidecars renamed although the archive was not.
+// Mutants: the set-aside marker left behind on a failed rename; the failure
+// not logged; the sidecars renamed although the archive was not; the in-place
+// marker not written, or ownerOf asking the marker only of set-aside names
+// (the sweep offers the archive); clearJobParts not told what was kept (the
+// one-part archive is deleted).
 func TestFailedSetAsideLeavesTheArchiveWhereItIs(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	outputDir, _ := archivedErrorJob(t, w, db, "j-locked")
@@ -268,12 +274,176 @@ func TestFailedSetAsideLeavesTheArchiveWhereItIs(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if got := strings.Join(names, "|"); got != "Show.chat.json|Show.description|Show.mp4" {
-		t.Errorf("the output directory holds %s; want the archive and its files as they were, and nothing else", got)
+	if got := strings.Join(names, "|"); got != "Show.chat.json|Show.description|Show.mp4|Show.owner" {
+		t.Errorf("the output directory holds %s; want the archive and its files as they were, and the marker", got)
 	}
 	if len(log.warns) != 1 || !strings.Contains(log.warns[0], "could not be set aside") {
 		t.Errorf("warnings = %q, want one naming the archive that was not set aside", log.warns)
 	}
+	if got := offeredOutput(t, db, outputDir); len(got) != 0 {
+		t.Errorf("the Files sweep offers %v while the job exists", got)
+	}
+	if err := db.DeleteJob("j-locked"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(offeredOutput(t, db, outputDir), "|"); got != "Show.chat.json|Show.description|Show.mp4|Show.owner" {
+		t.Errorf("with the job row gone the sweep offers %s, want the files and their marker", got)
+	}
+
+	t.Run("one part under the archive's name", func(t *testing.T) {
+		outputDir, archive := archivedErrorJob(t, w, db, "j-locked-part")
+		chat := filepath.Join(outputDir, "Show.chat.json")
+		if err := db.AddSegment(&database.Segment{JobID: "j-locked-part", SegmentIndex: 0, Filename: "Show.mp4", FilePath: archive, ChatFile: chat}); err != nil {
+			t.Fatal(err)
+		}
+		w.reinitializeNow("j-locked-part", database.StatusError)
+		if got := readTestFile(t, archive); got != "the earlier recording" {
+			t.Errorf("the archive reads %q where it was", got)
+		}
+		if got := readTestFile(t, chat); got != "the earlier chat" {
+			t.Errorf("its chat reads %q where it was", got)
+		}
+	})
+}
+
+// A job that ended with one part has it under the plain archive name, on a
+// segment row (renameSinglePartToPlain). An operator's Reinitialize sets that
+// archive aside with its chat like any single-file archive, and the confirm
+// counts it as the existing archive, not as a part it deletes.
+//
+// Mutants: the one-part rule dropped from archiveSetAsideByReset (the reset
+// deletes the archive as a part); the preview still counting it under
+// RecordedParts.
+func TestReinitializeSetsAOnePartArchiveAside(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	outputDir, archive := archivedErrorJob(t, w, db, "j-one")
+	if err := db.AddSegment(&database.Segment{JobID: "j-one", SegmentIndex: 0, Filename: "Show.mp4", FilePath: archive,
+		ChatFile: filepath.Join(outputDir, "Show.chat.json")}); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.GetJob("j-one")
+	if p := PreviewReinitialize(db, t.TempDir(), job); p.ExistingArchives != 1 || p.RecordedParts != 0 {
+		t.Errorf("preview = %+v, want one existing archive and no recorded part", p)
+	}
+
+	w.reinitializeNow("j-one", database.StatusError)
+
+	asides := asideArchives(t, outputDir)
+	if len(asides) != 1 {
+		t.Fatalf("set-aside archives = %v, want one", asides)
+	}
+	if got := readTestFile(t, asides[0]); got != "the earlier recording" {
+		t.Errorf("the aside reads %q", got)
+	}
+	if got := readTestFile(t, strings.TrimSuffix(asides[0], ".mp4")+".chat.json"); got != "the earlier chat" {
+		t.Errorf("the aside's chat reads %q", got)
+	}
+	if segs, _ := db.GetSegments("j-one"); len(segs) != 0 {
+		t.Errorf("the reset left %d segment rows", len(segs))
+	}
+}
+
+// The recovered set-aside recordings already beside the archive were the
+// job's through the archive's stem, which no row names after the reset: the
+// reset marks each as the job's, so the Files sweep goes on not offering
+// them. An archive in another container keeps its extension when it is set
+// aside, is listed in the job's details, and takes the next counter when its
+// set-aside name is taken in that extension.
+//
+// Mutants: adoptStemAsides not called (the sweep offers the recovered
+// recording and its chat); ScanSetAsideArchives matching a fixed list of
+// media extensions (the .mov is not listed); freeAsideName handing back the
+// taken name (the set-aside would be reported as failed).
+func TestResetKeepsWhatTheStemRuleOwned(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	_, outputDir := muxFixtureJob(t, w, db, "j-mov")
+	archive := filepath.Join(outputDir, "Show.mov")
+	writeTestFile(t, archive, "imported")
+	writeTestFile(t, filepath.Join(outputDir, "Show.restart-1700000000.mp4"), "recovered")
+	writeTestFile(t, filepath.Join(outputDir, "Show.restart-1700000000.chat.json"), "recovered chat")
+	db.UpdateJobFields("j-mov", map[string]any{"status": database.StatusError, "output_file": archive, "filename": "Show.mov"})
+	if got := offeredOutput(t, db, outputDir); len(got) != 0 {
+		t.Fatalf("before the reset the sweep offers %v", got)
+	}
+
+	w.reinitializeNow("j-mov", database.StatusError)
+
+	if got := offeredOutput(t, db, outputDir); len(got) != 0 {
+		t.Errorf("after the reset the sweep offers %v; they are the job's", got)
+	}
+	job, _ := db.GetJob("j-mov")
+	var mov []string
+	for _, a := range ScanSetAsideArchives(job, "", "") {
+		if strings.HasSuffix(a.Name, ".mov") {
+			mov = append(mov, a.Name)
+		}
+		if strings.HasSuffix(a.Name, ".json") || strings.HasSuffix(a.Name, asideOwnerSuffix) {
+			t.Errorf("job details list %s as an archive", a.Name)
+		}
+	}
+	if len(mov) != 1 {
+		t.Errorf("job details list the set-aside .mov %d times, want once", len(mov))
+	}
+
+	writeTestFile(t, filepath.Join(outputDir, "Other.restart-5.mkv"), "taken")
+	if got, ok := freeAsideName(outputDir, "Other", ".mkv", "5"); !ok || filepath.Base(got) != "Other.restart-5-2.mkv" {
+		t.Errorf("freeAsideName = (%q, %v), want the next counter in the archive's own extension", got, ok)
+	}
+}
+
+// A finalize does not copy its chat capture over a chat it did not write (the
+// one a Reinitialize could not set aside): the chat already there is kept and
+// the capture stays in staging, as when the copy fails. The chat the row
+// names is replaced as before.
+//
+// Mutants: the check dropped from copyAssets (the earlier chat is replaced);
+// chat_file not counted as the row's own (a re-finalize keeps its capture in
+// staging for good).
+func TestFinalizeDoesNotReplaceAChatItDidNotWrite(t *testing.T) {
+	started := time.Now().Add(-time.Hour)
+	run := func(t *testing.T, named bool) (chat string, updates map[string]any) {
+		w, db := testWorkerSetup(t)
+		stagingDir, outputDir := muxFixtureJob(t, w, db, "j-chat")
+		chat = filepath.Join(outputDir, "Show.chat.json")
+		writeTestFile(t, chat, "the earlier chat")
+		writeTestFile(t, filepath.Join(outputDir, "Show.chat.raw.jsonl"), "the earlier raw")
+		if err := os.Chtimes(chat, started.Add(-time.Hour), started.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(stagingDir, "chat.json"), "the new chat")
+		writeTestFile(t, filepath.Join(stagingDir, "chat.raw.jsonl"), "the new raw")
+		fields := map[string]any{"download_started_at": started.UTC().Format(time.RFC3339)}
+		if named {
+			fields["chat_file"] = chat
+		}
+		job := db.UpdateJobFields("j-chat", fields)
+		job.VideoID = "" // no thumbnail fetch
+		jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, StagingDir: stagingDir, OutputDir: outputDir, Filename: "Show", Logger: &discardLogger{}}
+		updates = map[string]any{}
+		w.orchestrator.copyAssets(context.Background(), jobCtx, outputDir, "Show", "Show", updates, false)
+		return chat, updates
+	}
+	t.Run("from before the recording: kept", func(t *testing.T) {
+		chat, updates := run(t, false)
+		if got := readTestFile(t, chat); got != "the earlier chat" {
+			t.Errorf("the chat already there now reads %q", got)
+		}
+		if got := readTestFile(t, strings.TrimSuffix(chat, ".chat.json")+".chat.raw.jsonl"); got != "the earlier raw" {
+			t.Errorf("its raw sidecar now reads %q", got)
+		}
+		if updates["chat_status"] != database.ChatIncomplete {
+			t.Errorf("chat_status = %v, want incomplete so the capture is kept in staging", updates["chat_status"])
+		}
+	})
+	t.Run("the row's own: replaced", func(t *testing.T) {
+		chat, updates := run(t, true)
+		if got := readTestFile(t, chat); got != "the new chat" {
+			t.Errorf("the row's chat reads %q after the finalize", got)
+		}
+		if updates["chat_file"] != chat {
+			t.Errorf("chat_file = %v", updates["chat_file"])
+		}
+	})
 }
 
 // TestFinalizeDoesNotReplaceAFileItDidNotWrite is the guard behind a failed
@@ -310,7 +480,7 @@ func TestFinalizeDoesNotReplaceAFileItDidNotWrite(t *testing.T) {
 
 	t.Run("single file from before the recording: refused, staging kept", func(t *testing.T) {
 		existing, staged, err := single(t, before)
-		if err == nil || !strings.Contains(err.Error(), "is not this job's recording") {
+		if err == nil || !strings.Contains(err.Error(), "is not this job's") {
 			t.Fatalf("finalize = %v, want it refused for the file already there", err)
 		}
 		if got := readTestFile(t, existing); got != "already here" {

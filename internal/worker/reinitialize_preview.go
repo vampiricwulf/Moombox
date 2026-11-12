@@ -98,15 +98,19 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	// (dropImportedArchiveChapters) — the same file for a split row whose
 	// output_file names part 1.
 	lists := map[string]bool{}
-	hasParts := false
-	if db != nil {
+	// The archive the reset sets aside, by the reset's own rule
+	// (archiveOfReset; a failed read of the parts sets nothing aside). A
+	// job's only part under the archive's name is that archive, not a
+	// deleted part.
+	archive := ""
+	if db == nil {
+		archive = archiveSetAsideByReset(job, nil, false)
+	} else {
 		segs, err := db.GetSegments(job.ID)
-		// A failed read sets nothing aside, as the reset reads it
-		// (archiveOfReset).
-		hasParts = err != nil || len(segs) > 0
 		if err == nil {
+			archive = archiveSetAsideByReset(job, segs, false)
 			for _, s := range segs {
-				if s.FilePath == "" {
+				if s.FilePath == "" || (archive != "" && normalizePath(s.FilePath) == normalizePath(archive)) {
 					continue
 				}
 				if info, serr := os.Stat(s.FilePath); serr == nil && !info.IsDir() {
@@ -124,7 +128,7 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 	if p := ArchiveSidecarPath(job.OutputFile, utils.ChaptersSidecarSuffix); p != "" {
 		lists[p] = true
 	}
-	if p := archiveSetAsideByReset(job, hasParts); p != "" {
+	if p := archive; p != "" {
 		// One that cannot be reached now (its drive is unplugged) is named
 		// without a size.
 		out.ExistingArchives = 1

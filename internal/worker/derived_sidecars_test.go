@@ -104,7 +104,7 @@ func TestDerivedSidecarsFollowTheParts(t *testing.T) {
 		if err := db.AddSegment(&database.Segment{JobID: "tw_re", SegmentIndex: 0, Filename: filepath.Base(part), FilePath: part}); err != nil {
 			t.Fatal(err)
 		}
-		w.clearJobParts("tw_re")
+		w.clearJobParts("tw_re", "")
 		if fileExists(part) || fileExists(chapters) {
 			t.Errorf("after the parts are cleared: part %v, chapter list %v; want neither", fileExists(part), fileExists(chapters))
 		}

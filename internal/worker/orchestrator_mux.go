@@ -1101,7 +1101,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// Reinitialize could not set aside (owner ruling R2-W1b), another
 	// recording's: stop before anything is muxed, with the staging kept, so a
 	// Mux tries again once the operator has moved it.
-	if err := o.foreignArchiveAt(jobCtx.Job.ID, outputFile); err != nil {
+	if err := o.foreignFileAt(jobCtx.Job.ID, outputFile); err != nil {
 		return err
 	}
 	// relBase preserves the full relative path (including channel subdir) for DB
@@ -1428,10 +1428,10 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
-	// Not onto a file this job did not write (foreignArchiveAt): the part then
+	// Not onto a file this job did not write (foreignFileAt): the part then
 	// keeps its suffixed name, as it does when the rename itself fails.
 	if len(segments) == 1 {
-		if err := o.foreignArchiveAt(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
+		if err := o.foreignFileAt(jobCtx.Job.ID, filepath.Join(outputDir, filenameBase+".mp4")); err != nil {
 			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
 		} else {
 			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
@@ -1630,7 +1630,15 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	if _, err := os.Stat(chatSrc); err == nil && !skipChat {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
-		if err := copyFile(chatSrc, chatDst); err != nil {
+		// Not over a chat this job did not write (foreignFileAt): the one a
+		// Reinitialize could not set aside. Refused like a failed copy, so
+		// the capture is kept in staging.
+		foreign := o.foreignFileAt(jobCtx.Job.ID, chatDst)
+		err := foreign
+		if err == nil {
+			err = copyFile(chatSrc, chatDst)
+		}
+		if err != nil {
 			// The archive has no chat, and the capture in staging is the
 			// only copy: "incomplete" is what keeps it. With no chat_status
 			// written the row read as it was, the staging cleanup saw no
@@ -1655,7 +1663,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// does above, logged at Error (owner decision PR-M6). It used to be a
 		// Warn, and the staging cleanup then deleted the only copy.
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
-		if _, err := os.Stat(rawSrc); err == nil {
+		if _, err := os.Stat(rawSrc); err == nil && foreign == nil {
 			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
 				updates["chat_status"] = database.ChatIncomplete
 				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",

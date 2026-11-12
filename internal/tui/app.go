@@ -719,10 +719,13 @@ type App struct {
 	// setAsideJobID / setAsideStatus / setAsideCache memoise the selected
 	// job's JobSetAsideArchives answer, for the same reason. Keyed on the
 	// status: an archive is set aside only by a Reinitialize, which changes
-	// it.
-	setAsideJobID  string
-	setAsideStatus database.JobStatus
-	setAsideCache  []SetAsideArchiveEntry
+	// it. The reset writes the status before it renames the file, so an
+	// empty answer is asked again once it is setAsideEmptyTTL old
+	// (setAsideAskedAt).
+	setAsideJobID   string
+	setAsideStatus  database.JobStatus
+	setAsideCache   []SetAsideArchiveEntry
+	setAsideAskedAt time.Time
 
 	// Callbacks for actions
 	OnAddVideo func(url string)

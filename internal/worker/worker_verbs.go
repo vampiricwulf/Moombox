@@ -263,10 +263,16 @@ func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, gate func(*
 
 // clearJobParts removes a job's persisted parts for a fresh restart: the
 // on-disk part files (video + per-part chat, best-effort) and then the
-// segment/gap rows. Called only by user-initiated Reinitialize.
-func (w *DownloadWorker) clearJobParts(jobID string) {
+// segment/gap rows. Called only by user-initiated Reinitialize. kept is the
+// one-part archive the reset set aside instead ("" for none,
+// archiveSetAsideByReset): the file and its chat are not deleted where the
+// rename could not move them.
+func (w *DownloadWorker) clearJobParts(jobID, kept string) {
 	if segs, err := w.db.GetSegments(jobID); err == nil {
 		for _, s := range segs {
+			if kept != "" && normalizePath(s.FilePath) == normalizePath(kept) {
+				continue
+			}
 			if s.FilePath != "" {
 				if rmErr := os.Remove(s.FilePath); rmErr != nil && !os.IsNotExist(rmErr) {
 					w.logger.Warn("reinit: failed to remove stale part file", "path", s.FilePath, "err", rmErr)
@@ -366,7 +372,7 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// A single-file archive the row already has is renamed aside once the
 	// claim has applied (owner ruling R2-W1b, reset_archive.go): the reset
 	// clears output_file, and the new recording can resolve to the same name.
-	archive := w.archiveOfReset(prior)
+	archive := w.archiveOfReset(prior, false)
 	beforeResetClaim(jobID)
 	if !w.db.UpdateJobFieldsIf(jobID, from, reinitResetFields(0)) {
 		w.logVerbOverridden(jobID, "reinitialize", seen)
@@ -380,7 +386,7 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	// would finalize the clean re-download as multi-part from the OLD part
 	// files, silently discarding the freshly-downloaded media. (AutoReinit
 	// deliberately does NOT do this — see that method.)
-	w.clearJobParts(jobID)
+	w.clearJobParts(jobID, archive)
 	if priorOutput != "" {
 		dropImportedArchiveChapters(priorOutput, w.logger)
 	}
@@ -447,7 +453,7 @@ func (w *DownloadWorker) autoReinitializeNow(jobID string, seen database.JobStat
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)
 		return
 	}
-	archive := w.archiveOfReset(prev)
+	archive := w.archiveOfReset(prev, true)
 	beforeResetClaim(jobID)
 	if !w.db.UpdateJobFieldsIf(jobID, seen, reinitResetFields(prev.AutoRetryCount+1)) {
 		w.logVerbOverridden(jobID, "auto-reinitialize", seen)

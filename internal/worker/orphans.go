@@ -322,8 +322,15 @@ func orphanOwner(absPath string, db *database.Database, cfg *config.MoomboxConfi
 	if err != nil {
 		return nil, err
 	}
-	if owner, how := newOutputOwners(jobs, trims, resolveOutputDir(cfg)).ownerOf(absPath); owner != "" {
+	owners := newOutputOwners(jobs, trims, resolveOutputDir(cfg))
+	if owner, how := owners.ownerOf(absPath); owner != "" {
 		return &NotOrphanError{Owner: owner, How: how}, nil
+	}
+	// A directory holding files a job kept at a Reinitialize. Asked here and
+	// not by ownerOf: the sweep never lists a directory, and the answer costs
+	// a walk.
+	if owner := owners.asideOwnerUnder(absPath); owner != "" {
+		return &NotOrphanError{Owner: owner, How: "kept a file in it at a Reinitialize"}, nil
 	}
 	return nil, nil
 }
@@ -595,11 +602,11 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		// FE-16): owned while the archive they derive from is
 		// (archiveDerivedStem), listed once it is gone, as its chat is.
 		_, isDerived := archiveDerivedStem(path)
-		// The marker of an archive a Reinitialize set aside (owner ruling
-		// R2-W1b): owned with the aside while its job exists, listed with it
-		// once the job is gone.
+		// The marker of an archive a Reinitialize kept (owner ruling
+		// R2-W1b): owned with its files while its job exists, listed with
+		// them once the job is gone.
 		if ext == asideOwnerSuffix {
-			_, isDerived = asideSiblingStem(absPath)
+			isDerived = true
 		}
 		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
@@ -953,8 +960,8 @@ func (o *outputOwners) isTrimDir(dir string) bool {
 //
 //   - a row names the file;
 //   - it is a recovered set-aside recording named after a file a row names;
-//   - it is a file of an archive a Reinitialize set aside, whose marker names
-//     a job that still exists (asideOwner), or a directory holding one;
+//   - it is a file a Reinitialize kept, whose marker names a job that still
+//     exists (asideOwner);
 //   - it is a directory holding a file a row names, which deleting it would
 //     take along. The sweep never lists a directory under the output tree, so
 //     only a request built by hand can name one.
@@ -982,20 +989,16 @@ func (o *outputOwners) ownerOf(absPath string) (owner, how string) {
 			return row, "names a file in it"
 		}
 	}
-	if _, ok := asideSiblingStem(absPath); ok {
-		if row := o.asideOwner(absPath); row != "" {
-			return row, "set it aside at a Reinitialize"
-		}
-	}
-	if row := o.asideOwnerUnder(absPath); row != "" {
-		return row, "set a file in it aside at a Reinitialize"
+	if row := o.asideOwner(absPath); row != "" {
+		return row, "kept it at a Reinitialize"
 	}
 	return "", ""
 }
 
-// asideOwner returns the row that owns the set-aside recording path is a file
-// of through its marker ("<stem>.restart-<ts>.owner", asideOwnerID), "" when
-// it has no marker or the job the marker names is gone.
+// asideOwner returns the row that owns path through the marker that shares
+// its name ("<stem>.restart-<ts>.owner" for an archive a Reinitialize set
+// aside, "<stem>.owner" for one it could not rename; asideOwnerID), "" when
+// there is no marker or the job it names is gone.
 func (o *outputOwners) asideOwner(path string) string {
 	marker := normalizePath(asideBase(path) + asideOwnerSuffix)
 	row, ok := o.asideOwners[marker]
@@ -1008,10 +1011,11 @@ func (o *outputOwners) asideOwner(path string) string {
 	return row
 }
 
-// asideOwnerUnder returns the row that owns a set-aside archive somewhere
-// under dir (asideOwner), "" when dir is not a directory or holds none:
-// deleting the directory would take that archive along. Only a delete request
-// built by hand names a directory under the output tree.
+// asideOwnerUnder returns the row that owns a file somewhere under dir
+// through a marker (asideOwner), "" when dir is not a directory or holds
+// none: deleting the directory would take that file along. Only a delete
+// request built by hand names a directory under the output tree, so the
+// delete's recheck asks this (orphanOwner) and the sweep does not.
 func (o *outputOwners) asideOwnerUnder(dir string) string {
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return ""
@@ -1019,9 +1023,6 @@ func (o *outputOwners) asideOwnerUnder(dir string) string {
 	found := ""
 	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), asideOwnerSuffix) {
-			return nil
-		}
-		if _, ok := asideSiblingStem(p); !ok {
 			return nil
 		}
 		if found = o.asideOwner(p); found != "" {
