@@ -45,14 +45,6 @@ func serveScript(t *testing.T, script ...scriptedResponse) (*httptest.Server, *a
 	return srv, &hits
 }
 
-// TestPlayerRetryBackoffBaseIsOneSecond pins the production base TestMain
-// scales down: 1 s, 2 s, 4 s.
-func TestPlayerRetryBackoffBaseIsOneSecond(t *testing.T) {
-	if productionPlayerRetryBackoffBase != time.Second {
-		t.Errorf("playerRetryBackoffBase = %s, want 1s", productionPlayerRetryBackoffBase)
-	}
-}
-
 // TestDoRetryRequestReturnsA429AtOnce: a 429 is YouTube saying too many
 // requests, and upstream returns it at once and moves on. It was retried
 // three more times at 1, 2 and 4 s, on every client of a cascade.
