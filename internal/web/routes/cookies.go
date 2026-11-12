@@ -962,11 +962,12 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// for reasons that do not apply here: /api/cookies/check writes nothing,
 		// and /api/cookies/refresh has the same exposure but predates this.
 		//
-		// 45 s is a backstop above the pass's own worst case, not a budget it
-		// is expected to spend: the shared HTTP client caps every request at
-		// 30 s and each auth check wraps its own 15 s context on top, so a live
-		// pass finishes well inside this. It exists so a wedged round-trip
-		// cannot hold a detached context open indefinitely — and, since the
+		// cookies.RecheckAfterWriteBudget (90 s) is a backstop, not a budget it
+		// is expected to spend: up to 45 s waiting for a pass already in flight
+		// to end, then one pass, whose auth checks each wrap their own 15 s
+		// context. It was 45 s, the length of the wait alone, which left the
+		// pass after a slow collision no time to finish. It exists so a wedged
+		// round-trip cannot hold a detached context open indefinitely — and, since the
 		// handler does not return until the deferred pass does, so it cannot
 		// hold the connection open indefinitely either.
 		//
@@ -981,7 +982,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// it is able to terminate without waiting for the handler, and the
 		// Flush commits it now rather than at return. Before the length was
 		// set, a browser on the setup dialog's 60 s AbortController waited for
-		// FinishSetupDetailed PLUS up to 45 s of re-check and could abort a
+		// FinishSetupDetailed PLUS up to 90 s of re-check and could abort a
 		// setup that in fact succeeded. The gzip wrapper implements Flusher and
 		// keeps the header for sub-threshold identity JSON;
 		// /api/update/apply already relies on the same flush.

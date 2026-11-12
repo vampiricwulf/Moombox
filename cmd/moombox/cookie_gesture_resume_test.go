@@ -10,6 +10,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -171,5 +172,32 @@ func TestAutomaticCookiePassResumesTheJobsItVerified(t *testing.T) {
 	}
 	if got := statusOf(t, s.db, "tw_parked"); got != database.StatusCookies {
 		t.Errorf("tw_parked = %s after a pass that could not tell for Twitch, want it still parked", got)
+	}
+}
+
+// TestCookieRecoveryResumesTheJobsItVerified: the automatic recovery is a
+// cookie-writing gesture, so a pass that ran and verified a platform resumes
+// the jobs parked on it (owner ruling R2-C2), and a pass that declined to run
+// resumes none.
+//
+// Mutants: the sweep dropped from runCookieRecovery's deferred tail — the job
+// stays parked; the tail's Ran gate dropped — the declined pass is unchanged
+// here (both its verdicts are Unknown), so that half only guards a decline
+// that carries a verdict.
+func TestCookieRecoveryResumesTheJobsItVerified(t *testing.T) {
+	s, seed := gestureResumeState(t)
+	seed("yt_parked", "youtube", database.ParkReasonAuth, false)
+	notify := func(string, string, string, notifications.NotificationType) {}
+
+	s.runCookieRecovery(context.Background(), "youtube",
+		stubRefreshResult(cookies.RefreshResult{YouTube: cookies.RefreshOK}), notify)
+	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusCookies {
+		t.Fatalf("yt_parked = %s after a recovery pass that did not run, want it still parked", got)
+	}
+
+	s.runCookieRecovery(context.Background(), "youtube",
+		stubRefresh(cookies.RefreshOK, cookies.RefreshUnknown), notify)
+	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusUpcoming {
+		t.Errorf("yt_parked = %s after a recovery that verified YouTube, want it resumed", got)
 	}
 }
