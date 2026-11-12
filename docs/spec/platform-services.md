@@ -612,6 +612,19 @@ Any other setup failure, a job already cancelled, and a VOD's own failure (which
 
 ---
 
+### Video URL Forms
+
+Every add path reads a YouTube video link through one parser: `utils.ExtractVideoID` (`internal/utils/youtube.go`), which the CLI's `moombox add` (`utils.ExtractMediaID`) and the TUI's Add Video (`extractMediaID`, `internal/tui/add_video.go`) call, `utils.ExtractVideoIDFromURL` for the API's url-only `POST /api/jobs` (the same reading, except that a bare ID is not a URL there: an 11-character word may be a Twitch login), and its mirror in the dashboard, `extractVideoId` (`web/public/app.js`). All four are tested against one table, `internal/utils/testdata/youtube_urls.json`. Before there was one parser each path had its own, so a link with `v` not first in the query was refused by the dashboard and the API and taken by the TUI and the CLI, and the TUI made a YouTube job of any text holding `v=` and 11 ID characters.
+
+| Form | Example |
+|---|---|
+| A bare ID | `dQw4w9WgXcQ` (exactly 11 of `A-Z a-z 0-9 _ -`) |
+| A `v` parameter anywhere in the query, on any path | `/watch?v=ID`, `/watch?app=desktop&v=ID`, `/watch?list=PL…&v=ID`; also the old `#v=ID` fragment |
+| Short link | `youtu.be/ID` |
+| Path forms | `/live/ID`, `/shorts/ID`, `/embed/ID`, `/v/ID` |
+
+The scheme (`http` or `https`) is optional and the host is read in any case. The hosts are `youtube.com`, `youtube-nocookie.com` and `youtubekids.com` with any subdomain (`www.`, `m.`, `music.`, `gaming.`), and `youtu.be`, matched on a dot boundary so a lookalike host (`notyoutube.com`, `youtube.com.example.com`) is refused. An ID may be followed by anything that cannot be part of one (a slash, a stray bracket from a paste); twelve or more ID characters are not an ID and are refused, where the dashboard's and the API's old regexes cut them to the first eleven. A link on any other host is not a YouTube video. Which of a bare `v` and digits is a Twitch VOD is decided before this parser is asked (§ Twitch URL Forms, owner decision FE-6).
+
 ## Twitch Service (`internal/twitch/`)
 
 ### Architecture
@@ -1977,6 +1990,10 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 - A live capture on the no-JS path: `TestNoJSCaptureRefreshesOnTheNoJSFormats`
 - A live path switch: `TestAFallbackCaptureSwitchesBackOnce`, `TestRunRecordSwitchBack`, `TestLiveHlsFallbackMarksTheRun`, `internal/worker/live_switch_back_test.go`
 - A live path switch: `TestLiveRefreshFailingOnTheChallengesSwitchesPathInANewPart`, `TestLivePathSwitchesAreBounded`, `TestASwitchBackReArmsTheFallbackItLeaves`, `internal/worker/live_path_switch_test.go`
+
+**Video URL Forms**
+
+- All four are tested against `internal/utils/testdata/youtube_urls.json`: `TestExtractVideoIDSharedURLTable` (`internal/utils/youtube_test.go`), `TestExtractMediaIDSharedYouTubeURLTable` (`internal/tui/tui_test.go`), `TestExtractVideoIDFromURLSharedYouTubeURLTable` (`internal/web/routes/jobs_test.go`) and `web/tests/youtube-urls.test.mjs`.
 
 **Twitch URL Forms**
 

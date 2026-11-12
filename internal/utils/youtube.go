@@ -21,79 +21,103 @@ import (
 // test in media_test.go for the resolution policy.
 var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
-// ExtractVideoID extracts a YouTube video ID from various URL formats.
-// Supported formats:
-//   - youtube.com/watch?v=ID
-//   - youtu.be/ID
-//   - youtube.com/live/ID
-//   - youtube.com/shorts/ID
-//   - youtube.com/embed/ID
-//   - youtube.com/v/ID
-//   - bare 11-character ID (see videoIDRegex godoc for the Twitch
-//     v-prefixed VOD collision)
+// ExtractVideoID extracts a YouTube video ID from a bare 11-character ID
+// (see videoIDRegex godoc for the Twitch v-prefixed VOD collision) or from
+// a YouTube URL as ExtractVideoIDFromURL reads it. It is the one parser
+// every add path uses: `moombox add` (ExtractMediaID), the TUI's add dialog
+// and, through ExtractVideoIDFromURL, the URL-only POST /api/jobs. The
+// dashboard's extractVideoId (web/public/app.js) mirrors it, and all of them
+// are tested against testdata/youtube_urls.json.
 func ExtractVideoID(input string) string {
+	input = strings.TrimSpace(input)
+	if videoIDRegex.MatchString(input) {
+		return input
+	}
+	return ExtractVideoIDFromURL(input)
+}
+
+// urlSchemeRegex matches a leading URL scheme ("https://").
+var urlSchemeRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://`)
+
+// youtubeVideoPathPrefixes are the path forms that carry the video ID as
+// their next segment.
+var youtubeVideoPathPrefixes = []string{"/live/", "/shorts/", "/embed/", "/v/"}
+
+// ExtractVideoIDFromURL extracts the video ID from a YouTube URL, and returns
+// "" for anything else, a bare ID included. The scheme (http or https) is
+// optional and the host is read in any case. Supported forms:
+//   - a v= parameter anywhere in the query (or in the fragment) on any path:
+//     /watch?v=ID, /watch?app=desktop&v=ID, /watch?list=PL...&v=ID
+//   - youtu.be/ID
+//   - /live/ID, /shorts/ID, /embed/ID, /v/ID
+//
+// on youtube.com, youtube-nocookie.com and youtubekids.com and their
+// subdomains (www., m., music., gaming.), and on youtu.be. The host is
+// matched on a dot boundary, so a lookalike ("notyoutube.com") is refused.
+// An ID may be followed by anything that is not an ID character (a slash,
+// a stray closing bracket from a paste); twelve or more ID characters are
+// not an ID.
+func ExtractVideoIDFromURL(input string) string {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return ""
 	}
-
-	// Check if it's already a bare video ID
-	if videoIDRegex.MatchString(input) {
-		return input
-	}
-
-	// Normalize bare URLs without protocol (e.g., youtube.com/watch?v=... or youtu.be/...)
-	if strings.HasPrefix(input, "youtube.com/") || strings.HasPrefix(input, "www.youtube.com/") ||
-		strings.HasPrefix(input, "m.youtube.com/") || strings.HasPrefix(input, "youtu.be/") {
+	if !urlSchemeRegex.MatchString(input) {
 		input = "https://" + input
 	}
-
-	// Try parsing as URL
 	u, err := url.Parse(input)
-	if err != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
 
 	host := strings.ToLower(u.Hostname())
+	short := hostIsOrUnder(host, "youtu.be")
+	if !short && !hostIsOrUnder(host, "youtube.com") &&
+		!hostIsOrUnder(host, "youtube-nocookie.com") && !hostIsOrUnder(host, "youtubekids.com") {
+		return ""
+	}
 
-	// youtu.be/ID
-	if host == "youtu.be" {
-		id := strings.TrimPrefix(u.Path, "/")
-		if videoIDRegex.MatchString(id) {
+	if id := leadingVideoID(u.Query().Get("v")); id != "" {
+		return id
+	}
+	// The old "#!v=ID" and "#v=ID" forms.
+	if frag, err := url.ParseQuery(strings.TrimPrefix(u.Fragment, "!")); err == nil {
+		if id := leadingVideoID(frag.Get("v")); id != "" {
 			return id
 		}
-		return ""
 	}
-
-	// youtube.com variants
-	if host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com" {
-		return ""
+	if short {
+		return leadingVideoID(strings.TrimPrefix(u.Path, "/"))
 	}
-
-	path := u.Path
-
-	// /watch?v=ID
-	if path == "/watch" {
-		v := u.Query().Get("v")
-		if videoIDRegex.MatchString(v) {
-			return v
-		}
-		return ""
-	}
-
-	// /live/ID, /shorts/ID, /embed/ID, /v/ID
-	prefixes := []string{"/live/", "/shorts/", "/embed/", "/v/"}
-	for _, prefix := range prefixes {
-		if id, ok := strings.CutPrefix(path, prefix); ok {
-			// Remove trailing path segments
-			id, _, _ = strings.Cut(id, "/")
-			if videoIDRegex.MatchString(id) {
-				return id
-			}
+	for _, prefix := range youtubeVideoPathPrefixes {
+		if rest, ok := strings.CutPrefix(u.Path, prefix); ok {
+			return leadingVideoID(rest)
 		}
 	}
-
 	return ""
+}
+
+// hostIsOrUnder reports whether host is domain or a subdomain of it.
+func hostIsOrUnder(host, domain string) bool {
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+// leadingVideoID returns the video ID s starts with: exactly 11 ID
+// characters, followed by nothing or by a character that cannot be part of
+// an ID.
+func leadingVideoID(s string) string {
+	n := 0
+	for n < len(s) {
+		c := s[n]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			break
+		}
+		n++
+	}
+	if n != 11 {
+		return ""
+	}
+	return s[:n]
 }
 
 // IsVideoID returns true if the string is a valid YouTube video ID.

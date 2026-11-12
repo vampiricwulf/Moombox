@@ -4407,6 +4407,16 @@ export class MoomboxApp {
     return null;
   }
 
+  /**
+   * Read a YouTube video ID from a bare 11-character ID or a YouTube URL.
+   * Mirrors utils.ExtractVideoID (internal/utils/youtube.go), the one parser
+   * the CLI, the TUI and the add route use; both are tested against
+   * internal/utils/testdata/youtube_urls.json. The scheme is optional, the
+   * host is read in any case, and the forms are a v= parameter anywhere in
+   * the query (or the fragment), youtu.be/ID, and /live/, /shorts/, /embed/
+   * and /v/ID on youtube.com, youtube-nocookie.com, youtubekids.com and
+   * their subdomains.
+   */
   extractVideoId(input) {
     const trimmed = input.trim();
 
@@ -4414,20 +4424,38 @@ export class MoomboxApp {
     if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
       return trimmed;
     }
+    if (!trimmed) return null;
 
-    // YouTube URL patterns
-    const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-      /youtube\.com\/live\/([a-zA-Z0-9_-]{11})/,
-    ];
+    let u;
+    try {
+      u = new URL(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : "https://" + trimmed);
+    } catch {
+      return null;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
 
-    for (const pattern of patterns) {
-      const match = trimmed.match(pattern);
-      if (match) {
-        return match[1];
-      }
+    const host = u.hostname.toLowerCase();
+    const isOrUnder = (domain) => host === domain || host.endsWith("." + domain);
+    const short = isOrUnder("youtu.be");
+    if (!short && !isOrUnder("youtube.com") && !isOrUnder("youtube-nocookie.com") && !isOrUnder("youtubekids.com")) {
+      return null;
     }
 
+    // Exactly 11 ID characters, then nothing or a character no ID holds.
+    const leadingId = (s) => {
+      const m = /^[a-zA-Z0-9_-]+/.exec(s || "");
+      return m && m[0].length === 11 ? m[0] : null;
+    };
+
+    let id = leadingId(u.searchParams.get("v"));
+    if (id) return id;
+    // The old "#!v=ID" and "#v=ID" forms.
+    id = leadingId(new URLSearchParams(u.hash.replace(/^#!?/, "")).get("v"));
+    if (id) return id;
+    if (short) return leadingId(u.pathname.slice(1));
+    for (const prefix of ["/live/", "/shorts/", "/embed/", "/v/"]) {
+      if (u.pathname.startsWith(prefix)) return leadingId(u.pathname.slice(prefix.length));
+    }
     return null;
   }
 

@@ -1165,6 +1165,41 @@ func TestJobCreateExtractsVideoIDFromYouTubeURL(t *testing.T) {
 	}
 }
 
+// TestExtractVideoIDFromURLSharedYouTubeURLTable runs the URL-only add's
+// reader over the one YouTube URL table every add path is tested against
+// (internal/utils/testdata/youtube_urls.json). A bare ID is not a URL here:
+// the caller has videoId for that, and an 11-character word in url may be a
+// Twitch login.
+//
+// Mutant: the route's own regex this replaced (watch?v= with v first,
+// youtu.be/ and /live/ only, on any host) fails the app=desktop, list=,
+// /shorts/, /embed/ and /v/ rows and takes the notyoutube.com row.
+func TestExtractVideoIDFromURLSharedYouTubeURLTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "utils", "testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []struct {
+			Input string `json:"input"`
+			ID    string `json:"id"`
+			Bare  bool   `json:"bare"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil || len(table.Rows) == 0 {
+		t.Fatalf("shared table: %v (%d rows)", err, len(table.Rows))
+	}
+	for _, row := range table.Rows {
+		want := row.ID
+		if row.Bare {
+			want = ""
+		}
+		if got := extractVideoIDFromURL(row.Input); got != want {
+			t.Errorf("extractVideoIDFromURL(%q) = %q, want %q", row.Input, got, want)
+		}
+	}
+}
+
 func TestJobCreateRejectsDuplicate(t *testing.T) {
 	// HasActiveJob check: creating the same videoID twice in a row
 	// returns 409. Mirrors the import-duplicate test in the import

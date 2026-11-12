@@ -2,10 +2,13 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -13,50 +16,57 @@ import (
 	"time"
 )
 
-func TestExtractVideoID(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		// Bare ID
-		{"dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Standard watch URLs
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"http://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// With extra params
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30s", "dQw4w9WgXcQ"},
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtest", "dQw4w9WgXcQ"},
-		// Short URLs
-		{"https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"http://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Live URLs
-		{"https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Shorts URLs
-		{"https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Embed URLs
-		{"https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// V URLs
-		{"https://www.youtube.com/v/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// IDs with hyphens and underscores (must be exactly 11 chars)
-		{"abc-_12-_AB", "abc-_12-_AB"},
-		// Invalid inputs
-		{"", ""},
-		{"not-a-url", ""},
-		{"https://example.com/watch?v=dQw4w9WgXcQ", ""},
-		{"https://www.youtube.com/watch", ""},
-		{"https://www.youtube.com/watch?v=tooshort", ""},
-		{"https://www.youtube.com/watch?v=toolooooooong", ""},
-	}
+// youtubeURLRow is one row of testdata/youtube_urls.json, the table the Go
+// parser, the TUI, the add route and the dashboard are all tested against.
+type youtubeURLRow struct {
+	Input string `json:"input"`
+	ID    string `json:"id"`
+	Bare  bool   `json:"bare"`
+}
 
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := ExtractVideoID(tt.input)
-			if result != tt.expected {
-				t.Errorf("ExtractVideoID(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
+func loadYouTubeURLTable(t *testing.T) []youtubeURLRow {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []youtubeURLRow `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Rows) == 0 {
+		t.Fatal("the shared YouTube URL table is empty")
+	}
+	return table.Rows
+}
+
+// TestExtractVideoIDSharedURLTable runs ExtractVideoID over the shared
+// table: every form any add path took before there was one parser (watch
+// with v anywhere in the query, youtu.be, /live/, /shorts/, /embed/, /v/,
+// music. and -nocookie hosts, no scheme, a host in any case) and the inputs
+// that must stay refused (another host, a lookalike host, a 12-character
+// ID). ExtractVideoIDFromURL reads the same rows, except that a bare ID is
+// not a URL: the add route must not take an 11-character Twitch login for a
+// video.
+//
+// Mutants: requiring path == "/watch" for the v parameter, a case-sensitive
+// scheme-less prefix test, an exact host list without music., a suffix match
+// without the dot (notyoutube.com), or truncating a long ID to 11
+// characters each fails its rows.
+func TestExtractVideoIDSharedURLTable(t *testing.T) {
+	for _, row := range loadYouTubeURLTable(t) {
+		if got := ExtractVideoID(row.Input); got != row.ID {
+			t.Errorf("ExtractVideoID(%q) = %q, want %q", row.Input, got, row.ID)
+		}
+		wantURL := row.ID
+		if row.Bare {
+			wantURL = ""
+		}
+		if got := ExtractVideoIDFromURL(row.Input); got != wantURL {
+			t.Errorf("ExtractVideoIDFromURL(%q) = %q, want %q", row.Input, got, wantURL)
+		}
 	}
 }
 

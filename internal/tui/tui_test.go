@@ -14,39 +14,39 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-// --- extractYouTubeVideoID ---
+// --- extractMediaID: YouTube ---
 
-func TestExtractYouTubeVideoID(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		// Direct 11-char ID
-		{"dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Standard watch URL
-		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://youtube.com/watch?v=dQw4w9WgXcQ&t=10", "dQw4w9WgXcQ"},
-		// Short URL
-		{"https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		{"https://youtu.be/dQw4w9WgXcQ?t=5", "dQw4w9WgXcQ"},
-		// Live URL
-		{"https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Shorts URL
-		{"https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Embed URL
-		{"https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"},
-		// Trailing slash
-		{"https://youtu.be/dQw4w9WgXcQ/", "dQw4w9WgXcQ"},
-		// Empty
-		{"", ""},
-		// Invalid (too short)
-		{"dQw4w9W", ""},
+// TestExtractMediaIDSharedYouTubeURLTable runs the TUI's add-dialog parser
+// over the one YouTube URL table the Go parser, the add route and the
+// dashboard are tested against (internal/utils/testdata/youtube_urls.json):
+// a row with an ID is that YouTube job, and a row without one is never a
+// YouTube job (it may still be a Twitch target: a bare word is a login).
+//
+// Mutant: the TUI's own substring parser this replaced ("v=" and 11 ID
+// characters anywhere, on any host) makes a YouTube job of the example.com
+// and notyoutube.com rows.
+func TestExtractMediaIDSharedYouTubeURLTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "utils", "testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, tc := range tests {
-		got := extractYouTubeVideoID(tc.input)
-		if got != tc.want {
-			t.Errorf("extractYouTubeVideoID(%q) = %q, want %q", tc.input, got, tc.want)
+	var table struct {
+		Rows []struct {
+			Input string `json:"input"`
+			ID    string `json:"id"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil || len(table.Rows) == 0 {
+		t.Fatalf("shared table: %v (%d rows)", err, len(table.Rows))
+	}
+	for _, row := range table.Rows {
+		gotID, gotType := extractMediaID(row.Input)
+		if row.ID != "" {
+			if gotID != row.ID || gotType != "youtube" {
+				t.Errorf("extractMediaID(%q) = (%q, %q), want (%q, youtube)", row.Input, gotID, gotType, row.ID)
+			}
+		} else if gotType == "youtube" {
+			t.Errorf("extractMediaID(%q) = (%q, youtube), want no YouTube job", row.Input, gotID)
 		}
 	}
 }
