@@ -60,22 +60,16 @@ func TestNewChatDownloaderInitialContinuation(t *testing.T) {
 
 func TestNewChatDownloaderStreamStartTimeParsing(t *testing.T) {
 	tests := []struct {
-		name          string
-		startTime     string
-		expectMs      int64
-		expectNonZero bool
+		name      string
+		startTime string
 	}{
 		{
-			name:          "empty string",
-			startTime:     "",
-			expectMs:      0,
-			expectNonZero: false,
+			name:      "empty string",
+			startTime: "",
 		},
 		{
-			name:          "invalid format",
-			startTime:     "not-a-date",
-			expectMs:      0,
-			expectNonZero: false,
+			name:      "invalid format",
+			startTime: "not-a-date",
 		},
 	}
 
@@ -87,10 +81,7 @@ func TestNewChatDownloaderStreamStartTimeParsing(t *testing.T) {
 				StreamStartTime: tt.startTime,
 			}
 			cd := NewChatDownloader(opts)
-			if tt.expectNonZero && cd.streamStartMs == 0 {
-				t.Error("expected non-zero streamStartMs")
-			}
-			if !tt.expectNonZero && cd.streamStartMs != 0 {
+			if cd.streamStartMs != 0 {
 				t.Errorf("expected 0 streamStartMs, got %d", cd.streamStartMs)
 			}
 		})

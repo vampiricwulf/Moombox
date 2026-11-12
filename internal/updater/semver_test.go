@@ -64,23 +64,19 @@ func TestParseVersionFullPreReleaseAndBuild(t *testing.T) {
 		patch        int
 		wantPre      []string
 		wantBuild    string
-		wantErr      bool
 	}{
-		{"2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, "", false},
-		{"v2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, "", false},
-		{"1.0.0-rc.1+build.7", 1, 0, 0, []string{"rc", "1"}, "build.7", false},
-		{"1.0.0+meta", 1, 0, 0, nil, "meta", false},
-		{"1.0.0-alpha", 1, 0, 0, []string{"alpha"}, "", false},
-		{"1.0.0-alpha.beta.1", 1, 0, 0, []string{"alpha", "beta", "1"}, "", false},
-		{"2.0.15", 2, 0, 15, nil, "", false},
+		{"2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, ""},
+		{"v2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, ""},
+		{"1.0.0-rc.1+build.7", 1, 0, 0, []string{"rc", "1"}, "build.7"},
+		{"1.0.0+meta", 1, 0, 0, nil, "meta"},
+		{"1.0.0-alpha", 1, 0, 0, []string{"alpha"}, ""},
+		{"1.0.0-alpha.beta.1", 1, 0, 0, []string{"alpha", "beta", "1"}, ""},
+		{"2.0.15", 2, 0, 15, nil, ""},
 	}
 	for _, tt := range tests {
 		v, err := ParseVersionFull(tt.input)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("ParseVersionFull(%q) err = %v, wantErr %v", tt.input, err, tt.wantErr)
-			continue
-		}
 		if err != nil {
+			t.Errorf("ParseVersionFull(%q) err = %v, want nil", tt.input, err)
 			continue
 		}
 		if v.Major != tt.major || v.Minor != tt.minor || v.Patch != tt.patch {
