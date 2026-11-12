@@ -1286,7 +1286,7 @@ Body `{"paths": [...]}`. Each path must lie under the staging or output director
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (the job was deleted, or a row DECAPI wrote for a video it skipped or gave up on, before it stopped recording those). While the row remains, the monitor treats the video as already-processed and won't re-discover it. Keyed by job ID, so the match is against `jobs.id`. |
-| `DELETE` | `/api/history/orphaned` | Remove the given history video IDs (JSON body `{"videoIds":[...]}`), unblocking re-discovery. |
+| `DELETE` | `/api/history/orphaned` | Remove the given history video IDs (JSON body `{"videoIds":[...]}`), unblocking re-discovery. Only a row that is still orphaned is removed: an ID whose video has a job by now keeps its row. Answers `{deleted, removed, errors}`: `deleted` echoes the requested IDs, and `removed` is the number of rows actually removed, lower when an ID had no row or was no longer an orphan. |
 
 ### Updates
 
