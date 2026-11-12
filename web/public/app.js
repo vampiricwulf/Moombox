@@ -761,8 +761,8 @@ export class MoomboxApp {
   }
 
   /**
-   * The cookie, re-login and sidecar fields have several writers: loadStatus,
-   * the status_changed read (_loadAuthStatus), the first-check poll
+   * The cookie and re-login fields have several writers: loadStatus, the
+   * status_changed read (_loadAuthStatus), the first-check poll
    * (_pollCookieCheck) and the answers of Recheck and Refresh. Each takes the
    * next number here; a read applies its answer only while its number is
    * still the newest, so an older read never draws over a newer answer.
@@ -771,11 +771,30 @@ export class MoomboxApp {
     return (this._authGen = (this._authGen || 0) + 1);
   }
 
-  /** The auth half of a status answer: what a status_changed frame is about. */
-  _applyAuthStatus(status) {
-    this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
-    this.cookieStatus = status.cookieStatus;
-    this.twitchAuthStatus = status.twitchAuthStatus;
+  /**
+   * The sidecar's health and the active platforms come only from a whole
+   * status answer, so only the two status reads (loadStatus and
+   * _loadAuthStatus) take this number. The cookie writers above do not: a
+   * poll or a Recheck that answers during a status read says nothing about
+   * the sidecar, and must not make that read's sidecar half be dropped (no
+   * second status_changed frame would follow to correct it).
+   */
+  _nextHealthGen() {
+    return (this._healthGen = (this._healthGen || 0) + 1);
+  }
+
+  /**
+   * The auth half of a status answer: what a status_changed frame is about.
+   * `gens` are the numbers the read took when it was sent; each group of
+   * fields is applied only while its number is still the newest.
+   */
+  _applyAuthStatus(status, gens) {
+    if (gens.auth === this._authGen) {
+      this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
+      this.cookieStatus = status.cookieStatus;
+      this.twitchAuthStatus = status.twitchAuthStatus;
+    }
+    if (gens.health !== this._healthGen) return;
     this.activePlatforms = status.activePlatforms || {};
     // Tri-state on purpose. `null` means the server published nothing —
     // `[bgutils] use_sidecar = false` — and must read as "no opinion", not
@@ -788,13 +807,13 @@ export class MoomboxApp {
     // that number is still the newest: of two reads that overlap, the one
     // asked for first can answer last, with the older status.
     const gen = (this._statusGen = (this._statusGen || 0) + 1);
-    const authGen = this._nextAuthGen();
+    const gens = { auth: this._nextAuthGen(), health: this._nextHealthGen() };
     try {
       const status = await this._fetchStatus();
       if (status) {
         if (gen !== this._statusGen) return;
-        // Skipped when another writer of these fields answered meanwhile.
-        if (authGen === this._authGen) this._applyAuthStatus(status);
+        // Each group of fields is skipped when a newer writer of it answered meanwhile.
+        this._applyAuthStatus(status, gens);
         // The server's zone, which recordings are named in: the Settings
         // template example renders its date there (renderTemplatePreview).
         // The config may have drawn it already, with the browser's.
@@ -872,13 +891,13 @@ export class MoomboxApp {
     }
   }
 
-  /** Read the status and apply its auth half only, unless a newer writer answered first. */
+  /** Read the status and apply its auth half only; a group of fields a newer writer answered first is left. */
   async _loadAuthStatus() {
-    const authGen = this._nextAuthGen();
+    const gens = { auth: this._nextAuthGen(), health: this._nextHealthGen() };
     try {
       const status = await this._fetchStatus();
-      if (!status || authGen !== this._authGen) return;
-      this._applyAuthStatus(status);
+      if (!status) return;
+      this._applyAuthStatus(status, gens);
       this.updateStatusBar();
     } catch (e) {
       // Unreachable or too slow: the reconnect's status load, or the next

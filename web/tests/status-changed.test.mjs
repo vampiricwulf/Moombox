@@ -114,8 +114,10 @@ test("a status_changed read does not write over state that has frames of its own
 
 // Mutant: Recheck's answer not taking a number — the frame's read, asked for
 // before the recheck and answered after it, draws its older verdict over the
-// recheck's.
-test("a status read in flight does not draw over a recheck that answered meanwhile", { skip }, async () => {
+// recheck's. The recheck says nothing about the sidecar, so that half of the
+// read is still applied. Mutant: one number for both halves — the sidecar
+// alert the frame was sent for never appears, and no second frame follows.
+test("a status read in flight does not draw over a recheck that answered meanwhile, and keeps its sidecar half", { skip }, async () => {
   const held = heldStatus({});
   const h = await harness.makeApp({
     routes: {
@@ -131,9 +133,32 @@ test("a status read in flight does not draw over a recheck that answered meanwhi
   await settle(h);
   await h.app.recheckCookies();
   const fromRecheck = h.app.cookieStatus;
-  held.pending.shift()({ activePlatforms: { youtube: true }, cookieStatus: { checked: true, isAuthenticated: false } });
+  held.pending.shift()({
+    activePlatforms: { youtube: true },
+    cookieStatus: { checked: true, isAuthenticated: false },
+    botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 },
+  });
   await settle(h);
   assert.equal(h.app.cookieStatus, fromRecheck);
+  assert.match(warnings(h), /sidecar down/, "the read's sidecar half was dropped with its cookie half");
+});
+
+// Mutant: the sidecar half applied with no number at all — a frame's read,
+// asked for before a full status load and answered after it, draws its older
+// health over the newer.
+test("a frame's read that answers after a newer status load does not draw its older sidecar health", { skip }, async () => {
+  const held = heldStatus({});
+  const h = await harness.makeApp({ routes: { "GET /api/status": held.route } });
+  nudge(h);
+  await settle(h);
+  const newer = h.app.loadStatus();
+  await settle(h);
+  const [answerFrame, answerLoad] = held.pending;
+  answerLoad({ botguardSidecar: { healthy: true, reason: "", restarts: 1 } });
+  await newer;
+  answerFrame({ botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 } });
+  await settle(h);
+  assert.doesNotMatch(warnings(h), /sidecar down/);
 });
 
 // Mutant: no deadline — a read that never settles holds the busy latch, and
