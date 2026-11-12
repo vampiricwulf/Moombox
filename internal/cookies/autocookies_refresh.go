@@ -132,7 +132,11 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		holder := s.refresh.holder.String()
 		s.mu.Unlock()
 		s.logger.Info("skipping cookie refresh — the refresh slot is held", "holder", holder)
-		return refreshDeclined(), nil
+		// The one decline that says a pass is running: the job-triggered
+		// caller answers it "wait for that pass", not "failed" (InFlight).
+		declined := refreshDeclined()
+		declined.InFlight = true
+		return declined, nil
 	}
 	s.refresh.claim(refreshHolderRefresh)
 	s.mu.Unlock()

@@ -100,6 +100,41 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }, wake func(), platform, currentIdentity string) int {
+	return sweepCookieParkedJobs(db, log, wake, platform, currentIdentity, nil, false)
+}
+
+// cookieRetryBudget is the worker's automatic cookie retry budget (owner
+// ruling R2-C1; worker.DownloadWorker's CookieRetryLeft and NoteCookieRetry),
+// as the sweep uses it.
+type cookieRetryBudget interface {
+	CookieRetryLeft(jobID string) bool
+	NoteCookieRetry(jobID string) int
+}
+
+// sweepCookieParkedJobs is resumeCookieParkedJobs with the retry budget.
+//
+// Every resume of an auth park is counted against the job's budget, so both
+// UIs show how many automatic retries it has had. gated says whether a job
+// with none left is skipped:
+//
+//   - The two edge sweeps (auth recovered, credentials changed) are not
+//     gated. The cookies really changed state, which is new information
+//     about every parked job, and neither edge repeats without another real
+//     change.
+//   - The gesture sweep (resumeAfterCookieGesture) is gated. A refresh that
+//     verifies a session that was verifying all along changes nothing for a
+//     job the platform refuses for another reason, and ungated it would hand
+//     such a job one more extraction for every other job's refresh.
+//
+// A membership park is neither counted nor gated: sweepShouldResume settles
+// it at one retry per real account change. A nil budget counts and gates
+// nothing.
+func sweepCookieParkedJobs(db *database.Database, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, wake func(), platform, currentIdentity string, budget cookieRetryBudget, gated bool) int {
 	jobs, err := db.GetAllJobs()
 	if err != nil {
 		log.Warn("cookie-parked sweep: GetAllJobs failed", "platform", platform, "err", err)
@@ -108,6 +143,12 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 	resumed := 0
 	for _, job := range jobs {
 		if !sweepShouldResume(job, platform, currentIdentity) {
+			continue
+		}
+		counted := budget != nil && job.ParkReason != database.ParkReasonMembership
+		if counted && gated && !budget.CookieRetryLeft(job.ID) {
+			log.Debug("cookie-parked sweep: no automatic cookie retry left for the job; leaving it parked",
+				"job", job.ID, "platform", platform)
 			continue
 		}
 		status := worker.CookieResumeStatus(job)
@@ -125,6 +166,9 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 				"job", job.ID, "platform", platform)
 			continue
 		}
+		if counted {
+			budget.NoteCookieRetry(job.ID)
+		}
 		resumed++
 	}
 	// Outside the loop and outside any lock the caller holds: one signal is
@@ -133,6 +177,59 @@ func resumeCookieParkedJobs(db *database.Database, log interface {
 		wake()
 	}
 	return resumed
+}
+
+// cookieBudget is the worker's automatic cookie retry budget for a sweep, or
+// nil when no worker is wired (a test harness's runState): a nil
+// *DownloadWorker inside the interface would not compare equal to nil.
+func (s *runState) cookieBudget() cookieRetryBudget {
+	if s.dlWorker == nil {
+		return nil
+	}
+	return s.dlWorker
+}
+
+// resumeAfterCookieGesture resumes the jobs parked in COOKIES? on platform's
+// credentials after a gesture that wrote cookies.txt and ended with the
+// platform verified: a browser refresh (a job's, the operator's or the
+// recovery's), an import, a finished setup (owner ruling R2-C2).
+//
+// The two edge sweeps do not cover this. OnAuthRecovered needs the refresh
+// service to have seen the platform signed out first, and OnCredentialsChanged
+// needs the account fingerprint to move. When a job is the first to meet a
+// dead session, the repair's re-check reads "authenticated" against a
+// baseline that never saw the failure and an unchanged account, and neither
+// fires: every job that parked while the first job's refresh ran stayed
+// parked beside healthy cookie badges.
+//
+// Call it AFTER the gesture's re-check (recheckAfterCookieWrite), so an edge
+// that does fire resumes the jobs first and its "Authentication Recovered"
+// notification counts them; this then finds nothing left. Only for a verdict
+// of RefreshOK, never Unknown: a pass that could not tell says nothing about
+// whether a retry can work.
+//
+// Each resume uses one of the job's automatic retries, and a job with none
+// left stays parked (sweepCookieParkedJobs, gated). Membership parks are not
+// touched: no identity is passed, as on the auth-recovered edge.
+func (s *runState) resumeAfterCookieGesture(platform, gesture string) {
+	if s.db == nil {
+		return // a test harness's runState
+	}
+	resumed := sweepCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, "", s.cookieBudget(), true)
+	if resumed > 0 {
+		s.log.Info("cookies verified after "+gesture+" — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+	}
+}
+
+// resumeAfterVerifiedCookies is resumeAfterCookieGesture for each platform a
+// gesture's result verified.
+func (s *runState) resumeAfterVerifiedCookies(youtube, twitch cookies.RefreshVerdict, gesture string) {
+	if youtube == cookies.RefreshOK {
+		s.resumeAfterCookieGesture("youtube", gesture)
+	}
+	if twitch == cookies.RefreshOK {
+		s.resumeAfterCookieGesture("twitch", gesture)
+	}
 }
 
 // schedulerWake returns the backlog scheduler's Wake, or nil when no worker is
@@ -369,7 +466,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("auth recovered — cleared membership non-member memos",
 				"platform", platform, "channels", n)
 		}
-		resumed := resumeCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, "")
+		resumed := sweepCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, "", s.cookieBudget(), false)
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 		}
@@ -448,7 +545,7 @@ func (s *runState) wireCredentialRepairCallbacks(broadcast func() int, clearMemb
 			s.log.Info("account identity observed — cleared membership non-member memos",
 				"platform", platform, "channels", n)
 		}
-		resumed := resumeCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, identity)
+		resumed := sweepCookieParkedJobs(s.db, s.log, s.schedulerWake(), platform, identity, s.cookieBudget(), false)
 		if resumed > 0 {
 			s.log.Info("account identity observed — resumed COOKIES? jobs", "platform", platform, "count", resumed)
 			// States no cause, for the same reason the "Cookie Auto-Refresh
@@ -934,6 +1031,9 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 	defer func() {
 		if result.Ran {
 			recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "recovery", "platform", platform)
+			// Then the parked jobs (owner ruling R2-C2), for each platform
+			// the pass verified; resumeAfterCookieGesture says why after.
+			s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "the automatic recovery")
 		}
 	}()
 

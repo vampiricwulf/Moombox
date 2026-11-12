@@ -528,7 +528,19 @@ var cookieImportOnlyKeys = map[string]bool{"youtubeImport": true, "twitchImport"
 // auto-setup start/finish/cancel/abandon quartet) so a buggy or hostile client
 // can't trigger a flurry of browser process launches — an expensive
 // operation per audit reports/web.md S-7.
-func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
+func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter, onCookiesVerified ...func(youtube, twitch cookies.RefreshVerdict, gesture string)) {
+	// cookiesVerified reports the per-platform verdicts of a gesture that
+	// wrote cookies.txt (the browser refresh, an import, a finished setup) to
+	// the host, after the gesture's re-check: cmd/moombox resumes the jobs
+	// parked in COOKIES? on a platform that verified (owner ruling R2-C2,
+	// runState.resumeAfterVerifiedCookies).
+	cookiesVerified := func(youtube, twitch cookies.RefreshVerdict, gesture string) {
+		for _, fn := range onCookiesVerified {
+			if fn != nil {
+				fn(youtube, twitch, gesture)
+			}
+		}
+	}
 	// POST /api/cookies/recheck
 	r.Post("/api/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
 		// CheckNow's bool — "did a pass actually run" — is deliberately ignored,
@@ -704,6 +716,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// refresh's OWN outcome comes from `result` via cookieRefreshOutcome and
 		// is unaffected; only cookieStatus/twitchAuthStatus can lag.
 		refreshSvc.CheckNow(req.Context())
+		if result.Ran {
+			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
+		}
 		status := refreshSvc.GetStatus()
 
 		response := cookieRefreshOutcome(result)
@@ -781,6 +796,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
 			refreshSvc.CheckNow(recheckCtx)
+			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
 		}()
 
 		if err != nil {
@@ -981,6 +997,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			recheckCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
 			refreshSvc.CheckNow(recheckCtx)
+			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")
 		}()
 
 		if err != nil {
