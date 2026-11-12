@@ -117,15 +117,6 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 				history++
 				continue // the history gate — vod/not_a_stream ONLY
 			}
-			// A job row in any status counts the same as a history row. A
-			// job can exist with no history row (a manual add writes none,
-			// and the operator can clear history), and without this gate
-			// such a row cost a refresh probe and an Info line every cycle
-			// only for the job insert to be refused as a duplicate.
-			if has, err := fm.db.HasAnyJob(row.VideoID); err != nil || has {
-				history++
-				continue
-			}
 			if !ch.IncludeNonLiveContent {
 				gated++
 				continue // BEFORE probing: an unjobbable VOD is not worth a request
@@ -140,6 +131,17 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 			if row.Source == "membership" && !fm.membershipActive() {
 				gated++
 				continue // the probe gate: skip a request we know is refused; scope is untouched (§9)
+			}
+			// A job row in any status counts the same as a history row. A
+			// job can exist with no history row (a manual add writes none,
+			// and the operator can clear history), and without this gate
+			// such a row cost a refresh probe and an Info line every cycle
+			// only for the job insert to be refused as a duplicate. It sits
+			// below the in-memory gates, so a channel that jobs no past
+			// content pays no database read for it, and above every probe.
+			if has, err := fm.db.HasAnyJob(row.VideoID); err != nil || has {
+				history++
+				continue
 			}
 			// Reuse the walk's FRESH result; refresh-probe otherwise. The
 			// refresh probe exists to stop a job being built on STALE
