@@ -42,13 +42,21 @@ fi
 
 data=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/moombox-smoke.XXXXXX")
 
-out=$(docker run --rm --user "$(id -u):$(id -g)" -v "$data:/data" "$image" --version)
+# A container that exits non-zero must not end the script here (set -e):
+# what it printed before it died, the entrypoint's own lines included, is
+# the explanation, and the checks below still say how far it got.
+failed=0
+rc=0
+out=$(docker run --rm --user "$(id -u):$(id -g)" -v "$data:/data" "$image" --version) || rc=$?
 echo "$out"
+if [ "$rc" -ne 0 ]; then
+	echo "image-smoke.sh: $image --version exited $rc (the output above is all it printed; data directory: $data)" >&2
+	failed=1
+fi
 
 # The entrypoint's own lines come first; the binary's answer is the last.
 got=$(printf '%s\n' "$out" | tail -n 1)
 want="moombox $version ($commit)"
-failed=0
 if [ "$got" != "$want" ]; then
 	echo "image-smoke.sh: $image --version ended with: $got" >&2
 	echo "image-smoke.sh: expected:                    $want" >&2
