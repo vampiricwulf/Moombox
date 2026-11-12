@@ -314,6 +314,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	unsubSidecarAlerts := s.wireSidecarAlerts()
 	defer unsubSidecarAlerts()
 
+	// BotGuard sidecar health -> open dashboards, which re-read /api/status.
+	unsubSidecarNudge := s.wireSidecarStatusNudge()
+	defer unsubSidecarNudge()
+
 	// =========================================================================
 	// Start services (consumers first)
 	// =========================================================================

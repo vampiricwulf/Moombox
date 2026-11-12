@@ -717,10 +717,15 @@ export class MoomboxApp {
   }
 
   async loadStatus() {
+    // Each read takes the next number and its answer is applied only while
+    // that number is still the newest: of two reads that overlap, the one
+    // asked for first can answer last, with the older status.
+    const gen = (this._statusGen = (this._statusGen || 0) + 1);
     try {
       const response = await fetch("/api/status");
       if (response.ok) {
         const status = await response.json();
+        if (gen !== this._statusGen) return;
         this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
@@ -773,6 +778,29 @@ export class MoomboxApp {
       }
     } catch (e) {
       console.error("Failed to load status:", e);
+    }
+  }
+
+  /**
+   * The server's status_changed frame: cookie authentication, a re-login flag
+   * or the sidecar's health changed. The frame carries nothing; the status is
+   * read again, so the badges are only ever drawn from an answer this tab
+   * asked for. One read is in flight at a time, and frames that arrive during
+   * it ask for one more after it, however many they were.
+   */
+  async onStatusChanged() {
+    if (this._statusNudgeBusy) {
+      this._statusNudgeAgain = true;
+      return;
+    }
+    this._statusNudgeBusy = true;
+    try {
+      do {
+        this._statusNudgeAgain = false;
+        await this.loadStatus();
+      } while (this._statusNudgeAgain);
+    } finally {
+      this._statusNudgeBusy = false;
     }
   }
 
@@ -1781,6 +1809,10 @@ export class MoomboxApp {
 
       case "admission_holds":
         this.setAdmissionHolds(p);
+        break;
+
+      case "status_changed":
+        this.onStatusChanged();
         break;
 
       case "channel_monitors":

@@ -439,6 +439,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 		s.noteSuppliedLocked("twitch")
 	}
 	s.mu.Unlock()
+	s.announceRelogin()
 
 	// Persist verified platforms to config so we can detect auth loss after
 	// restart (matches TS autoCookies.ts persistPlatforms). VERIFIED, not
