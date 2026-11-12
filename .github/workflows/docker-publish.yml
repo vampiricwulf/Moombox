@@ -28,8 +28,10 @@ name: Build and Publish Docker Image
 # with a tag selected builds both architectures and stops: before this gate
 # it rebuilt that tag and pushed it as X.Y.Z, X.Y and `latest`, which moved
 # `latest` back to an old version for everyone who pulls it. To publish the
-# image for an existing tag again, use "Re-run failed jobs" on that tag's
-# release run, which is still a push.
+# image for an existing tag again, open that tag's release run and re-run the
+# docker job: "Re-run failed jobs" when it failed, otherwise the re-run button
+# on the docker job alone. Either is still a push event. Do not use "Re-run
+# all jobs", which runs the release job again too.
 #
 # The gate covers only tags created from the commit that added it on. A manual
 # run on a tag executes THAT TAG'S copy of this file, so for v2.9.9 and older
