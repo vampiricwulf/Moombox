@@ -34,12 +34,12 @@ const open = [];
 after(() => { for (const w of open.splice(0)) { try { w.close(); } catch { /* closed */ } } });
 
 /** A jsdom over one real page, with a stubbed matchMedia and a quiet console. */
-function page(file, { light = false } = {}) {
+function page(file, { light = false, url = null } = {}) {
   const virtualConsole = new VirtualConsole();
   const jsdomErrors = [];
   virtualConsole.on("jsdomError", (e) => jsdomErrors.push(e.message));
   const dom = new JSDOM(read(file), {
-    url: "http://localhost/" + (file === "index.html" ? "" : file),
+    url: url ?? "http://localhost/" + (file === "index.html" ? "" : file),
     runScripts: "outside-only",
     virtualConsole,
   });
@@ -288,4 +288,34 @@ test("login.js redirects to the dashboard on success and holds the button", { sk
     "the button stays disabled/loading until the navigation completes, or it flickers");
   assert.equal(window.document.getElementById("login-error").style.display, "none",
     "no error may be shown for a successful login");
+});
+
+// A notification's deep link is {public_url}/#job=<id>. A browser with no
+// session is answered the login page at that same URL (AuthMiddleware serves
+// it in place), so the hash is still in the address bar when the password is
+// accepted, and the dashboard opens the job from it once it loads.
+//
+// jsdom implements no navigation: a reload is reported on the virtual
+// console, and an href that differs from the current URL by its fragment
+// alone is applied as a hash change.
+//
+// MUTANT: `window.location.href = "/"` — the hash is gone and the visitor
+// lands on the plain job list. `window.location.href = "/" + hash` alone —
+// the same URL again, which a browser does not load: the visitor stays on
+// the login form (no navigation is reported here).
+test("login.js keeps a #job= deep link through a successful login", { skip }, async () => {
+  const dom = page("login.html", { url: "http://localhost/#job=yt_aB3-xY_9zqw" });
+  const { window } = dom;
+  await domContentLoaded(window);
+  stubFetch(window, () => ({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({}) }));
+  window.eval(read("login.js"));
+
+  window.document.getElementById("login-password").value = "hunter2";
+  window.document.getElementById("login-submit").dispatchEvent(new window.Event("click"));
+  await settle();
+
+  assert.equal(window.location.href, "http://localhost/#job=yt_aB3-xY_9zqw",
+    "the deep link's hash must still be in the address bar after the login");
+  assert.ok(dom.jsdomErrors.some((m) => /navigation/i.test(m)),
+    "the page must be loaded again, or the login form stays up");
 });
