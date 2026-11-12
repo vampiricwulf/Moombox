@@ -185,6 +185,8 @@ func newGapFillFixture(t *testing.T) *gapFillFixture {
 	}
 	f.filler = &twitchGapFiller{
 		db: f.db, logger: f.log,
+		// No test waits out a retry pause; the ones that pin the pauses record them.
+		pause:   func(context.Context, time.Duration) bool { return true },
 		findVod: func(context.Context, string, time.Time, time.Time) (string, error) { return f.vodID, nil },
 		vodInfo: func(context.Context, string) (*twitch.TwitchVodInfo, error) { i := f.vodInfo; return &i, nil },
 		vodVariants: func(context.Context, string) ([]twitch.TwitchHLSVariant, error) {

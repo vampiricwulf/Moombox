@@ -64,6 +64,12 @@ type twitchGapFillPlan struct {
 	// measured against the broadcast's span (gapFillDriftLimit, owner
 	// decision PR-R6).
 	EndKnown bool `json:"endKnown,omitempty"`
+	// CutFailures counts the looks that found the VOD complete and then failed
+	// to download or mux a span from it. They wait on gapFillCutBackoff, apart
+	// from Attempts: a failed download is no sign the VOD is far from ready.
+	CutFailures int `json:"cutFailures,omitempty"`
+	// cutFailed is fill's word to step that this look ended in such a failure.
+	cutFailed bool
 	// Outcome is set once the fill is over: the row then records it for the
 	// job's details (TwitchGapFillStateOf) and is no longer a plan to run.
 	Outcome *gapFillOutcome `json:"outcome,omitempty"`
@@ -149,14 +155,35 @@ func gapFillBackoff(attempts int) time.Duration {
 	return min(d, 3*time.Hour)
 }
 
+// gapFillCutBackoff is the wait before the next look after the n-th (1-based)
+// look in which the VOD was complete and a span could not be downloaded or
+// muxed from it: 10 min doubling, capped at one hour. Such a failure is the
+// network's or the disk's, not the VOD's, so it does not climb gapFillBackoff
+// toward its three hours.
+func gapFillCutBackoff(failures int) time.Duration {
+	d := gapFillFirstCheck
+	for i := 1; i < failures && d < time.Hour; i++ {
+		d *= 2
+	}
+	return min(d, time.Hour)
+}
+
 // gapFillPad widens each span on both sides before it is mapped onto the
 // VOD's segments: the live program date-times and the VOD's offset from the
 // broadcast's createdAt agree to within a second or so, and the owner's rule
 // is a small overlap over a hole (D17, timestamp mapping).
 const gapFillPad = time.Second
 
-// gapFillSegmentAttempts bounds the fetch of one VOD segment.
+// gapFillSegmentAttempts is how many refusals in a row (refusedVodSegment)
+// make a VOD segment's answer lasting.
 const gapFillSegmentAttempts = 3
+
+// gapFillRetryPauses are the waits between the tries of one VOD playlist or
+// segment fetch that failed in passing (a transport error, a 5xx): a try for
+// each, so four tries over about 14 seconds. Tried back to back, a two-second
+// network blip spent every try at once, and the look threw away every span
+// it had already cut.
+var gapFillRetryPauses = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second}
 
 // gapFillDriftLimit is how far the archive VOD's length may differ from the
 // broadcast's span (createdAt to the end the capture saw) before the VOD's
@@ -234,6 +261,14 @@ type twitchGapFiller struct {
 	// archiveRewriting reports a chapter import holding the job's claim
 	// (production: DownloadWorker.chapterImportRunning); nil never is.
 	archiveRewriting func(jobID string) bool
+	// online reports the device online (production: the connectivity
+	// monitor's IsOnline, the reading the backlog scheduler admits on); nil
+	// always is. A look is not taken while offline, and one that failed as
+	// the device went offline is not counted.
+	online func() bool
+	// pause waits d between two tries of a fetch and reports false when ctx
+	// ended first; nil is the real wait (gapFillPause).
+	pause func(ctx context.Context, d time.Duration) bool
 }
 
 // newTwitchGapFiller is the production filler.
@@ -264,6 +299,9 @@ func (w *DownloadWorker) newTwitchGapFiller() *twitchGapFiller {
 		return err == nil && r.critical
 	}
 	f.archiveRewriting = w.chapterImportRunning
+	if w.conn != nil {
+		f.online = w.conn.IsOnline
+	}
 	return f
 }
 
@@ -406,6 +444,14 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		f.settleOrDrop(&plan, &gapFillOutcome{State: GapFillKept, Reason: reason}, now)
 		return
 	}
+	if f.offline() {
+		// Every request of a look would fail, and the look would count
+		// toward the backoff: the plan is left as it is, due, and the next
+		// sweep looks again, as the backlog scheduler admits nothing offline.
+		f.logger.Debug("gap-fill: the device is offline; looking again at the next sweep", "jobID", plan.JobID)
+		return
+	}
+	plan.cutFailed = false
 	out, reason := f.fill(ctx, &plan, job)
 	if out != nil {
 		// Settled even when ctx ended meanwhile: a "filled" outcome means the
@@ -419,9 +465,23 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 	if ctx.Err() != nil {
 		return
 	}
-	plan.Attempts++
+	if f.offline() {
+		// The look failed as the device went offline: the outage's failure,
+		// not the VOD's. Nothing is counted and the plan stays due.
+		f.logger.Debug("gap-fill: the device went offline during the look; looking again at the next sweep",
+			"jobID", plan.JobID, "reason", reason)
+		return
+	}
 	plan.LastReason = reason
-	next := now.Add(gapFillBackoff(plan.Attempts))
+	var wait time.Duration
+	if plan.cutFailed {
+		plan.CutFailures++
+		wait = gapFillCutBackoff(plan.CutFailures)
+	} else {
+		plan.Attempts++
+		wait = gapFillBackoff(plan.Attempts)
+	}
+	next := now.Add(wait)
 	if !deadline.IsZero() && next.After(deadline) {
 		next = deadline.Add(time.Second)
 	}
@@ -431,6 +491,9 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		f.logger.Warn("gap-fill: could not reschedule the plan", "jobID", plan.JobID, "err", err)
 	}
 }
+
+// offline reports the device offline by the filler's connectivity seam.
+func (f *twitchGapFiller) offline() bool { return f.online != nil && !f.online() }
 
 // settle records how plan ended on its row, which stops being a plan to run
 // and becomes the job's record of its fill (TwitchGapFillStateOf), looked at
@@ -699,6 +762,7 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 		}
 		if err != nil {
 			undo()
+			plan.cutFailed = true
 			return nil, fmt.Sprintf("a span could not be cut from the archive VOD (%v)", err)
 		}
 		part.span = sp
@@ -839,20 +903,55 @@ func isMutedVodSegment(u string) bool {
 	return strings.HasSuffix(path, "-muted.ts") || strings.Contains(path, "-muted-")
 }
 
-// fetchRetry is fetch with up to gapFillSegmentAttempts tries.
+// fetchRetry is fetch, tried again after a failure. A failure in passing (a
+// transport error, a 5xx) is tried again after each of gapFillRetryPauses,
+// what the span has fetched so far kept meanwhile; a refusal
+// (refusedVodSegment) is tried again at once, and is the segment's lasting
+// answer once it has come gapFillSegmentAttempts times. The wait ends with
+// ctx.
 func (f *twitchGapFiller) fetchRetry(ctx context.Context, url string) ([]byte, error) {
-	var lastErr error
-	for range gapFillSegmentAttempts {
+	refusals, failures := 0, 0
+	for {
 		data, err := f.fetch(ctx, url)
 		if err == nil {
 			return data, nil
 		}
-		lastErr = err
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if refusedVodSegment(err) {
+			if refusals++; refusals >= gapFillSegmentAttempts {
+				return nil, err
+			}
+			continue
+		}
+		if failures >= len(gapFillRetryPauses) {
+			return nil, err
+		}
+		pause := f.pause
+		if pause == nil {
+			pause = gapFillPause
+		}
+		if !pause(ctx, gapFillRetryPauses[failures]) {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr
+			}
+			return nil, err
+		}
+		failures++
 	}
-	return nil, lastErr
+}
+
+// gapFillPause waits d, and reports false when ctx ended first.
+func gapFillPause(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // gapFillOutputLocation is where the recovered parts go — beside the archive:
