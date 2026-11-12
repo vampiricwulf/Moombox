@@ -909,7 +909,8 @@ func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
 			t.Fatal(err)
 		}
 		l.Info("while stdout works")
-		stdout.Close() // the hang-up
+		l.FlushConsole(10 * time.Second) // stdout is written by its own goroutine
+		stdout.Close()                   // the hang-up
 		l.Info("after stdout died", "n", 1)
 		l.Warn("after stdout died", "n", 2)
 		l.Close()

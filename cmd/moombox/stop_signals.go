@@ -74,10 +74,11 @@ func (s *runState) stopOverrodeRestart() bool {
 // line. The shutdown makes no attempt on a terminal that is gone. A write to a
 // hung-up tty fails at once (EIO), but one whose far side is still open and no
 // longer drains it — a `kill -HUP` while the terminal emulator is frozen —
-// blocks, and the logger writes stdout under the lock its file writes take,
-// which the force-exit backstop's own log line needs: the backstop that ends a
-// stalled shutdown would stall with it. restoreStdoutAfterTUI leaves stdout
-// suppressed after a hangup for the same reason.
+// blocks. The logger writes stdout on its own goroutine, so that no longer
+// blocks a goroutine that logs, but every line would still be queued for a
+// terminal nobody reads and the logger's Close would wait its flush bound for
+// it. restoreStdoutAfterTUI leaves stdout suppressed after a hangup for the
+// same reason.
 func (s *runState) muteHungUpTerminal() {
 	if s.stdoutHungUp.Load() {
 		s.log.SuppressStdout()

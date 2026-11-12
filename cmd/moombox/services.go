@@ -675,6 +675,12 @@ func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 // launcher this is the environment failing deterministically, so a
 // first-post-update boot that lands here is never rolled back as a broken
 // release (CORE-23).
+// consoleBannerFlush bounds the wait for queued log lines to reach the console
+// before something is printed to it directly: long enough for any console
+// that is taking output, short enough that one that is not delays a headless
+// start or exit by no more than this.
+const consoleBannerFlush = time.Second
+
 func (s *runState) initServices(logLevelOverride string) error {
 	if !s.useTUI {
 		fmt.Println("Loading configuration...")
@@ -690,6 +696,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 3. Open database
 	// =========================================================================
 	if !s.useTUI {
+		// Log lines reach the console through the logger's queue; let the
+		// ones before this banner print first.
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Initializing database...")
 	}
 	// The record `moombox add` finds this database by (daemon_record.go): at
@@ -729,6 +738,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 4. Load cookies
 	// =========================================================================
 	if !s.useTUI {
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Starting services...")
 	}
 	jar := cookies.NewCookieJar()

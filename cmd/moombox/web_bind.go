@@ -61,6 +61,9 @@ func (s *runState) resolveWebBind(webErrCh <-chan error, bound <-chan struct{}) 
 		if err != nil {
 			if !useTUI {
 				log.Error("Web server failed to start", slog.String("error", err.Error()))
+				// This arm exits without closing the logger, which is what
+				// prints the lines still queued for the console.
+				log.FlushConsole(consoleBannerFlush)
 				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
 				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
 				// Deterministic: the port is taken or the bind address is

@@ -699,7 +699,7 @@ An imported list that starts late is led by an "Intro" chapter (CJ-1); the offse
 
 ### Logger
 
-slog-based wrapper with dual output (file + stdout). File rotation by size (default 10MB, 5 rotated files). A 200-line ring buffer provides recent log history for WebSocket initial state and TUI backfill. Pub/sub allows multiple subscribers (WebSocket forwarder, TUI forwarder) to receive log lines. Stdout output is suppressed via `switchableWriter` when the TUI is running (BubbleTea owns the alternate screen).
+slog-based wrapper with dual output (file + stdout). File rotation by size (default 10MB, 5 rotated files). A 200-line ring buffer provides recent log history for WebSocket initial state and TUI backfill. Pub/sub allows multiple subscribers (WebSocket forwarder, TUI forwarder) to receive log lines. Stdout output is suppressed via `switchableWriter` when the TUI is running (BubbleTea owns the alternate screen). The file, ring buffer and subscribers are written before a log call returns; stdout is written from a bounded queue by its own goroutine, so a console or pipe that stops taking output delays or loses only console lines and never blocks a goroutine that logs.
 
 **Deep-dive:** [docs/spec/data-and-storage.md](docs/spec/data-and-storage.md)
 
