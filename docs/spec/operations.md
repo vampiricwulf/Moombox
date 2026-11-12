@@ -311,7 +311,13 @@ Builds the multi-arch (linux/amd64 + linux/arm64) image via buildx and pushes to
 **Trigger:** weekly `schedule` (Mondays 06:17 UTC), plus `workflow_dispatch`
 **Permissions:** `contents: read`
 
-Runs `govulncheck ./...` (pinned, like staticcheck) and `npm audit` on the two npm projects — the sidecar's runtime dependencies and the frontend test harness, failing at moderate and above. govulncheck fails only when the code reaches the vulnerable symbol. It needs every package to load, so two empty files stand in for the embed blobs instead of building them. Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
+Five checks, each run even when an earlier one failed:
+
+- **`govulncheck ./...`** (pinned, like staticcheck, and installed once for the runner), twice: for linux/amd64 and, with `GOOS=windows GOARCH=amd64`, for the Windows build. govulncheck analyses one build configuration per run, and the Windows one has files (`*_windows.go`), dependencies (`golang.org/x/sys/windows`) and standard-library halves (`os/exec`, `path/filepath`) the linux pass never loads. It fails only when the code reaches the vulnerable symbol. It needs every package to load, so `.github/scripts/embed-standins.sh` writes an empty file for each embed blob instead of building them.
+- **`npm audit`** on the two npm projects — the sidecar's runtime dependencies (`--omit=dev`) and the frontend test harness — failing at moderate and above.
+- **`node audit-bundled.mjs`** in `bgutil-sidecar/` — the same threshold for `meriyah` and `astring` alone. They are devDependencies, so the audit above skips them, but `build.mjs` bundles them into `vendor/ejs.bundle.js`, where they parse YouTube's player JavaScript on every cipher solve. A full `npm audit` is not used because it would also fail on esbuild, which only runs at build time. A sidecar test keeps the two names equal to the packages `vendor/ejs/src` imports.
+- **`go run ./tools/fetch-node -check-security`** — reads `https://nodejs.org/dist/index.json` and fails when a release on the pinned major line that is newer than `nodeVersion` (`tools/fetch-node/main.go`) is marked `security` (owner ruling R2-O1). `npm audit` cannot see the embedded Node runtime or the undici inside it. A run that cannot reach nodejs.org prints a warning annotation and passes; an index that does not list the pin fails, because the check then cannot judge. Nothing else runs this check: it never blocks a pull request or a release.
+ Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
 
 ---
 
