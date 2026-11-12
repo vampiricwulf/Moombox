@@ -1109,6 +1109,15 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		d.lastHeadProbeTime.StoreNow()
 	}
 
+	// A cancel (operator Cancel, shutdown) that landed during the head probe
+	// above is not a stream failure. Leave it to the loop top, which returns
+	// the cancel: no stream-status check on a dead context and no finalize.
+	// The probe can hold this handler for its whole 10 s timeout when the
+	// edge is not answering, so the window is wide.
+	if ctx.Err() != nil || d.isCancelled() {
+		return nil
+	}
+
 	head := int(d.headSeq.Load())
 	behindHead := head > 0 && curSeq < head
 	stuckOnSegment := rs.sameSegRetries >= MaxSegmentRetries

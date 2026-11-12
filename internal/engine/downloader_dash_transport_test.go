@@ -319,3 +319,81 @@ func TestDashCancelDuringAHangingFetchReturnsTheCancel(t *testing.T) {
 		}
 	})
 }
+
+// cancelOnRequest runs cancel when a request arrives and then fails it: a
+// cancel that lands while a request is in flight.
+type cancelOnRequest struct {
+	cancel   context.CancelFunc
+	requests atomic.Int32
+}
+
+func (t *cancelOnRequest) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.requests.Add(1)
+	t.cancel()
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("dial tcp: i/o timeout") // cancelled by the flag alone
+}
+
+// A cancel that lands during handleHTTPError's own head probe is left to the
+// loop top like one that lands during the segment fetch: no stream-status
+// check on the dead context and no finalize, even with the no-segment gap
+// past MaxTimeout. The probe can hang for its whole timeout when the edge is
+// not answering, which is the case owner ruling R2-E1 routes here.
+//
+// Mutant: handleHTTPError without the cancel check after its head probe —
+// CheckStreamStatus runs on the dead context and the download is recorded as
+// finished at MaxTimeout.
+func TestHandleHTTPErrorLeavesACancelDuringItsHeadProbeToTheLoop(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel func(d *SegmentDownloader, cancelCtx context.CancelFunc)
+	}{
+		{"context cancelled", func(_ *SegmentDownloader, cancelCtx context.CancelFunc) { cancelCtx() }},
+		{"cancel flag set", func(d *SegmentDownloader, _ context.CancelFunc) { d.cancelled.Store(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks := 0
+			d := NewSegmentDownloader(DownloaderOptions{
+				BaseURL:    gvsBase("probecancel"),
+				OutputFile: filepath.Join(t.TempDir(), "v"),
+				MaxTimeout: time.Minute,
+				IsOnline:   func() bool { return true },
+				CheckStreamStatus: func(context.Context) (bool, error) {
+					checks++
+					return false, nil
+				},
+			})
+			d.delays = fastDelays()
+			d.headSeq.Store(10)
+			d.currentSeq.Store(10)                                // at the live edge
+			d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // past MaxTimeout
+			// lastHeadProbeTime is left unset, so the handler probes the head.
+
+			handlerCtx, cancelCtx := context.WithCancel(t.Context())
+			defer cancelCtx()
+			rt := &cancelOnRequest{cancel: func() { tc.cancel(d, cancelCtx) }}
+			orig := engineHTTPClient
+			engineHTTPClient = &http.Client{Transport: rt}
+			t.Cleanup(func() { engineHTTPClient = orig })
+
+			rs := &dashRetryState{}
+			if err := d.handleHTTPError(handlerCtx, true, rs, 60); err != nil {
+				t.Fatalf("handleHTTPError = %v, want nil (the loop top returns the cancel)", err)
+			}
+			if rt.requests.Load() == 0 {
+				t.Fatal("no head probe was sent: the test did not reach the window it pins")
+			}
+			if checks != 0 {
+				t.Errorf("CheckStreamStatus ran %d times after a cancel during the head probe", checks)
+			}
+			if got := d.finishedWith(); got != finishNone {
+				t.Errorf("finished as %v, want finishNone: a cancel is not a finalize", got)
+			}
+			if d.FinalizedBehindHead() {
+				t.Error("FinalizedBehindHead latched by a cancel during the head probe")
+			}
+		})
+	}
+}
