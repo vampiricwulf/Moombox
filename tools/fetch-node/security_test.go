@@ -58,9 +58,9 @@ func TestNewerSecurityReleasesComparesNumerically(t *testing.T) {
 
 func TestNewerSecurityReleasesRefusesAnIndexItCannotJudge(t *testing.T) {
 	cases := map[string]string{
-		"not JSON":             `<html>503</html>`,
+		"not JSON":              `<html>503</html>`,
 		"an object, not a list": `{"version":"v24.22.2"}`,
-		"pin not listed":       `[{"version":"v24.23.1","security":true}]`,
+		"pin not listed":        `[{"version":"v24.23.1","security":true}]`,
 	}
 	for name, index := range cases {
 		t.Run(name, func(t *testing.T) {
