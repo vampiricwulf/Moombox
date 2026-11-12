@@ -13,6 +13,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // audioProbeTimeout bounds the one ffprobe -show_streams run behind GET
@@ -77,7 +78,9 @@ func audioInfoRoute(r chi.Router, db *database.Database, store *config.Store, lg
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) {
-	r.Get("/api/jobs/{id}/audio-info", func(rw http.ResponseWriter, req *http.Request) {
+	// RefuseCrossSite: this GET spawns ffprobe on every call, so another
+	// site's page must not be able to fire it.
+	r.With(web.RefuseCrossSite).Get("/api/jobs/{id}/audio-info", func(rw http.ResponseWriter, req *http.Request) {
 		job, ok := loadJob(rw, db, chi.URLParam(req, "id"))
 		if !ok {
 			return
