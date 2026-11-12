@@ -724,3 +724,60 @@ func TestARefusedPasswordChangeClosesNoSockets(t *testing.T) {
 		t.Errorf("a refused change closed sockets %d times", f.socketCloses)
 	}
 }
+
+// TestAPasswordChangeLeavesItsCallerAClientToken: set-password keeps the
+// caller's session but deletes every client token, the caller's included. A
+// later revoke or expiry of any other device's token ends every session and
+// counts on each browser's own token to mint it a new one, so a caller left
+// with a session and no token was logged out by it. The caller is issued a
+// new token, as a login would give it.
+//
+// Mutant: clear the caller's client cookie and issue nothing: no cookie
+// value comes back and the table is empty.
+func TestAPasswordChangeLeavesItsCallerAClientToken(t *testing.T) {
+	f := newAuthFixture(t)
+	f.setPasswordHash(t, "current-secret")
+	session, err := f.auth.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.AddClientToken(&database.ClientToken{
+		ID: "other-device", TokenPrefix: "abcd1234", TokenHash: "x:y", Label: "phone",
+		CreatedAt: "2026-11-01T00:00:00Z", LastUsedAt: "2026-11-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, _ := json.Marshal(map[string]any{"currentPassword": "current-secret", "newPassword": "newsecret123"})
+	req := httptest.NewRequest("POST", "/api/auth/set-password", bytes.NewReader(buf))
+	req.RemoteAddr = "203.0.113.7:40000"
+	req.AddCookie(&http.Cookie{Name: "moombox_session", Value: session})
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set-password: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	if !f.auth.ValidateSession(session) {
+		t.Fatal("the caller's own session was ended")
+	}
+	var raw string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "moombox_client" {
+			raw = c.Value
+		}
+	}
+	if raw == "" {
+		t.Fatal("the caller was sent no new client token")
+	}
+	tokens, err := f.db.ListClientTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 || tokens[0].ID == "other-device" {
+		t.Fatalf("client tokens after the change: %+v, want only the caller's new one", tokens)
+	}
+	if !web.VerifyToken(raw, tokens[0].TokenHash) {
+		t.Error("the cookie sent to the caller does not match the stored token")
+	}
+}

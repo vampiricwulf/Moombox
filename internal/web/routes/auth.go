@@ -139,27 +139,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 					deps.DB.DeleteClientToken(oldCT.ID)
 				}
 			}
-			if rawToken, err := web.GenerateToken(); err == nil {
-				if tokenHash, err := web.HashToken(rawToken); err == nil {
-					now := time.Now().UTC().Format(time.RFC3339)
-					ct := &database.ClientToken{
-						ID:          generateShortID(),
-						TokenPrefix: web.TokenPrefix(rawToken),
-						TokenHash:   tokenHash,
-						Label:       buildTokenLabel(store, req),
-						CreatedAt:   now,
-						LastUsedAt:  now,
-						LastIP:      web.EffectiveClientIP(store, req),
-					}
-					if err := deps.DB.AddClientToken(ct); err == nil {
-						var ttlDays int
-						store.Read(func(c *config.MoomboxConfig) {
-							ttlDays = c.Network.ClientTokenTTLDays
-						})
-						setClientCookie(rw, req, rawToken, ttlDays)
-					}
-				}
-			}
+			issueClientToken(rw, req, deps, store)
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -263,16 +243,24 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
-		// Invalidate other sessions (keep current if authenticated)
+		// Invalidate other sessions (keep current if authenticated). The
+		// caller whose session is kept gets a new client token in place of
+		// the one just deleted, as a login would give it: a browser left with
+		// a session and no token is logged out by the next revoke or expiry
+		// of any other device's token, which ends every session and relies
+		// on each browser's own token to re-session it.
 		if isAuthenticated && token != "" {
 			deps.Auth.InvalidateOtherSessions(token)
+			if deps.DB == nil || !issueClientToken(rw, req, deps, store) {
+				clearClientCookie(rw, req)
+			}
 		} else {
 			deps.Auth.InvalidateAllSessions()
+			clearClientCookie(rw, req)
 		}
 		// Open sockets were authenticated under the old password. The
 		// caller's own reconnects on the session it keeps.
 		deps.closeAuthenticatedSockets()
-		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
 			deps.Logger.Info("[Auth] Password set/changed from " + web.EffectiveClientIP(store, req))
@@ -418,6 +406,39 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		deps.closeAuthenticatedSockets()
 		jsonResponse(rw, map[string]any{"success": true})
 	})
+}
+
+// issueClientToken stores a new persistent client token for the caller and
+// sets its moombox_client cookie, and reports whether it did. Login and a
+// password change that keeps the caller's session both call it.
+func issueClientToken(rw http.ResponseWriter, req *http.Request, deps *AuthRoutesDeps, store *config.Store) bool {
+	rawToken, err := web.GenerateToken()
+	if err != nil {
+		return false
+	}
+	tokenHash, err := web.HashToken(rawToken)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	ct := &database.ClientToken{
+		ID:          generateShortID(),
+		TokenPrefix: web.TokenPrefix(rawToken),
+		TokenHash:   tokenHash,
+		Label:       buildTokenLabel(store, req),
+		CreatedAt:   now,
+		LastUsedAt:  now,
+		LastIP:      web.EffectiveClientIP(store, req),
+	}
+	if err := deps.DB.AddClientToken(ct); err != nil {
+		return false
+	}
+	var ttlDays int
+	store.Read(func(c *config.MoomboxConfig) {
+		ttlDays = c.Network.ClientTokenTTLDays
+	})
+	setClientCookie(rw, req, rawToken, ttlDays)
+	return true
 }
 
 // redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64
