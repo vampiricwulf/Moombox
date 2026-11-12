@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
@@ -357,6 +358,10 @@ type DownloadWorker struct {
 	// is running or waiting to run, so the same verb again is a no-op and a
 	// different one is refused with ErrResetPending rather than dropped.
 	afterExitPending sync.Map
+	// runCtx is Start's context, which ends at shutdown: what a deferred verb
+	// stops waiting on (awaitJobExit). Nil until Start, and in tests that
+	// never call it, where such a wait ends only with the run.
+	runCtx atomic.Pointer[context.Context]
 
 	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
 	// monitor poll that lands while one is in flight does not start another;
@@ -587,6 +592,7 @@ func NewDownloadWorker(
 
 // Start begins the worker loop, processing jobs from the queue.
 func (w *DownloadWorker) Start(ctx context.Context) {
+	w.runCtx.Store(&ctx)
 	w.logger.Info("download worker started")
 
 	// Incomplete-tail flags from before the end-of-stream margin

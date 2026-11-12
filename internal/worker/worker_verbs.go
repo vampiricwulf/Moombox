@@ -88,11 +88,43 @@ var ErrAlreadyPending = errors.New("already on its way")
 // accepted; the REST layer answers 404.
 var ErrJobNotFound = errors.New("job not found")
 
-// afterJobExitTimeout bounds how long a deferred Resume/Reinitialize waits for
-// the job's previous run to unwind (a chat capture's shutdown grace is the
-// long pole) before giving up rather than racing it. The wait for a staging
-// claim that follows has no cut-off (owner ruling R-A1).
-const afterJobExitTimeout = 60 * time.Second
+// afterJobExitNotice is how long a deferred Resume/Reinitialize waits for the
+// job's previous run to unwind before it says so once more, naming itself
+// (awaitJobExit). The wait itself has no cut-off (owner ruling R2-W2), like
+// the wait for a staging claim that follows it (owner ruling R-A1): a run's
+// tail can take minutes — a cookie refresh inside setJobError, a cancelled
+// capture waiting out its part muxes — and a verb dropped after a minute had
+// already been answered as accepted.
+//
+// A variable so a test can reach the notice without waiting a minute.
+var afterJobExitNotice = 60 * time.Second
+
+// awaitJobExit waits for jobID's run to return (the queue closes Done when
+// processJob does) and reports true, or reports false when the worker is
+// shutting down first (Start's context): the verb is then not applied, and
+// the row is as the run leaves it for the next start. One Info line after
+// afterJobExitNotice names the verb still waiting.
+func (w *DownloadWorker) awaitJobExit(jobID, what string) bool {
+	done := w.queue.Done(jobID)
+	notice := time.NewTimer(afterJobExitNotice)
+	defer notice.Stop()
+	var stopping <-chan struct{}
+	if ctx := w.runCtx.Load(); ctx != nil {
+		stopping = (*ctx).Done()
+	}
+	for {
+		select {
+		case <-done:
+			return true
+		case <-stopping:
+			w.logger.Info(what+" not applied: Moombox is shutting down while the job's previous run was still stopping", "jobID", jobID)
+			return false
+		case <-notice.C:
+			w.logger.Info(what+" is still waiting for the job's previous run to stop; it runs as soon as that does",
+				"jobID", jobID, "waited", afterJobExitNotice)
+		}
+	}
+}
 
 // logVerbOverridden records a deferred verb that found its row changed while
 // it waited — an operator's Cancel, another verb, a deletion — and so did
@@ -143,6 +175,11 @@ func (w *DownloadWorker) logVerbOverridden(jobID, what string, seen database.Job
 // fn gets the job's status as read when the verb was accepted (seen), the
 // status its write must still find (UpdateJobFieldsIf): an operator's Cancel
 // landing during the wait wins.
+//
+// The wait for the run has no cut-off (owner ruling R2-W2, awaitJobExit): it
+// ends when the run returns, or at shutdown, and says once after a minute
+// that the verb is still waiting. It used to give up after 60 s with one
+// Warn in the global log, after the caller had been answered as accepted.
 //
 // One verb waits per job (afterExitPending, which names it). The same verb
 // again answers ErrAlreadyPending, which the operator's callers treat as
@@ -204,13 +241,21 @@ func (w *DownloadWorker) afterJobExit(jobID, what string, hold bool, gate func(*
 				w.logger.Error("panic in deferred "+what, "jobID", jobID, "panic", fmt.Sprint(r))
 			}
 		}()
-		if running && !w.WaitForJobExit(jobID, afterJobExitTimeout) {
-			w.logger.Warn(what+" skipped: the job's previous run did not stop", "jobID", jobID,
-				"waited", afterJobExitTimeout)
+		if running && !w.awaitJobExit(jobID, what) {
 			return
 		}
 		release, _ := w.awaitStagingClaim(context.Background(), jobID, what, blocks, hold)
 		defer release()
+		// The wait can have been long. The gate is asked again, under the
+		// claim, of a row whose status did not move (ResumeJob's own check
+		// for a verb that never waited): a status change is fn's to refuse,
+		// by its conditional write.
+		if gate != nil {
+			if cur, err := w.db.GetJob(jobID); err == nil && cur != nil && cur.Status == seen && gate(cur) != nil {
+				w.logger.Info(what+" not applied: the job stopped allowing it while it waited", "jobID", jobID, "status", cur.Status)
+				return
+			}
+		}
 		fn(seen)
 	})
 	return nil
