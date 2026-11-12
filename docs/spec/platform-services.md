@@ -1114,6 +1114,7 @@ Beside the channel's own sets, `Resolve` fetches each provider's global set, the
 - **A failure is not a result**: the set is cached only when at least one provider answered. Cached, three providers failing together — one outage, one flaky minute — would be served for the rest of the process lifetime. A resolve in which nothing answered returns nil, and the next one fetches again.
 - **A job keeps no copy**: a live chat asks the resolver at every part roll and at the stream's end (`resolveEmotes`, `internal/twitch/chat_recording.go`). A part enriched while a global provider was down carries the channel's sets alone; the next part, once the provider is back and its retry floor has passed, carries the globals again.
 - **An answer goes stale**: an entry older than `emoteCacheTTL` (`internal/twitch/emotes.go` — 24 hours) is refetched on the next resolve. Moombox runs for weeks and 7TV/BTTV/FFZ sets change daily. If that refetch fails outright the STALE set is served and kept — yesterday's emotes beat none.
+- **One provider failing is not "no emotes"**: when some providers answer and others fail, the answers are cached, each failed provider keeps the list the entry already had for it (none on a first fetch), and the entry is refetched after `globalEmoteRetryFloor` (5 minutes) instead of after `emoteCacheTTL`. So a provider's outage at one stream's end does not leave that channel's archives without its emotes for a day, and a refresh never replaces a complete set with a poorer one. A fetch cut short by the caller's own context starts no floor: the next resolve fetches at once.
 - **Inflight dedup**: If a request for the same cache key is already in-flight, subsequent callers block on a channel until the first completes, then read from cache.
 
 #### Emote Injection
@@ -1782,7 +1783,7 @@ The epoch also holds across the live→replay flip inside ONE live/upcoming run 
 |---------|-----------|-----|-----------|-------------------|-----|
 | YouTube Visitor Data | Memory (single value) | None | 1 entry | Overwrite | N/A |
 | YouTube STS | Memory map | None | 150 entries | Random eviction when full | SHA256(playerURL) |
-| Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`) | 200 channels | Oldest by insertion order | lowercased channelLogin |
+| Twitch Emotes | Memory LRU + TTL | 24 h (`emoteCacheTTL`, `internal/twitch/emotes.go`); 5 min (`globalEmoteRetryFloor`) while a provider's last fetch failed | 200 channels | Oldest by insertion order | lowercased channelLogin |
 | Twitch global emote sets | Memory, one entry per provider | 24 h (`emoteCacheTTL`); a failed fetch is retried after 5 min (`globalEmoteRetryFloor`, `internal/twitch/emotes_global.go`) | 3 (BTTV, FFZ, 7TV) | Never; a failed refresh keeps the old set | provider |
 | Cipher (Disk) | Disk files | 24 h (`playerCacheTTL`), revalidated by conditional GET on every fetch | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 10 solvers | Oldest by insertion order | SHA256(playerURL) |
