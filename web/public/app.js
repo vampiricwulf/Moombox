@@ -397,6 +397,8 @@ export class MoomboxApp {
           this.files.fetchOrphanedHistory();
         } else if (e.detail.name === "stats") {
           this.stats.activate();
+        } else if (e.detail.name === "logs") {
+          this.logPanel.onShow();
         }
         // Detach the player's document-level keydown listener when leaving
         // the player tab — it used to run for every keystroke app-wide even

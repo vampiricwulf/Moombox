@@ -229,3 +229,107 @@ test("a reconnect's snapshot keeps nothing the old socket delivered", { skip }, 
   assert.deepEqual(h.app.logPanel.logs, ["INFO new"],
     "after a reconnect the new snapshot is the whole buffer");
 });
+
+// The Logs panel is display:none until its tab is shown, so the viewer has no
+// scroll box and the scroll-to-bottom writes made while it was hidden did
+// nothing: a first visit showed the oldest of the 500 lines. Mutants: no logs
+// branch in sl-tab-show; onShow scrolling although the operator scrolled up.
+test("showing the Logs tab scrolls to the newest line unless the operator scrolled up", { skip }, async () => {
+  const h = await harness.makeApp();
+  const viewer = h.el("logs-viewer");
+  const spy = spyOnViewer(viewer);
+  Object.defineProperty(viewer, "scrollHeight", { configurable: true, get: () => 4000 });
+  const tabs = h.document.querySelector("sl-tab-group");
+  const show = (name) => tabs.dispatchEvent(new h.window.CustomEvent("sl-tab-show", { detail: { name } }));
+
+  show("logs");
+  assert.equal(spy.scrollWrites, 0, "not before the panel is laid out");
+  h.flushRaf();
+  assert.equal(viewer.scrollTop, 4000, "scrolled to the bottom once shown");
+
+  h.app.logPanel._logAutoScroll = false; // the operator scrolled up
+  viewer.scrollTop = 120;
+  show("tasks");
+  show("logs");
+  h.flushRaf();
+  assert.equal(viewer.scrollTop, 120, "a paused view stays where the operator left it");
+});
+
+/** renderLogs calls made while fn runs. */
+function countRenders(panel) {
+  const real = panel.renderLogs.bind(panel);
+  const spy = { renders: 0 };
+  panel.renderLogs = () => { spy.renders++; return real(); };
+  return spy;
+}
+
+// With a level filter on, every incoming line used to restart a 100 ms timer
+// that rebuilt the whole view, the lines the filter hides included. Mutant:
+// dropping the early return for a hidden line.
+test("a line the filter hides rebuilds nothing; one it shows is drawn within 100 ms", { skip }, async () => {
+  const h = await harness.makeApp();
+  const panel = h.app.logPanel;
+  panel.logFilter = "WARN";
+  panel.renderLogs();
+  const spy = countRenders(panel);
+  const viewer = h.el("logs-viewer");
+
+  for (let i = 0; i < 20; i++) panel.addLog(`INFO hidden ${i}`);
+  h.advance(1000);
+  assert.equal(spy.renders, 0, "hidden lines must not rebuild the view");
+
+  panel.addLog("WARN shown");
+  h.advance(100);
+  assert.equal(spy.renders, 1);
+  assert.match(viewer.textContent, /WARN shown/);
+  assert.doesNotMatch(viewer.textContent, /hidden/);
+
+  // The search box hides lines the same way.
+  panel.logFilter = "all";
+  panel._logSearchQuery = "needle";
+  panel.renderLogs();
+  spy.renders = 0;
+  panel.addLog("INFO hay");
+  h.advance(1000);
+  assert.equal(spy.renders, 0, "a line the search hides must not rebuild the view");
+  panel.addLog("INFO a needle here");
+  h.advance(100);
+  assert.equal(spy.renders, 1);
+  assert.equal(viewer.querySelector("mark")?.textContent, "needle");
+});
+
+// The timer restarted on every line, so under steady logging faster than ten
+// lines a second the filtered view never drew. Mutant: clearTimeout + a new
+// setTimeout per line.
+test("a filtered view keeps drawing while lines arrive faster than its timer", { skip }, async () => {
+  const h = await harness.makeApp();
+  const panel = h.app.logPanel;
+  panel.logFilter = "WARN";
+  panel.renderLogs();
+  const spy = countRenders(panel);
+
+  for (let i = 0; i < 20; i++) { // one line every 50 ms for a second
+    panel.addLog(`WARN steady ${i}`);
+    h.advance(50);
+  }
+  assert.ok(spy.renders >= 9 && spy.renders <= 10, `want a rebuild every 100 ms, got ${spy.renders} in 1 s`);
+  assert.match(h.el("logs-viewer").textContent, /steady 1[0-9]/);
+});
+
+// A hidden line still has to redraw when it pushed a line out of the 500-line
+// window: the dropped line may be on screen. Mutant: returning early on the
+// filter alone.
+test("a hidden line that pushes one out of the window still redraws the filtered view", { skip }, async () => {
+  const h = await harness.makeApp();
+  const panel = h.app.logPanel;
+  panel.setSnapshot(["WARN oldest", ...Array.from({ length: 499 }, (_, i) => `INFO fill ${i}`)]);
+  panel.logFilter = "WARN";
+  panel.renderLogs();
+  const viewer = h.el("logs-viewer");
+  assert.match(viewer.textContent, /WARN oldest/);
+
+  panel.addLog("INFO pushes the oldest out");
+  h.advance(100);
+  assert.doesNotMatch(viewer.textContent, /WARN oldest/, "the dropped line must leave the view");
+  assert.equal(h.el("log-count").textContent, "0 log entries (WARN+)");
+});
