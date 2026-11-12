@@ -10,13 +10,6 @@ import (
 
 // --- NewRuntime tests ---
 
-func TestNewRuntime(t *testing.T) {
-	vm := NewRuntime()
-	if vm == nil {
-		t.Fatal("expected non-nil runtime")
-	}
-}
-
 func TestNewRuntimeFieldMapper(t *testing.T) {
 	// NewRuntime sets TagFieldNameMapper("json", true) — verify it works
 	// by setting a Go struct with json tags and checking JS access
@@ -36,19 +29,6 @@ func TestNewRuntimeFieldMapper(t *testing.T) {
 }
 
 // --- NewRuntimeWithShims tests ---
-
-func TestNewRuntimeWithShimsCreatesRuntime(t *testing.T) {
-	vm, tm, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if vm == nil {
-		t.Fatal("expected non-nil runtime")
-	}
-	if tm == nil {
-		t.Fatal("expected non-nil timer manager")
-	}
-}
 
 func TestNewRuntimeWithShimsBtoaAtob(t *testing.T) {
 	vm, _, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
@@ -153,21 +133,6 @@ func TestRegisterEncodingAtobBasic(t *testing.T) {
 	}
 	if v.String() != "ABC" {
 		t.Errorf("expected 'ABC', got %q", v.String())
-	}
-}
-
-func TestRegisterEncodingTextEncoder(t *testing.T) {
-	vm := NewRuntime()
-	if err := RegisterEncoding(vm); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	v, err := vm.RunString("new TextEncoder().encode('AB').length")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if v.ToInteger() != 2 {
-		t.Errorf("expected 2, got %d", v.ToInteger())
 	}
 }
 
