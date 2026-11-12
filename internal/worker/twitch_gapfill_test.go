@@ -438,9 +438,9 @@ func TestGapFillWaitsForTheCompleteVod(t *testing.T) {
 }
 
 // TestGapFillNextLookIsCappedAtTheDeadline: a look whose backoff would land
-// past the deadline is put one second after it instead, where the plan is
-// dropped with its line, rather than outliving the window by up to three
-// hours.
+// past the deadline is put one second after it instead, where the plan gets
+// its last look (TestGapFillTakesOneLastLookPastTheDeadline), rather than
+// outliving the window by up to three hours.
 //
 // Mutant: the cap removed (the next look is the full backoff away).
 func TestGapFillNextLookIsCappedAtTheDeadline(t *testing.T) {
@@ -458,29 +458,86 @@ func TestGapFillNextLookIsCappedAtTheDeadline(t *testing.T) {
 	}
 }
 
-// TestGapFillGivesUpAtTheDeadline (follow-up 4): past the deadline the plan
-// is dropped with one line saying why, and the archive kept as recorded.
+// TestGapFillGivesUpAtTheDeadline (follow-up 4, owner ruling R2-F1): past
+// the deadline the plan gets one last look, and when that finds the VOD no
+// more ready than before the plan is settled with one line saying why — the
+// last look's reason, not an older one — and the archive kept as recorded.
+// The window is then final: the row is an outcome, not a plan to run.
 //
-// Mutant: the deadline check removed (the fill runs, and adds a part).
+// Mutants: the plan rescheduled after the look past the deadline (it stays
+// pending); the reason an earlier look left reported in place of the last
+// look's.
 func TestGapFillGivesUpAtTheDeadline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup  func(*gapFillFixture)
+		reason string
+	}{
+		"never listed": {func(f *gapFillFixture) { f.vodID = "" },
+			"no archive VOD published within 10 minutes of the broadcast's start is listed; the 24-hour wait for the archive VOD is over"},
+		"still recording": {func(f *gapFillFixture) { f.vodInfo.IsRecording = true },
+			"the archive VOD is still recording; the 24-hour wait for the archive VOD is over"},
+		"download fails": {func(f *gapFillFixture) { f.failURL = "https://vod.example/chunked/1.ts" },
+			"a span could not be cut from the archive VOD (refused); the 24-hour wait for the archive VOD is over"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newGapFillFixture(t)
+			tc.setup(f)
+			f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
+				[]gapSpan{{FromMs: ms(0), ToMs: ms(25 * time.Second), Kind: gapKindLateStart, AfterPart: -1}},
+				gapStart.Add(25*time.Hour))
+			p := f.row(t)
+			p.LastReason = "the archive VOD is subscriber-only and this login has no access"
+			saveTwitchGapFillPlan(f.db, p, gapStart)
+			row, _ := f.db.GetGapFill("tw_1")
+			f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+
+			if f.row(t) != nil {
+				t.Error("the plan was kept past its last look")
+			}
+			if out := f.outcome(t); out == nil || out.State != GapFillKept || out.Reason != tc.reason {
+				t.Errorf("outcome %+v, want kept: %s", out, tc.reason)
+			}
+			if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 0 {
+				t.Errorf("a part was added: %+v", job.Segments)
+			}
+			if matches, _ := filepath.Glob(filepath.Join(f.dir, "*recovered*")); len(matches) != 0 {
+				t.Errorf("the last look left %v", matches)
+			}
+			if _, logged := f.log.field("gap-fill: keeping the archive as recorded — "+tc.reason, "jobID"); !logged {
+				t.Errorf("no line saying why; logged %v", f.log.lines())
+			}
+		})
+	}
+}
+
+// TestGapFillTakesOneLastLookPastTheDeadline (owner ruling R2-F1): a plan
+// that could not look inside its 24 hours — Moombox was off, offline, the
+// volume full — is not written off unseen. Its first look past the deadline
+// is a real one, and a VOD that is complete by then is filled. While the
+// device is offline that look is not taken, and the plan waits for it.
+//
+// Mutants: the plan settled as kept before the look (nothing is filled); the
+// plan settled while offline (no look was ever taken).
+func TestGapFillTakesOneLastLookPastTheDeadline(t *testing.T) {
 	f := newGapFillFixture(t)
-	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Hour, false)},
+	f.plan(t, []stagedPartCoverage{covPart(0, 25*time.Second, time.Minute, false)},
 		[]gapSpan{{FromMs: ms(0), ToMs: ms(25 * time.Second), Kind: gapKindLateStart, AfterPart: -1}},
 		gapStart.Add(25*time.Hour))
-	p := f.row(t)
-	p.LastReason = "the archive VOD is subscriber-only and this login has no access"
-	saveTwitchGapFillPlan(f.db, p, gapStart)
+	online := false
+	f.filler.online = func() bool { return online }
 	row, _ := f.db.GetGapFill("tw_1")
-	f.filler.step(context.Background(), *row, gapStart.Add(26*time.Hour))
+	f.filler.step(context.Background(), *row, gapStart.Add(72*time.Hour))
+	if p := f.row(t); p == nil || f.fetched != 0 {
+		t.Fatalf("plan %+v after %d fetches, want it still pending and no look taken while offline", p, f.fetched)
+	}
 
-	if f.row(t) != nil {
-		t.Error("the plan was kept past its deadline")
+	online = true
+	f.filler.step(context.Background(), *row, gapStart.Add(73*time.Hour))
+	if out := f.outcome(t); out == nil || out.State != GapFillFilled || out.Spans != 1 {
+		t.Fatalf("outcome %+v, want the span filled at the look past the deadline", out)
 	}
-	if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 0 {
-		t.Errorf("a part was added past the deadline: %+v", job.Segments)
-	}
-	if _, logged := f.log.field("gap-fill: keeping the archive as recorded — the archive VOD is subscriber-only and this login has no access within 24 hours of the broadcast's end", "jobID"); !logged {
-		t.Errorf("no line saying why; logged %v", f.log.lines())
+	if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 2 {
+		t.Errorf("%d parts, want the recovered part beside the recording", len(job.Segments))
 	}
 }
 

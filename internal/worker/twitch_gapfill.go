@@ -26,7 +26,7 @@ import (
 // The worker looks at each plan on a backoff until the broadcast's archive VOD
 // is complete — listed, VideoMetadata no longer recording, its playlist ending
 // in #EXT-X-ENDLIST — or until gapFillWindow after the broadcast ended (follow-
-// up 4). It then cuts each span the capture lacks out of the VOD, on segment
+// up 4), with one last look past it (owner ruling R2-F1). It then cuts each span the capture lacks out of the VOD, on segment
 // boundaries, muxes it as a part of its own beside the archive, and re-finalizes
 // the job with the parts in time order (follow-up 1). The recorded footage is
 // never touched: a fill that fails anywhere removes what it wrote and leaves the
@@ -390,8 +390,8 @@ func (f *twitchGapFiller) stepRecovered(ctx context.Context, row database.GapFil
 }
 
 // step takes one look at a plan: it fills the job, or reschedules the plan on
-// the backoff, or — past the deadline — settles it, keeping the archive as
-// recorded. A plan whose job is gone or no longer Finished is dropped. A
+// the backoff, or — when the look was the one past the deadline — settles it,
+// keeping the archive as recorded. A plan whose job is gone or no longer Finished is dropped. A
 // settled row is looked at only to drop it once its job is gone.
 //
 // Every line a look logs about the job reaches the job's own log (owner
@@ -432,18 +432,14 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 	f.db.TrackJobForLogs(job.ID)
 	defer restoreJobLogRouting(f.db, job.ID)
 
+	// Past the deadline the plan gets one last look (owner ruling R2-F1)
+	// before it is settled: a plan that never managed to look inside its
+	// window (Moombox not running, offline, the volume full), or whose last
+	// look was hours before the window's end, is not written off unseen, and
+	// the look scheduled a second past the deadline (below) is a real one.
+	// After it the window is final.
 	deadline, _ := time.Parse(time.RFC3339, plan.Deadline)
-	if !deadline.IsZero() && now.After(deadline) {
-		reason := plan.LastReason
-		if reason == "" {
-			reason = "no complete archive VOD was found"
-		}
-		reason += " within 24 hours of the broadcast's end"
-		f.logger.Info("gap-fill: keeping the archive as recorded — "+reason,
-			"jobID", plan.JobID, "spans", len(plan.Spans))
-		f.settleOrDrop(&plan, &gapFillOutcome{State: GapFillKept, Reason: reason}, now)
-		return
-	}
+	lastLook := !deadline.IsZero() && now.After(deadline)
 	if f.offline() {
 		// Every request of a look would fail, and the look would count
 		// toward the backoff: the plan is left as it is, due, and the next
@@ -470,6 +466,16 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		// not the VOD's. Nothing is counted and the plan stays due.
 		f.logger.Debug("gap-fill: the device went offline during the look; looking again at the next sweep",
 			"jobID", plan.JobID, "reason", reason)
+		return
+	}
+	if lastLook {
+		if reason == "" {
+			reason = "no complete archive VOD was found"
+		}
+		reason += "; the 24-hour wait for the archive VOD is over"
+		f.logger.Info("gap-fill: keeping the archive as recorded — "+reason,
+			"jobID", plan.JobID, "spans", len(plan.Spans))
+		f.settleOrDrop(&plan, &gapFillOutcome{State: GapFillKept, Reason: reason}, now)
 		return
 	}
 	plan.LastReason = reason
@@ -643,8 +649,8 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 		if id == "" {
 			// Nothing published within ArchiveVodStartTolerance of the
 			// broadcast's start is an archive: not listed yet, or gone. The
-			// plan is looked at again until its deadline, and the archive
-			// then kept as recorded with this reason (step); a later
+			// plan is looked at again until its deadline and once past it,
+			// and the archive then kept as recorded with this reason (step); a later
 			// broadcast's archive is never taken in its place (PR-M3).
 			return nil, "no archive VOD published within 10 minutes of the broadcast's start is listed"
 		}
