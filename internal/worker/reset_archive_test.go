@@ -683,3 +683,29 @@ func TestFinalizeSetsAsideAFileItDidNotWrite(t *testing.T) {
 		}
 	})
 }
+
+// The Files sweep offers a marker whose job is gone, and only a marker: a
+// *.owner file that does not hold one job ID as its whole content is the
+// operator's, whichever of the two marker names it has, and is never listed,
+// so never deleted by Delete All.
+//
+// Mutants: every *.owner file listed (the operator's are offered); the
+// content rule dropped for the set-aside name alone; a marker with a CRLF
+// line end not read as one (it is never offered, and owns nothing).
+func TestFilesSweepOffersOnlyMarkersMoomboxWrote(t *testing.T) {
+	_, db := testWorkerSetup(t)
+	outputDir := t.TempDir()
+	for name, content := range map[string]string{
+		"Gone.restart-1700000000.owner": "j-gone\n",   // a set-aside archive's marker, its job deleted
+		"Old.owner":                     "j-gone\r\n", // an in-place marker, saved by an editor
+		"notes.owner":                   "the owner of this folder is Wulf\n",
+		"Show.restart-1700000001.owner": "line one\nline two\n",
+		"empty.owner":                   "",
+		"long.owner":                    strings.Repeat("x", asideMarkerMaxID+1) + "\n",
+	} {
+		writeTestFile(t, filepath.Join(outputDir, name), content)
+	}
+	if got := strings.Join(offeredOutput(t, db, outputDir), "|"); got != "Gone.restart-1700000000.owner|Old.owner" {
+		t.Errorf("the sweep offers %s, want the two markers and none of the operator's files", got)
+	}
+}

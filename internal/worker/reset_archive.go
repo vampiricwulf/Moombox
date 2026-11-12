@@ -2,7 +2,6 @@ package worker
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -143,13 +142,42 @@ func asideBase(path string) string {
 // asideOwnerID returns the job ID in the marker beside path, the one that
 // shares its name less the extension, "" when there is none.
 func asideOwnerID(path string) string {
-	f, err := os.Open(asideBase(path) + asideOwnerSuffix)
-	if err != nil {
-		return ""
+	id, _ := readAsideMarker(asideBase(path) + asideOwnerSuffix)
+	return id
+}
+
+// asideMarkerMaxID bounds the job ID a marker holds. The longest IDs are a
+// Twitch clip's slug behind its prefix, well under it.
+const asideMarkerMaxID = 200
+
+// readAsideMarker reads the marker file at markerPath: the job ID it holds,
+// and whether it is a marker at all — a regular file named *.owner whose
+// whole content is what writeAsideOwner writes, one job ID on one line (no
+// spaces, no control characters, at most asideMarkerMaxID bytes; the line end
+// may be missing or CRLF, for a marker that went through an editor). Any
+// other *.owner file in the output tree is the operator's: it owns nothing,
+// and the Files sweep never lists it.
+func readAsideMarker(markerPath string) (jobID string, ok bool) {
+	if !strings.EqualFold(filepath.Ext(markerPath), asideOwnerSuffix) {
+		return "", false
 	}
-	defer f.Close()
-	b, _ := io.ReadAll(io.LimitReader(f, 256))
-	return strings.TrimSpace(string(b))
+	if info, err := os.Lstat(markerPath); err != nil || !info.Mode().IsRegular() || info.Size() > asideMarkerMaxID+2 {
+		return "", false
+	}
+	b, err := os.ReadFile(markerPath)
+	if err != nil {
+		return "", false
+	}
+	id := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	if id == "" || len(id) > asideMarkerMaxID {
+		return "", false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] <= ' ' || id[i] == 0x7f {
+			return "", false
+		}
+	}
+	return id, true
 }
 
 // writeAsideOwner writes the marker that makes the files named base.* jobID's.

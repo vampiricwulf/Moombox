@@ -604,9 +604,14 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		_, isDerived := archiveDerivedStem(path)
 		// The marker of an archive a Reinitialize kept (owner ruling
 		// R2-W1b): owned with its files while its job exists, listed with
-		// them once the job is gone.
+		// them once the job is gone. Only a marker Moombox wrote
+		// (readAsideMarker: either marker name, and one job ID as its whole
+		// content): any other *.owner file is the operator's, and is never
+		// offered.
 		if ext == asideOwnerSuffix {
-			isDerived = true
+			if _, isMarker := readAsideMarker(absPath); isMarker {
+				isDerived = true
+			}
 		}
 		if !inTrimDir && !isMedia && !isThumbnail && !isChat && !isDescription && !isDerived {
 			return nil
