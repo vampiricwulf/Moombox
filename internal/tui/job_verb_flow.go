@@ -24,12 +24,14 @@ type jobVerbFlow struct {
 	busy  bool
 	gen   uint64
 	label string // "Resume" or "Reinitialize", for the busy refusal
+	line  string // what the feedback line says while the run is in flight
 }
 
-func (f *jobVerbFlow) begin(label string) uint64 {
+func (f *jobVerbFlow) begin(label, line string) uint64 {
 	f.gen++
 	f.busy = true
 	f.label = label
+	f.line = line
 	return f.gen
 }
 
@@ -40,6 +42,7 @@ func (f *jobVerbFlow) end(gen uint64) bool {
 	}
 	f.busy = false
 	f.label = ""
+	f.line = ""
 	return true
 }
 
@@ -69,12 +72,12 @@ func (a *App) jobVerbBusy() bool {
 // jobVerbBusy and chosen the eligible ids.
 func (a *App) runJobVerb(chord string, verb func(jobID string) error, ids []string, title string) tea.Cmd {
 	w := jobVerbWordsFor(chord)
-	gen := a.jobVerb.begin(w.noun)
+	line := w.doing + " " + jobCount(len(ids)) + "..."
 	if title != "" {
-		a.setFeedback(fmt.Sprintf("%s: %s", w.doing, title))
-	} else {
-		a.setFeedback(w.doing + " " + jobCount(len(ids)) + "...")
+		line = fmt.Sprintf("%s: %s", w.doing, title)
 	}
+	gen := a.jobVerb.begin(w.noun, line)
+	a.showJobVerbRunning()
 	return safeCmdOr(func() tea.Msg {
 		res := jobVerbResultMsg{Gen: gen, Chord: chord, Title: title}
 		for _, id := range ids {
@@ -94,20 +97,65 @@ func (a *App) runJobVerb(chord string, verb func(jobID string) error, ids []stri
 	})
 }
 
-// finishJobVerb applies a run's answer: the same lines the verbs gave when
-// they ran inline. An answer for a run that is not the one in flight is
-// dropped.
+// showJobVerbRunning puts the run's line on the feedback line with no expiry:
+// a batch over large staging directories runs far longer than the 3 s an
+// ordinary line is held, and the busy state must stay visible for as long as
+// it refuses a second run. Another line may replace it; keepJobVerbShown
+// brings it back once that line has gone.
+func (a *App) showJobVerbRunning() {
+	a.feedback = appFeedback{msg: a.jobVerb.line}
+}
+
+// keepJobVerbShown runs on the one-second tick, after the feedback line's
+// expiry: while a run is in flight and the line is empty, the run's line
+// returns.
+func (a *App) keepJobVerbShown() {
+	if a.jobVerb.busy && a.feedback.msg == "" {
+		a.showJobVerbRunning()
+	}
+}
+
+// jobVerbRunningNote is the clause a quit or restart prompt carries while a
+// run is in flight: leaving now can stop a reset between its row write and
+// its file deletion. "" when nothing is running.
+func (a *App) jobVerbRunningNote() string {
+	if !a.jobVerb.busy {
+		return ""
+	}
+	return a.jobVerb.label + " is still running"
+}
+
+// finishJobVerb applies a run's answer. An answer for a run that is not the
+// one in flight is dropped.
+//
+// The answer can arrive seconds after the dispatch, so it must not take the
+// feedback line from whatever holds it by then, least of all an armed
+// chord's confirm prompt (the chord would stay armed with its prompt gone).
+// A refusal is always shown: it is the one thing the operator has to act on.
+// A single job's success says nothing new, so it only gives the run's own
+// line, if that is still up, the ordinary hold. A batch's count is shown
+// unless a chord is in progress.
 func (a *App) finishJobVerb(msg jobVerbResultMsg) {
+	running := a.jobVerb.line
 	if !a.jobVerb.end(msg.Gen) {
 		return
 	}
+	stillUp := a.feedback.msg == running
 	w := jobVerbWordsFor(msg.Chord)
 	if msg.Title != "" {
 		if msg.Refused.n > 0 {
 			a.setFeedbackWithSeverity(msg.Refused.first.Error(), severityError)
 			return
 		}
-		a.setFeedback(fmt.Sprintf("%s: %s", w.doing, msg.Title))
+		if stillUp {
+			a.setFeedback(running)
+		}
+		return
+	}
+	if msg.Refused.n == 0 && a.chord.prefix != "" {
+		if stillUp {
+			a.clearFeedback()
+		}
 		return
 	}
 	a.setBatchFeedback(w.done+" "+jobCount(msg.Count), msg.Refused)

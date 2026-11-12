@@ -685,6 +685,11 @@ func (a *App) chordFeedback(prefix string) string {
 // taken as the chord it is and refused the same way.
 func (a *App) chordHint(prefix string) (hint string, refused bool) {
 	if prefix == "q" {
+		// Quitting in the middle of a reset can leave it half done, so the
+		// prompt says one is running.
+		if note := a.jobVerbRunningNote(); note != "" {
+			return "Quit: Q Confirm (3s) — " + note, false
+		}
 		return "Quit: Q Confirm (3s)", false
 	}
 
@@ -1113,7 +1118,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			// The warning the update restart gives, on the confirm line and
 			// the menu's confirm (restart_warning.go).
 			ConfirmDetail: func([]string) string {
-				return activeRestartClause(a.activeDownloadCount(), "restart")
+				clause := activeRestartClause(a.activeDownloadCount(), "restart")
+				note := a.jobVerbRunningNote()
+				if clause != "" && note != "" {
+					return clause + "; " + note
+				}
+				return clause + note
 			}})
 	}
 

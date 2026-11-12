@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -140,5 +141,143 @@ func TestAPanickingJobVerbEndsItsRun(t *testing.T) {
 	}
 	if !strings.Contains(app.feedback.msg, "boom") || app.feedback.sev != severityError {
 		t.Errorf("line = %q (sev %v)", app.feedback.msg, app.feedback.sev)
+	}
+}
+
+func pressRune(a *App, r rune) (tea.Model, tea.Cmd) {
+	return a.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+}
+
+// A single job's answer can arrive seconds after its dispatch. It must not
+// take the feedback line from a confirm armed in the meantime: the chord
+// would stay armed with its prompt gone. Mutant: finishJobVerb setting
+// "Reinitializing: <title>" again on success.
+func TestAJobVerbAnswerLeavesAnArmedConfirmPromptAlone(t *testing.T) {
+	app := jobVerbApp()
+	app.OnReinitializeJob = func(string) error { return nil }
+	app.OnDeleteJob = func(string) {}
+	_, cmd := app.dispatchAction("A I", app.taskList.GetJobByID("a"))
+
+	pressRune(app, 'a')
+	pressRune(app, 'd')
+	prompt := app.feedback.msg
+	if !strings.Contains(prompt, "Press D to confirm") {
+		t.Fatalf("no delete prompt armed: %q", prompt)
+	}
+	app.Update(cmd())
+	if app.feedback.msg != prompt {
+		t.Errorf("the answer replaced the armed prompt with %q", app.feedback.msg)
+	}
+	if app.chord.action == "" {
+		t.Error("the confirm must stay armed")
+	}
+
+	// A batch's count is held back the same way; a refusal is still shown.
+	app = jobVerbApp()
+	app.OnResumeJob = func(string) error { return nil }
+	app.OnDeleteJob = func(string) {}
+	app.taskList.ToggleSelection("a")
+	app.taskList.ToggleSelection("b")
+	_, cmd = app.dispatchAction("A R", nil)
+	pressRune(app, 'a')
+	hint := app.feedback.msg
+	app.Update(cmd())
+	if app.feedback.msg != hint {
+		t.Errorf("a batch's count replaced the chord hint with %q", app.feedback.msg)
+	}
+
+	app = jobVerbApp()
+	app.OnResumeJob = func(string) error { return errors.New("refused: reset pending") }
+	_, cmd = app.dispatchAction("A R", app.taskList.GetJobByID("a"))
+	pressRune(app, 'a')
+	app.Update(cmd())
+	if !strings.Contains(app.feedback.msg, "reset pending") || app.feedback.sev != severityError {
+		t.Errorf("a refusal must be shown whatever holds the line: %q", app.feedback.msg)
+	}
+}
+
+// The run's line is the only sign of the busy state, so it outlives the 3 s
+// an ordinary line gets, and comes back after a line that replaced it has
+// expired. Once the run answers it gets the ordinary hold. Mutant: the tick
+// without keepJobVerbShown (the line is gone on the first tick after 3 s).
+func TestTheRunningLineStaysUpWhileTheRunDoes(t *testing.T) {
+	app := jobVerbApp()
+	app.OnReinitializeJob = func(string) error { return nil }
+	app.taskList.ToggleSelection("a")
+	app.taskList.ToggleSelection("b")
+	_, cmd := app.dispatchAction("A I", nil)
+	running := app.feedback.msg
+
+	app.feedback.until = app.feedback.until.Add(-time.Hour) // far past any hold
+	app.Update(tickMsg{})
+	if app.feedback.msg != running {
+		t.Fatalf("the running line expired mid-run: %q", app.feedback.msg)
+	}
+	app.setFeedback("something else")
+	app.feedback.until = time.Now().Add(-time.Second)
+	app.Update(tickMsg{})
+	if app.feedback.msg != running {
+		t.Errorf("the running line did not return after another line expired: %q", app.feedback.msg)
+	}
+
+	app.Update(cmd())
+	if app.feedback.until.IsZero() {
+		t.Fatal("the result line must expire")
+	}
+	app.feedback.until = time.Now().Add(-time.Second)
+	app.Update(tickMsg{})
+	if app.feedback.msg != "" {
+		t.Errorf("a line was left up after the run: %q", app.feedback.msg)
+	}
+}
+
+// A I is refused while a run is in flight before its confirm is armed, not
+// after the operator has answered it. Mutant: the busy check left to
+// dispatchAction alone.
+func TestReinitializeChordIsRefusedBeforeItsConfirmWhileARunIsInFlight(t *testing.T) {
+	app := jobVerbApp()
+	app.OnReinitializeJob = func(string) error { return nil }
+	summaries := 0
+	app.ReinitializeSummary = func([]string) string { summaries++; return "" }
+	app.dispatchAction("A R", nil) // nothing selected: starts nothing
+	app.OnResumeJob = func(string) error { return nil }
+	app.dispatchAction("A R", app.taskList.GetJobByID("b"))
+
+	summaries = 0
+	pressRune(app, 'a')
+	pressRune(app, 'i')
+	if app.chord.prefix != "" || app.chord.action != "" {
+		t.Error("the chord must be disarmed by the refusal")
+	}
+	if !strings.Contains(app.feedback.msg, "Resume is still running") {
+		t.Errorf("line = %q, want the busy refusal", app.feedback.msg)
+	}
+	if summaries != 0 {
+		t.Error("the confirm's preflight ran for a chord that was refused")
+	}
+}
+
+// Quitting or restarting mid-run can stop a reset half way, so both prompts
+// say a run is in flight. Mutant: jobVerbRunningNote returning "".
+func TestQuitAndRestartPromptsNameARunInFlight(t *testing.T) {
+	app := jobVerbApp()
+	app.OnReinitializeJob = func(string) error { return nil }
+	app.OnRestart = func() {}
+	pressRune(app, 'q')
+	if app.feedback.msg != "Quit: Q Confirm (3s)" {
+		t.Errorf("idle quit prompt = %q", app.feedback.msg)
+	}
+	app.disarmChord()
+
+	app.dispatchAction("A I", app.taskList.GetJobByID("a"))
+	pressRune(app, 'q')
+	if app.feedback.msg != "Quit: Q Confirm (3s) — Reinitialize is still running" || app.feedback.sev != severityWarning {
+		t.Errorf("quit prompt = %q (sev %v)", app.feedback.msg, app.feedback.sev)
+	}
+	app.disarmChord()
+	pressRune(app, 'r')
+	pressRune(app, 'p')
+	if app.feedback.msg != "Press P to confirm restart: Reinitialize is still running (3s)" {
+		t.Errorf("restart prompt = %q", app.feedback.msg)
 	}
 }

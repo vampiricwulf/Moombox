@@ -87,6 +87,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {
 			a.clearFeedback()
 		}
+		// A Resume or Reinitialize still running keeps its line up.
+		a.keepJobVerbShown()
 		// (Terminal title is event-driven — updated by the job-lifecycle
 		// handlers on status change, not polled here every second.)
 		// Keep the details panel's wall-clock text ("5m ago" suffixes) live

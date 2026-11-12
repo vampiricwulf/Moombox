@@ -313,7 +313,7 @@ func (a *App) cancelChord() {
 // hint is the size refusal, in the refusal's colour.
 func (a *App) setPrefixHint(prefix string) {
 	hint, refused := a.chordHint(prefix)
-	if refused {
+	if refused || (prefix == "q" && a.jobVerb.busy) {
 		a.setFeedbackWithSeverity(hint, severityWarning)
 		return
 	}
@@ -409,6 +409,15 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	// whatever is selected (dispatchAction holds the same guard for every
 	// other route).
 	if item.Opens != "" && a.refuseOverlay(item.Opens) {
+		return a, nil, true
+	}
+
+	// A Reinitialize is refused while a Resume or Reinitialize is running
+	// (dispatchAction). Said here, before the confirm is armed: the confirm
+	// line walks the staging directory to say what the reset deletes, and
+	// answering it would only earn the refusal.
+	if chord == "A I" && a.jobVerbBusy() {
+		a.disarmChord()
 		return a, nil, true
 	}
 
