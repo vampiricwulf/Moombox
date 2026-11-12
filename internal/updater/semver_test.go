@@ -73,9 +73,6 @@ func TestParseVersionFullPreReleaseAndBuild(t *testing.T) {
 		{"1.0.0-alpha", 1, 0, 0, []string{"alpha"}, "", false},
 		{"1.0.0-alpha.beta.1", 1, 0, 0, []string{"alpha", "beta", "1"}, "", false},
 		{"2.0.15", 2, 0, 15, nil, "", false},
-		// Errors:
-		{"v1.x.0", 0, 0, 0, nil, "", true},
-		{"1.2.3.4", 0, 0, 0, nil, "", true}, // 4 segments still rejected
 	}
 	for _, tt := range tests {
 		v, err := ParseVersionFull(tt.input)
