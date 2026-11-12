@@ -1053,10 +1053,18 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 			// not show a prior error alongside the fresh state (per audit
 			// reports/worker.md Finding 24). Only while the row is still
 			// Muxing, like every write decided on an earlier status read.
-			if !w.stillMuxingAfter(job.ID, map[string]any{
+			// A mux that died while it waited for a download slot left its
+			// wait line on the row (acquireMuxSlot): taken off here, or the
+			// Downloading row shows "Waiting for a download slot to mux..."
+			// until its run writes progress of its own.
+			reset := map[string]any{
 				"status": database.StatusDownloading,
 				"error":  "",
-			}) {
+			}
+			if isMuxSlotWaitLine(job.Progress) {
+				reset["progress"] = ""
+			}
+			if !w.stillMuxingAfter(job.ID, reset) {
 				continue
 			}
 			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
