@@ -905,9 +905,8 @@ func (d *SegmentDownloader) noteOfflineRecovery() {
 // noteFetch records n bytes of media payload arriving off the network and
 // fires OnFetch. Called at every successful segment body read, and for a
 // whole-file chunk while its body is being read (fetchChunk's arrivalMeter),
-// so there it includes the bytes of a chunk that later broke off and was
-// fetched again: they did arrive. It is the
-// answer to "is data arriving?", which is a different question from the
+// where a chunk that breaks off keeps the part that arrived, so its bytes
+// are reported once. It is the answer to "is data arriving?", which is a different question from the
 // flush-driven counters: bytesWritten, lastSegTime, resume, and the
 // finalize budget deliberately stay keyed on what is durably on disk (a
 // fetch that lands in the reorder buffer above a permanent gap is
