@@ -1050,25 +1050,32 @@ func (s *runState) runTUI() {
 	})
 	// This one already carries a full list, so its own drop is harmless (a
 	// snapshot is queued when a snapshot cannot be queued) and its default
-	// stays empty. It neither calls the replay nor CLEARS it: the list it
-	// delivers is a time-of-write snapshot taken inside the bulk write, so an
+	// stays empty. It never CLEARS the replay: the list it delivers is a
+	// time-of-write snapshot taken inside the bulk write, so an
 	// UpdateJobFields that lands after that snapshot and is then dropped by a
 	// full jobUpdateCh is NOT in it. Clearing the flag there discarded that
-	// replay — a delivered list is not assumed newer than a pending one — and
-	// the dropped transition was never recovered. Leaving it armed costs one
-	// redundant GetAllJobs in the rare coincidence of a bulk write with a
-	// pending drop, and the next successful send (or the 1 s backstop) does
-	// the catch-up (CORE-6).
+	// replay, and the dropped transition was never recovered (CORE-6).
 	//
 	// For the same reason it states no version floor: a write that landed
 	// after the bulk write's snapshot may already have been seen by a
 	// forwarder, and a floor that covered it would have the TUI drop that
 	// write's event though the list does not hold it.
+	//
+	// And it ARMS the replay after the send. A list with no floor is applied
+	// whatever the TUI has applied before it, and this one is delivered some
+	// time after it was read: a catch-up snapshot read later can reach the
+	// TUI first, and the older list then puts older rows back, while the
+	// events that would correct them are at or below that snapshot's floor
+	// and are dropped as stale. So a floored snapshot always follows a bulk
+	// list (on the next successful send, or the 1 s backstop) and has the
+	// last word. One extra GetAllJobs per bulk write, and the two bulk
+	// writes are rare operator actions.
 	unsubTUIJobsChange := s.db.OnJobsChange(func(jobs []*database.Job) {
 		select {
 		case jobsUpdateCh <- tui.JobsUpdateMsg{Jobs: jobs}:
 		default:
 		}
+		tuiResyncNeeded.Store(true)
 	})
 
 	// 1 s backstop for the resync: the forwarders above cover the common

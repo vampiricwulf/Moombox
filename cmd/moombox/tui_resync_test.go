@@ -342,12 +342,69 @@ func TestADeliveredBulkListDoesNotClearAPendingReplay(t *testing.T) {
 	}
 }
 
+// A bulk write's list carries no floor, so the TUI applies it whatever it has
+// applied before, and it is delivered some time after it was read. A catch-up
+// snapshot read later can reach the TUI first; the older list then puts older
+// rows back, and the events that would correct them are at or below that
+// snapshot's floor, so the TUI drops them. The forwarder therefore arms the
+// replay after its send: a floored snapshot, read after the bulk list was
+// queued, follows it and has the last word.
+//
+// The forwarder's two statements are spelled here as they are in runTUI
+// (TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend pins that shape).
+//
+// Mutant: delete the Store(true) (spelled here on the rig's flag). Nothing is
+// pending, the next send fetches nothing, and the stale list is the last one
+// the TUI is given.
+func TestABulkListIsFollowedByAFlooredSnapshot(t *testing.T) {
+	r := newResyncRig(t)
+	resync := r.resync()
+
+	// The bulk write read the list while "a" was still downloading; "a"
+	// finished before the list was delivered.
+	stale := []*database.Job{{ID: "a", Status: database.StatusDownloading}}
+	done := r.db.UpdateJobFields("a", map[string]any{"status": database.StatusFinished})
+	if done == nil {
+		t.Fatal("UpdateJobFields returned no row")
+	}
+	noteSeenJobVersion(&r.seen, done.Version)
+
+	select {
+	case r.jobsCh <- tui.JobsUpdateMsg{Jobs: stale}:
+	default:
+	}
+	r.needed.Store(true)
+
+	// The next event that gets through runs the replay.
+	r.forward(resync, &database.JobChange{Job: &database.Job{ID: "a"}, Changes: []string{"progress"}})
+	if r.fetches != 1 {
+		t.Fatalf("a delivered bulk list was followed by %d snapshot reads, want 1", r.fetches)
+	}
+	if first := <-r.jobsCh; first.Floor != 0 {
+		t.Fatalf("the bulk list states floor %d, want none", first.Floor)
+	}
+	select {
+	case snap := <-r.jobsCh:
+		if snap.Floor < done.Version {
+			t.Errorf("the snapshot after the bulk list has floor %d, below the write (%d) the list missed", snap.Floor, done.Version)
+		}
+		for _, j := range snap.Jobs {
+			if j.ID == "a" && j.Status != database.StatusFinished {
+				t.Errorf("the snapshot after the bulk list carries status %q, want %q", j.Status, database.StatusFinished)
+			}
+		}
+	default:
+		t.Error("no snapshot followed the bulk list")
+	}
+}
+
 // resyncForwarders are the five DB subscriptions runTUI forwards to the TUI.
 // The four that count a drop must delegate to forwardOrDrop — the body the
 // tests above measure — passing resyncTUIJobs as the replay. The fifth
-// (OnJobsChange) already carries a full list, so it neither replays nor
+// (OnJobsChange) already carries a full list, so it counts no drop and never
 // CLEARS a pending replay: its body is a bare non-blocking send with an empty
-// default.
+// default, followed by the Store(true) that arms a floored snapshot to follow
+// its list.
 var resyncForwarders = map[string]bool{ // name -> counts a drop
 	"OnJobChange":    true,
 	"OnJobAdded":     true,
@@ -370,7 +427,9 @@ var resyncForwarders = map[string]bool{ // name -> counts a drop
 // tuiResyncNeeded.Store(false) to the OnJobsChange success branch (a
 // delivered snapshot discards a replay armed after it — B-1); give
 // OnJobsChange a non-empty default (its own drop is harmless, a snapshot
-// queued when a snapshot cannot be queued).
+// queued when a snapshot cannot be queued); delete the Store(true) that ends
+// the OnJobsChange forwarder (an older bulk list applied over a newer
+// catch-up snapshot is never put right).
 func TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tui_wiring.go", nil, 0)
@@ -431,19 +490,39 @@ func TestEveryTUIJobForwarderReplaysOnTheSuccessfulSend(t *testing.T) {
 			return true
 		}
 
-		// OnJobsChange: a bare non-blocking send. It must not touch the flag
-		// at all — its list is a time-of-write snapshot that may predate the
-		// drop which armed a pending replay (B-1).
+		// OnJobsChange: a bare non-blocking send, then the replay armed. It
+		// must never CLEAR the flag — its list is a time-of-write snapshot
+		// that may predate the drop which armed a pending replay (B-1).
 		sent := successClause(lit.Body)
 		if sent == nil {
 			t.Errorf("the s.db.%s forwarder has no select clause that sends the event", sel.Sel.Name)
 			return true
 		}
-		if hasCallTo(lit.Body, "tuiResyncNeeded", "Store") {
-			t.Errorf("the s.db.%s forwarder writes tuiResyncNeeded — a DELIVERED list is not newer "+
-				"than a pending replay (it is the bulk write's own time-of-write snapshot), so "+
-				"clearing the flag there throws the replay away", sel.Sel.Name)
+		// The one write of the flag is the arming Store(true), as the last
+		// statement: after the send, whichever branch the select took.
+		armed := false
+		if last, ok := lit.Body.List[len(lit.Body.List)-1].(*ast.ExprStmt); ok {
+			if c, ok := last.X.(*ast.CallExpr); ok && selectorIs(c.Fun, "tuiResyncNeeded", "Store") {
+				armed = true
+			}
 		}
+		if !armed {
+			t.Errorf("the s.db.%s forwarder does not end by arming the replay — a list with no "+
+				"floor can be applied over a newer catch-up snapshot, and only a floored snapshot "+
+				"after it puts that right", sel.Sel.Name)
+		}
+		ast.Inspect(lit.Body, func(m ast.Node) bool {
+			c, ok := m.(*ast.CallExpr)
+			if !ok || !selectorIs(c.Fun, "tuiResyncNeeded", "Store") {
+				return true
+			}
+			if id, ok := c.Args[0].(*ast.Ident); !ok || id.Name != "true" {
+				t.Errorf("the s.db.%s forwarder clears tuiResyncNeeded — a DELIVERED list is not newer "+
+					"than a pending replay (it is the bulk write's own time-of-write snapshot), so "+
+					"clearing the flag there throws the replay away", sel.Sel.Name)
+			}
+			return true
+		})
 		if soleCallArgs(lit.Body, "forwardOrDrop") != nil {
 			t.Errorf("the s.db.%s forwarder calls forwardOrDrop — its own drop is harmless (a "+
 				"snapshot is queued when a snapshot cannot be queued) and it counts no drop",
