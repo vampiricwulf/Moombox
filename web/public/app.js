@@ -1252,7 +1252,15 @@ export class MoomboxApp {
     };
 
     this.ws.onmessage = (event) => {
-      this._wsGotFrame = true;
+      if (!this._wsGotFrame) {
+        // The first frame proves the socket alive, so the pong clock starts
+        // again from it. A snapshot that took over 45 s to arrive would
+        // otherwise switch the heartbeat to its 45 s limit with _lastPong
+        // still dating from onopen, and a tick landing before the pongs
+        // queued behind the snapshot closed the socket it had just read.
+        this._wsGotFrame = true;
+        this._lastPong = Date.now();
+      }
       try {
         const message = JSON.parse(event.data);
         this.handleMessage(message);

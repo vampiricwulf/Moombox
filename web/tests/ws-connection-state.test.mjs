@@ -229,3 +229,25 @@ test("the heartbeat waits longer for a socket's first frame than for a pong afte
   silentFor(second.h, 200000);
   assert.equal(second.ws.readyState, 3, "a socket that never delivers a frame is never closed");
 });
+
+// The snapshot itself is the first frame, and the pongs for the pings sent
+// while it was arriving are queued behind it. A heartbeat tick that runs
+// between the two used to see the 45 s limit with a pong clock still dating
+// from onopen, and close the socket it had just finished reading.
+//
+// MUTANT: do not restart the pong clock on the first frame (the socket is
+// closed at the tick).
+test("a slow first frame is proof of life: the next heartbeat tick keeps the socket", { skip }, async () => {
+  const h = await harness.makeApp();
+  const ws = lastSocket(h);
+  ws.readyState = 1;
+  ws.onopen();
+  await h.flush();
+
+  // 60 s without a pong, a ping outstanding, and then the snapshot lands.
+  h.app._lastPong = Date.now() - 60000;
+  h.app._lastPingSent = Date.now();
+  ws.onmessage({ data: JSON.stringify({ type: "initial_state", payload: { jobs: [], logs: [] } }) });
+  h.advance(15000);
+  assert.equal(ws.readyState, 1, "the socket was closed right after its first frame arrived");
+});
