@@ -424,18 +424,23 @@ func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 
 // priorArchiveLine is the details line for the archive an earlier recording
 // of the job left (prior_output_file, owner ruling R2-W1), the dashboard's
-// priorArchiveText (web/public/modules/utils.js): the file's name, and that
-// it is kept. "" for a job with none. The name is cut at either separator:
-// the row stores the path as the machine that wrote it spelled it.
+// priorArchiveText (web/public/modules/utils.js): the file, and that it is
+// kept. "" for a job with none. Its name alone when it sits in the directory
+// of the archive the row names (output_file); its whole path when it is
+// somewhere else — a reinitialized row can follow a changed output directory
+// (owner ruling R2-X1) — or the row names no archive to be beside. The path
+// is cut at either separator: the row stores it as the machine that wrote it
+// spelled it.
 func priorArchiveLine(j *database.Job) string {
 	if j == nil || j.PriorOutputFile == "" {
 		return ""
 	}
-	name := j.PriorOutputFile
-	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
-		name = name[i+1:]
+	shown := j.PriorOutputFile
+	cut := strings.LastIndexAny(shown, `/\`)
+	if out := j.OutputFile; cut >= 0 && out != "" && strings.LastIndexAny(out, `/\`) == cut && out[:cut] == shown[:cut] {
+		shown = shown[cut+1:]
 	}
-	return name + " (kept, not replaced)"
+	return shown + " (kept, not replaced)"
 }
 
 // liveEdgeLine is the details line for a live YouTube capture that recorded

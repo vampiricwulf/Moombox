@@ -1204,16 +1204,23 @@ export function liveEdgeText(job) {
  * priorArchiveText is the job-details line for the archive an earlier
  * recording of the job left (priorOutputFile, owner ruling R2-W1): a
  * Reinitialize keeps it, and the new recording's finalize renames it aside
- * instead of writing over it. The file's name and that it is kept; "" for a
- * job with none. The TUI's twin is priorArchiveLine
- * (internal/tui/job_details.go).
- * @param {{priorOutputFile?: string}} job
+ * instead of writing over it. The file and that it is kept; "" for a job
+ * with none. Its name alone when it sits in the directory of the archive the
+ * row names (outputFile); its whole path when it is somewhere else (a
+ * reinitialized row can follow a changed output directory, owner ruling
+ * R2-X1) or the row names no archive to be beside. The TUI's twin is
+ * priorArchiveLine (internal/tui/job_details.go).
+ * @param {{priorOutputFile?: string, outputFile?: string}} job
  * @returns {string}
  */
 export function priorArchiveText(job) {
   const path = job?.priorOutputFile;
   if (!path) return "";
-  return `${path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1)} (kept, not replaced)`;
+  const cutAt = (p) => Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  const cut = cutAt(path);
+  const out = job.outputFile || "";
+  const beside = cut >= 0 && out !== "" && cutAt(out) === cut && out.slice(0, cut) === path.slice(0, cut);
+  return `${beside ? path.slice(cut + 1) : path} (kept, not replaced)`;
 }
 
 /**

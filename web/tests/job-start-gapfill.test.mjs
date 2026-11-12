@@ -37,16 +37,24 @@ test("liveEdgeText names the reason and the join point", () => {
   assert.equal(liveEdgeText({ liveEdgeReason: REASON, joinOffsetSeconds: 0 }), "");
 });
 
-// The archive a Reinitialize kept (owner ruling R2-W1): the file's name,
-// whichever separator the row's path uses. The TUI's twin is
-// priorArchiveLine, pinned on the same paths (TestPriorArchiveLine).
+// The archive a Reinitialize kept (owner ruling R2-W1): the file's name when
+// it is beside the row's archive, whichever separator the row's path uses,
+// and its whole path when it is in another directory or the row names no
+// archive. The TUI's twin is priorArchiveLine, pinned on the same paths
+// (TestPriorArchiveLine).
 //
-// Mutants: the whole path shown; only "/" cut (a Windows row shows its path).
+// Mutants: the whole path always shown; the name always shown; only "/" cut
+// (a Windows row always shows its path).
 test("priorArchiveText names the kept file", () => {
   assert.equal(priorArchiveText({}), "");
-  assert.equal(priorArchiveText({ priorOutputFile: "D:\\out\\Chan\\Show.restart-1700000000.mp4" }),
+  const win = "D:\\out\\Chan\\Show.restart-1700000000.mp4";
+  assert.equal(priorArchiveText({ priorOutputFile: win, outputFile: "D:\\out\\Chan\\Show.mp4" }),
     "Show.restart-1700000000.mp4 (kept, not replaced)");
-  assert.equal(priorArchiveText({ priorOutputFile: "/out/Chan/Show.mp4" }), "Show.mp4 (kept, not replaced)");
+  assert.equal(priorArchiveText({ priorOutputFile: "/out/Chan/Show.restart-1700000000.mp4", outputFile: "/out/Chan/Show.mp4" }),
+    "Show.restart-1700000000.mp4 (kept, not replaced)");
+  assert.equal(priorArchiveText({ priorOutputFile: win, outputFile: "E:\\new\\Chan\\Show.mp4" }),
+    `${win} (kept, not replaced)`);
+  assert.equal(priorArchiveText({ priorOutputFile: "/out/Chan/Show.mp4" }), "/out/Chan/Show.mp4 (kept, not replaced)");
 });
 
 // Mutants: the pending state without its spans or deadline; the kept state
