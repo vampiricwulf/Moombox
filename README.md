@@ -126,6 +126,8 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 2. Place it in a directory of your choice
 3. Run `Moombox.exe`
 
+While a capture or a mux is running, Moombox asks Windows not to go to sleep on its idle timer (the screen may still turn off), and lets it sleep again as soon as none is. A PC that is already asleep is not woken: one that should catch streams unattended needs a power plan that keeps it on. Turn this off with `downloader.keep_awake = false` or in Settings.
+
 ### Linux (x64)
 
 ```bash
@@ -494,6 +496,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.download_chat` | `true` | No | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
 | `downloader.prefer_hdr` | `true` | No | YouTube: prefer HDR over SDR at the same resolution and fps |
+| `downloader.keep_awake` | `true` | No | Windows: no idle sleep while a capture or mux is running (the screen may still turn off); no effect on Linux |
 | `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
 | `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |

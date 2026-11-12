@@ -279,6 +279,7 @@ internal/httpx/httpxtest      -- test-only: an http.Client that serves a handler
 internal/sqliteuri           -- the "file:" URI every SQLite open goes through (job database, browser cookie databases)
 internal/redact              -- one redaction rule per kind of secret, for error text, log lines and notifications (a googlevideo or Twitch media URL's credentials, the GVS PO token, a credential inside a URL)
 internal/childproc           -- FFmpeg and ffprobe started tied to the process that runs them: Pdeathsig on a locked thread (Linux), a kill-on-close Job Object of the child's own (Windows)
+internal/keepawake           -- Asks Windows not to sleep on its idle timer while a capture or mux is running (SetThreadExecutionState on one locked thread); does nothing on Linux
 internal/disk                -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/constants           -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils               -- HTTP helpers, formatters, YouTube URL parsing
@@ -293,7 +294,7 @@ Dependencies flow strictly downward. Lower-level packages never import higher-le
 
 The lists below are the `internal/` imports of each package as `go list -f '{{join .Imports " "}}' ./internal/<pkg>` prints them (regenerate the same way):
 
-- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `childproc`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `jobfilter`, `jobstate`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
+- `cmd/moombox` imports everything (orchestrator): `bgutils`, `bgutils/sidecar`, `childproc`, `cipher`, `config`, `connectivity`, `cookies`, `database`, `engine`, `keepawake`, `jobfilter`, `jobstate`, `logger`, `monitor`, `notifications`, `stats`, `tui`, `twitch`, `updater`, `utils`, `web`, `internal/web/routes`, `worker`, `youtube`
 - `internal/worker` imports: `bgutils`, `chat`, `childproc`, `cipher`, `config`, `connectivity`, `constants`, `database`, `disk`, `engine`, `httpx`, `jobfilter` (the clip predicate, `IsClipJob`), `jobstate`, `jobverbs`, `notifications`, `redact`, `twitch`, `utils`, `youtube`
 - `internal/web/routes` imports: `bgutils`, `bgutils/sidecar`, `childproc` (the FFmpeg check and the import's ffprobe), `config`, `cookies`, `database`, `disk`, `engine` (the import's ffprobe path), `jobfilter`, `jobstate`, `jobverbs`, `notifications`, `stats`, `twitch`, `updater`, `utils`, `web`, `worker`, `ytdlpplugin`
 - `internal/web` imports: `config` only — the hub's `Broadcast*` methods take `any`, so the server, hub, auth and middleware never import the job types; the route handlers live in `internal/web/routes`
@@ -308,7 +309,7 @@ The lists below are the `internal/` imports of each package as `go list -f '{{jo
 - `internal/chat` / `internal/notifications` import: `constants`/`config`, `httpx`, `utils` (`internal/notifications` also `redact`)
 - `internal/utils` imports: `connectivity`, `constants`, `httpx`
 - `internal/database` imports: `sqliteuri`
-- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri`, `internal/redact`, `internal/childproc` import nothing from internal
+- `internal/constants`, `internal/httpx`, `internal/connectivity`, `internal/sqliteuri`, `internal/redact`, `internal/childproc`, `internal/keepawake` import nothing from internal
 
 Cross-cutting concerns (logging, notifications, events) flow through callback closures wired in `cmd/moombox` (`services.go`, `monitor_callbacks.go`, `tui_wiring.go`), not through package imports.
 

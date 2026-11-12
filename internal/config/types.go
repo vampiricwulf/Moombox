@@ -243,6 +243,13 @@ type DownloaderConfig struct {
 	// restart-required. No migration: a config file without the key decodes
 	// over Defaults(), so it reads as true.
 	PreferHDR bool `toml:"prefer_hdr" json:"prefer_hdr"`
+	// KeepAwake asks Windows not to go to sleep on its idle timer while a
+	// capture or a mux is running, and lets it sleep again as soon as none
+	// is (SetThreadExecutionState with ES_SYSTEM_REQUIRED; the screen may
+	// still turn off). Default true: a capture makes no keyboard or mouse
+	// input, so a PC whose power plan allows sleep suspended Moombox
+	// mid-recording. Hot-reloadable. No effect on Linux (owner ruling R2-X5).
+	KeepAwake bool `toml:"keep_awake" json:"keep_awake"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream

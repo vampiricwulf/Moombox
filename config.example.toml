@@ -198,6 +198,13 @@
 # tone-map HDR. Dolby Vision ranks last either way.
 # prefer_hdr = true
 
+# Windows: while a capture or a mux is running, ask Windows not to go to sleep
+# on its idle timer, and let it sleep again as soon as none is. The screen may
+# still turn off. A capture makes no keyboard or mouse input, so without this
+# a PC whose power plan allows sleep suspends Moombox in the middle of a
+# recording. Applies without a restart. No effect on Linux.
+# keep_awake = true
+
 # YouTube livestreams: how long (seconds) to keep retrying — re-checking stream
 # status every 30s — before assuming the stream has finished even if YouTube
 # still reports it live. The clock resets whenever a segment arrives. Minimum 30;

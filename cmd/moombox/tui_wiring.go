@@ -607,6 +607,7 @@ func (s *runState) runTUI() {
 		s.applyTrustForwardedProto(snap.Network.TrustForwardedProto)
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		s.applyReorderBudget(snap.Downloader)
+		s.applyKeepAwake(snap.Downloader.KeepAwake)
 		s.warnSegmentWorkers(snap.Downloader.SegmentWorkers)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()

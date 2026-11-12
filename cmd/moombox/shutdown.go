@@ -161,6 +161,12 @@ func (s *runState) shutdown() bool {
 	// in-flight wait: the muxes are cancelled as soon as that is known.
 	stopService("DownloadWorker", func() { s.dlWorker.StopHurried(s.consoleEnd.marked()) })
 
+	// 2b. Nothing is capturing or muxing any more: Windows may sleep again
+	// (downloader.keep_awake). The request would end with the process too.
+	if s.keepAwake != nil {
+		stopService("KeepAwake", s.keepAwake.stop)
+	}
+
 	// 3. Flush in-flight notifications (may have been fired during worker stop)
 	stopService("Notifications", s.notifyMgr.Wait)
 

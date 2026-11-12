@@ -779,6 +779,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
 				// interval — close enough to the 5-min target while reusing the
 				// existing ticker).
+				// A keep-awake hold in place is checked against the jobs'
+				// statuses (nothing is read while none is held).
+				if s.keepAwake != nil {
+					s.keepAwake.reconcile()
+				}
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
 					checkDisk()

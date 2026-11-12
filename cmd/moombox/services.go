@@ -1081,6 +1081,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// carries the value. Warns here if the saved pair is incoherent.
 	s.applyReorderBudget(cfg.Downloader)
 
+	// downloader.keep_awake: while a capture or mux is running, ask Windows
+	// not to sleep on its idle timer. Started before the worker resumes the
+	// rows a previous run left Downloading or Muxing; re-applied on every
+	// config save from either UI (applyKeepAwake).
+	s.startKeepAwake(cfg.Downloader.KeepAwake)
+
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
 	// Feed and DECAPI each own a probe cooldown (created in their

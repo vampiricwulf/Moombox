@@ -1050,6 +1050,17 @@
                                     play the file.</span
                                 >
                             </sl-switch>
+                            <sl-switch id="cfg-keep-awake" checked>
+                                Keep the PC awake while recording (Windows only)
+                                <span slot="help-text"
+                                    >While a capture or a mux is running,
+                                    Windows is asked not to go to sleep on its
+                                    idle timer; it may sleep again as soon as
+                                    none is. The screen can still turn off.
+                                    Applies without a restart. No effect on
+                                    Linux.</span
+                                >
+                            </sl-switch>
 
                             <sl-input
                                 id="cfg-maximum-timeout"

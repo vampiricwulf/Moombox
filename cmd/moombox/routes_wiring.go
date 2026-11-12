@@ -112,6 +112,7 @@ func (s *runState) wireRoutes() func() {
 		OnTrustForwardedProtoChange: s.applyTrustForwardedProto,
 		OnFfmpegPathChange:          s.applyFfmpegPath,
 		OnReorderBudgetChange:       s.applyReorderBudget,
+		OnKeepAwakeChange:           s.applyKeepAwake,
 		ResolveRateLimit:            s.apiRL,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})

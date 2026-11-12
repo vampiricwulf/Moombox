@@ -86,6 +86,10 @@ type ConfigRoutesCallbacks struct {
 	// OnSegmentWorkersChange is called with the new downloader.segment_workers
 	// when it changes, for the high-value warning boot logs.
 	OnSegmentWorkersChange func(n int)
+	// OnKeepAwakeChange is called with the new downloader.keep_awake when it
+	// changes, so a hold in place is released, or one that is due is taken,
+	// without a restart.
+	OnKeepAwakeChange func(on bool)
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -1005,6 +1009,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["prefer_hdr"].(bool); ok {
 			cfg.Downloader.PreferHDR = v
 		}
+		if v, ok := dl["keep_awake"].(bool); ok {
+			cfg.Downloader.KeepAwake = v
+		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {
 			cfg.Downloader.MaximumTimeout = int(v)
 		}
@@ -1286,6 +1293,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
 		oldDisk := diskSettingsOf(cfg)
 		oldSegWorkers := cfg.Downloader.SegmentWorkers
+		oldKeepAwake := cfg.Downloader.KeepAwake
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1354,6 +1362,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
 		newDisk := diskSettingsOf(cfg)
 		newSegWorkers := cfg.Downloader.SegmentWorkers
+		newKeepAwake := cfg.Downloader.KeepAwake
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1388,6 +1397,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if newSegWorkers != oldSegWorkers && callbacks.OnSegmentWorkersChange != nil {
 				callbacks.OnSegmentWorkersChange(newSegWorkers)
+			}
+			if newKeepAwake != oldKeepAwake && callbacks.OnKeepAwakeChange != nil {
+				callbacks.OnKeepAwakeChange(newKeepAwake)
 			}
 			// The targets, when this save changed them — not on the mere
 			// presence of notification_edits: the reload flushes every

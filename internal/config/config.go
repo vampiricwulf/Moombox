@@ -219,6 +219,7 @@ func Defaults() *MoomboxConfig {
 			DownloadChat:                true,
 			Prefer60fps:                 true,
 			PreferHDR:                   true,
+			KeepAwake:                   true,
 			MaximumTimeout:              600,
 			InterruptionTimeout:         FlexDuration{Value: 120}, // minutes
 			IncompleteStagingExpiryDays: FlexDuration{Value: 7},   // days

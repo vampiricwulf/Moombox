@@ -145,6 +145,9 @@ type runState struct {
 	// end the process (isConsoleEnding, stopOnSignal): the shutdown then
 	// hurries (consoleEndBudget). Never marked on Linux.
 	consoleEnd consoleEnd
+	// keepAwake holds the host awake while a capture or mux is running
+	// (startKeepAwake, in initServices). Nil until then.
+	keepAwake *keepAwake
 	// prevCrash is what the previous process's crash left in the crash file
 	// beside the log (captureCrashOutput, in initServices); the Recovered
 	// From Crash notice reports it.

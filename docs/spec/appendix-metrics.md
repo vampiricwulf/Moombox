@@ -77,6 +77,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | constants/ | ~460 | 1 | 3 | Hardcoded values (client configs, UAs, URLs) |
 | jobstate/ | ~400 | 6 | 5 | Derived job sub-states both UIs show — the pending automatic action (the one Twitch auto-retry predicate), the wait-line marker, a Queued row's admission hold by the scheduler's precedence; imports only `database`, mirrored by utils.js against a shared table |
 | childproc/ | ~380 | 4 | 4 | FFmpeg and ffprobe started tied to the process that runs them (Pdeathsig on a locked thread on Linux, a kill-on-close Job Object of the child's own on Windows) |
+| keepawake/ | ~150 | 3 | 2 | Asks Windows not to sleep on its idle timer while a capture or mux is running (`downloader.keep_awake`); a no-op on Linux. Added 2026-11-12, not yet in the Totals |
 | ytdlpplugin/ | ~350 | 1 | 2 | yt-dlp PO-token plugin status/install — shared by the dashboard's Integrations card and the TUI's E Y overlay |
 | treeguard/ | ~200 | 1 | 1 | Test-only: every tested package's `TestMain` runs through `Run`, which fails a run that leaves files in the package directory |
 | disk/ | ~200 | 5 | 5 | Disk space queries: kernel32 on Windows, statfs on Linux |
