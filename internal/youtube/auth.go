@@ -67,7 +67,8 @@ func (a *Auth) GetCookieHeader() string {
 
 // PageCookieHeader is the Cookie header for a YouTube HTML page fetched with
 // the jar's session: the authenticated watch page, the homepage, the liveness
-// and membership pages, chat's continuation page. It is GetCookieHeader with
+// and membership pages, chat's continuation page, the chapter read at the mux
+// (Service.FetchChapters). It is GetCookieHeader with
 // yt-dlp's consent and language applied — SOCS=CAI when the jar is not signed
 // in, PREF with hl=en and tz=UTC — in the header only (see
 // cookies.CookieJar.YouTubePageCookieHeader). The Innertube calls keep
