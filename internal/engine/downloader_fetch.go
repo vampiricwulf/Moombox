@@ -532,8 +532,8 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		// blocks", downloader/http.py), and its fragment loop then skips that
 		// fragment as not found (fatal only for fragment 0); this retries it,
 		// as moonarchive does (_dash.py, EmptyFragmentException), and when the
-		// ladder runs out the caller sees ErrSegmentRetriesExhausted — a gap
-		// it reports and the DASH loop re-fetches — never a quiet skip.
+		// ladder runs out the caller sees ErrSegmentRetriesExhausted — catch-up
+		// stops there and the DASH loop re-fetches it — never a quiet skip.
 		if err == nil && status < 400 && len(body) > 0 {
 			// Every caller of this function fetches MEDIA payload (catch-up
 			// workers, parallel HLS) — playlists and probes use fetchSegment

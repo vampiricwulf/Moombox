@@ -1168,7 +1168,7 @@ Key methods:
 Callback fields:
 - `OnStart func(seq int, resuming bool)`: Called when download begins.
 - `OnProgress func(p DownloadProgress)`: Called per segment/chunk with progress data.
-- `OnGap func(g DownloadGap)`: Called when a gap (missing segment) is detected.
+- `OnGap func(g DownloadGap)`: Called when a segment is given up and the file goes on past it (an HLS window gap or stuck-segment skip, a refused DASH segment skipped in place). Parallel catch-up stopping at a failed claim is not one: it logs "Parallel catch-up stopping at gap; main loop will re-fetch" and calls nothing, because the DASH loop fetches that segment next and records whatever it cannot get itself. A gap reported there became a persisted gap row, and a "Gaps" line in the job details, for a complete recording.
 - `OnFinish func()`: Called when download completes.
 - `OnFirstMedia func(seq int)`: Called once, from the live DASH loop (its catch-up writes included), the live HLS loop and the HLS VOD-parallel writer it hands a finished playlist to, with the sequence of the first media segment written into a file the downloader opened empty — never on a resume or an append. `runDownloaders` records it beside the staged file (`recordingStartFile`, `recording-start.json`, `internal/worker/recording_start.go`), which is how a finalize knows a live YouTube capture began at sq=0 (data-and-storage.md § Archive Chapters). A downloader that opens its file empty drops the file's entry first (`OnStart`, `forgetRecordingStart`), so a fresh file never inherits the entry an earlier, set-aside recording of the same name left.
 

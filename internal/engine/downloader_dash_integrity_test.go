@@ -930,6 +930,67 @@ func TestDashCatchUpRetriesAnEmptySegment(t *testing.T) {
 	})
 }
 
+// A segment catch-up gives up on (a 410, which its workers never retry) and
+// the sequential loop then fetches leaves a complete recording, so no gap is
+// reported for it. Catch-up used to call OnGap as it stopped there: the worker
+// logged a "segment gap" warning and stored a gap row, and the job details of
+// a complete archive showed gaps.
+//
+// Mutant: runParallelCatchUp calling OnGap for the unflushed claimed range —
+// OnGap fires although the file holds every segment.
+func TestDashCatchUpStopAtASegmentTheLoopFetchesIsNoGap(t *testing.T) {
+	const head, hole = 80, 7
+	g := serveGVS(t, constHead(head), func(r *http.Request, seq, attempt int) gvsAnswer {
+		switch {
+		case seq == hole && attempt == 1:
+			return gvsGone
+		case seq <= head:
+			return gvsServe
+		default:
+			return gvsForbidden
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "video_stream")
+		var gaps []DownloadGap
+		var gapMu sync.Mutex
+		d := NewSegmentDownloader(DownloaderOptions{
+			BaseURL:           gvsBase("catchupgap"),
+			OutputFile:        out,
+			InitInlineAtStart: true,
+			CheckStreamStatus: func(context.Context) (bool, error) { return true, nil },
+		})
+		d.OnGap = func(g DownloadGap) {
+			gapMu.Lock()
+			defer gapMu.Unlock()
+			gaps = append(gaps, g)
+		}
+		var caughtUp atomic.Bool
+		d.OnProgress = func(p DownloadProgress) {
+			if p.CatchingUp {
+				caughtUp.Store(true)
+			}
+		}
+
+		if err := d.Start(t.Context()); err != nil {
+			t.Fatalf("Start = %v, want nil", err)
+		}
+		if !caughtUp.Load() {
+			t.Fatal("the download never entered catch-up — the scenario did not run")
+		}
+		if n := g.attemptsFor(hole); n < 2 {
+			t.Fatalf("segment %d was asked %d time(s) — catch-up never failed it", hole, n)
+		}
+		wantFile(t, out, gvsRecording(0, head))
+		gapMu.Lock()
+		defer gapMu.Unlock()
+		if len(gaps) != 0 {
+			t.Errorf("OnGap fired with %+v for a recording that holds every segment", gaps)
+		}
+	})
+}
+
 // TestDashInlineInitGuardWritesSq0InitFirst pins step 2 of G3: an
 // InitInlineAtStart file that is still empty never takes media for a
 // sequence above 0 before sq=0's ftyp+moov (ensureInlineInit), on the
