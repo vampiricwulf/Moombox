@@ -103,3 +103,38 @@ func TestClientTokenExpired(t *testing.T) {
 		}
 	}
 }
+
+// TestATokenRevokedWhileItsSessionIsMintedGetsNoSession: a revoke deletes the
+// token's row and then ends every session. A request from the revoked device
+// that passed the token check just before the delete used to mint its
+// session after the sessions were ended, and keep it. The row is read again
+// once the session exists.
+//
+// Mutant: mint without the second read: the revoked token gets a session.
+func TestATokenRevokedWhileItsSessionIsMintedGetsNoSession(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "revoke.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s := &runState{db: db, authSvc: web.NewAuthService()}
+
+	ct := &database.ClientToken{
+		ID: "phone", TokenPrefix: "abcd1234", TokenHash: "x:y", Label: "phone",
+		CreatedAt: "2026-11-01T00:00:00Z", LastUsedAt: "2026-11-01T00:00:00Z",
+	}
+	if err := db.AddClientToken(ct); err != nil {
+		t.Fatal(err)
+	}
+	if session, ok := s.sessionForClientToken(ct); !ok || !s.authSvc.ValidateSession(session) {
+		t.Fatal("a token whose row stands was given no session")
+	}
+
+	// The check passed on ct; the revoke lands before the session is minted.
+	if err := db.DeleteClientToken(ct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if session, ok := s.sessionForClientToken(ct); ok {
+		t.Errorf("a token revoked after its check still got a session (%q)", session)
+	}
+}

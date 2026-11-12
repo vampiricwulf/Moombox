@@ -28,8 +28,8 @@ func (s *runState) wireWebSocket() {
 		if ct == nil {
 			return false, ""
 		}
-		sessionToken, err := s.authSvc.CreateSession()
-		if err != nil {
+		sessionToken, ok := s.sessionForClientToken(ct)
+		if !ok {
 			return false, ""
 		}
 		// Fire-and-forget usage update
@@ -183,6 +183,26 @@ func (s *runState) clientTokenFor(raw string) *database.ClientToken {
 	return ct
 }
 
+// sessionForClientToken mints the session a verified client token earns, and
+// then checks that the token's row is still there. A revoke deletes the row
+// and then ends every session; a request from the revoked device that passed
+// clientTokenFor just before the delete could otherwise mint its session just
+// after the sessions were ended, and keep it. With the row read again AFTER
+// the session exists, either this sees the row gone and drops the session,
+// or the revoke's InvalidateAllSessions runs after the session was made and
+// ends it.
+func (s *runState) sessionForClientToken(ct *database.ClientToken) (string, bool) {
+	sessionToken, err := s.authSvc.CreateSession()
+	if err != nil {
+		return "", false
+	}
+	if still, err := s.db.GetClientTokenByPrefix(ct.TokenPrefix); err != nil || still == nil || still.ID != ct.ID {
+		s.authSvc.InvalidateSession(sessionToken)
+		return "", false
+	}
+	return sessionToken, true
+}
+
 // endRemoteSessions ends every dashboard session and closes every WebSocket
 // whose upgrade had to authenticate. It runs after a client token stops being
 // good (revoked from Settings or the TUI, or expired): sessions carry no link
@@ -196,6 +216,11 @@ func (s *runState) clientTokenFor(raw string) *database.ClientToken {
 // other local peers hold no session and their sockets are not closed.
 //
 // Call it AFTER the token row is gone, or the token mints a session again.
+//
+// A request or an upgrade that is part-way through authenticating on the dead
+// token while this runs does not slip past it: sessionForClientToken reads
+// the row again after it mints, and the hub refuses to register a socket
+// whose AuthCheck ran before CloseAuthenticated (its generation counter).
 func (s *runState) endRemoteSessions() {
 	if s.authSvc != nil {
 		s.authSvc.InvalidateAllSessions()

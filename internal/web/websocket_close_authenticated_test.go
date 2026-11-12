@@ -61,3 +61,54 @@ func TestCloseAuthenticatedClosesOnlySocketsThatAuthenticated(t *testing.T) {
 		t.Errorf("the authenticated socket is still open and read %q", b)
 	}
 }
+
+// TestAnUpgradeAuthenticatedBeforeARevokeIsNotRegistered: an upgrade passes
+// AuthCheck and joins the hub some milliseconds later. A revoke that ran in
+// between took its list of sockets without this one, so the socket stayed
+// open on the revoked credential for as long as its tab did. Here the revoke
+// lands inside AuthCheck, after it has decided to accept.
+//
+// Mutant: register without comparing the generation: the client joins the
+// hub and reads its initial_state.
+func TestAnUpgradeAuthenticatedBeforeARevokeIsNotRegistered(t *testing.T) {
+	hub := NewWebSocketHub(testWSLogger{})
+	hub.InitialState = func() map[string]any { return map[string]any{} }
+	hub.LocalPeer = func(string) bool { return false }
+	var revokeDuringCheck atomic.Bool
+	revokeDuringCheck.Store(true)
+	hub.AuthCheck = func(*http.Request) bool {
+		if revokeDuringCheck.Load() {
+			hub.CloseAuthenticated()
+		}
+		return true
+	}
+	srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
+	t.Cleanup(func() { srv.Close(); hub.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err == nil {
+		defer conn.CloseNow()
+		if _, b, err := conn.Read(ctx); err == nil {
+			t.Errorf("a socket authenticated before the revoke was served %q", b)
+		} else if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+			t.Errorf("the socket ended with %v, want a policy-violation close", err)
+		}
+	}
+	if got := hub.ClientCount(); got != 0 {
+		t.Errorf("%d clients in the hub, want none", got)
+	}
+
+	// The browser reconnects; with no revoke in the way it is let in.
+	revokeDuringCheck.Store(false)
+	again, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("the reconnect was refused: %v", err)
+	}
+	defer again.CloseNow()
+	if _, _, err := again.Read(ctx); err != nil {
+		t.Errorf("the reconnect got no initial_state: %v", err)
+	}
+}

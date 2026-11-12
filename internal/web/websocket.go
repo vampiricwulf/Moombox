@@ -101,6 +101,12 @@ type WebSocketHub struct {
 	clients map[*wsClient]struct{}
 	closed  bool
 
+	// authGen counts CloseAuthenticated calls. An upgrade reads it before
+	// its AuthCheck and again, under mu, as it joins clients: a change in
+	// between means the credential it was checked on may be one that call
+	// revoked, after the call had already listed the sockets to close.
+	authGen atomic.Uint64
+
 	// jobVersions is the newest write version broadcast per job, in either
 	// frame (see jobVersioned); jobRowVersions is the newest a job_update
 	// carried, and has an entry only once one has been broadcast since the
@@ -252,6 +258,9 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Read before AuthCheck; compared when the client joins the hub.
+	authGen := hub.authGen.Load()
+
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
 	authenticated := false
 	if hub.AuthCheck != nil {
@@ -345,6 +354,18 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	client.lastResync.Store(time.Now().UnixNano())
 
 	hub.mu.Lock()
+	if authenticated && hub.authGen.Load() != authGen {
+		// A credential was revoked between this upgrade's AuthCheck and
+		// here, and CloseAuthenticated may already have taken its list of
+		// clients without this one. Refuse rather than register: a browser
+		// whose credential is still good reconnects through AuthCheck.
+		hub.mu.Unlock()
+		cancel()
+		client = nil
+		hub.logger.Debug("websocket upgrade dropped: a credential was revoked while it authenticated")
+		conn.Close(websocket.StatusPolicyViolation, "session ended")
+		return
+	}
 	hub.clients[client] = struct{}{}
 	clientCount := len(hub.clients)
 	hub.mu.Unlock()
@@ -694,9 +715,16 @@ func (hub *WebSocketHub) detachClient(client *wsClient) bool {
 // two and passes AuthCheck again; one that does not is refused. Sockets of
 // loopback and other local peers never authenticated, and are not touched.
 //
+// An upgrade whose AuthCheck ran before this call and which has not joined
+// the hub yet is refused when it tries to (authGen).
+//
 // By the time it returns, no broadcast reaches a closed client. The close
 // handshake itself waits on the peer, so it runs on its own goroutine.
 func (hub *WebSocketHub) CloseAuthenticated() int {
+	// Before the list is taken: an upgrade that registers after it either
+	// sees this change and refuses itself, or registered first and is in
+	// the list (both happen under mu).
+	hub.authGen.Add(1)
 	hub.mu.RLock()
 	var targets []*wsClient
 	for c := range hub.clients {
