@@ -3475,6 +3475,16 @@ html.sl-theme-light .log-debug {
     max-width: 960px;
 }
 
+/* The Stats tab could not be read; the cards below keep their last values. */
+.stats-error {
+    margin-bottom: var(--sl-spacing-medium);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-danger-300);
+    border-radius: var(--sl-border-radius-medium);
+    color: var(--sl-color-danger-800);
+    background-color: var(--sl-color-danger-100);
+}
+
 .stats-section {
     margin-bottom: var(--sl-spacing-large);
 }

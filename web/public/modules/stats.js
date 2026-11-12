@@ -11,6 +11,12 @@ export class StatsController {
     // (onAdmissionHolds) redraws them without waiting for the next reading.
     this._lastGaugeDisk = null;
     this._lastIndicatorDisk = null;
+    // loadStats: each call takes the next number, and an answer is drawn only
+    // while its number is still the newest, so a slow failure cannot replace
+    // a later success (or the reverse).
+    this._loadGen = 0;
+    // When the cards were last drawn from a successful answer (ms), or null.
+    this._lastLoadedAt = null;
   }
 
   /** The admission holds changed: redraw what reads the disk gate. */
@@ -24,8 +30,12 @@ export class StatsController {
     this.loadStats();
     // Clear any existing interval to prevent leaks on double-activate
     if (this._refreshInterval) clearInterval(this._refreshInterval);
-    // Auto-refresh every 60 seconds while active
-    this._refreshInterval = setInterval(() => this.loadStats(), 60000);
+    // Auto-refresh every 60 seconds while active. A hidden browser tab skips
+    // the request; the numbers are read again on the first tick after it is
+    // shown.
+    this._refreshInterval = setInterval(() => {
+      if (!document.hidden) this.loadStats();
+    }, 60000);
   }
 
   /** Called when the Stats tab is hidden. */
@@ -37,14 +47,50 @@ export class StatsController {
   }
 
   async loadStats() {
+    const gen = ++this._loadGen;
+    let data = null;
+    let failure = "";
     try {
       const response = await fetch("/api/stats");
-      if (!response.ok) return;
-      const data = await response.json();
-      this.render(data);
+      if (response.ok) {
+        data = await response.json();
+      } else {
+        const body = await response.json().catch(() => null);
+        failure = (body && body.error) || `HTTP ${response.status}`;
+      }
     } catch (e) {
       console.error("Failed to load stats:", e);
+      failure = (e && e.message) || "the server did not answer";
     }
+    if (gen !== this._loadGen) return;
+    if (data) {
+      this._lastLoadedAt = Date.now();
+      this._showLoadError("");
+      this.render(data);
+    } else {
+      this._showLoadError(failure);
+    }
+  }
+
+  /**
+   * The one failure line above the cards. The cards keep the last values
+   * that loaded, so the line says how old they are; "" hides it.
+   */
+  _showLoadError(failure) {
+    const el = document.getElementById("stats-error");
+    if (!el) return;
+    if (!failure) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    let text = `Could not load statistics: ${failure}`;
+    if (this._lastLoadedAt != null) {
+      const at = new Date(this._lastLoadedAt).toLocaleString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      text += ` — the numbers below are from the last successful load, at ${at}.`;
+    }
+    el.textContent = text;
+    el.hidden = false;
   }
 
   render(data) {
