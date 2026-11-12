@@ -63,7 +63,7 @@ type Scheduler struct {
 	conn Connectivity
 
 	// readDisk reads the volume the jobs write to against the disk_critical
-	// threshold (DownloadWorker.readOutputDisk; nil: never full). An
+	// threshold (DownloadWorker.readGateDisk; nil: never full). An
 	// admission while it reads critical is a backlog VOD sent to download
 	// onto a disk that is filling, so sweep admits nothing from then until it
 	// reads clear of the threshold, and reads again on every sweep after —

@@ -879,7 +879,7 @@ behaviour.
 Upcoming -> Live -> Downloading -> Muxing -> Finished
 ```
 
-A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
+A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive — or the staging drive, if you keep staging on a different one — reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
 
 Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies expired or missing, a sign-in wall, or a membership the account does not hold; resumes on its own once the credentials check out, or for a membership refusal once the cookie file carries a different account)
 

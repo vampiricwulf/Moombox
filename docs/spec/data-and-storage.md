@@ -747,7 +747,7 @@ Windows-only, and empty by default. Names a Chromium-family PROFILE directory fo
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
 | WarnPercent | int | 90 | `disk_warn_percent` | Valid: 1-99 |
-| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent. Also the backlog scheduler's admission gate: no backlog VOD is admitted from the reading at or past it until usage is 2 points below it |
+| CriticalPercent | int | 95 | `disk_critical_percent` | Must be > WarnPercent. Also the backlog scheduler's admission gate: no backlog VOD is admitted from the reading at or past it until usage is 2 points below it. Both levels are judged on the output directory's volume, or the staging directory's when that is another volume and fuller |
 
 #### [updates]
 

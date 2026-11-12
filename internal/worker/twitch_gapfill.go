@@ -228,8 +228,8 @@ type twitchGapFiller struct {
 	// mux turns the cut span's MPEG-TS into the part's MP4.
 	mux func(ctx context.Context, tsPath, outPath string) error
 	// diskCritical reports the output volume at the disk_critical threshold
-	// (production: DownloadWorker.readOutputDisk's reading, the one the
-	// backlog scheduler's admission gate closes on); nil never is.
+	// (production: DownloadWorker.readOutputDisk's reading, the output half
+	// of what the backlog scheduler's admission gate closes on); nil never is.
 	diskCritical func() bool
 	// archiveRewriting reports a chapter import holding the job's claim
 	// (production: DownloadWorker.chapterImportRunning); nil never is.
@@ -256,7 +256,7 @@ func newTwitchGapFiller(db *database.Database, tw *twitch.Service, o *DownloadOr
 
 // newTwitchGapFiller is the worker's filler: newTwitchGapFiller over its
 // database, Twitch service and orchestrator, with the disk gate read off the
-// same output-volume reading the backlog scheduler admits on.
+// output volume alone (readOutputDisk): a fill writes beside the archive.
 func (w *DownloadWorker) newTwitchGapFiller() *twitchGapFiller {
 	f := newTwitchGapFiller(w.db, w.tw, w.orchestrator, w.logger)
 	f.diskCritical = func() bool {

@@ -5,7 +5,8 @@ import "testing"
 // The disk gauge and alerts re-read their thresholds and the output directory
 // only on the periodic check, every third two-minute tick, so a save of any of
 // them showed the old reading for up to six minutes. The PUT now calls
-// OnDiskSettingsChange when one of the three changes.
+// OnDiskSettingsChange when one of them, or the staging directory the alerts
+// also read, changes.
 //
 // Mutants: drop the callback — the three "changed" rows fire 0 times; fire it
 // on every save — the "unchanged" row fires.
@@ -18,6 +19,7 @@ func TestConfigPutReportsADiskSettingsChange(t *testing.T) {
 		{"warn", map[string]any{"disk": map[string]any{"disk_warn_percent": float64(80)}}, 1},
 		{"critical", map[string]any{"disk": map[string]any{"disk_critical_percent": float64(98)}}, 1},
 		{"output dir", map[string]any{"paths": map[string]any{"output_directory": t.TempDir()}}, 1},
+		{"staging dir", map[string]any{"paths": map[string]any{"staging_directory": t.TempDir()}}, 1},
 		{"unchanged", map[string]any{"logs": map[string]any{"log_level": "DEBUG"}}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

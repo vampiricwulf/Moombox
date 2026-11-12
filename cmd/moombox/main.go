@@ -640,27 +640,34 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// The boot-time reading (UpdateDiskStatus above) goes through the
 		// alert decision too: the ticker's first disk check is three ticks
 		// away, so a volume already full at boot was not announced for six
-		// minutes while recordings kept writing to it.
-		if ds := routes.SharedDiskStatus.Load(); ds != nil {
-			var bootOutputDir string
+		// minutes while recordings kept writing to it. A boot reading that
+		// FAILED (nothing stored: the output volume absent at start) counts
+		// as the first failed reading, so "Disk Monitoring Failed" goes out
+		// on the ticker's first check rather than its second.
+		{
+			var bootOutputDir, bootStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				bootOutputDir = c.Paths.OutputDirectory
+				bootStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
-			diskAlerter.onReading(ds, bootOutputDir, time.Now())
+			diskAlerter.onBootReading(routes.SharedDiskStatus.Load(), bootOutputDir, bootStagingDir, time.Now())
 		}
 		// checkDisk takes a reading, publishes it to both UIs and runs the
-		// alert decision. The ticker calls it every third tick; a save that
+		// alert decision. The gauge and the frame are the output directory's
+		// volume; the alerts also judge the staging directory's when it is
+		// on another volume, and act on the fuller of the two. The ticker calls it every third tick; a save that
 		// changes the thresholds or the output directory asks for one at once
 		// (requestDiskRecheck), so the gauge and the alerts do not keep the
 		// old settings for up to six minutes.
 		checkDisk := func() {
-			var diskOutputDir string
+			var diskOutputDir, diskStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				diskOutputDir = c.Paths.OutputDirectory
+				diskStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
@@ -685,7 +692,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// cooldown, the level escalation, and the all-clear
 				// that closes them — lives in diskAlerts, where it
 				// can be tested.
-				diskAlerter.onReading(ds, diskOutputDir, time.Now())
+				diskAlerter.onVolumes(ds, diskOutputDir,
+					diskAlerter.readStaging(diskOutputDir, diskStagingDir), diskStagingDir, time.Now())
 			} else {
 				// GetDiskSpace failed (volume offline, I/O error): the
 				// dashboard disk gauge and low-disk notifications are

@@ -610,7 +610,7 @@ func (s *runState) runTUI() {
 		s.warnSegmentWorkers(snap.Downloader.SegmentWorkers)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
-		// The disk thresholds and the output directory, read by the disk
+		// The disk thresholds and the output and staging directories, read by the disk
 		// loop only every third tick otherwise.
 		s.requestDiskRecheck()
 		return nil

@@ -18,7 +18,8 @@ const (
 	// HoldOffline: the connectivity monitor reports offline, and the
 	// scheduler admits nothing until it is back.
 	HoldOffline HoldReason = "offline"
-	// HoldDisk: the output volume reached disk_critical_percent and is not yet
+	// HoldDisk: the output volume, or the staging volume when it is another
+	// one, reached disk_critical_percent and is not yet
 	// config.DiskRecoveryMargin points below it (the disk gate).
 	HoldDisk HoldReason = "disk"
 	// HoldRateLimit: YouTube rate-limited the session; no YouTube backlog is

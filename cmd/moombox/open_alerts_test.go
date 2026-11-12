@@ -429,3 +429,68 @@ func TestAStillDeadPlatformIsAnnouncedAgainAfterTheCooldown(t *testing.T) {
 		t.Error("the platform is no longer seen as announced — its close never fires")
 	}
 }
+
+// TestStagingDiskAlertOpenAcrossARestartGetsItsClose: an alert that named
+// the staging volume is restored as one, so the next process's recovery
+// reports the staging volume, and the gate starts closed on it as on any
+// open critical.
+//
+// Mutant: drop the Staging field from persist or restoreFrom — the recovery
+// after the restart reports the output volume.
+func TestStagingDiskAlertOpenAcrossARestartGetsItsClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), openAlertsFileName)
+	now := time.Now()
+	stg := filepath.Join(t.TempDir(), "scratch")
+
+	first := newDiskAlerts(notificationtest.New(), &nopLogger{})
+	first.restoreFrom(restart(t, path))
+	first.setThresholds(90, 95)
+	first.onVolumes(diskReading("ok", 50), "./output", diskReading("critical", 97), stg, now)
+
+	st := restart(t, path)
+	gate := &diskGateSpy{}
+	restoreDiskGate(st, gate)
+	if gate.holds != 1 {
+		t.Errorf("the gate was restored %d times on an open staging critical, want 1", gate.holds)
+	}
+	rec := notificationtest.New()
+	second := newDiskAlerts(rec, &nopLogger{})
+	second.restoreFrom(st)
+	second.setThresholds(90, 95)
+	second.onVolumes(diskReading("ok", 50), "./output", diskReading("ok", 20), stg, now.Add(time.Minute))
+	calls := rec.Calls()
+	if len(calls) != 1 || calls[0].Title != "Disk Space Recovered" {
+		t.Fatalf("calls = %+v, want one Disk Space Recovered", calls)
+	}
+	if got, _ := calls[0].Field("Staging Directory"); got != stg {
+		t.Errorf("the recovery named %+v, want the staging directory %q", calls[0].Fields, stg)
+	}
+}
+
+// TestOpenAlertsFileFromBeforeTheStagingVolumeLoads: a v2.9.9
+// open-alerts.json — a disk alert with no "staging" key, the gate hold
+// beside it — loads as an output-volume alert and is closed as one.
+func TestOpenAlertsFileFromBeforeTheStagingVolumeLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), openAlertsFileName)
+	old := `{"disk":{"level":"critical","notifiedAt":"2026-11-10T12:00:00Z","monitoringFailed":true},"diskGateHeld":true}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := restart(t, path)
+	doc := st.snapshot()
+	if doc.Disk == nil || doc.Disk.Level != "critical" || !doc.Disk.MonitoringFailed || doc.Disk.Staging || !doc.DiskGateHeld {
+		t.Fatalf("the old file loaded as %+v (disk %+v)", doc, doc.Disk)
+	}
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.restoreFrom(st)
+	d.setThresholds(90, 95)
+	d.onVolumes(diskReading("ok", 50), "./output", diskReading("ok", 20), "./scratch", time.Now())
+	calls := rec.ByEvent("disk_ok")
+	if len(calls) != 2 || calls[1].Title != "Disk Space Recovered" {
+		t.Fatalf("disk_ok calls = %+v, want the monitoring close then the space close", calls)
+	}
+	if _, ok := calls[1].Field("Output Directory"); !ok {
+		t.Errorf("the old alert's recovery named %+v, want the output directory", calls[1].Fields)
+	}
+}

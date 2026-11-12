@@ -385,6 +385,8 @@
 # [disk]
 # disk_warn_percent = 90                     # Warning alert when the output disk is this full (1-99).
 # disk_critical_percent = 95                 # Critical alert at this usage; must be above the warning.
+#                                             With staging_directory on a different drive, the alerts and the
+#                                             backlog hold go by the fuller of the two drives.
 
 # ─── Updates ────────────────────────────────────────────────────────────────
 # [updates]

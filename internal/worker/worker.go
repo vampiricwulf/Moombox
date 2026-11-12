@@ -414,9 +414,12 @@ type DownloadWorker struct {
 	processStreamFn  func(ctx context.Context, job *database.Job) (*StreamProcessResult, error)
 	refreshVodInfoFn func(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error)
 
-	// diskSpace replaces disk.GetDiskSpace in readOutputDisk when set — a
+	// diskSpace replaces disk.GetDiskSpace in readOutputDisk and readGateDisk when set — a
 	// test seam standing in a volume of any fullness. nil in production.
 	diskSpace func(path string) (*disk.DiskSpace, error)
+	// sameVolume replaces disk.SameVolume in readGateDisk when set — a test
+	// seam putting staging on a volume of its own. nil in production.
+	sameVolume func(a, b string) bool
 
 	// CookieFileInUse returns the cookie file the running services read and
 	// write (the jar's path). cookies.cookie_file is restart-required, so after
@@ -552,7 +555,7 @@ func NewDownloadWorker(
 	// The scheduler reads the disk through the worker, which holds the
 	// config: the output directory and the critical threshold both follow a
 	// Settings save without a restart.
-	sched.readDisk = w.readOutputDisk
+	sched.readDisk = w.readGateDisk
 	// And skips a backlog row whose staging an off-queue operation holds (a
 	// set-aside recovery accepts a Queued row): admitting it starts a run
 	// that writes the staging FFmpeg is reading. The claim's release wakes

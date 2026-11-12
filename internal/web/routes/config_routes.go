@@ -78,7 +78,8 @@ type ConfigRoutesCallbacks struct {
 	// on an auth transition.
 	OnActivePlatformsChange func()
 	// OnDiskSettingsChange is called when disk.disk_warn_percent,
-	// disk.disk_critical_percent or paths.output_directory changes, so the
+	// disk.disk_critical_percent, paths.output_directory or
+	// paths.staging_directory changes, so the
 	// disk gauge and alerts take a reading against the new settings now
 	// rather than at the next ~6-minute check.
 	OnDiskSettingsChange func()
@@ -111,14 +112,17 @@ type ConfigRoutesCallbacks struct {
 	ResolveRateLimit *web.RateLimiter
 }
 
-// diskSettings is the comparable form of what the disk gauge reads.
+// diskSettings is the comparable form of what the disk gauge and the disk
+// alerts read; the alerts also read the staging directory when it is on
+// another volume.
 type diskSettings struct {
 	warn, critical int
 	outputDir      string
+	stagingDir     string
 }
 
 func diskSettingsOf(cfg *config.MoomboxConfig) diskSettings {
-	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory}
+	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory, stagingDir: cfg.Paths.EffectiveStagingDir()}
 }
 
 // monitorIntervals is the comparable form of the three monitor check
