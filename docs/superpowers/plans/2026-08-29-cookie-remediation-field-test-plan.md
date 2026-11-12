@@ -272,8 +272,8 @@ gofmt -l internal/ cmd/          # must print nothing (repo-wide since Arc 8 T5)
 go test -count=1 ./... 2>&1 | Tee-Object gates.txt   # count 'ok' lines: 28; FAIL: 0
 ```
 
-Do not run two `go test ./...` at once - concurrent runs starve `TestPotProvider_BypassCache` past
-its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real build disproves
+Do not run two `go test ./...` at once - concurrent runs have starved a network-dependent
+`internal/bgutils` test past the 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real build disproves
 (~18 phantom batches on this plan). Run every `go test` with `$env:GOTMPDIR = "D:/Git/Moombox/.superpowers/gotmp"` (gitignored): since 2026-09-03 Windows Defender quarantines the `internal/cookies` test binary when it is built under `%TEMP%\go-build*` (`Trojan:Win32/Bearfoos.B!ml`, an ML heuristic); a Defender exclusion is your call.
 
 **Live gates** (each skips unless its variable is set; none prints a cookie value):
