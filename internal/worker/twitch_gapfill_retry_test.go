@@ -80,3 +80,32 @@ func TestRecoveredPartPathIsBoundedAndEndsWithItsContext(t *testing.T) {
 		t.Errorf("err %v after %d Stat calls, want the context's error and none", err, stats)
 	}
 }
+
+// TestGapFillCommittedBeforeAShutdownIsSettled: the worker's context ends
+// just as the last span is muxed. The fill has committed its recovered part
+// to the job, so the plan is settled as filled; left due, the next start
+// would cut the same span again as "recovered2", a duplicate part.
+//
+// Mutant: step returning on a cancelled context before it looks at the
+// outcome (the plan stays pending).
+func TestGapFillCommittedBeforeAShutdownIsSettled(t *testing.T) {
+	f := newGapFillFixture(t)
+	lateStartPlan(t, f, gapStart.Add(25*time.Hour))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mux := f.filler.mux
+	f.filler.mux = func(c context.Context, ts, out string) error {
+		err := mux(c, ts, out)
+		cancel()
+		return err
+	}
+	row, _ := f.db.GetGapFill("tw_1")
+	f.filler.step(ctx, *row, gapStart.Add(70*time.Minute))
+
+	if job, _ := f.db.GetJob("tw_1"); len(job.Segments) != 2 {
+		t.Fatalf("%d parts, want the recovered part committed beside the recording", len(job.Segments))
+	}
+	if out := f.outcome(t); out == nil || out.State != GapFillFilled || out.Spans != 1 {
+		t.Errorf("outcome %+v, want the committed fill settled as filled, one span", out)
+	}
+}

@@ -407,11 +407,16 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		return
 	}
 	out, reason := f.fill(ctx, &plan, job)
-	if ctx.Err() != nil {
+	if out != nil {
+		// Settled even when ctx ended meanwhile: a "filled" outcome means the
+		// recovered parts are already committed to the job, and a plan left
+		// due would cut the same spans again at the next start, as duplicate
+		// parts. No outcome comes from a cancelled request (each of those
+		// returns none).
+		f.settleOrDrop(&plan, out, now)
 		return
 	}
-	if out != nil {
-		f.settleOrDrop(&plan, out, now)
+	if ctx.Err() != nil {
 		return
 	}
 	plan.Attempts++
