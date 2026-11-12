@@ -391,7 +391,9 @@ func (f *twitchGapFiller) stepRecovered(ctx context.Context, row database.GapFil
 
 // step takes one look at a plan: it fills the job, or reschedules the plan on
 // the backoff, or — when the look was the one past the deadline — settles it,
-// keeping the archive as recorded. A plan whose job is gone or no longer Finished is dropped. A
+// keeping the archive as recorded. A plan whose job is gone or no longer
+// Finished is dropped, except while the job is Muxing, when it is left for the
+// next sweep. A
 // settled row is looked at only to drop it once its job is gone.
 //
 // Every line a look logs about the job reaches the job's own log (owner
@@ -415,6 +417,16 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 			return
 		}
 		_ = saveTwitchGapFillPlan(f.db, &plan, now.Add(gapFillOutcomeRecheck))
+		return
+	}
+	if job != nil && job.Status == database.StatusMuxing {
+		// A mux is running on the job: the operator's Mux of a Finished
+		// archive for a part its finalize could not mux, which leaves the
+		// archive, and the plan that describes it, as they were (muxJob keeps
+		// the row), or a mux of a re-run, whose own end replaces or drops the
+		// row. Either way the row is that mux's to settle, not this look's to
+		// drop: it is left as it is, due, and the next sweep looks again.
+		f.logger.Debug("gap-fill: the job is being muxed; looking again at the next sweep", "jobID", plan.JobID)
 		return
 	}
 	if job == nil || job.Status != database.StatusFinished {
