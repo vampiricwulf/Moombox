@@ -1594,15 +1594,18 @@ The `compileSolver` method executes this pipeline:
 `StsCache` in `sts.go` extracts the `signatureTimestamp` from player JavaScript using the regex `(?:signatureTimestamp|sts)\s*:\s*(\d+)`. The STS is a numeric value included in Innertube player requests to tell YouTube which cipher version to use for format URLs. The extraction asks for it only when the page's ytcfg states none (`extractSTS`).
 
 - **Cache size**: 150 entries.
-- **Eviction**: Random entry removed when full (simple bounded cache, not LRU).
+- **Eviction**: The oldest entry is removed when full (insertion order, not LRU).
+- **Shared fetch**: Callers asking for the same uncached player share one fetch (`runInflight`), which runs detached from all of them. A caller whose context ends leaves with its own error; the others still get the answer. Run on the first caller's context, a cancelled first caller handed its cancellation to every waiter, and their player requests went out with no STS.
 
 ### Thundering Herd Prevention
 
-The `Solver.compileMu sync.Mutex` serializes all compilation. When multiple goroutines request the same uncached player URL:
-1. First goroutine acquires `compileMu`, starts compilation.
-2. Other goroutines block on `compileMu`.
-3. First goroutine completes, stores result in cache, releases lock.
-4. Other goroutines acquire lock, re-check cache, find the result, return without compiling.
+`GojaResolver.compileSlot` serializes all compilation. When multiple goroutines request the same uncached player URL:
+1. First goroutine takes the slot, starts compilation.
+2. Other goroutines wait for the slot. One whose context ends while it waits leaves with that context's error.
+3. First goroutine completes, stores result in cache, releases the slot.
+4. Other goroutines take the slot in turn, re-check cache, find the result, return without compiling.
+
+A failed compile is not cached, so each waiter then tries its own. That is why the slot is not a plain mutex: with the player CDN down, a cancelled job would wait out every fetch ahead of it.
 
 ---
 
