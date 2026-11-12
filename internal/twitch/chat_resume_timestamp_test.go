@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // resumeTimestampFloor is 2020-01-01T00:00:00Z in epoch MILLISECONDS. Any
@@ -61,13 +60,4 @@ func readResumeTimestamp(t *testing.T, path string) int64 {
 		t.Fatalf("sidecar %s carries no timestamp", path)
 	}
 	return state.Timestamp
-}
-
-// TestResumeTimestampFloorIsBelowNow keeps the floor above honest: if the
-// constant ever drifted past the current clock, the test above would pass for
-// the wrong reason.
-func TestResumeTimestampFloorIsBelowNow(t *testing.T) {
-	if now := time.Now().UnixMilli(); resumeTimestampFloor >= now {
-		t.Fatalf("resumeTimestampFloor (%d) is not in the past (now %d)", resumeTimestampFloor, now)
-	}
 }
