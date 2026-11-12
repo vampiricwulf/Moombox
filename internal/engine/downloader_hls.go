@@ -257,7 +257,6 @@ func (d *SegmentDownloader) consultStreamEnd(ctx context.Context) endVerdict {
 var errEmptySegmentBody = errors.New("segment answered with an empty body")
 
 // runHlsLoop is the main HLS download loop.
-
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
 	// Only clear the resume file when the stream ends naturally.
