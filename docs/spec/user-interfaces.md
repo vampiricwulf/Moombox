@@ -472,7 +472,7 @@ Import Chapters. The operator pastes a timestamp comment, sees it previewed agai
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL (`streamURL`, `internal/tui/app_actions.go`) — never an archive import's `imp_` placeholder, whose URL names no video; the dashboard hides it the same way (`isImportPlaceholderId`), and so does the TUI's Details panel. A Twitch live row with no URL (an imported capture) has none either: its channel name is no login, and `twitch.tv/<channel name>` was a stranger's channel; the dashboard's `streamUrl` agrees |
 | `O W` | Open Web UI (browser) | No | — |
 | `O C` | Copy Stream URL to clipboard. | Yes | Job has a stream URL — the same rule as `O S` |
-| `O L` | Open Job Log. | Yes | — (every job; a job from an earlier run has an empty buffer, the buffers being in memory only) |
+| `O L` | Open Job Log. | Yes | — (every job; a job from an earlier run has an empty buffer, the buffers being in memory only, and so does a finished job once 200 others have finished after it) |
 | `O G` | Open GitHub Page (browser) | No | — |
 
 ##### `O C`

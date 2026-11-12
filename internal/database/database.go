@@ -157,6 +157,11 @@ type Database struct {
 	// must outlive the terminal transition because the operator reads a
 	// failed job's log right after it fails. Guarded by jobLogsMu.
 	logRouted map[string]struct{}
+	// logKept lists the untracked jobs that still hold a buffer, oldest
+	// first: the finished jobs whose log stays readable. It is bounded by
+	// finishedJobLogsKept (untrackForLogsLocked frees the oldest beyond it),
+	// and an ID is never in both logRouted and logKept. Guarded by jobLogsMu.
+	logKept []string
 
 	// GetJobStats cache — the aggregate is a full-table scan, so results are
 	// cached for jobStatsCacheTTL. Not invalidated on writes: stats drive UI

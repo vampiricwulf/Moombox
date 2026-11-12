@@ -81,6 +81,7 @@ type Database struct {
     jobLogsMu sync.RWMutex
     jobLogs   map[string][]string
     logRouted map[string]struct{} // the job IDs RouteLogToJobs scans
+    logKept   []string            // untracked jobs still holding a buffer, oldest first
 
     // GetJobStats cache
     statsMu       sync.Mutex
@@ -95,7 +96,7 @@ Key details:
 - `fieldToColumn` is a per-instance copy of the package-level map, snapshotted at `Open()` so the map is read-only at runtime.
 - `stmtGetJob` is the prepared hot-path SELECT behind `GetJob` and the row read-back in `UpdateJobFields`. `preparedStmts` tracks every statement prepared through `prepareStmt` so `Close()` can release them.
 - Each subscriber slice holds `{id, fn}` entries; `nextSubID` hands out the ids that the unsubscribe closures remove by.
-- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100. `logRouted` is the separate set of job IDs that `RouteLogToJobs` scans — only non-terminal jobs — so a finished job's buffer outlives its tracking.
+- `jobLogs` is an in-memory map of per-job log buffers (not persisted to SQLite). Capped at 200 lines per job; when exceeded, trimmed to the last 100. `logRouted` is the separate set of job IDs that `RouteLogToJobs` scans — only non-terminal jobs — so a finished job's buffer outlives its tracking. `logKept` lists the untracked jobs that still hold a buffer, oldest first; it holds at most 200 (`finishedJobLogsKept`).
 - `statsCached` memoises `GetJobStats` (a full-table scan) for `jobStatsCacheTTL` (5 s); it is not invalidated on writes.
 
 ### Write Path (no batching)
@@ -526,6 +527,7 @@ The database maintains in-memory per-job log buffers (`jobLogs map[string][]stri
 - **It runs inside the log call**, as the logger's line router (`Logger.SetLineRouter`, wired by `wireLogForwarding` in `cmd/moombox/monitor_callbacks.go`), never on a subscriber's goroutine. The routed set changes synchronously — a status write that makes a job terminal untracks it inside `UpdateJobFields` — so a line has to be matched against the set as it stood when the line was logged. Routed by the log forwarder, a line logged just before a terminal write (`setJobError`'s "job error") would lose the race to the untrack for roughly one failed job in twelve and be missing from the very log an operator opens after a failure; the brackets `cleanupStagingAfterMux` and `RecoverAsides` put around their last lines would lose it the same way. A subscriber that falls behind does not cost a job its lines either: the logger drops lines for a full subscriber channel, not for the router.
 - `TrackJobForLogs(jobID)` starts routing to a job and initializes its buffer (nil slice).
 - `UntrackJobForLogs(jobID)` stops routing to a job and KEEPS its buffer — the job that just failed is the one whose log an operator opens next.
+- **Only the newest 200 finished jobs keep their buffer** (`finishedJobLogsKept`, owner ruling R2-N2). An untracked job with lines joins `logKept`; when that passes 200 the oldest entry's buffer is freed (`untrackForLogsLocked`), so a process working through a backlog no longer holds the lines of every job it ever finished. An active job is never freed: only untracked jobs are in `logKept`, and tracking a job again (Resume, Reinitialize, auto-retry, the worker brackets) takes it out, or starts an empty buffer if its old one was already freed. A freed log reads as empty in both UIs, exactly as every log does after a restart; the lines are still in `moombox.log`.
 - `SyncJobLogTracking(jobs)` applies both rules to a whole list: non-terminal jobs tracked, terminal ones untracked. The boot seed calls it (`cmd/moombox/monitor_callbacks.go`); after boot routing follows each job's own events, through that file's `syncJobLogRouting` — from `OnJobAdded` (the ZIP import really does add a `Finished` job) and from `OnJobChange` whenever the `status` column was written, which is what re-routes a job that LEAVES a terminal state: `/retry`, `/resume` and auto-retry each resurrect a job with a plain `UpdateJobFields(status=…)`.
 - The per-line cost is a substring scan per TRACKED id — proportional to the number of LIVE jobs, not constant, and not to the size of the `jobs` table: ~99 ns at 5 live, ~76 µs at 5,000 live (the pre-fix cost, when every row the database had ever held was tracked). Live jobs are bounded by the archive slots and `num_parallel_downloads`; a long-lived tracked set is what must never come back.
 - `ClearJobLogs(jobID)` removes a specific buffer and its routing. `OnJobDeleted` drops a single deleted job's that way (`onJobDeleted`), and `DeleteJobsAndHistoryForChannel` drops each row it deleted itself, under `db.mu` before it returns (`clearJobLogsOf` over the ids its `DELETE … RETURNING id` named) — so a job `AddJob` re-creates under one of those ids waits for it, and keeps the routing its own `OnJobAdded` gives it.
