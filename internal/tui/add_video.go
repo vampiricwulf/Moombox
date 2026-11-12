@@ -512,6 +512,27 @@ func (m *AddVideoModel) Submitting(videoID string) bool {
 	return m.visible && m.submitting && m.videoID == videoID
 }
 
+// FailSubmit ends the in-flight submit for videoID as refused: the dialog
+// stays on the step it submitted from, with everything typed and picked, and
+// shows reason as its error. Enter submits again. It reports whether this
+// dialog was the one waiting (Submitting); for any other result it changes
+// nothing. The dialog's own transition — the App only delivers the message.
+func (m *AddVideoModel) FailSubmit(videoID, reason string) bool {
+	if !m.Submitting(videoID) {
+		return false
+	}
+	m.submitting = false
+	if reason == "" {
+		reason = "Failed to add job"
+	}
+	m.errorMsg = reason
+	if m.step == AddStepURL {
+		// startSubmit blurred the input; the URL is the thing to correct.
+		m.textInput.Focus()
+	}
+	return true
+}
+
 // UpdateComponents routes tea.Msg to embedded textinput/spinner/table and syncs.
 func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {

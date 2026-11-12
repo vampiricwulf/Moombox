@@ -641,8 +641,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case addVideoResultMsg:
+		// A refused add leaves its own dialog open, with the URL, the format
+		// picks and the time range as they were, and the reason as the
+		// dialog's error: the feedback line is under the dialog, and closing
+		// threw the input away. With that dialog gone (Esc during the
+		// request) the reason goes to the feedback line, in red.
+		if msg.Err && a.addVideo.FailSubmit(msg.VideoID, msg.Feedback) {
+			return a, nil
+		}
 		if msg.Feedback != "" {
-			if msg.Warn {
+			if msg.Err {
+				a.setFeedbackWithSeverity(msg.Feedback, severityError)
+			} else if msg.Warn {
 				a.setFeedbackWithSeverity(msg.Feedback, severityWarning)
 			} else {
 				a.setFeedback(msg.Feedback)

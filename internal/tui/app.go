@@ -151,6 +151,12 @@ type (
 		// Warn shows Feedback as a warning: a pasted Twitch listing some of
 		// whose VODs could not be queued (owner decision PR-M9).
 		Warn bool
+		// Err says the add was refused or never reached the server. The
+		// dialog that sent it stays open with what was typed and shows
+		// Feedback as its error; with that dialog gone, Feedback goes to the
+		// feedback line in the error colour. A job that already exists is
+		// not one: it is a Warn, and closes the dialog as a success does.
+		Err bool
 	}
 	fetchFormatsResultMsg struct {
 		VideoID string

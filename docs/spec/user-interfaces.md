@@ -645,7 +645,7 @@ These are returned by Bubble Tea commands that perform HTTP requests to the back
 | `signatureVerifyResultMsg` | Ed25519 signature verification, and whether the release manifest was checked too |
 | `fetchFormatsResultMsg` | Format list fetch for Add Video |
 | `fetchFormatsAutoAdvanceMsg` | Timer to auto-skip format selection on error; the dialog takes the jump itself (`AddVideoModel.AutoAdvanceToConfirm`, only while `AutoAdvanceApplies` for that video) |
-| `addVideoResultMsg` | Job creation result |
+| `addVideoResultMsg` | Job creation result. A refusal (`Err`: the server said no, or was not reached) keeps the dialog that sent it open, on the step it submitted from with everything typed and picked, and shows the reason as the dialog's error (`AddVideoModel.FailSubmit`); with that dialog closed the reason goes to the feedback line in red. A job that already exists is a warning and closes the dialog, as a success does |
 | `importResultMsg` | Zip import result |
 | `cookieImportResultMsg` | Cookie file import (`E I`) |
 | `createTrimResultMsg` | Trim creation result |
