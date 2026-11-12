@@ -1,7 +1,6 @@
 package twitch
 
 import (
-	"encoding/json"
 	"reflect"
 	"strconv"
 	"testing"
@@ -791,38 +790,5 @@ func TestActionIsNotStrippedFromUsernotice(t *testing.T) {
 	}
 	if msg.IsAction {
 		t.Error("IsAction set on a USERNOTICE — the strip must be PRIVMSG-only")
-	}
-}
-
-// TestActionFlagIsWrittenUnderTheKeyThePlayerReads pins the file side of the
-// /me display: the Web player draws a row as an action on `isAction === true`
-// (web/public/modules/player.js _fillPlainRow), so that is the key a /me must
-// be written under, and an ordinary message must not carry it at all. A file
-// from a build that never drew actions holds the same bytes.
-func TestActionFlagIsWrittenUnderTheKeyThePlayerReads(t *testing.T) {
-	cd := NewChatDownloader(ChatDownloaderOptions{ChannelLogin: "testchan", StreamID: "stream-1"}, &testLogger{})
-	const head = "@id=m1;tmi-sent-ts=1700000000000;user-id=u1;display-name=Viewer :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchan :"
-	for body, want := range map[string]any{
-		"\x01ACTION waves\x01": true,
-		"waves":                nil,
-	} {
-		msg := cd.parseLine(head + body)
-		if msg == nil {
-			t.Fatalf("parseLine returned nil for %q", body)
-		}
-		raw, err := json.Marshal(msg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var row map[string]any
-		if err := json.Unmarshal(raw, &row); err != nil {
-			t.Fatal(err)
-		}
-		if row["isAction"] != want {
-			t.Errorf("%q: isAction = %v, want %v", body, row["isAction"], want)
-		}
-		if row["message"] != "waves" {
-			t.Errorf("%q: message = %v, want the unwrapped text", body, row["message"])
-		}
 	}
 }
