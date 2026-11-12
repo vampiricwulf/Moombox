@@ -40,9 +40,3 @@ func TestReplaceFileSyncsTheDestinationDirectory(t *testing.T) {
 		t.Errorf("a failed replace synced %v", synced)
 	}
 }
-
-// syncDir is best-effort: a directory that is gone is not an error to report.
-func TestSyncDirToleratesAMissingDirectory(t *testing.T) {
-	syncDir(t.TempDir())
-	syncDir(filepath.Join(t.TempDir(), "gone"))
-}

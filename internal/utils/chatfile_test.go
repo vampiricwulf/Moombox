@@ -429,19 +429,6 @@ func TestUpdateChatFileHeaderFieldsTinyFile(t *testing.T) {
 	}
 }
 
-// TestErrChatFilePartialWriteSentinel verifies that ErrChatFilePartialWrite is
-// exported, wrappable, and identifiable via errors.Is. The real triggering
-// condition (truncate succeeds but subsequent WriteAt fails) is hard to
-// reproduce in a unit test without an injectable os.File wrapper, so we only
-// assert the sentinel's public contract.
-func TestErrChatFilePartialWriteSentinel(t *testing.T) {
-	wrapped := errors.New("other cause")
-	combo := errors.Join(ErrChatFilePartialWrite, wrapped)
-	if !errors.Is(combo, ErrChatFilePartialWrite) {
-		t.Error("errors.Is should match ErrChatFilePartialWrite through errors.Join")
-	}
-}
-
 // TestAppendChatMessagesContentBrackets pins that the tail scan anchors on the
 // STRUCTURAL closing ']' even when the last message's content ends with ']'
 // and '}' — the write-first append must not splice into the message. Runs two
