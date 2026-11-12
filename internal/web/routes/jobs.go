@@ -633,17 +633,20 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id/logs — per-job log buffer
 	r.Get("/api/jobs/{id}/logs", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		// Verify job exists
+		// The job's in-memory log buffer (written by database.RouteLogToJobs).
+		// The open details dialog reads this every second,
+		// so a buffer with lines is answered without touching SQLite, as the
+		// TUI's O L overlay reads it: the buffer goes with its row
+		// (ClearJobLogs), so lines mean the job exists.
+		if logs := db.GetJobLogs(jobID); len(logs) > 0 {
+			jsonResponse(rw, logs)
+			return
+		}
+		// No lines: 404 for an unknown job, [] for one that has logged nothing.
 		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
-		// The job's in-memory log buffer (written by database.AddJobLog and
-		// RouteLogToJobs); [] when it has none.
-		logs := db.GetJobLogs(jobID)
-		if logs == nil {
-			logs = []string{}
-		}
-		jsonResponse(rw, logs)
+		jsonResponse(rw, []string{})
 	})
 
 	// POST /api/jobs — create a new job
