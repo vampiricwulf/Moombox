@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1178,4 +1179,12 @@ func feedStatusError(status int) error {
 		return fmt.Errorf("feed http %d: %s", status, feedBusy404Note)
 	}
 	return fmt.Errorf("feed http %d", status)
+}
+
+// IsFeedBusy404 reports whether a channel's last error (ChannelHealth.LastError)
+// is the feed 404 that feedStatusError words as YouTube being busy, so the
+// Channel Not Responding alert can say the same instead of matching the text
+// itself.
+func IsFeedBusy404(lastErr string) bool {
+	return strings.Contains(lastErr, feedStatusError(http.StatusNotFound).Error())
 }

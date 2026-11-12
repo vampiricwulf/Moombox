@@ -558,7 +558,8 @@ func channelHealthNotifiers(
 				"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
 			return
 		}
-		log.Warn("channel failing monitor checks — verify it still exists",
+		warn, description := channelUnhealthyText(platform, consecutive, lastErr)
+		log.Warn(warn,
 			"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
 		incidents.mu.Lock()
 		announced := incidents.sent[channelID]
@@ -569,7 +570,7 @@ func channelHealthNotifiers(
 		}
 		incidents.persist(channelID)
 		n.Send("Channel Not Responding",
-			fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
+			description,
 			notifications.TypeWarning,
 			[]notifications.Field{
 				{Name: "Channel", Value: channelID, Inline: true},
