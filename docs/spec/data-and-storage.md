@@ -1374,6 +1374,7 @@ the file with fragments that reference a different `moov`.
 
 - Sequential downloads: every 50 segments (`ResumeSeqInterval`)
 - Catch-up downloads: every 10 segments (`ResumeCatchupInterval`)
+- The live HLS loop: at most once per 15 s (`hlsResumeSaveInterval`) while the position advances, checked after every segment write as well as at the end of each playlist pass, so a pass that lists a long backlog (a Twitch VOD that is still recording has no ENDLIST and lists the whole broadcast so far) is checkpointed while it is written
 - Always saved on exit (clean or interrupted)
 
 **Resume validation on load** (`resumeIdentityMismatch` in `engine/downloader_resume.go`):

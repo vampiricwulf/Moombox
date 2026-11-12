@@ -145,6 +145,9 @@ const (
 	// truncate-for-resume) and re-fetches those segments — still far
 	// tighter than the DASH loop's every-50-segments cadence
 	// (ResumeSeqInterval, ~100 s of footage).
+	// The floor is checked after every segment write as well as at the end of
+	// each playlist pass, so a pass longer than it (the backlog of a VOD that
+	// is still recording) is saved while it runs.
 	hlsResumeSaveInterval = 15 * time.Second
 )
 
@@ -286,6 +289,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// (see the constant). Zero means "never saved", which always passes the
 	// floor, so the first advance still writes immediately.
 	var lastResumeSave time.Time
+	// loopStart stands in for lastResumeSave in the mid-pass save (after each
+	// segment write, below) until the first save has happened: a pass shorter
+	// than the floor still saves once, at its end, as it always did.
+	loopStart := time.Now()
 	// consecutiveStuckSkips bounds termination when EVERY segment fails
 	// (expired auth, dead variant): each skip costs ~12s of retries, and an
 	// ended stream with a long listed backlog would otherwise grind through
@@ -822,6 +829,26 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					Seq:   hlsSeq,
 					Bytes: d.bytesWritten.Load(),
 				})
+			}
+
+			// The per-iteration save below, reachable inside a long pass and
+			// under the same floor. A live window is a few segments and never
+			// gets here with the floor elapsed, but a Twitch VOD that is still
+			// recording has no ENDLIST, so it takes this loop and its first
+			// playlist lists the whole broadcast so far: hours of segments
+			// written before that save. A crash in that pass left staged media
+			// with no sidecar, which Start refuses (ErrStagedMediaPresent), and
+			// the job could only start over. The write and currentSeq.Add
+			// above are both done, so the sidecar's position and byte count
+			// agree.
+			since := lastResumeSave
+			if since.IsZero() {
+				since = loopStart
+			}
+			if time.Since(since) >= d.delays.hlsResumeSave {
+				d.saveResume()
+				lastSavedSeq = int(d.currentSeq.Load())
+				lastResumeSave = time.Now()
 			}
 		}
 
