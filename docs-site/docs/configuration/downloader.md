@@ -201,6 +201,30 @@ washed out). Dolby Vision renditions rank below both either way.
 prefer_hdr = false
 ```
 
+## Power
+
+### `downloader.keep_awake`
+
+| Default | Allowed values | Takes effect | Where to change |
+|---|---|---|---|
+| `true` | `true` / `false` | Immediately (no restart) | Dashboard: Settings → Downloader → **Keep the PC awake while recording (Windows only)**. TUI: Settings → Downloader → **Keep PC awake (Windows)**. |
+
+Windows only. A recording makes no keyboard or mouse input, so a PC whose
+power plan allows sleep can go to sleep in the middle of a capture. While
+this is on, Moombox asks Windows not to sleep on its idle timer whenever at
+least one job is `Live`, `Downloading` or `Muxing`, and lets it sleep again
+as soon as none is. Jobs waiting in `Queued` or `Upcoming` do not hold the
+PC awake, since they can wait for days.
+
+The screen can still turn off, and sleeping by hand (Start → Sleep, closing
+a laptop lid) is not blocked. On Linux and in Docker the setting has no
+effect.
+
+```toml
+[downloader]
+keep_awake = false
+```
+
 ## Concurrency and memory
 
 ### `downloader.num_parallel_downloads`
