@@ -6,7 +6,7 @@ Where the last upstream review left off, so the next one (a local session, a sch
 
 ## Last review
 
-- **Date:** 2026-11-05
+- **Date:** 2026-11-12
 - **Last port:** `15fe37f4` — fix(youtube,chat): read ytInitialData from the dedicated script element ← yt-dlp `12ac9aca7` (#17703)
 - **Ported into:** `internal/youtube/channel_membership.go` (`ytInitialDataAnchors`, which `internal/youtube/watch_page.go` shares) and `internal/chat/api.go` (its twin anchor set)
 
@@ -170,6 +170,4 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 Replace this section on each review. It is the reason the SHAs above moved past these commits.
 
-- yt-dlp `0b8f7258b`, `b77c9304e`, `b3b18f8fc`, `412e7f0a4`: pytest config, CI checks, dependency cooldown and dependency bumps. No extractor, downloader or networking change.
-- chatterino7 (`790291d2`..`910b01dd`): Qt/UI, CI, plugin API, followed-channels window, usercard mod actions, channel point redemption display fixes. No IRC/emote protocol change Moombox consumes.
-- ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, moombox (Python): nothing new.
+- All seven repos (yt-dlp, ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python): nothing new since the 2026-11-05 review; every HEAD is still the *Last reviewed* SHA above. The open `c7fb478d2` item is unchanged upstream.
