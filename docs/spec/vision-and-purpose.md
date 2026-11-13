@@ -84,7 +84,7 @@ Beyond the core download workflow:
 - **Terminal UI** — A bubbletea-based TUI provides the same capabilities as the web dashboard: job monitoring, log viewing, channel management, settings, and all operational controls. The TUI uses a chord-based keyboard system for efficient navigation.
 - **Self-Updating** — Moombox checks GitHub releases for new versions, downloads updates, verifies Ed25519 signatures, and performs a three-step binary swap (`.new` -> current -> `.old`). The launcher/supervisor pattern allows graceful restarts after updates.
 - **Cookie Management** — Moombox manages browser cookies for YouTube authentication, supporting automatic extraction from Firefox and Chromium browsers, periodic refresh, and manual import.
-- **BotGuard/PO Token** — Moombox runs YouTube's BotGuard challenge under an embedded Node.js + JSDOM + bgutils-js sidecar (real V8, real DOM) to generate Proof of Origin tokens. The Node binary and JS payload are embedded into the Moombox.exe via `go:embed` and extracted on first launch — users do not need a Node install. A goja-VM path runs when the sidecar is turned off, but BotGuard's timing check rejects it, so it mints no PO tokens; while a configured sidecar is down a mint fails at once. Either way PO-token-gated formats are unavailable until the sidecar is back.
+- **BotGuard/PO Token** — Moombox runs YouTube's BotGuard challenge under an embedded Node.js + JSDOM + bgutils-js sidecar (real V8, real DOM) to generate Proof of Origin tokens. The Node binary and JS payload are embedded into the Moombox.exe via `go:embed` and extracted on first launch — users do not need a Node install. A goja-VM path runs when the sidecar is turned off, but BotGuard's timing check rejects it, so it mints no PO tokens; while a configured sidecar is down a mint waits up to a minute for its restart and then fails. Either way PO-token-gated formats are unavailable until the sidecar is back.
 - **Signature Cipher** — Moombox solves YouTube's signature cipher for format URL decryption using AST analysis with regex fallback, maintaining a 10-VM LRU cache keyed by player.js URL.
 
 ## What Moombox Is NOT
@@ -125,7 +125,7 @@ Moombox was originally written in TypeScript/Node.js. The Go rewrite began in ea
 - The original TypeScript codebase is preserved on the `abandoned-nodejs` branch (last version: v1.5.16).
 - The Go rewrite incorporated all lessons learned from the TypeScript era: authentication handling, CSP headers, rate limiting, batch database updates, chat bounding, gap detection, and more.
 - The Go rewrite is not a line-for-line port. It is a reimplementation that takes advantage of Go's concurrency model, static typing, and single-binary deployment.
-- `REWRITE_GUIDE.md` in the repository documents the porting strategy for historical reference.
+- The porting strategy was written down in `REWRITE_GUIDE.md`. The file describes the TypeScript codebase and is no longer in the tree; read it from history with `git show d9bbbc83:REWRITE_GUIDE.md` (v2.9.8, the last release that held it).
 
 There is no ongoing relationship between the TypeScript codebase and the current Go code. The TypeScript branch exists purely for historical reference.
 

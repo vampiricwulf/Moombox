@@ -15,7 +15,9 @@ import (
 // foreground process group — the launcher and the child alike — and its
 // default action killed both outright: no worker drain or final resume save,
 // no cancelled muxes, no notification flush, no sidecar stop, no WAL
-// checkpoint. A Windows console close arrives as SIGTERM and runs all of it.
+// checkpoint. A Windows console close arrives as SIGTERM, and Windows ends the
+// process about 5 seconds later: that stop runs the same steps on a shorter
+// budget (consoleEndBudget).
 //
 // A hangup the process inherited as ignored — nohup, or a launcher started
 // under it — stays ignored: signal.Notify installs a handler even then, which
@@ -33,6 +35,12 @@ func stopSignalSet(hupIgnored bool) []os.Signal {
 	}
 	return set
 }
+
+// isConsoleEnding reports whether sig means the operating system is about to
+// end the process on a deadline of its own, which only Windows does (the
+// console close, logoff and shutdown events). A SIGTERM here is a plain stop:
+// Docker and systemd wait their own, longer, configurable time after it.
+func isConsoleEnding(os.Signal) bool { return false }
 
 // isHangup reports whether sig is a hangup: the terminal it names has gone.
 func isHangup(sig os.Signal) bool {

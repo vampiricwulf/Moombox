@@ -20,7 +20,8 @@ type Health struct {
 	// restart succeeds.
 	Healthy bool
 	// Reason is why it last went down ("stdout EOF", "readPump panic",
-	// "stdin write stalled for 1m30s", a failed initial start). Empty while
+	// "stdin write stalled for 1m30s", "event loop unresponsive: no ping
+	// answer in 30s", a failed initial start). Empty while
 	// healthy.
 	Reason string
 	// Restarts counts SUCCESSFUL supervisor restarts this process.
@@ -35,9 +36,12 @@ type Health struct {
 // sidecar-disabled config never draws an alert.
 var sharedHealth atomic.Pointer[Health]
 
-// healthSubs are the PUSH consumers — today exactly one, cmd/moombox's TUI
-// wiring, which turns each call into an app.Send. The Web dashboard polls
-// CurrentHealth from /api/status instead and is not in this list.
+// healthSubs are the PUSH consumers, all wired in cmd/moombox: the TUI wiring,
+// which turns each call into an app.Send; the alerts wiring
+// (wireSidecarAlerts); and the dashboard nudge (wireSidecarStatusNudge,
+// status_nudge.go), which sends a payload-less status_changed frame. The Web
+// dashboard still reads the health itself, from CurrentHealth through
+// /api/status; the frame only tells it to read again.
 var (
 	healthSubsMu sync.Mutex
 	healthSubs   []*func(Health)
@@ -93,9 +97,10 @@ func SubscribeHealth(fn func(Health)) (unsubscribe func()) {
 
 // callHealthSub isolates one subscriber from the publisher. The silence is
 // DELIBERATE: this package has no logger of its own (Sidecar and Supervisor
-// each carry the caller's), and the subscribers are one-line projections —
-// cmd/moombox's app.Send and the status setter beside it — so the only panic
-// reachable here is a nil program pointer or a nil callback, neither of which
+// each carry the caller's), and the subscribers are short projections in
+// cmd/moombox — app.Send and the status setter beside it, the alert raiser
+// and the dashboard nudge — so the only panic expected here is a nil program
+// pointer or a nil callback, neither of which
 // a log line would help anyone diagnose. What matters is that a bad subscriber
 // cannot take the supervisor loop or a startup path down with it.
 func callHealthSub(p *func(Health), h Health) {

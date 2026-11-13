@@ -9,6 +9,15 @@ import (
 
 // HandleKey processes key input in the settings panel.
 func (m *SettingsModel) HandleKey(key string) (action string) {
+	if m.bare() {
+		return m.bareKey(key)
+	}
+	return m.handleKey(key)
+}
+
+// handleKey is HandleKey at any size; the bare form reaches it through
+// bareKey (settings_bare.go).
+func (m *SettingsModel) handleKey(key string) (action string) {
 	// Restart overlay
 	if m.showRestartOverlay {
 		switch key {

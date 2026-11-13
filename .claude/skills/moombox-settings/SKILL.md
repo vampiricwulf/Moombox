@@ -49,9 +49,10 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 - Add `fieldDef` to the appropriate section with type (`fieldText`, `fieldNumber`, `fieldToggle`, or `fieldCycle`)
 - Add loading logic in `loadSettingsValues()` — for FlexDuration use `.Minutes()` or `.Days()`, for pointers default to sensible value when nil
 - Add the field's check to `validateSettingsValues()` (a FlexDuration goes in its float table, whose parsed value lands in `settingsParsed`) and its case to `writeSettingsField()` — for FlexDuration wrap back: `FlexDuration{Value: p.flex[key]}`, for booleans check `== "Yes"`. A save writes only the fields the operator edited, over the live config (`applyValues()`), so a field with no write case is silently never saved; `TestEverySettingsFieldIsWritable` fails for one
+- The field is drawn below 60x20 too, by the bare form (`internal/tui/settings_bare.go`), from the same `fieldDef`: nothing to add there, but keep its label distinct from its section's other labels in their first twenty cells (`TestBareSettingsLabelsStayDistinct`), and write its `help` so the first 30 cells say what matters, since that is all a 30x6 terminal shows of it
 
 ### 8. Hot-Reload (if runtime-changeable)
-Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
+Ten callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
 - `OnLogLevelChange(level)` → `log.SetLevel()`
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
@@ -61,6 +62,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
 - `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
 - `OnReorderBudgetChange(downloaderCfg)` → `runState.applyReorderBudget`
+- `OnKeepAwakeChange(on)` → `runState.applyKeepAwake` (`downloader.keep_awake`, Windows only: the TUI save calls the same method; a Windows-only setting says "Windows only" in its Web label and "(Windows)" in its TUI label, and its help says it has no effect on Linux)
 
 `applyReorderBudget` (`cmd/moombox/hot_reload.go`) is the model for a process-wide value: ONE method reached from all three entry points — `initServices` at boot, this PUT callback, and the TUI's `OnSaveConfig` hot-reload block — so the number never travels through `engine.DownloaderOptions` or the worker's per-job call sites.
 
@@ -73,6 +75,8 @@ Some keys are deliberately `config.toml`-only: no Settings row in either UI, abs
 
 ### 9. Config Migration (if renaming/moving)
 `internal/config/config.go` → `migrateOldFormat()` — Non-destructive: only applies when new section doesn't exist. Converts legacy field to current location.
+- Add every key the migration reads from the raw map to `legacyKeys` (same file). A key in the file that the struct does not decode and `legacyKeys` does not name is logged at boot as not recognised (`UnknownOnLoad`); `TestLegacyKeysAreNotReportedUnknown` holds every entry.
+- Removing a released key without a migration: add it to `legacyKeys` too (silent), or to `retiredKeys` when the operator should be told it is no longer used.
 
 ### 10. Docs site reference
 Every key has one heading on the GitHub Pages site, under `docs-site/docs/configuration/`, written as its dotted path in backticks (`### `downloader.segment_workers``; arrays of tables take `[]`: `### `channels[].archive_slots``). Give its default, range, when it takes effect and where it sits in each UI, then what it does. `TestSettingsReferenceCoversEveryConfigKey` (`internal/docs/settings_reference_test.go`) fails when a key has no heading, a heading names a key that is gone, or a key is documented twice — so a rename moves the heading too. Format: `docs-site/CONTRIBUTING-DOCS.md`.

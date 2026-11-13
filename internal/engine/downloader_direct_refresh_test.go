@@ -181,8 +181,9 @@ func TestDirectRefreshIsBounded(t *testing.T) {
 }
 
 // outageServer serves body by Range, except that from the first request past
-// the first chunk it drops every connection mid-body (206 headers, a few
-// bytes, then EOF) until the download has waited the outage out. out is that
+// the first chunk it drops every connection before the body's first byte (206
+// headers, then EOF: a break that delivered part of the range would be kept
+// as a short chunk, not retried) until the download has waited the outage out. out is that
 // outage (see outage): its isOnline answers like a connectivity monitor that
 // lets lateAsks checks after the first drop pass before it calls the link
 // offline.
@@ -206,7 +207,7 @@ func newOutageServer(t *testing.T, body []byte, lateAsks int32) *outageServer {
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(body)))
 				w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 				w.WriteHeader(http.StatusPartialContent)
-				w.Write(body[start : start+1000]) // short: the server drops the connection
+				w.(http.Flusher).Flush() // headers only: the server drops the connection
 				return
 			}
 		}

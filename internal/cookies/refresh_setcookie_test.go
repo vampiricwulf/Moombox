@@ -423,8 +423,9 @@ func TestProcessSetCookiesFutureExpiryStillUpdates(t *testing.T) {
 // skipped as malformed. Hence the round-trip assertion.
 //
 // Discriminates: pre-fix the row was rewritten with value "" and a one-year
-// expiry, and a fresh jar reported the cookie absent. The third subtest is a
-// regression guard on the guard itself and passes either way.
+// expiry, and a fresh jar reported the cookie absent. The guard must sit behind
+// the Delete check (every deletion form also carries an empty value);
+// TestProcessSetCookiesDeletesRowOnPastExpires pins that.
 func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 	t.Run("existing row is kept", func(t *testing.T) {
 		initial := "# Netscape HTTP Cookie File\n" +
@@ -457,21 +458,6 @@ func TestProcessSetCookiesRefusesEmptyValueWithoutExpiry(t *testing.T) {
 
 		if got := rowsNamed(readCookieRows(t, path), "YSC"); len(got) != 0 {
 			t.Errorf("an empty-valued Set-Cookie inserted a row: %q", got[0].raw)
-		}
-	})
-
-	t.Run("an explicit deletion is still a deletion", func(t *testing.T) {
-		// The guard must sit behind the Delete check: every deletion form also
-		// carries an empty value, so testing emptiness first would neuter S7.
-		initial := "# Netscape HTTP Cookie File\n" +
-			".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
-		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
-
-		rs.processYouTubeSetCookies(setCookieResponse(
-			"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
-
-		if got := rowsNamed(readCookieRows(t, path), "LOGIN_INFO"); len(got) != 0 {
-			t.Errorf("the empty-value guard swallowed a real deletion: %q", got[0].raw)
 		}
 	})
 }

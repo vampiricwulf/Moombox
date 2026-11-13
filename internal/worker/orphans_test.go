@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -169,6 +170,9 @@ func TestIncompleteStagingExpired(t *testing.T) {
 	}
 	old := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	fresh := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	dayOld := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	twoDaysOld := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	justNow := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
 
 	cases := []struct {
 		name string
@@ -181,6 +185,14 @@ func TestIncompleteStagingExpired(t *testing.T) {
 		{"fresh job preserved", cfgDays(7), fresh, false},
 		{"aged job expired", cfgDays(7), old, true},
 		{"unparseable timestamp preserves", cfgDays(7), "not-a-time", false},
+		// Fractional days keep their fraction. 0.02 d is 28.8 minutes: converted
+		// to whole hours first it was a zero window that expired everything.
+		{"0.02 days, a minute old, preserved", cfgDays(0.02), justNow, false},
+		{"0.02 days, an hour old, expired", cfgDays(0.02), fresh, true},
+		{"1.5 days, a day old, preserved", cfgDays(1.5), dayOld, false},
+		{"1.5 days, two days old, expired", cfgDays(1.5), twoDaysOld, true},
+		{"NaN days preserves", cfgDays(math.NaN()), old, false},
+		{"negative days preserves", cfgDays(-1), old, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -57,7 +57,7 @@ func (sp *StreamProcessor) sendStreamFound(job *database.Job, info *youtube.Vide
 // written the fetch's start time to the row and synced job to it.
 //
 // The one row→facts mapper, exactly as the worker's "Authentication Required"
-// send uses it (worker.go). `scheduled` is one of the lifecycle events, and
+// send uses it (worker_failure.go). `scheduled` is one of the lifecycle events, and
 // Manager.planLifecycle (internal/notifications/lifecycle.go) keys on
 // Opts.JobID: without it an edit-mode target could never fold this embed into
 // the job's one message, and the dashboard deep link — which needs JobID and

@@ -65,8 +65,8 @@ func newStdoutCapturingLogger(t *testing.T) (log *logger.Logger, read func() str
 
 // TestHungUpTerminalGetsNoMoreLines pins what a hangup does to the logger's
 // stdout: once stdout's terminal is gone nothing more is written to it, so the
-// shutdown makes no attempt on a terminal that may not drain — the logger
-// writes stdout under the lock the force-exit backstop's own log line needs.
+// shutdown makes no attempt on a terminal that may not drain, and the logger's
+// Close does not wait its console flush bound for one.
 // Both ways in: shutdown's muteHungUpTerminal (a --headless run, or a hangup
 // after the TUI had gone), and the TUI's exit, which no longer hands stdout
 // back to a terminal that hung up (restoreStdoutAfterTUI). Stdout that did not

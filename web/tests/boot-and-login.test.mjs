@@ -34,12 +34,12 @@ const open = [];
 after(() => { for (const w of open.splice(0)) { try { w.close(); } catch { /* closed */ } } });
 
 /** A jsdom over one real page, with a stubbed matchMedia and a quiet console. */
-function page(file, { light = false } = {}) {
+function page(file, { light = false, url = null } = {}) {
   const virtualConsole = new VirtualConsole();
   const jsdomErrors = [];
   virtualConsole.on("jsdomError", (e) => jsdomErrors.push(e.message));
   const dom = new JSDOM(read(file), {
-    url: "http://localhost/" + (file === "index.html" ? "" : file),
+    url: url ?? "http://localhost/" + (file === "index.html" ? "" : file),
     runScripts: "outside-only",
     virtualConsole,
   });
@@ -64,14 +64,19 @@ function boot(file, { light = false, stored = null } = {}) {
   return dom;
 }
 
-/** Resolves when jsdom has finished parsing and fired DOMContentLoaded. */
+/**
+ * Resolves when jsdom has finished parsing and fired DOMContentLoaded. It
+ * waits for `load`, the event after it: readyState "interactive" does not say
+ * whether DOMContentLoaded has fired yet (jsdom 31 returns from the
+ * constructor "interactive" with the event still queued), "complete" does.
+ */
 function domContentLoaded(window) {
   return new Promise((resolve) => {
-    if (window.document.readyState !== "loading") {
+    if (window.document.readyState === "complete") {
       resolve();
       return;
     }
-    window.addEventListener("DOMContentLoaded", () => resolve(), { once: true });
+    window.addEventListener("load", () => resolve(), { once: true });
   });
 }
 
@@ -202,8 +207,14 @@ test("login.js defers its wiring when it is evaluated while the document is stil
   });
   open.push(dom.window);
   const { window } = dom;
+  // document.open() puts the document back in the parser's hands: readyState
+  // is "loading" until close(), which is what a script reached before the end
+  // of the markup sees in a browser. (A script-free jsdom document is already
+  // "interactive" when the constructor returns, as of jsdom 31; jsdom 30 left
+  // it "loading" there, which this test used to rely on.)
+  window.document.open();
   assert.equal(window.document.readyState, "loading",
-    "premise: a freshly constructed jsdom has not fired DOMContentLoaded yet");
+    "premise: an opened document is still parsing and has not fired DOMContentLoaded");
 
   const calls = stubFetch(window, refused);
   window.eval(read("login.js"));
@@ -214,9 +225,13 @@ test("login.js defers its wiring when it is evaluated while the document is stil
   const start = html.indexOf("<main");
   const end = html.indexOf("</main>") + "</main>".length;
   assert.ok(start > 0 && end > start, "login.html must still have a <main> to lift");
-  window.document.body.innerHTML = html.slice(start, end);
+  window.document.write("<!doctype html><html><head></head><body>" + html.slice(start, end) + "</body></html>");
+  assert.equal(window.document.readyState, "loading", "premise: the parser is still open after the write");
+  // Registered after login.js's own listener, so it runs after initLogin.
+  const fired = new Promise((r) => window.document.addEventListener("DOMContentLoaded", r, { once: true }));
+  window.document.close();
+  await fired;
 
-  await domContentLoaded(window);
   window.document.getElementById("login-password").value = "hunter2";
   window.document.getElementById("login-submit").dispatchEvent(new window.Event("click"));
   await settle();
@@ -273,4 +288,34 @@ test("login.js redirects to the dashboard on success and holds the button", { sk
     "the button stays disabled/loading until the navigation completes, or it flickers");
   assert.equal(window.document.getElementById("login-error").style.display, "none",
     "no error may be shown for a successful login");
+});
+
+// A notification's deep link is {public_url}/#job=<id>. A browser with no
+// session is answered the login page at that same URL (AuthMiddleware serves
+// it in place), so the hash is still in the address bar when the password is
+// accepted, and the dashboard opens the job from it once it loads.
+//
+// jsdom implements no navigation: a reload is reported on the virtual
+// console, and an href that differs from the current URL by its fragment
+// alone is applied as a hash change.
+//
+// MUTANT: `window.location.href = "/"` — the hash is gone and the visitor
+// lands on the plain job list. `window.location.href = "/" + hash` alone —
+// the same URL again, which a browser does not load: the visitor stays on
+// the login form (no navigation is reported here).
+test("login.js keeps a #job= deep link through a successful login", { skip }, async () => {
+  const dom = page("login.html", { url: "http://localhost/#job=yt_aB3-xY_9zqw" });
+  const { window } = dom;
+  await domContentLoaded(window);
+  stubFetch(window, () => ({ ok: true, status: 200, statusText: "OK", json: () => Promise.resolve({}) }));
+  window.eval(read("login.js"));
+
+  window.document.getElementById("login-password").value = "hunter2";
+  window.document.getElementById("login-submit").dispatchEvent(new window.Event("click"));
+  await settle();
+
+  assert.equal(window.location.href, "http://localhost/#job=yt_aB3-xY_9zqw",
+    "the deep link's hash must still be in the address bar after the login");
+  assert.ok(dom.jsdomErrors.some((m) => /navigation/i.test(m)),
+    "the page must be loaded again, or the login form stays up");
 });

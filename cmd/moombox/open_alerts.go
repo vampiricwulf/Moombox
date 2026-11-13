@@ -61,6 +61,10 @@ type openDiskAlert struct {
 	// cooldown runs from.
 	Level      string    `json:"level,omitempty"`
 	NotifiedAt time.Time `json:"notifiedAt,omitzero"`
+	// Staging says the open space alert named the staging directory's
+	// volume rather than the output directory's. Absent in a file written
+	// before the staging volume was watched, which reads as the output's.
+	Staging bool `json:"staging,omitempty"`
 	// MonitoringFailed is an open "Disk Monitoring Failed".
 	MonitoringFailed bool `json:"monitoringFailed,omitempty"`
 }

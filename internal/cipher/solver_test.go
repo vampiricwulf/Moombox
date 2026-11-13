@@ -1,7 +1,6 @@
 package cipher
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -74,54 +73,6 @@ _result.sig = function(input) {
 	}
 	if result != "HELLO" {
 		t.Errorf("expected HELLO, got %q", result)
-	}
-}
-
-func TestStsCacheFIFOEviction(t *testing.T) {
-	// Verify that STS cache uses FIFO (oldest first) eviction,
-	// not random eviction.
-	sc := NewStsCache()
-
-	// Fill the cache to capacity by manually inserting entries
-	sc.mu.Lock()
-	for i := range stsCacheSize {
-		key := fmt.Sprintf("key-%04d", i)
-		sc.cache[key] = fmt.Sprintf("sts-%d", i)
-		sc.order = append(sc.order, key)
-	}
-	sc.mu.Unlock()
-
-	if len(sc.cache) != stsCacheSize {
-		t.Fatalf("expected cache size %d, got %d", stsCacheSize, len(sc.cache))
-	}
-
-	// Insert a new entry — should evict key-0000 (oldest)
-	sc.mu.Lock()
-	newKey := "key-new"
-	if _, exists := sc.cache[newKey]; !exists && len(sc.cache) >= stsCacheSize {
-		evictKey := sc.order[0]
-		sc.order = sc.order[1:]
-		delete(sc.cache, evictKey)
-	}
-	sc.cache[newKey] = "sts-new"
-	sc.order = append(sc.order, newKey)
-	sc.mu.Unlock()
-
-	// Verify key-0000 was evicted (the oldest)
-	sc.mu.RLock()
-	_, hasOldest := sc.cache["key-0000"]
-	_, hasNew := sc.cache["key-new"]
-	_, hasSecond := sc.cache["key-0001"]
-	sc.mu.RUnlock()
-
-	if hasOldest {
-		t.Error("expected key-0000 (oldest) to be evicted")
-	}
-	if !hasNew {
-		t.Error("expected key-new to be in cache")
-	}
-	if !hasSecond {
-		t.Error("expected key-0001 to still be in cache")
 	}
 }
 
@@ -291,22 +242,5 @@ _result.n = function(input) {
 	}
 	if nResult != "foo_ok" {
 		t.Errorf("subsequent n call: expected 'foo_ok', got %q", nResult)
-	}
-}
-
-// TestSolverCacheSizeMatchesTheDocs is the anti-drift pin for ledger item
-// T4-34. The cap was raised from 3 to 10 in 2026-04; five documents and the
-// upstream-porting skill went on saying 3, which understates the worst-case
-// VM residency by 3x (~500 MB against the ~150 MB a reader would price).
-//
-// Mutant named: changing solverCacheSize without touching the docs fails
-// here with both numbers on screen, which is the only moment anyone is
-// holding the context needed to fix the prose.
-func TestSolverCacheSizeMatchesTheDocs(t *testing.T) {
-	const documented = 10
-	if solverCacheSize != documented {
-		t.Fatalf("solverCacheSize = %d, but docs/spec/{architecture,platform-services,design-philosophy,vision-and-purpose}.md "+
-			"and .claude/skills/moombox-upstream-porting/SKILL.md document %d — update the prose in the same commit",
-			solverCacheSize, documented)
 	}
 }

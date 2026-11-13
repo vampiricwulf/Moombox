@@ -148,16 +148,31 @@ var (
 // #40.
 const twitchGQLRatePerSec = 10
 
+// twitchGQLTokenInterval is how long the bucket takes to earn one token,
+// and twitchGQLBurst the most it holds: an idle period never hands out
+// more than twitchGQLRatePerSec requests at once.
+const (
+	twitchGQLTokenInterval = time.Second / twitchGQLRatePerSec
+	twitchGQLBurst         = twitchGQLRatePerSec * twitchGQLTokenInterval
+)
+
 // API provides low-level Twitch GQL and Usher access.
 type API struct {
-	// rateLimiter throttles outbound GQL requests. Process-wide bucket;
-	// per-channel was considered but the existing flows already fan out
-	// concurrently across channels, so a single shared bucket is the
-	// right place to enforce the ceiling. Started on first use
-	// (initRateLimiter).
-	rateLimiter *time.Ticker
-	rateTokens  chan struct{}
-	rateOnce    sync.Once
+	// The GQL rate limiter: one process-wide token bucket. Per-channel was
+	// considered, but the flows already fan out concurrently across
+	// channels, so a single shared bucket is the right place to enforce
+	// the ceiling. It is refilled lazily from elapsed time on each
+	// acquireToken call, so an idle process runs no timer and no goroutine
+	// for it.
+	//
+	// rateCredit is the bucket's content as time: one token is worth
+	// twitchGQLTokenInterval, a full bucket twitchGQLBurst. It goes
+	// negative while callers wait: each has reserved a token the bucket
+	// has still to earn. rateLast is when rateCredit was last brought up
+	// to date; zero means never used, which reads as a full bucket.
+	rateMu     sync.Mutex
+	rateCredit time.Duration
+	rateLast   time.Time
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -177,44 +192,56 @@ func NewAPI(logger interface {
 	return &API{logger: logger}
 }
 
-// initRateLimiter lazily starts the GQL rate limiter on first use. Tokens
-// are produced at twitchGQLRatePerSec; the channel buffer caps the burst
-// to twitchGQLRatePerSec (so an idle period doesn't hand out a year's
-// worth of tokens at once). Audit reports/twitch.md #40.
-func (a *API) initRateLimiter() {
-	a.rateOnce.Do(func() {
-		a.rateLimiter = time.NewTicker(time.Second / time.Duration(twitchGQLRatePerSec))
-		a.rateTokens = make(chan struct{}, twitchGQLRatePerSec)
-		// Pre-fill the burst capacity so a fresh process can issue up to
-		// twitchGQLRatePerSec without waiting for the first tick.
-		for range twitchGQLRatePerSec {
-			a.rateTokens <- struct{}{}
-		}
-		go func() {
-			defer func() {
-				if r := recover(); r != nil && a.logger != nil {
-					a.logger.Error("twitch rate limiter goroutine panic", "panic", r)
-				}
-			}()
-			for range a.rateLimiter.C {
-				select {
-				case a.rateTokens <- struct{}{}:
-				default:
-					// Bucket full — drop the token. Burst-cap behaviour.
-				}
-			}
-		}()
-	})
+// reserveToken takes one token from the bucket and returns how long the
+// caller must wait before using it: zero when the bucket held one, and
+// otherwise the time the bucket needs to earn it, behind every caller
+// already waiting. Audit reports/twitch.md #40.
+func (a *API) reserveToken() time.Duration {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	now := time.Now()
+	if a.rateLast.IsZero() {
+		// First use: a fresh process may issue the whole burst at once.
+		a.rateCredit = twitchGQLBurst
+	} else if elapsed := now.Sub(a.rateLast); elapsed > 0 {
+		// min before the add: elapsed can be days, the credit never more
+		// than the burst.
+		a.rateCredit += min(elapsed, twitchGQLBurst-a.rateCredit)
+	}
+	a.rateLast = now
+	a.rateCredit -= twitchGQLTokenInterval
+	if a.rateCredit >= 0 {
+		return 0
+	}
+	return -a.rateCredit
+}
+
+// returnToken gives back a token reserved by a caller that gave up
+// waiting, so its place is not charged to the callers after it.
+func (a *API) returnToken() {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+	a.rateCredit = min(a.rateCredit+twitchGQLTokenInterval, twitchGQLBurst)
 }
 
 // acquireToken blocks until a rate-limit token is available or ctx is
-// cancelled. Returns ctx.Err() on cancellation.
+// cancelled. Returns ctx.Err() on cancellation; a context that is already
+// done takes no token.
 func (a *API) acquireToken(ctx context.Context) error {
-	a.initRateLimiter()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	wait := a.reserveToken()
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
-	case <-a.rateTokens:
+	case <-timer.C:
 		return nil
 	case <-ctx.Done():
+		a.returnToken()
 		return ctx.Err()
 	}
 }
@@ -1272,6 +1299,15 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 	)
 }
 
+// ErrVodCommentsVideoGone is GetVodComments' answer when Twitch returns a null
+// video: the VOD no longer exists, so the chat already saved is all there will
+// be, and it is not known to be all of it.
+var ErrVodCommentsVideoGone = errors.New("twitch answered a null video for the VOD's comments (the VOD is gone)")
+
+// ErrVodCommentsMissing is GetVodComments' answer when Twitch returns a null
+// comments object for a page past the start of the VOD.
+var ErrVodCommentsMissing = errors.New("twitch answered null comments for a page past the start of the VOD")
+
 // GetVodComments fetches one page of VOD chat comments.
 //
 // The operation is VideoCommentsByOffsetOrCursor and the OR is the point: a
@@ -1282,6 +1318,12 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 // (a fresh start, or a resume from the sidecar's LastOffsetSeconds).
 //
 // The persisted-query hash is unchanged: both forms are the same operation.
+//
+// A null `video` (the VOD was deleted or expired; Twitch answers null, not an
+// error) is ErrVodCommentsVideoGone on any page. A null `comments` is
+// ErrVodCommentsMissing on a cursor page or a non-zero offset, and an empty
+// result only when entering at offset 0, where it is a VOD with no chat.
+// Neither error is the natural end of chat: that is hasNextPage=false.
 func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSeconds float64, cursor, authToken string) ([]VodCommentEdge, bool, error) {
 	vars := map[string]any{"videoID": vodID}
 	if cursor != "" {
@@ -1298,8 +1340,8 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 
 	var resp struct {
 		Data struct {
-			Video struct {
-				Comments struct {
+			Video *struct {
+				Comments *struct {
 					Edges []struct {
 						Cursor string `json:"cursor"`
 						Node   struct {
@@ -1337,6 +1379,15 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 		return nil, false, fmt.Errorf("parse vod comments: %w", err)
 	}
 
+	if resp.Data.Video == nil {
+		return nil, false, ErrVodCommentsVideoGone
+	}
+	if resp.Data.Video.Comments == nil {
+		if cursor != "" || contentOffsetSeconds != 0 {
+			return nil, false, ErrVodCommentsMissing
+		}
+		return nil, false, nil
+	}
 	edges := resp.Data.Video.Comments.Edges
 	hasNext := resp.Data.Video.Comments.PageInfo.HasNextPage
 

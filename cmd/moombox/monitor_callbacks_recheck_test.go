@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // Arc 10 Task 7a. The in-process re-check that must follow every pass which
@@ -159,13 +161,13 @@ func TestCheckNowFnRunsTheServicesCheck(t *testing.T) {
 func TestPostRefreshRecheckHookSurvivesAPanic(t *testing.T) {
 	log := &recheckLogger{}
 	ran := 0
-	hook := postRefreshRecheckHook(func(context.Context) {
+	hook := postRefreshRecheckHook(func(context.Context, cookies.RefreshResult) {
 		ran++
 		panic("the credential fan-out blew up")
 	}, log)
 
-	hook(context.Background()) // must not panic
-	hook(context.Background()) // and the caller is still able to call it again
+	hook(context.Background(), cookies.RefreshResult{}) // must not panic
+	hook(context.Background(), cookies.RefreshResult{}) // and the caller is still able to call it again
 
 	if ran != 2 {
 		t.Errorf("the hook body ran %d times, want 2 — a recovered panic must not latch the hook off", ran)
@@ -179,7 +181,7 @@ func TestPostRefreshRecheckHookSurvivesAPanic(t *testing.T) {
 func TestPostRefreshRecheckHookRunsItsBody(t *testing.T) {
 	log := &recheckLogger{}
 	ran := 0
-	postRefreshRecheckHook(func(context.Context) { ran++ }, log)(context.Background())
+	postRefreshRecheckHook(func(context.Context, cookies.RefreshResult) { ran++ }, log)(context.Background(), cookies.RefreshResult{})
 
 	if ran != 1 {
 		t.Errorf("the hook body ran %d times, want 1", ran)
@@ -200,11 +202,11 @@ func TestPostRefreshRecheckHookForwardsItsContext(t *testing.T) {
 	type key struct{}
 	log := &recheckLogger{}
 	var got context.Context
-	hook := postRefreshRecheckHook(func(ctx context.Context) { got = ctx }, log)
+	hook := postRefreshRecheckHook(func(ctx context.Context, _ cookies.RefreshResult) { got = ctx }, log)
 
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "the loop's"))
 	cancel()
-	hook(ctx)
+	hook(ctx, cookies.RefreshResult{})
 
 	if got == nil || got.Value(key{}) != "the loop's" || got.Err() == nil {
 		t.Errorf("the hook body ran under %v, want the context the hook was called with — the re-check "+

@@ -197,20 +197,6 @@ func TestGenerateAuthorizationHeaderOriginAllowlist(t *testing.T) {
 	}
 }
 
-// TestMakeSidAuthorizationKnownVector locks down the SAPISIDHASH format
-// against a known (timestamp, sid, origin) input so future refactors can't
-// silently break Google's hash scheme (finding #58).
-func TestMakeSidAuthorizationKnownVector(t *testing.T) {
-	// sha1("1234567890 test-sid https://www.youtube.com") computed once:
-	// printf '%s' "1234567890 test-sid https://www.youtube.com" | sha1sum
-	// = 96d13ea75f0bf102d71aebdfdaa599807584b65c
-	got := makeSidAuthorization("SAPISIDHASH", "test-sid", "https://www.youtube.com", "", 1234567890)
-	want := "SAPISIDHASH 1234567890_96d13ea75f0bf102d71aebdfdaa599807584b65c"
-	if got != want {
-		t.Errorf("SAPISIDHASH mismatch\n got: %q\nwant: %q", got, want)
-	}
-}
-
 // TestMakeSidAuthorizationUserSessionVector pins the user-bound form against
 // vectors computed with yt-dlp's own _make_sid_authorization (_base.py:
 // 762-775), its body run verbatim under Python with time.time() fixed at
@@ -220,8 +206,13 @@ func TestMakeSidAuthorizationKnownVector(t *testing.T) {
 //	SAPISID1PHASH 1234567890_39f8e63c3a2e4cd1629dc3df93c3c67908dfea64_u
 //
 // i.e. sha1("user-u 1234567890 test-sid https://www.youtube.com") with "_u"
-// appended. With {} the same function gives the unbound vector above, which
-// is why an empty id must stay exactly today's form.
+// appended. With {} the same function gives the unbound vector of the third
+// row, which is why an empty id must stay exactly today's form. That row locks
+// the SAPISIDHASH format against a known (timestamp, sid, origin) input so a
+// refactor cannot silently break Google's hash scheme (finding #58):
+//
+//	printf '%s' "1234567890 test-sid https://www.youtube.com" | sha1sum
+//	= 96d13ea75f0bf102d71aebdfdaa599807584b65c
 //
 // Mutants: the id appended to the hash input instead of prefixed; the "_u"
 // suffix dropped; the suffix written as the id ("_user-u") instead of the

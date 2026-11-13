@@ -609,9 +609,9 @@ func (db *Database) migrate() error {
 	}
 
 	if version < 12 {
-		// pruneHistory ORDERs by added_at and DELETEs via a subquery on every
-		// AddToHistory. Without an index on added_at the subquery is a full
-		// table scan. CREATE INDEX IF NOT EXISTS is idempotent on retry.
+		// Added for the prune AddToHistory once ran on every insert (history is
+		// no longer capped, so nothing prunes it now). The index stays: no
+		// migration drops it. CREATE INDEX IF NOT EXISTS is idempotent on retry.
 		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at)`); err != nil {
 			return err
 		}

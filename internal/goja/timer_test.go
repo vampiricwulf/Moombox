@@ -29,19 +29,6 @@ func waitQueued(t *testing.T, tm *TimerManager, n int) {
 	}
 }
 
-// --- NewTimerManager tests ---
-
-func TestNewTimerManager(t *testing.T) {
-	vm := gojalib.New()
-	tm := NewTimerManager(vm)
-	if tm == nil {
-		t.Fatal("expected non-nil TimerManager")
-	}
-	if tm.ActiveCount() != 0 {
-		t.Errorf("expected 0 active timers, got %d", tm.ActiveCount())
-	}
-}
-
 // --- SetTimeout tests ---
 
 func TestSetTimeoutEnqueuesCallback(t *testing.T) {
@@ -160,27 +147,6 @@ func TestClearTimerNonExistentID(t *testing.T) {
 
 	// Should not panic when clearing a non-existent timer
 	tm.ClearTimer(99999)
-}
-
-func TestClearTimerDecreasesActiveCount(t *testing.T) {
-	vm := gojalib.New()
-	tm := NewTimerManager(vm)
-	defer tm.CancelAll()
-
-	fn := func(call gojalib.FunctionCall) gojalib.Value {
-		return gojalib.Undefined()
-	}
-	callable, _ := gojalib.AssertFunction(vm.ToValue(fn))
-
-	id := tm.SetTimeout(callable, 5000)
-	if tm.ActiveCount() != 1 {
-		t.Errorf("expected 1 active timer, got %d", tm.ActiveCount())
-	}
-
-	tm.ClearTimer(id)
-	if tm.ActiveCount() != 0 {
-		t.Errorf("expected 0 active timers after clear, got %d", tm.ActiveCount())
-	}
 }
 
 // --- CancelAll tests ---

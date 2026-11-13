@@ -130,9 +130,10 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 
 // doRefresh is the TICKER refresh, and the only path allowed to pay for the
 // FallbackLiveness probe. Both of the other entry points run synchronously on
-// a goroutine somebody is waiting on — CheckNow on an HTTP handler, Start's
-// initial check ahead of the web server binding — and both pass
-// allowFallback=false for that reason.
+// a goroutine something is waiting on — CheckNow on an HTTP handler, Start's
+// initial check with both UIs showing "checking cookies" and the profile seed
+// and the browser refresh timer queued behind it (cmd/moombox's cookie startup
+// goroutine) — and both pass allowFallback=false for that reason.
 //
 // Subject to the same single-flight as the other two, and in this direction it
 // is a tick that gets dropped: a tick arriving while a manual recheck is in
@@ -180,6 +181,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			return false
 		}
 		rs.refreshInFlight = true
+		rs.passDone = make(chan struct{})
 		hook, lockedHook = rs.refreshPassHook, rs.refreshLockedHook
 		return true
 	}()
@@ -214,9 +216,35 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	// no log line. Lock and defer-unlock together, or scope the section into a
 	// func literal that does.
 	defer func() {
-		rs.mu.Lock()
-		rs.refreshInFlight = false
-		rs.mu.Unlock()
+		// A pass that ended without publishing a status (a panic in it) still
+		// ends the "checking" state: the UIs then show what they showed before
+		// that state existed, instead of "checking cookies" until the next tick.
+		// That flip is pushed like any other status change, or a TUI already
+		// showing "checking" would keep it: the next pass finds Checked set
+		// and may have nothing else to report. Outside rs.mu, as every
+		// OnAuthChange call is. A pass that published its status has set
+		// Checked already, so this fires nothing after it.
+		var ended bool
+		var statusCopy AuthStatus
+		func() {
+			rs.mu.Lock()
+			defer rs.mu.Unlock()
+			rs.refreshInFlight = false
+			// Closed once this section has set Checked (or found it set), so
+			// an AwaitPass caller that wakes reads a checked status.
+			done := rs.passDone
+			rs.passDone = nil
+			if done != nil {
+				defer close(done)
+			}
+			if !rs.status.Checked {
+				rs.status.Checked = true
+				ended, statusCopy = true, rs.status
+			}
+		}()
+		if ended && rs.OnAuthChange != nil {
+			rs.OnAuthChange(statusCopy)
+		}
 	}()
 	if hook != nil {
 		hook()
@@ -375,6 +403,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		}
 
 		rs.status = AuthStatus{
+			Checked:              true,
 			YouTubeAuthenticated: ytAuth,
 			TwitchAuthenticated:  twEffective,
 			// Now "YouTube auth is configured" rather than "the cookie set is

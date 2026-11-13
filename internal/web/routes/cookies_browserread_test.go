@@ -186,6 +186,7 @@ func TestAuthStatusPayloadsCarryTheInconclusiveReason(t *testing.T) {
 
 	t.Run("inconclusive — the reason is carried", func(t *testing.T) {
 		status := cookies.AuthStatus{
+			Checked:             true,
 			HasYouTubeCookies:   true,
 			HasTwitchCookies:    true,
 			YouTubeVerification: cookies.RefreshUnknown,
@@ -220,6 +221,7 @@ func TestAuthStatusPayloadsCarryTheInconclusiveReason(t *testing.T) {
 		// a leftover string alongside "ok" would put an explanation on screen
 		// for a state that has nothing to explain.
 		status := cookies.AuthStatus{
+			Checked:              true,
 			YouTubeAuthenticated: true,
 			HasYouTubeCookies:    true,
 			HasTwitchCookies:     true,
@@ -237,7 +239,7 @@ func TestAuthStatusPayloadsCarryTheInconclusiveReason(t *testing.T) {
 	// THE PREMISE for both rows: the two projections must not be reading the
 	// same field. YouTube's payload carrying Twitch's reason would satisfy the
 	// first row above whenever the fixture happened to set both.
-	crossed := cookies.AuthStatus{YouTubeError: ytReason}
+	crossed := cookies.AuthStatus{Checked: true, YouTubeError: ytReason}
 	if got := TwitchAuthStatusPayload(crossed)["twitchError"]; got != "" {
 		t.Errorf("twitchError = %v, want empty — it is reading AuthStatus.YouTubeError", got)
 	}

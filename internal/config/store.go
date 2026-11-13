@@ -184,16 +184,6 @@ func (s *Store) CompleteFirstRunLocked(next *MoomboxConfig) error {
 	return nil
 }
 
-// SetSavePath installs or overrides the path used by Update for auto-save.
-// Useful when the path is negotiated after NewStore (first-run wizard,
-// test harnesses). Stored via atomic.Pointer so SavePath() can read it
-// without grabbing s.mu — route writers call SavePath() while already
-// holding s.mu.Lock for their copy-on-write pattern, and an internal
-// RLock would have deadlocked against the held write lock.
-func (s *Store) SetSavePath(path string) {
-	s.savePath.Store(&path)
-}
-
 // SavePath returns the path Update / SaveLocked write to. Empty string
 // means "no save configured" (e.g., during first-run setup before a path
 // has been negotiated). Lock-free via atomic load so it's safe to call

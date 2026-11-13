@@ -431,10 +431,7 @@ func (s *Service) browseRequestBody(browseID, params, continuation, visitorData 
 // the membership tab was answered for the primary account and its
 // members-only backlog read as absent or cleanly exhausted.
 func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visitorData string) ([]byte, error) {
-	endpoint := s.browse.endpointOrDefault()
-	if key := s.PlayerAPI.APIKey(); key != "" {
-		endpoint += "?key=" + key
-	}
+	endpoint := innertubeURL(s.browse.endpointOrDefault(), s.PlayerAPI.APIKey())
 
 	ytcfg := s.PlayerAPI.probeYtcfg(visitorData)
 	headers := s.Auth.GenerateAPIHeaders(constants.WebClient, ytcfg)

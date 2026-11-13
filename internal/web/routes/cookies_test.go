@@ -928,7 +928,7 @@ func postFinish(t *testing.T, r chi.Router) *httptest.ResponseRecorder {
 }
 
 // TestCookieWritersSetContentLength is COOKIES-4 / owner decision O-L. Both
-// handlers Flush and then run a <=45 s auth re-check on the handler goroutine.
+// handlers Flush and then run a <=90 s auth re-check on the handler goroutine.
 // Without Content-Length net/http uses chunked encoding and the terminating
 // chunk is written only when the handler RETURNS, so the Flush released the
 // headers and nothing else: fetch().json() awaited the body for the whole
@@ -1127,7 +1127,7 @@ func TestBothRecheckHandlersAnswerThroughTheSizedWriters(t *testing.T) {
 				if counts[unsized] > 0 {
 					t.Errorf("%s still answers %d exit(s) through %s. That writer streams through "+
 						"a json.Encoder and sets no length, so net/http chunks the body and writes "+
-						"the terminating chunk when the HANDLER returns — after the <=45 s re-check "+
+						"the terminating chunk when the HANDLER returns — after the <=90 s re-check "+
 						"this handler defers", route, counts[unsized], unsized)
 				}
 			}

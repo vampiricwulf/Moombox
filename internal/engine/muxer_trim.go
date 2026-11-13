@@ -105,7 +105,8 @@ type TrimSegmentInput struct {
 	NeedScale bool    // true if resolution/FPS differs from target
 }
 
-// buildTrimSegmentArgs builds FFmpeg arguments for trimming a single segment.
+// buildTrimSegmentArgs builds FFmpeg arguments for trimming a single segment
+// of a multi-segment trim into its intermediate file.
 func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, targetWidth, targetHeight, targetFPS, crf, audioBitrate int) []string {
 	args := []string{"-y"}
 
@@ -137,7 +138,11 @@ func (m *Muxer) buildTrimSegmentArgs(seg TrimSegmentInput, outputPath string, ta
 		args = append(args, "-c:a", "aac")
 	}
 
-	args = append(args, "-movflags", "faststart", ffmpegPathArg(outputPath))
+	// No `-movflags faststart` here: the output is an intermediate the concat
+	// demuxer reads once from local disk and the trim then deletes, so moving
+	// its moov atom to the front would only write the file a second time. The
+	// concat (buildConcatArgs) applies faststart to the clip that is kept.
+	args = append(args, ffmpegPathArg(outputPath))
 	return args
 }
 

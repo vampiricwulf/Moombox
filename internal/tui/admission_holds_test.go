@@ -56,6 +56,65 @@ func TestQueuedRowsShowTheirHold(t *testing.T) {
 	}
 }
 
+// TestParkedRowsShowTheirCookieRetries pins owner ruling R2-C1 in the TUI: a
+// job parked in COOKIES? on its credentials shows how many automatic cookie
+// retries it has used, as a row tag and as the details pane's Cookies line,
+// from the AdmissionHoldsMsg snapshot, and the open details pane follows a
+// new snapshot. A job that has used none, and a membership park, show
+// neither.
+//
+// Mutants: the COOKIES? arm of progressCell dropped; the details Cookies
+// line not added; SetAdmissionHolds not rebuilding the rows of a parked job.
+func TestParkedRowsShowTheirCookieRetries(t *testing.T) {
+	last := time.Now().Add(-time.Minute)
+	parked := &database.Job{ID: "p", Platform: "youtube", Status: database.StatusCookies, ParkReason: database.ParkReasonAuth, Title: "P"}
+	member := &database.Job{ID: "p", Platform: "youtube", Status: database.StatusCookies, ParkReason: database.ParkReasonMembership, Title: "M"}
+	used := func(n int) jobstate.AdmissionHolds {
+		return jobstate.AdmissionHolds{CookieRetries: map[string]jobstate.CookieRetry{"p": {Count: n, Of: 3, Last: last}}}
+	}
+	cookiesLine := func(a *App) string {
+		for _, r := range a.details.rows {
+			if r.kind == rowField && r.label == "Cookies" {
+				return r.value
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		name  string
+		holds jobstate.AdmissionHolds
+		job   *database.Job
+		tag   string
+		line  string
+	}{
+		{"none used", jobstate.AdmissionHolds{}, parked, "", ""},
+		{"two used", used(2), parked, "⟳ 2/3 ", "Cookie retry 2 of 3 used"},
+		{"all used", used(3), parked, "⟳ 3/3 ", "Cookie retries used up (3 of 3): no more automatic retries"},
+		{"membership park", used(2), member, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewApp()
+			a.Update(AdmissionHoldsMsg{Holds: tc.holds})
+			if text, _ := a.taskList.progressCellText(tc.job); text != tc.tag {
+				t.Errorf("row tag = %q, want %q", text, tc.tag)
+			}
+			a.details.SetSize(120, 40)
+			a.details.SetJob(tc.job)
+			if got := cookiesLine(a); got != tc.line {
+				t.Errorf("details Cookies = %q, want %q", got, tc.line)
+			}
+		})
+	}
+
+	a := NewApp()
+	a.details.SetSize(120, 40)
+	a.details.SetJob(parked)
+	a.Update(AdmissionHoldsMsg{Holds: used(1)})
+	if got := cookiesLine(a); got != "Cookie retry 1 of 3 used" {
+		t.Errorf("the open details pane reads %q after a new snapshot, want the count", got)
+	}
+}
+
 // TestDiskIndicatorSaysHoldingWhileTheGateHolds: the backlog's disk gate
 // holds until usage is back under the recovery margin, so a reading that has
 // stepped down to "warn" still holds admission, and the bar says "holding"

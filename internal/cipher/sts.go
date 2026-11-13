@@ -44,7 +44,9 @@ func NewStsCache() *StsCache {
 // Uses the provided player cache to fetch the JS. Concurrent callers for the
 // same playerURL share a single underlying fetch+regex pass via the inflight
 // map — otherwise a first-call-after-boot burst on the same channel could
-// double-fetch the player and double-regex.
+// double-fetch the player and double-regex. The shared pass belongs to none
+// of them: a caller whose context ends leaves with that context's error, and
+// the others still get the pass's answer.
 func (sc *StsCache) GetSts(ctx context.Context, playerCache *PlayerCache, playerURL string) (string, error) {
 	key := CacheKey(playerURL)
 
@@ -63,42 +65,62 @@ func (sc *StsCache) GetSts(ctx context.Context, playerCache *PlayerCache, player
 		sc.mu.Unlock()
 		return sts, nil
 	}
-	if entry, ok := sc.inflight[key]; ok {
+	entry, ok := sc.inflight[key]
+	if !ok {
+		entry = &stsInflight{done: make(chan struct{})}
+		sc.inflight[key] = entry
+		// The fetch runs on its own goroutine, detached from the context of
+		// the caller that started it: the callers sharing it come from
+		// independent extractions, and a first caller cancelled mid-fetch
+		// used to hand its context.Canceled to every one of them, whose
+		// player requests then went out with no signatureTimestamp.
+		// PlayerCache.Fetch bounds the detached fetch (about 94s).
+		go sc.runInflight(context.WithoutCancel(ctx), entry, key, playerCache, playerURL)
+	}
+	sc.mu.Unlock()
+
+	// Every caller, the one that started the fetch included, leaves on its
+	// own context.
+	select {
+	case <-entry.done:
+		return entry.sts, entry.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// runInflight fetches and extracts one player's STS for every caller waiting
+// on entry, stores a success in the cache, and closes entry.done. ctx is
+// never cancelled (GetSts detaches it).
+func (sc *StsCache) runInflight(ctx context.Context, entry *stsInflight, key string, playerCache *PlayerCache, playerURL string) {
+	var sts string
+	var err error
+	defer func() {
+		if r := recover(); r != nil {
+			sts, err = "", fmt.Errorf("fetch player for STS: panic: %v", r)
+		}
+		sc.mu.Lock()
+		delete(sc.inflight, key)
+		if err == nil {
+			if _, exists := sc.cache[key]; !exists && len(sc.cache) >= stsCacheSize {
+				// Evict the oldest entry (first in insertion order).
+				evictKey := sc.order[0]
+				sc.order = sc.order[1:]
+				delete(sc.cache, evictKey)
+			}
+			if _, exists := sc.cache[key]; !exists {
+				sc.order = append(sc.order, key)
+			}
+			sc.cache[key] = sts
+		}
 		sc.mu.Unlock()
-		select {
-		case <-entry.done:
-			return entry.sts, entry.err
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-	entry := &stsInflight{done: make(chan struct{})}
-	sc.inflight[key] = entry
-	sc.mu.Unlock()
 
-	// Fetch + extract outside the lock so other cache hits aren't blocked.
-	sts, err := sc.fetchAndExtract(ctx, playerCache, playerURL)
-
-	sc.mu.Lock()
-	delete(sc.inflight, key)
-	if err == nil {
-		if _, exists := sc.cache[key]; !exists && len(sc.cache) >= stsCacheSize {
-			// Evict the oldest entry (first in insertion order).
-			evictKey := sc.order[0]
-			sc.order = sc.order[1:]
-			delete(sc.cache, evictKey)
-		}
-		if _, exists := sc.cache[key]; !exists {
-			sc.order = append(sc.order, key)
-		}
-		sc.cache[key] = sts
-	}
-	sc.mu.Unlock()
-
-	entry.sts = sts
-	entry.err = err
-	close(entry.done)
-	return sts, err
+		entry.sts = sts
+		entry.err = err
+		close(entry.done)
+	}()
+	// Outside the lock, so other cache hits aren't blocked.
+	sts, err = sc.fetchAndExtract(ctx, playerCache, playerURL)
 }
 
 // fetchAndExtract runs the cache miss path: download (via PlayerCache) +

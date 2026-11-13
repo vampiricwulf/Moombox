@@ -1,7 +1,6 @@
 package youtube
 
 import (
-	"os"
 	"testing"
 )
 
@@ -130,19 +129,5 @@ func TestGvsBindVideoIDRegex(t *testing.T) {
 		if got := gvsBindVideoIDRegex.MatchString(in); got != want {
 			t.Errorf("MatchString(%q) = %v, want %v", in, got, want)
 		}
-	}
-}
-
-// TestGvsBindVideoIDAgainstLivePage runs the detector over a real watch page
-// when one has been captured, so the escaping assumption above is checked
-// against YouTube rather than against our own fixture. Skips when absent.
-func TestGvsBindVideoIDAgainstLivePage(t *testing.T) {
-	const fixture = `C:\Users\Wulf\AppData\Local\Temp\claude\D--Git-Moombox\90a4e150-ec10-4219-bd59-c233e8508d1b\scratchpad\yt_page.html`
-	b, err := os.ReadFile(fixture)
-	if err != nil {
-		t.Skip("no captured watch page available")
-	}
-	if !gvsBindVideoIDRegex.MatchString(string(b)) {
-		t.Error("live page carries html5_generate_content_po_token=true but the detector missed it")
 	}
 }

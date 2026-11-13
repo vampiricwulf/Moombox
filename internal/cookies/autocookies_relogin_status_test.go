@@ -435,3 +435,31 @@ func TestRollbackHedgeNamesEachPlatformWhenTheyDisagree(t *testing.T) {
 		t.Errorf("LastError = %q, want %q", *status.LastError, want)
 	}
 }
+
+// OnReloginChange is what tells an open dashboard to read its status again,
+// so it must fire for every change of a flag and for nothing else: a write
+// that leaves the flags as they were would cost every tab a status read.
+//
+// Mutants: announceRelogin never calling the hook; calling it on every write.
+func TestOnReloginChangeFiresOnlyWhenAFlagChanges(t *testing.T) {
+	withFreshBrowserDetectCache(t)
+	stubDetectors(t, nil, []DetectedBrowser{})
+
+	s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
+	calls := 0
+	s.OnReloginChange = func() {
+		calls++
+		s.ReloginStatus() // the hook runs with no lock held: a listener may read
+	}
+	step := func(what string, do func(), want int) {
+		t.Helper()
+		do()
+		if calls != want {
+			t.Fatalf("after %s: %d announcements, want %d", what, calls, want)
+		}
+	}
+	step("raising youtube", func() { s.FlagManualRelogin("youtube") }, 1)
+	step("raising youtube again", func() { s.FlagManualRelogin("youtube") }, 1)
+	step("lowering twitch, which was not raised", func() { s.ClearManualRelogin("twitch") }, 1)
+	step("lowering youtube", func() { s.ClearManualRelogin("youtube") }, 2)
+}

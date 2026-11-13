@@ -1,0 +1,511 @@
+package tui
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
+)
+
+// A text input shared by the bare and the normal form of an overlay is laid
+// out again whenever the form changes, and whenever the bare width does. The
+// input itself only does that on the next edit, and only when the cursor has
+// left its window, so a value entered at one width used to keep that width's
+// window at the next.
+
+// relayLong is a value longer than any normal input draws.
+var relayLong = "https://www.youtube.com/watch?v=" + strings.Repeat("abcdefghij", 10)
+
+// relayCursorCell reports whether the focused input's cursor cell (the one
+// reverse-video cell of the frame) is on screen.
+func relayCursorCell(frame string) bool {
+	return strings.Contains(frame, "\x1b[7m") || strings.Contains(frame, "\x1b[7;")
+}
+
+// relayTo sends the sizes one after the other, drawing a frame at each as the
+// program would.
+func relayTo(a *App, sizes ...[2]int) {
+	for _, s := range sizes {
+		a.Update(tea.WindowSizeMsg{Width: s[0], Height: s[1]})
+		_ = a.View()
+	}
+}
+
+// relayCase is one overlay with a shared input: how it is opened, and how
+// the long value gets into the input.
+type relayCase struct {
+	name string
+	open func(t *testing.T, r *compactRig)
+}
+
+var relayCases = []relayCase{
+	{"add video", func(t *testing.T, r *compactRig) { r.press("a", "a") }},
+	{"cookie import", func(t *testing.T, r *compactRig) { r.press("e", "i") }},
+	{"job log search", func(t *testing.T, r *compactRig) {
+		r.press("o", "l")
+		if !r.app.jobLog.IsVisible() {
+			t.Fatalf("O L did not open the Job Log: %q", r.app.feedback.msg)
+		}
+		r.press("/")
+	}},
+	{"settings field", func(t *testing.T, r *compactRig) {
+		r.press("`")
+		toSection(t, r.app.settings, "Downloader")
+		toField(t, r.app.settings, "output_template")
+	}},
+}
+
+// TestSharedInputIsLaidOutAgainAcrossForms: a long value entered at any
+// size, with the cursor at its end or back inside it, draws at 60x20 and at
+// 120x40 exactly as it does in a terminal that was never any other size.
+func TestSharedInputIsLaidOutAgainAcrossForms(t *testing.T) {
+	for _, c := range relayCases {
+		for _, back := range []int{0, 5, 40} {
+			for _, normal := range [][2]int{{60, 20}, {120, 40}} {
+				enter := func(r *compactRig) {
+					c.open(t, r)
+					_ = r.app.View() // the program draws before the first key arrives
+					typeIntoApp(r.app, relayLong)
+					for range back {
+						r.press("left")
+					}
+					_ = r.app.View()
+				}
+				never := newRelayRig(t, normal[0], normal[1])
+				enter(never)
+				want := never.app.View().Content
+				if rows := strings.Count(want, "\n") + 1; rows != normal[1] {
+					t.Fatalf("%s: the never-compact frame is %d rows", c.name, rows)
+				}
+				for _, start := range [][2]int{{40, 10}, {200, 8}, {30, 6}, {30, 50}} {
+					what := fmt.Sprintf("%s, cursor back %d, entered at %dx%d, grown to %dx%d", c.name, back, start[0], start[1], normal[0], normal[1])
+					r := newRelayRig(t, start[0], start[1])
+					enter(r)
+					wantExact(t, what+" (before growing)", r.app.View().Content, start[0], start[1])
+					if !relayCursorCell(r.app.View().Content) {
+						t.Errorf("%s: no cursor cell in the bare frame:\n%s", what, plainFrame(r.app))
+					}
+					relayTo(r.app, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s:\n%s\nnever compact:\n%s", what, ansi.Strip(got), ansi.Strip(want))
+					}
+					// Through a bare size, a size too small for anything, and back.
+					relayTo(r.app, [2]int{40, 10}, [2]int{20, 5}, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s, then through 20x5:\n%s\nnever compact:\n%s", what, ansi.Strip(got), ansi.Strip(want))
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestSharedInputIsUntouchedByAShrinkAndBack: a long value typed at a normal
+// size, the cursor moved anywhere in it, the terminal shrunk and grown back
+// with nothing typed while it was small: the normal frame is the frame of a
+// terminal that was never any other size. A window the input scrolled to at
+// the normal width is not a window a fresh layout gives, so the bare form
+// must leave the input alone.
+func TestSharedInputIsUntouchedByAShrinkAndBack(t *testing.T) {
+	moves := map[string][]string{
+		"at the end":       nil,
+		"home, two right":  {"home", "right", "right"},
+		"forty back":       repeatKey("left", 40),
+		"a hundred back":   repeatKey("left", 100),
+		"home, then ahead": append([]string{"home"}, repeatKey("right", 70)...),
+	}
+	for _, c := range relayCases {
+		for name, keys := range moves {
+			for _, normal := range [][2]int{{60, 20}, {80, 24}, {120, 40}} {
+				r := newRelayRig(t, normal[0], normal[1])
+				c.open(t, r)
+				_ = r.app.View()
+				typeIntoApp(r.app, relayLong)
+				r.press(keys...)
+				want := r.app.View().Content
+				for _, small := range [][][2]int{{{40, 10}}, {{30, 6}}, {{200, 8}}, {{20, 5}}, {{40, 10}, {20, 5}, {30, 50}}} {
+					relayTo(r.app, small...)
+					relayTo(r.app, normal)
+					if got := r.app.View().Content; got != want {
+						t.Errorf("%s, cursor %s, %dx%d through %v and back:\n%s\nnever shrunk:\n%s", c.name, name, normal[0], normal[1], small, ansi.Strip(got), ansi.Strip(want))
+					}
+				}
+			}
+		}
+	}
+}
+
+// repeatKey is key, n times.
+func repeatKey(key string, n int) []string {
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = key
+	}
+	return keys
+}
+
+// relayDistinct is a long value in which every run of ten characters is
+// found once, so a frame that shows the ten before the cursor shows that
+// place in the value and no other.
+var relayDistinct = func() string {
+	var b strings.Builder
+	for i := 100; b.Len() < 132; i++ {
+		fmt.Fprintf(&b, "%d", i)
+	}
+	return b.String()
+}()
+
+// TestSharedInputKeepsItsCursorOnScreenAfterAShrink: a long value entered at
+// a normal size, the terminal then shrunk: the bare frame is whole, its
+// cursor cell is on screen wherever in the value the cursor is, and the row
+// of the cursor shows the ten characters typed before it.
+func TestSharedInputKeepsItsCursorOnScreenAfterAShrink(t *testing.T) {
+	for _, c := range relayCases {
+		for _, back := range []int{0, 20, 60, 100} {
+			r := newRelayRig(t, 120, 40)
+			c.open(t, r)
+			_ = r.app.View() // the program draws before the first key arrives
+			typeIntoApp(r.app, relayDistinct)
+			for range back {
+				r.press("left")
+			}
+			_ = r.app.View()
+			end := len(relayDistinct) - back
+			before := relayDistinct[end-10 : end]
+			if strings.Count(relayDistinct, before) != 1 {
+				t.Fatalf("premise lost: %q is not found once in the value", before)
+			}
+			for _, s := range [][2]int{{59, 19}, {200, 8}, {30, 6}, {40, 10}, {30, 50}} {
+				relayTo(r.app, s)
+				what := fmt.Sprintf("%s, cursor back %d, shrunk to %dx%d", c.name, back, s[0], s[1])
+				frame := r.app.View().Content
+				wantExact(t, what, frame, s[0], s[1])
+				row := ""
+				for _, line := range strings.Split(frame, "\n") {
+					if relayCursorCell(line) {
+						row = ansi.Strip(line)
+					}
+				}
+				if !strings.Contains(row, before) {
+					t.Errorf("%s: the cursor's row %q does not show %q, the ten characters before the cursor:\n%s", what, row, before, ansi.Strip(frame))
+				}
+			}
+		}
+	}
+}
+
+// newRelayRig is a compact rig with a job selected, so O L opens.
+func newRelayRig(t *testing.T, w, h int) *compactRig {
+	t.Helper()
+	r := newCompactRig(t, w, h)
+	r.app.OnGetJobLogs = func(string) []string { return bareLogLines(57) }
+	r.selectJob(t, "done")
+	return r
+}
+
+// An error too long for the rows under a list's cursor row takes the keys
+// row and then the title before any of it is cut (owner ruling R-C11), and
+// stays in one block under the cursor's row.
+func TestBareListErrorsTakeTheKeysAndTheTitle(t *testing.T) {
+	// 113 cells: four rows at 30 columns, one more than the body has under
+	// the cursor's row at 30x6, so it needs the keys row and nothing else.
+	const failure = "Delete failed: remove title.mkv: the file is in use by another process, close the player and try once more"
+	whole := func(what string, rows []string, from int) {
+		t.Helper()
+		if got := strings.Join(strings.Fields(strings.Join(rows[from:], " ")), " "); got != failure {
+			t.Errorf("%s: the error on screen is %q, want it whole:\n%s", what, got, strings.Join(rows, "\n"))
+		}
+	}
+
+	files := bareFiles(30, 6)
+	files.HandleKey(namedKey("down"))
+	files.SetActionError(failure)
+	wantExact(t, "orphans, an error at 30x6", files.View(), 30, 6)
+	rows := plainRows(files.View())
+	if rows[0] != "Orphans: 3 files, 2 history" || !strings.HasPrefix(rows[1], ">") {
+		t.Errorf("orphans: the title or the cursor's row moved:\n%s", strings.Join(rows, "\n"))
+	}
+	whole("orphans", rows, 2)
+
+	trim := bareTrim(30, 6, "delete error")
+	trim.SetError(failure)
+	wantExact(t, "trim delete, an error at 30x6", trim.View(), 30, 6)
+	rows = plainRows(trim.View())
+	if !strings.HasPrefix(rows[0], "Delete trim") || !strings.HasPrefix(rows[1], "> 1:05:00-2:06:00") {
+		t.Errorf("trim: the title or the selected trim moved:\n%s", strings.Join(rows, "\n"))
+	}
+	whole("trim", rows, 2)
+
+	// Nothing listed and a load error longer than the body: it takes the
+	// keys row and the title too.
+	empty := NewFilesDialogModel()
+	empty.SetSize(30, 6)
+	empty.Open()
+	empty.SetFiles(nil)
+	empty.SetHistory(nil)
+	empty.SetFilesError(strings.Repeat("the scan failed and failed ", 3) + "end")
+	wantExact(t, "orphans, a load error at 30x6", empty.View(), 30, 6)
+	if got := ansi.Strip(empty.View()); !strings.Contains(got, "end") {
+		t.Errorf("the load error is cut while rows are left:\n%s", got)
+	}
+}
+
+// An action error that arrives while a delete is armed is shown, and the
+// armed confirm moves to the keys row: neither hides the other.
+func TestBareOrphansErrorDoesNotHideBehindAnArmedConfirm(t *testing.T) {
+	m := bareFiles(40, 10)
+	m.HandleKey(keyMsg("d"))
+	if m.bareConfirm() == "" {
+		t.Fatal("premise lost: D did not arm")
+	}
+	m.SetActionError("Delete failed: access denied")
+	wantExact(t, "armed with an error", m.View(), 40, 10)
+	rows := plainRows(m.View())
+	if !strings.Contains(strings.Join(rows, "\n"), "Delete failed: access denied") || !strings.HasPrefix(rows[9], "D again: delete") {
+		t.Errorf("armed with an error:\n%s", strings.Join(rows, "\n"))
+	}
+}
+
+// The cookie import's failure is whole wherever the screen has the cells
+// for it: no row is held back for a heading, and the keys row and the title
+// give way before any of it is cut (owner ruling R-C11).
+func TestBareCookieImportFailureIsWhole(t *testing.T) {
+	flat := func(m *CookieImportDialogModel) string {
+		return strings.Join(strings.Fields(ansi.Strip(m.View())), " ")
+	}
+	for _, c := range []struct {
+		err  error
+		w, h int
+	}{
+		{cookies.ErrImportNoCredential, 30, 6},
+		{cookies.ErrImportNotNetscape, 59, 6},
+		{cookies.ErrImportNotNetscape, 40, 8},
+		{cookies.ErrImportNoCredential, 40, 10},
+	} {
+		m := bareCookie(c.w, c.h)
+		m.SetResult(cookies.ImportResult{}, c.err)
+		wantExact(t, fmt.Sprintf("the failure at %dx%d", c.w, c.h), m.View(), c.w, c.h)
+		if got := flat(m); !strings.Contains(got, c.err.Error()) {
+			t.Errorf("%dx%d: the failure is not whole:\n%s", c.w, c.h, ansi.Strip(m.View()))
+		}
+	}
+	// With room to spare the title and the keys stay.
+	m := bareCookie(40, 10)
+	m.SetResult(cookies.ImportResult{}, cookies.ErrImportNoCredential)
+	rows := plainRows(m.View())
+	if rows[0] != "Cookie import" || rows[9] != "Enter/Esc close" || !strings.HasPrefix(rows[1], "Import failed: ") {
+		t.Errorf("the failure at 40x10:\n%s", strings.Join(rows, "\n"))
+	}
+	// Longer than the screen: every row is the error's, and it ends in an
+	// ellipsis.
+	m = bareCookie(30, 6)
+	m.SetResult(cookies.ImportResult{}, errors.New(strings.Repeat("open /home/name/cookies.txt failed ", 6)))
+	wantExact(t, "a failure longer than the screen", m.View(), 30, 6)
+	rows = plainRows(m.View())
+	if !strings.HasPrefix(rows[0], "open /home") || !strings.HasSuffix(rows[5], "…") {
+		t.Errorf("a failure longer than the screen:\n%s", strings.Join(rows, "\n"))
+	}
+}
+
+// The refusal of a confirm that does not fit names the size for the terminal
+// as it is now, not as it was when Enter was pressed, and is gone once the
+// summary fits.
+func TestBareMenuRefusalFollowsTheSize(t *testing.T) {
+	r := bareMenuApp(t, 30, 6)
+	a := r.app
+	menuTo(t, r, "A I")
+	r.press("enter", "enter")
+	if a.actionMenu.jobConfirm || !strings.Contains(plainFrame(a), "Enlarge the terminal to 30x9") {
+		t.Fatalf("premise lost: no refusal at 30x6:\n%s", plainFrame(a))
+	}
+	// Wider, the summary wraps to fewer rows: the size named follows.
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 6})
+	wantExact(t, "the refusal at 40x6", a.View().Content, 40, 6)
+	got := plainFrame(a)
+	if strings.Contains(got, "30x9") {
+		t.Errorf("the refusal still names the size for 30 columns:\n%s", got)
+	}
+	if want := a.actionMenu.bareConfirmRefusal(); a.actionMenu.bareConfirmFits() || !strings.Contains(strings.Join(strings.Fields(got), " "), want) {
+		t.Errorf("the refusal at 40x6 is not %q:\n%s", want, got)
+	}
+	// Tall enough for the summary: nothing is refused any more.
+	a.Update(tea.WindowSizeMsg{Width: 59, Height: 12})
+	if got := plainFrame(a); strings.Contains(got, "Enlarge") {
+		t.Errorf("a refusal for a summary that now fits:\n%s", got)
+	}
+}
+
+// relayLongFolder is a folder of n archives whose names share a long prefix
+// and differ in their last cells.
+func relayLongFolder(t *testing.T, n int) string {
+	t.Helper()
+	dir := t.TempDir()
+	for i := range n {
+		name := fmt.Sprintf("hololive-karaoke-with-a-long-shared-prefix-2026-11-%02d.zip", i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("PK"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// The archive picker after a shrink and back is the picker of a terminal
+// that was never smaller, with the cursor low in a folder longer than the
+// picker: the window is laid out from the top of the folder again.
+func TestBareImportPickerRoundTripInALongFolder(t *testing.T) {
+	dir := relayLongFolder(t, 40)
+	for _, downs := range []int{0, 5, 25, 39} {
+		open := func() *ImportDialogModel {
+			m := bareImport(t, 60, 20, dir, "pick")
+			for range downs {
+				m.UpdateComponents(namedKey("down"))
+			}
+			return m
+		}
+		want := open().View()
+		m := open()
+		for _, s := range [][2]int{{30, 6}, {200, 8}, {30, 50}, {40, 10}} {
+			m.SetSize(s[0], s[1])
+			wantExact(t, fmt.Sprintf("%d down, shrunk to %dx%d", downs, s[0], s[1]), m.View(), s[0], s[1])
+		}
+		m.SetSize(60, 20)
+		if got := m.View(); got != want {
+			t.Errorf("%d down: the 60x20 picker changed across a shrink:\n%s\nnever shrunk:\n%s", downs, ansi.Strip(got), ansi.Strip(want))
+		}
+		// Through a size too small to draw anything, too.
+		m.SetSize(30, 6)
+		m.SetSize(20, 5)
+		m.SetSize(60, 20)
+		if got := m.View(); got != want {
+			t.Errorf("%d down: the 60x20 picker changed across 20x5:\n%s\nnever shrunk:\n%s", downs, ansi.Strip(got), ansi.Strip(want))
+		}
+	}
+}
+
+// Two archives whose names differ only at their end are different rows of
+// the bare picker: a long name is cut in its middle, never at its end.
+func TestBareImportPickerRowsKeepTheirEnd(t *testing.T) {
+	dir := relayLongFolder(t, 3)
+	for _, s := range [][2]int{{30, 6}, {40, 10}} {
+		m := bareImport(t, s[0], s[1], dir, "pick")
+		wantExact(t, fmt.Sprintf("the picker at %dx%d", s[0], s[1]), m.View(), s[0], s[1])
+		rows := plainRows(m.View())
+		if rows[1] == rows[2] || !strings.HasSuffix(rows[1], "-01.zip") || !strings.HasSuffix(rows[2], "-02.zip") || !strings.HasPrefix(rows[1], "> holo") {
+			t.Errorf("%dx%d: two archives look the same:\n%s", s[0], s[1], strings.Join(rows, "\n"))
+		}
+	}
+}
+
+// The chapter import's editing step: a single row left for several chapters
+// is not spent on "and n more" with no chapter above it, and the offset's
+// placeholder is whole at the floor.
+func TestBareChapterEditWording(t *testing.T) {
+	if got := NewChapterImportDialogModel().offset.Placeholder; got != chapterOffsetPlaceholder {
+		t.Fatalf("the normal offset placeholder is %q, the bare form restores %q", got, chapterOffsetPlaceholder)
+	}
+	compactSizes(func(w, h int) {
+		if h < 10 {
+			return
+		}
+		for _, state := range []string{"edit", "worst"} {
+			m := bareChapters(w, h, 12, state)
+			rows := plainRows(m.View())
+			for i, row := range rows {
+				if strings.Contains(row, "more") && strings.Contains(row, "…") && i > 0 && !strings.Contains(rows[i-1], ":") {
+					t.Errorf("%dx%d, %s: a \"more\" row with no chapter above it:\n%s", w, h, state, strings.Join(rows, "\n"))
+				}
+			}
+		}
+	})
+	m := bareChapters(30, 10, 12, "reading")
+	if got := ansi.Strip(m.View()); !strings.Contains(got, "Offset: "+bareChapterOffsetPlaceholder) {
+		t.Errorf("the offset placeholder at 30 columns:\n%s", got)
+	}
+	m.SetSize(60, 20)
+	if m.offset.Placeholder != chapterOffsetPlaceholder {
+		t.Errorf("the normal form got the placeholder %q back", m.offset.Placeholder)
+	}
+}
+
+// relayChapterLines is n chapter lines, one a row of the paste box.
+func relayChapterLines(n int) string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("%d:00 Chapter %d", i, i+1)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// The Import Chapters paste box after a shrink and back, with nothing typed
+// while the terminal was small, is the box of a terminal that was never
+// smaller: the bare form's two rows (and the three of a size too small for
+// anything) scroll the box to its cursor, and the taller box used to keep
+// that scroll, its first lines hidden above blank rows.
+func TestChapterPasteBoxIsUntouchedByAShrinkAndBack(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		lines int
+		keys  []string
+	}{
+		{"four lines, cursor at the end", 4, nil},
+		{"four lines, cursor on the first", 4, repeatKey("up", 3)},
+		{"twenty lines, cursor at the end", 20, nil},
+		{"twenty lines, three up", 20, repeatKey("up", 3)},
+		{"twenty lines, fifteen up", 20, repeatKey("up", 15)},
+		{"twenty lines, up to the top and six down", 20, append(repeatKey("up", 19), repeatKey("down", 6)...)},
+	} {
+		for _, normal := range [][2]int{{80, 24}, {60, 20}, {120, 40}} {
+			r := newRelayRig(t, normal[0], normal[1])
+			r.press("a", "c")
+			if !r.app.chapterDlg.IsVisible() {
+				t.Fatalf("A C did not open the chapter import: %q", r.app.feedback.msg)
+			}
+			_ = r.app.View()
+			typeIntoApp(r.app, relayChapterLines(c.lines))
+			r.press(c.keys...)
+			want := r.app.View().Content
+			if c.lines == 4 && !strings.Contains(ansi.Strip(want), "0:00 Chapter 1") {
+				t.Fatalf("premise lost: the first line is not in the never-shrunk box:\n%s", ansi.Strip(want))
+			}
+			for _, small := range [][][2]int{{{40, 12}}, {{30, 6}}, {{200, 8}}, {{20, 5}}, {{40, 12}, {20, 5}, {30, 50}}} {
+				relayTo(r.app, small...)
+				relayTo(r.app, normal)
+				if got := r.app.View().Content; got != want {
+					t.Errorf("%s, %dx%d through %v and back:\n%s\nnever shrunk:\n%s", c.name, normal[0], normal[1], small, ansi.Strip(got), ansi.Strip(want))
+				}
+			}
+		}
+	}
+}
+
+// A paste box written while the terminal was small is laid out from its top
+// when the terminal grows: every line of a paste that fits the box is shown.
+func TestChapterPasteBoxWrittenWhileSmallStartsAtItsTop(t *testing.T) {
+	for _, start := range [][2]int{{40, 12}, {30, 10}, {200, 10}} {
+		r := newRelayRig(t, start[0], start[1])
+		r.press("a", "c")
+		if !r.app.chapterDlg.IsVisible() {
+			t.Fatalf("A C did not open the chapter import at %dx%d: %q", start[0], start[1], r.app.feedback.msg)
+		}
+		_ = r.app.View()
+		typeIntoApp(r.app, relayChapterLines(4))
+		wantExact(t, fmt.Sprintf("typed at %dx%d", start[0], start[1]), r.app.View().Content, start[0], start[1])
+		relayTo(r.app, [2]int{80, 24})
+		got := ansi.Strip(r.app.View().Content)
+		for i := range 4 {
+			if line := fmt.Sprintf("%d:00 Chapter %d", i, i+1); !strings.Contains(got, line) {
+				t.Errorf("typed at %dx%d, grown to 80x24: %q is not in the box:\n%s", start[0], start[1], line, got)
+			}
+		}
+		if r.app.chapterDlg.text.Line() != 3 {
+			t.Errorf("the cursor moved to line %d", r.app.chapterDlg.text.Line())
+		}
+	}
+}

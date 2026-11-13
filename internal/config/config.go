@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"math"
@@ -217,6 +219,7 @@ func Defaults() *MoomboxConfig {
 			DownloadChat:                true,
 			Prefer60fps:                 true,
 			PreferHDR:                   true,
+			KeepAwake:                   true,
 			MaximumTimeout:              600,
 			InterruptionTimeout:         FlexDuration{Value: 120}, // minutes
 			IncompleteStagingExpiryDays: FlexDuration{Value: 7},   // days
@@ -257,6 +260,14 @@ func Defaults() *MoomboxConfig {
 	}
 }
 
+// statConfig is os.Stat; a test replaces it to produce a Stat failure the host
+// cannot be made to give portably. configWarnings is where the search reports
+// a candidate it skipped.
+var (
+	statConfig               = os.Stat
+	configWarnings io.Writer = os.Stderr
+)
+
 // Load reads configuration from a TOML file.
 //
 // An explicit customPath (the -config flag) is AUTHORITATIVE: it is the only
@@ -272,10 +283,21 @@ func Defaults() *MoomboxConfig {
 // The file that answers is recorded in cfg.LoadedFrom — callers must save back
 // to it rather than to the path they asked for (see the field's doc). When no
 // file is found, LoadedFrom is "" and the caller's own path stays the target.
+//
+// "Does not exist" is the only Stat failure read as "no config here". A named
+// path that fails any other way (access denied, an I/O error, a device that
+// is not ready) is an error: booting on defaults there would show a first-run
+// install over an existing one. In the search, such a candidate is skipped
+// with a warning on stderr, so an unreadable ~/.config cannot stop an install
+// in the working directory from booting.
 func Load(customPath string) (*MoomboxConfig, error) {
 	if customPath != "" {
-		if _, err := os.Stat(customPath); err == nil {
+		_, err := statConfig(customPath)
+		if err == nil {
 			return loadFromFile(customPath)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("config %s cannot be read: %w", customPath, err)
 		}
 		// Named but absent — the caller's path stays the save target
 		// (storePathFor in cmd/moombox/helpers.go keeps it when LoadedFrom
@@ -303,8 +325,12 @@ func Load(customPath string) (*MoomboxConfig, error) {
 	}
 
 	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
+		_, err := statConfig(p)
+		if err == nil {
 			return loadFromFile(p)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(configWarnings, "warning: skipping config %s: %v\n", p, err)
 		}
 	}
 
@@ -326,7 +352,8 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 
 	cfg := Defaults()
-	if _, err := toml.Decode(string(data), cfg); err != nil {
+	md, err := toml.Decode(string(data), cfg)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse config %s: %w", path, err)
 	}
 
@@ -359,6 +386,7 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 
 	cfg.IgnoredOnLoad = retiredKeysIn(raw)
+	cfg.UnknownOnLoad = unknownKeysIn(md.Undecoded())
 
 	cfg.ConfigLoaded = true
 	cfg.LoadedFrom = path
@@ -392,6 +420,65 @@ func retiredKeysIn(raw map[string]any) []string {
 				found = append(found, section+"."+key)
 			}
 		}
+	}
+	return found
+}
+
+// legacyKeys are the keys an older build wrote to config.toml that the struct
+// decode does not take and that are not mistakes: the ones migrateOldFormat
+// reads from the raw map (the flat top-level keys, [tasklist], [auto_cookies],
+// the [downloader] keys that moved), the ones dropped from the struct without
+// a migration, and retiredKeys, which are reported on their own list. They are
+// never "unknown". A key migrateOldFormat starts reading, and a key removed
+// from the struct after a release carried it, must be added here;
+// TestLegacyKeysAreNotReportedUnknown holds every one of them.
+var legacyKeys = func() map[string]bool {
+	keys := map[string]bool{}
+	for _, k := range []string{
+		"allow_lan", "allow_external",
+		"port", "network_access", "https_enabled", "tls_cert_path", "tls_key_path", "password_hash",
+		"log_level", "log_file_path", "log_max_file_size", "log_max_files", "database_path",
+		"feed_check_interval", "decapi_check_interval", "twitch_check_interval", "hide_finished_age_days",
+		"tasklist", "tasklist.hide_finished_age_days",
+		"downloader.output_directory", "downloader.staging_directory", "downloader.ffmpeg_path", "downloader.cookie_file",
+		"auto_cookies", "auto_cookies.enabled", "auto_cookies.browser_profile_dir", "auto_cookies.refresh_interval", "auto_cookies.platforms",
+		// Dropped from the struct, no migration: nothing reads them.
+		"monitors.max_feed_items", "channels.max_feed_items",
+		"downloader.pot_provider_url", "downloader.segment_retry_delay_cap", "downloader.segment_live_check_retries",
+		"notifications.tags",
+	} {
+		keys[k] = true
+	}
+	for section, names := range retiredKeys {
+		for _, name := range names {
+			keys[section+"."+name] = true
+		}
+	}
+	return keys
+}()
+
+// unknownKeysIn returns the keys of a config file that nothing reads: the ones
+// the struct decode left undecoded (a misspelt key or section, a key under the
+// wrong section), less legacyKeys. Each is named once, in file order, and an
+// unknown section is named without the keys under it. Keys inside a value that
+// decodes itself (a FlexDuration or ChannelTerms table) are never undecoded:
+// the TOML library marks everything under an Unmarshaler as decoded.
+func unknownKeysIn(undecoded []toml.Key) []string {
+	var found []string
+	seen := map[string]bool{}
+next:
+	for _, key := range undecoded {
+		name := key.String()
+		if legacyKeys[name] || seen[name] {
+			continue
+		}
+		for i := 1; i < len(key); i++ {
+			if seen[key[:i].String()] {
+				continue next
+			}
+		}
+		seen[name] = true
+		found = append(found, name)
 	}
 	return found
 }
@@ -606,6 +693,27 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+// ValidChannelPlatform reports whether p is a channel platform the monitors
+// know, spelt as they compare it. Empty means YouTube. The one rule for
+// config.Validate, POST /api/config/channels and PUT /api/config's channels[]
+// check, so the file and the two web writers cannot disagree.
+func ValidChannelPlatform(p string) bool {
+	switch p {
+	case "", "youtube", "twitch":
+		return true
+	}
+	return false
+}
+
+// channelLabel names a channel in a validation message: its name, or its ID
+// when it has none.
+func channelLabel(ch *ChannelConfig) string {
+	if ch.Name != "" {
+		return ch.Name
+	}
+	return ch.ID
 }
 
 // Validate reports configuration issues without mutating cfg. Returns a
@@ -1125,12 +1233,38 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.ArchiveSlots = nil
 			}
 		}
+		// channels[].platform (owner ruling R2-M2). The monitors compare the
+		// string exactly, so a hand-written "Twitch" was polled as a YouTube
+		// channel, never by the Twitch monitor, and the block below then
+		// cleared its Twitch switches. A spelling that is right once trimmed
+		// and lower-cased is rewritten. Any other value is refused only while
+		// the channel is enabled, and Normalize disables that channel: its
+		// line, its platform string and its switches stay in the file, and the
+		// next save writes enabled = false beside them, so the message says to
+		// set enabled = true as well as correct the spelling. A disabled channel
+		// with an unknown platform is not reported, so Normalize leaves nothing
+		// Validate still refuses.
+		platform := strings.ToLower(strings.TrimSpace(ch.Platform))
+		knownPlatform := ValidChannelPlatform(platform)
+		if knownPlatform && platform != ch.Platform {
+			fail("channels[%d].platform %q must be written %q (channel %q)", i, ch.Platform, platform, channelLabel(ch))
+			if !reportOnly {
+				ch.Platform = platform
+			}
+		}
+		if !knownPlatform && ch.IsEnabled() {
+			fail("channels[%d].platform %q must be youtube or twitch: channel %q is loaded disabled; correct the platform and set enabled = true", i, ch.Platform, channelLabel(ch))
+			if !reportOnly {
+				off := false
+				ch.Enabled = &off
+			}
+		}
 		// The three Twitch-only switches (owner decision PR-I3): each acts
 		// only through the Twitch monitor or the Twitch gap-fill, so on any
 		// other channel it would sit in the file doing nothing while the
 		// settings list showed it on. The TUI's channel form already forces
 		// all three off off Twitch; the file and the API are refused alike.
-		if ch.GetPlatform() != "twitch" {
+		if knownPlatform && platform != "twitch" {
 			if ch.TwitchArchiveClips {
 				fail("channels[%d].twitch_archive_clips applies to Twitch channels only", i)
 				if !reportOnly {

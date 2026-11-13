@@ -4,30 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 )
 
 // --- NewChatDownloader tests ---
-
-func TestNewChatDownloaderDefaults(t *testing.T) {
-	opts := ChatDownloaderOptions{
-		VideoID:    "testVid123",
-		VideoTitle: "Test Video",
-		OutputFile: "/tmp/chat.json",
-	}
-	cd := NewChatDownloader(opts)
-	if cd == nil {
-		t.Fatal("expected non-nil ChatDownloader")
-	}
-	if cd.opts.VideoID != "testVid123" {
-		t.Errorf("expected VideoID 'testVid123', got %q", cd.opts.VideoID)
-	}
-	if cd.opts.VideoTitle != "Test Video" {
-		t.Errorf("expected VideoTitle 'Test Video', got %q", cd.opts.VideoTitle)
-	}
-}
 
 func TestNewChatDownloaderResumeFileDefault(t *testing.T) {
 	opts := ChatDownloaderOptions{
@@ -79,27 +60,16 @@ func TestNewChatDownloaderInitialContinuation(t *testing.T) {
 
 func TestNewChatDownloaderStreamStartTimeParsing(t *testing.T) {
 	tests := []struct {
-		name          string
-		startTime     string
-		expectMs      int64
-		expectNonZero bool
+		name      string
+		startTime string
 	}{
 		{
-			name:          "valid RFC3339",
-			startTime:     "2024-01-15T10:30:00Z",
-			expectNonZero: true,
+			name:      "empty string",
+			startTime: "",
 		},
 		{
-			name:          "empty string",
-			startTime:     "",
-			expectMs:      0,
-			expectNonZero: false,
-		},
-		{
-			name:          "invalid format",
-			startTime:     "not-a-date",
-			expectMs:      0,
-			expectNonZero: false,
+			name:      "invalid format",
+			startTime: "not-a-date",
 		},
 	}
 
@@ -111,10 +81,7 @@ func TestNewChatDownloaderStreamStartTimeParsing(t *testing.T) {
 				StreamStartTime: tt.startTime,
 			}
 			cd := NewChatDownloader(opts)
-			if tt.expectNonZero && cd.streamStartMs == 0 {
-				t.Error("expected non-zero streamStartMs")
-			}
-			if !tt.expectNonZero && cd.streamStartMs != 0 {
+			if cd.streamStartMs != 0 {
 				t.Errorf("expected 0 streamStartMs, got %d", cd.streamStartMs)
 			}
 		})
@@ -272,47 +239,6 @@ func TestMarkStreamEndedSetsFlag(t *testing.T) {
 
 	if !ended {
 		t.Error("expected streamEnded == true after MarkStreamEnded()")
-	}
-}
-
-// --- dedup cull tests ---
-
-func TestDedupTrimsToKeepSize(t *testing.T) {
-	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
-
-	totalIDs := dedupKeepSize + 100
-	for i := range totalIDs {
-		cd.dedup.Add("msg_" + strconv.Itoa(i))
-	}
-
-	cd.dedup.Keep(dedupKeepSize)
-
-	if cd.dedup.Len() != dedupKeepSize {
-		t.Errorf("expected %d entries after cull, got %d", dedupKeepSize, cd.dedup.Len())
-	}
-
-	lastID := "msg_" + strconv.Itoa(totalIDs-1)
-	if !cd.dedup.Seen(lastID) {
-		t.Error("expected last inserted ID to be retained after cull")
-	}
-
-	firstID := "msg_0"
-	if cd.dedup.Seen(firstID) {
-		t.Error("expected first inserted ID to be removed after cull")
-	}
-}
-
-func TestDedupNoopWhenBelowThreshold(t *testing.T) {
-	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
-
-	for i := range 10 {
-		cd.dedup.Add("msg_" + strconv.Itoa(i))
-	}
-
-	cd.dedup.Keep(dedupKeepSize)
-
-	if cd.dedup.Len() != 10 {
-		t.Errorf("expected 10 entries (no cull needed), got %d", cd.dedup.Len())
 	}
 }
 

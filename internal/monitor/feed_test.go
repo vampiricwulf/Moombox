@@ -229,12 +229,12 @@ func rssWith(items ...rssItem) RSSFetchFunc {
 }
 
 // rss404 returns an RSSFetchFunc that fails exactly like fetchFeed's non-200
-// path (see feed.go's fetchFeed: `fmt.Errorf("feed http %d", resp.StatusCode)`),
+// path (see feed.go's fetchFeed: `feedStatusError(resp.StatusCode)`),
 // so tests can exercise "an RSS failure never establishes" without a real
 // HTTP round trip.
 func rss404() RSSFetchFunc {
 	return func(ctx context.Context, ch *config.ChannelConfig) ([]byte, error) {
-		return nil, fmt.Errorf("feed http %d", http.StatusNotFound)
+		return nil, feedStatusError(http.StatusNotFound)
 	}
 }
 

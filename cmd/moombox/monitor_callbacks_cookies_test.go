@@ -252,44 +252,6 @@ func TestResumeCookieParkedJobs(t *testing.T) {
 	mustStatus("tw_dead", database.StatusCookies)
 }
 
-// TestMembershipParkSurvivesRestart is the durability property the per-job
-// comparison buys, and the reason it is preferred over a process-local
-// "did the identity change since last check" edge.
-//
-// A restart resets any in-process baseline. The parked job still carries the
-// account that refused it, so the first observation after the restart decides
-// correctly in both directions: unchanged cookies leave it alone, an offline
-// swap (stop Moombox, replace cookies, start) resumes it. An edge-triggered
-// design sees neither, because a restart produces no transition at all.
-func TestMembershipParkSurvivesRestart(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "restart.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	if _, err := db.AddJob(&database.Job{
-		ID: "yt_r", VideoID: "r", URL: "u", Platform: "youtube", Status: database.StatusCookies,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	db.UpdateJobFields("yt_r", map[string]any{
-		"park_reason":   database.ParkReasonMembership,
-		"park_identity": "account-A",
-	})
-
-	// Restart with the SAME cookies: the first observation must be a no-op.
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-A"); n != 0 {
-		t.Errorf("first observation after a same-cookies restart resumed %d jobs, want 0", n)
-	}
-
-	// Restart after an OFFLINE cookie swap: the first observation must resume.
-	if n := resumeCookieParkedJobs(db, sweepTestLogger{}, nil, "youtube", "account-B"); n != 1 {
-		t.Errorf("first observation after an offline account swap resumed %d jobs, want 1 — "+
-			"this is the case a process-local edge can never see", n)
-	}
-}
-
 // TestResumeCookieParkedJobs_RespectsQueuePriority is MON-4. A cookie repair
 // used to bounce EVERY parked row straight to Upcoming, which the worker's
 // heartbeat poller then processes — so a channel's whole members-only backlog

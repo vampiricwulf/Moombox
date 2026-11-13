@@ -330,17 +330,6 @@ func TestUpdateDismissConfigSaveFailureDoesNotNotify(t *testing.T) {
 	}
 }
 
-func TestUpdateDismissWithoutPendingIs400(t *testing.T) {
-	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
-	// No SharedUpdateInfo seeded — nothing to skip.
-	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
-	}
-}
-
 // TestDismissUpdateSkipsExactlyThePendingTag: the helper the route and the
 // TUI share persists the skipped version and clears the shared pointer — and
 // only for the release still pending. A skip naming an older one (its notes

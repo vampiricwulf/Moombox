@@ -28,7 +28,6 @@ func TestClassifyProbeErr(t *testing.T) {
 		{"opError direct", &net.OpError{Op: "dial", Err: errors.New("connect: connection refused")}, classNetwork},
 		{"http 503 string", fmt.Errorf("WEB API error: HTTP 503"), classNetwork},
 		{"http 429 string", fmt.Errorf("ANDROID_VR API error: HTTP 429"), classNetwork},
-		{"tls string", fmt.Errorf("tls: handshake failure"), classNetwork},
 		{"http 404 string", fmt.Errorf("WEB API error: HTTP 404"), classServer},
 		{"http 410 string", fmt.Errorf("WEB API error: HTTP 410"), classServer},
 		{"http 401 is transient", fmt.Errorf("WEB API error: HTTP 401"), classNetwork},

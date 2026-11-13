@@ -100,3 +100,136 @@ func TestHlsResumeSaveIsRateLimited(t *testing.T) {
 		t.Errorf("final sidecar LastSeq = %d, want %d — the deferred save must still record the true final position", got[len(got)-1], want)
 	}
 }
+
+// A playlist pass long enough to outlast the save floor writes the resume
+// sidecar inside the pass, not only at its end. A Twitch VOD that is still
+// recording has no ENDLIST and lists the whole broadcast so far in its first
+// playlist; the loop used to write all of it before the first save, so a crash
+// in that pass left staged media with no sidecar and the job had to start over.
+//
+// The floor is zero here, so every write is past it: each of the first pass's
+// segments is followed by a save.
+//
+// Mutant: the segment loop without its save — the first pass is saved once,
+// at its end.
+func TestHlsResumeSavedInsideALongPlaylistPass(t *testing.T) {
+	const first, backlog = 100, 8
+	var reloads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, _ *http.Request) {
+		var b strings.Builder
+		fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", first)
+		for seq := first; seq < first+backlog; seq++ {
+			fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", seq)
+		}
+		if reloads.Add(1) > 1 {
+			b.WriteString("#EXT-X-ENDLIST\n")
+		}
+		fmt.Fprint(w, b.String())
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "[%s]", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var mu sync.Mutex
+	var saved []int
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: filepath.Join(t.TempDir(), "video.ts"),
+		StartSeq:   first,
+		IsHls:      true,
+		StopOnGap:  true, // keeps the ENDLIST reload on this loop, as above
+	})
+	d.delays = fastDelays()
+	d.delays.hlsResumeSave = 0
+	d.delays.hlsReloadUnit = time.Millisecond
+	d.onResumeSaved = func(lastSeq int) {
+		mu.Lock()
+		saved = append(saved, lastSeq)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() = %v, want nil (EXT-X-ENDLIST finish)", err)
+	}
+
+	mu.Lock()
+	got := append([]int(nil), saved...)
+	mu.Unlock()
+	if len(got) < backlog {
+		t.Fatalf("sidecar written %d times (LastSeq %v) for a pass of %d segments, want one save per segment at a zero floor", len(got), got, backlog)
+	}
+	for i := range backlog {
+		if got[i] != got[0]+i {
+			t.Fatalf("saved positions %v, want the first %d to advance one segment at a time", got, backlog)
+		}
+	}
+}
+
+// A first pass shorter than the save floor is saved once, at its end: until
+// the first save the mid-pass save measures the floor from the loop's start,
+// not from a zero "never saved" time. Each live part starts a fresh loop, so
+// a save after its first segment would add a sidecar fsync to every part.
+//
+// Mutant: the mid-pass save reading the zero lastResumeSave directly — the
+// first save lands after the first segment, at first.
+func TestHlsResumeNotSavedInsideAPassShorterThanTheFloor(t *testing.T) {
+	const first, backlog = 100, 8
+	var reloads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/playlist.m3u8", func(w http.ResponseWriter, _ *http.Request) {
+		var b strings.Builder
+		fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:%d\n", first)
+		for seq := first; seq < first+backlog; seq++ {
+			fmt.Fprintf(&b, "#EXTINF:1.0,\nseg%d.ts\n", seq)
+		}
+		if reloads.Add(1) > 1 {
+			b.WriteString("#EXT-X-ENDLIST\n")
+		}
+		fmt.Fprint(w, b.String())
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "[%s]", strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), ".ts"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var mu sync.Mutex
+	var saved []int
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    srv.URL + "/playlist.m3u8",
+		OutputFile: filepath.Join(t.TempDir(), "video.ts"),
+		StartSeq:   first,
+		IsHls:      true,
+		StopOnGap:  true, // keeps the ENDLIST reload on this loop, as above
+	})
+	d.delays = fastDelays()
+	d.delays.hlsResumeSave = time.Hour // far longer than the pass
+	d.delays.hlsReloadUnit = time.Millisecond
+	d.onResumeSaved = func(lastSeq int) {
+		mu.Lock()
+		saved = append(saved, lastSeq)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() = %v, want nil (EXT-X-ENDLIST finish)", err)
+	}
+
+	mu.Lock()
+	got := append([]int(nil), saved...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("sidecar never written")
+	}
+	// A saved position is the last sequence written.
+	if want := first + backlog - 1; got[0] != want {
+		t.Fatalf("saved positions %v: the first save is at %d, want %d, the end of the pass — nothing saved inside a pass shorter than the floor", got, got[0], want)
+	}
+}

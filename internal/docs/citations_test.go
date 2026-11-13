@@ -29,7 +29,8 @@ import (
 // since before v2.8.8) in a range that EDITED one of them. README.md is the
 // first thing a human reads and was carrying a resolution rule two arcs old.
 //
-// appendix-metrics.md (volatile numbers), design-philosophy.md and
+// appendix-metrics.md (volatile numbers), appendix-owner-rulings.md (an index
+// of rulings, which names removed files on purpose), design-philosophy.md and
 // vision-and-purpose.md (prose) are still out on purpose. A name containing a
 // slash is repo-relative; everything else resolves through docPath.
 var specDocs = []string{
@@ -619,7 +620,19 @@ func TestSpecDocCitationsResolve(t *testing.T) {
 			spans := backtickSpans(line)
 			for i, sp := range spans {
 				tok := sp.text
-				if !hasCitationPrefix(tok) || strings.ContainsAny(tok, " \t") {
+				if strings.ContainsAny(tok, " \t") {
+					continue
+				}
+				if !hasCitationPrefix(tok) {
+					// A skill is read as instructions, so a bare `app.go` or
+					// a package-relative `youtube/auth.go` there sends the
+					// reader looking, and nothing below would check it. Two
+					// skills named the wrong file for three symbols that way
+					// (2026-11). Skills only, and .go only: upstream files,
+					// commands and the JS module tables are ordinary prose.
+					if strings.HasPrefix(doc, ".claude/skills/") && strings.HasSuffix(lineRefRe.ReplaceAllString(tok, ""), ".go") && !allow[doc+"|"+tok] {
+						t.Errorf("%s:%d names `%s` without its directory -- write it repo-relative (`internal/...`, `cmd/...`) so it is checked", doc, lineNo, tok)
+					}
 					continue
 				}
 				p := lineRefRe.ReplaceAllString(tok, "")

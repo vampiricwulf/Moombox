@@ -1605,7 +1605,7 @@ sessionLoop:
 		if irc != nil {
 			result.ChatPath = chatPathFor(curStagingDir)
 		}
-		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
+		seg, muxErr := o.muxFinalPart(muxCtx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final Twitch part", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {

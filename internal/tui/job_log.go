@@ -39,6 +39,9 @@ type JobLogModel struct {
 	// "Loading logs...", as the dashboard's section does.
 	loaded bool
 	log    *LogViewerModel
+	// heldSearch is the search box as it was when the terminal left the
+	// normal layout (bareHeldInput). SetSize is its one writer and reader.
+	heldSearch bareHeldInput
 }
 
 // NewJobLogModel creates the job log overlay.
@@ -77,8 +80,22 @@ func (m *JobLogModel) Close() {
 
 // SetSize gives the viewer the whole terminal but the footer's row.
 func (m *JobLogModel) SetSize(w, h int) {
+	was := layoutModeFor(m.width, m.height)
 	m.width, m.height = w, h
+	relay := m.heldSearch.resized(&m.log.searchInput, was, layoutModeFor(w, h))
+	if m.log.bare = m.bare(); m.log.bare {
+		// The bare form: no border to keep whole, so no floor on the height.
+		m.log.SetSize(w, max(h-1, 1))
+		return
+	}
 	m.log.SetSize(w, max(h-1, minPanelH))
+	// A search written while the terminal was small is laid out for the
+	// normal form: the bare one draws the box from a copy, and the viewer only
+	// sets a width when it draws (LogViewerModel.View: the content width less
+	// the "/" prompt).
+	if relay {
+		bareInputWidth(&m.log.searchInput, max(w-2, 1)-1)
+	}
 }
 
 // SetLines applies a fresh read of the job's log buffer.
@@ -175,6 +192,9 @@ func (m *JobLogModel) footerHint() string {
 func (m *JobLogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.log.View(), m.footerHint())
 }

@@ -29,9 +29,22 @@ const emoteCacheTTL = 24 * time.Hour
 // emoteCacheEntry is one channel's resolved set plus WHEN it was resolved.
 // The timestamp is the whole reason this is a struct rather than the bare
 // pointer it used to be.
+//
+// retryAfter is set when the fetch that wrote the entry left a provider
+// unanswered: the entry is then fresh only until that time (see
+// resolveChannel), not for emoteCacheTTL. Zero when all three answered.
 type emoteCacheEntry struct {
-	data      *TwitchEmoteData
-	fetchedAt time.Time
+	data       *TwitchEmoteData
+	fetchedAt  time.Time
+	retryAfter time.Time
+}
+
+// fresh reports whether the entry is served without a fetch.
+func (e emoteCacheEntry) fresh(now time.Time) bool {
+	if !e.retryAfter.IsZero() {
+		return now.Before(e.retryAfter)
+	}
+	return now.Sub(e.fetchedAt) < emoteCacheTTL
 }
 
 // EmoteResolver fetches and caches third-party emotes for Twitch channels.
@@ -40,6 +53,12 @@ type EmoteResolver struct {
 	cache      map[string]emoteCacheEntry // channelLogin (lowered) -> entry
 	cacheOrder []string                   // insertion order for LRU eviction
 	inflight   map[string]chan struct{}   // dedup concurrent fetches for same key
+
+	// globals are the providers' global emote sets (emotes_global.go), one per
+	// provider for the whole process; globalInflight is non-nil while a fetch
+	// of them runs. Both are guarded by mu.
+	globals        [globalProviderCount]globalEmoteSet
+	globalInflight chan struct{}
 
 	// now is the clock the TTL is measured against. A field so a test can
 	// cross a 24-hour boundary without waiting for one; production never
@@ -81,7 +100,35 @@ func (er *EmoteResolver) evictIfFullLocked() {
 	delete(er.cache, oldest)
 }
 
-// Resolve fetches all third-party emotes for a channel.
+// Resolve returns the third-party emotes a channel's chat can use: the
+// channel's own BTTV, FFZ and 7TV sets (resolveChannel) followed by the three
+// providers' global sets (globalEmotes), with a channel emote winning over a
+// global one of the same name (withGlobalEmotes). The two are fetched side by
+// side, so a cold start costs one emoteTimeout at most, not two.
+//
+// The global sets only ever add: when they cannot be fetched the channel's
+// sets are returned alone, and when the channel's sets cannot be resolved the
+// result is nil whatever the globals hold, so nothing is written to the chat file
+// and the next resolve (the job's next part, resolveEmotes in
+// chat_recording.go) tries again.
+func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
+	var global *TwitchEmoteData
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				er.logger.Error("global emote resolve panic", "panic", r)
+			}
+		}()
+		global = er.globalEmotes(ctx)
+	}()
+	channel := er.resolveChannel(ctx, channelID, channelLogin...)
+	<-done
+	return withGlobalEmotes(channel, global)
+}
+
+// resolveChannel fetches a channel's own third-party emotes.
 //
 // Results are cached per channel login (lowercased); the channelID is used for
 // the API calls. Two rules beyond the plain LRU, and both exist because this
@@ -95,10 +142,20 @@ func (er *EmoteResolver) evictIfFullLocked() {
 //   - AN ANSWER GOES STALE. An entry older than emoteCacheTTL is refetched on
 //     the next Resolve. If that refetch fails outright the STALE set is served
 //     and kept: an emote set from yesterday beats none.
+//   - ONE PROVIDER FAILING IS NOT "NO EMOTES" EITHER. When some providers
+//     answer and others fail, the answers are cached, each failed provider
+//     keeps the list the entry already had for it (none on a first fetch),
+//     and the entry is refetched after globalEmoteRetryFloor rather than after
+//     emoteCacheTTL. Without this a provider's bad minute at one stream's end
+//     left the channel's archives without that provider's emotes for a day,
+//     and a refresh replaced a complete set with the poorer one. A fetch that
+//     ended because the caller's own ctx did says nothing about a provider: it
+//     starts no floor, so the next Resolve fetches at once (the global sets'
+//     rule, globalEmotes).
 //
 // Returns nil only when nothing is cached and no provider answered, so the
-// caller's own cache (resolveEmotesCached, chat_recording.go) can retry later.
-func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
+// caller (resolveEmotes, chat_recording.go) can retry later.
+func (er *EmoteResolver) resolveChannel(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
 	// Determine cache key: prefer channelLogin, fall back to channelID
 	cacheKey := channelID
 	if len(channelLogin) > 0 && channelLogin[0] != "" {
@@ -116,12 +173,13 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 				break
 			}
 		}
-		if er.now().Sub(cached.fetchedAt) < emoteCacheTTL {
+		if cached.fresh(er.now()) {
 			er.mu.Unlock()
 			return cached.data
 		}
-		// Expired: keep it in hand as the fallback for a refetch that fails,
-		// and leave it in the map so a concurrent caller keeps being served.
+		// Expired, or due a retry for a provider that failed: keep it in hand
+		// as the fallback for a refetch that fails, and leave it in the map so
+		// a concurrent caller keeps being served.
 		stale = cached.data
 	}
 	// Dedup: if another goroutine is already fetching this key, wait for it.
@@ -191,15 +249,38 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 
 	wg.Wait()
 
+	answered := bttvOK || ffzOK || sevenTVOK
+	complete := bttvOK && ffzOK && sevenTVOK
+	// A provider that failed keeps the list the entry had for it. stale is
+	// never written to after it is stored, so its slices can be shared.
+	if stale != nil {
+		if !bttvOK {
+			bttvResult = stale.BTTV
+		}
+		if !ffzOK {
+			ffzResult = stale.FFZ
+		}
+		if !sevenTVOK {
+			sevenTVResult = stale.SevenTV
+		}
+	}
 	data := &TwitchEmoteData{
 		BTTV:    bttvResult,
 		FFZ:     ffzResult,
 		SevenTV: sevenTVResult,
 	}
-	answered := bttvOK || ffzOK || sevenTVOK
 
 	er.mu.Lock()
 	if answered {
+		entry := emoteCacheEntry{data: data, fetchedAt: er.now()}
+		if !complete {
+			// Due again after the floor, or at once when the failures were
+			// the caller's ctx ending rather than the providers'.
+			entry.retryAfter = entry.fetchedAt
+			if ctx.Err() == nil {
+				entry.retryAfter = entry.fetchedAt.Add(globalEmoteRetryFloor)
+			}
+		}
 		// Refreshing an EXPIRED entry must not evict anything and must not
 		// append a second order entry: the key is already in both, and the LRU
 		// promotion above already moved it to the end.
@@ -207,7 +288,7 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 			er.evictIfFullLocked()
 			er.cacheOrder = append(er.cacheOrder, cacheKey)
 		}
-		er.cache[cacheKey] = emoteCacheEntry{data: data, fetchedAt: er.now()}
+		er.cache[cacheKey] = entry
 	}
 	delete(er.inflight, cacheKey)
 	er.mu.Unlock()
@@ -244,6 +325,7 @@ func (er *EmoteResolver) Clear() {
 	er.mu.Lock()
 	er.cache = make(map[string]emoteCacheEntry)
 	er.cacheOrder = nil
+	er.globals = [globalProviderCount]globalEmoteSet{}
 	er.mu.Unlock()
 }
 
@@ -332,11 +414,7 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) ([]Emot
 
 	var resp struct {
 		Sets map[string]struct {
-			Emoticons []struct {
-				ID   int               `json:"id"`
-				Name string            `json:"name"`
-				URLs map[string]string `json:"urls"`
-			} `json:"emoticons"`
+			Emoticons []ffzEmoticon `json:"emoticons"`
 		} `json:"sets"`
 	}
 
@@ -347,28 +425,43 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) ([]Emot
 
 	var emotes []EmoteInfo
 	for _, set := range resp.Sets {
-		for _, e := range set.Emoticons {
-			emoteURL := ""
-			if u, ok := e.URLs["2"]; ok {
-				emoteURL = u
-			} else if u, ok := e.URLs["1"]; ok {
-				emoteURL = u
-			}
-			if emoteURL != "" {
-				// Fix protocol-relative URLs
-				if strings.HasPrefix(emoteURL, "//") {
-					emoteURL = "https:" + emoteURL
-				}
-				emotes = append(emotes, EmoteInfo{
-					ID:   fmt.Sprintf("%d", e.ID),
-					Code: e.Name,
-					URL:  emoteURL,
-				})
-			}
-		}
+		emotes = appendFFZEmotes(emotes, set.Emoticons)
 	}
 
 	return emotes, true
+}
+
+// ffzEmoticon is one emote of an FFZ set, as both the room and the global
+// endpoint list it.
+type ffzEmoticon struct {
+	ID   int               `json:"id"`
+	Name string            `json:"name"`
+	URLs map[string]string `json:"urls"`
+}
+
+// appendFFZEmotes appends list to emotes as EmoteInfo: the 2x image, else the
+// 1x, and an emoticon with neither is skipped.
+func appendFFZEmotes(emotes []EmoteInfo, list []ffzEmoticon) []EmoteInfo {
+	for _, e := range list {
+		emoteURL := ""
+		if u, ok := e.URLs["2"]; ok {
+			emoteURL = u
+		} else if u, ok := e.URLs["1"]; ok {
+			emoteURL = u
+		}
+		if emoteURL != "" {
+			// Fix protocol-relative URLs
+			if strings.HasPrefix(emoteURL, "//") {
+				emoteURL = "https:" + emoteURL
+			}
+			emotes = append(emotes, EmoteInfo{
+				ID:   fmt.Sprintf("%d", e.ID),
+				Code: e.Name,
+				URL:  emoteURL,
+			})
+		}
+	}
+	return emotes
 }
 
 // fetch7TV returns the channel's 7TV emotes and whether 7TV ANSWERED.
@@ -396,19 +489,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]Emot
 
 	var resp struct {
 		EmoteSet struct {
-			Emotes []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-				Data struct {
-					Host struct {
-						URL   string `json:"url"`
-						Files []struct {
-							Name   string `json:"name"`
-							Format string `json:"format"`
-						} `json:"files"`
-					} `json:"host"`
-				} `json:"data"`
-			} `json:"emotes"`
+			Emotes []sevenTVEmote `json:"emotes"`
 		} `json:"emote_set"`
 	}
 
@@ -417,8 +498,30 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]Emot
 		return nil, false
 	}
 
+	return sevenTVEmoteInfos(resp.EmoteSet.Emotes), true
+}
+
+// sevenTVEmote is one entry of a 7TV emote set, as both the per-channel and
+// the global endpoint list it.
+type sevenTVEmote struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Data struct {
+		Host struct {
+			URL   string `json:"url"`
+			Files []struct {
+				Name   string `json:"name"`
+				Format string `json:"format"`
+			} `json:"files"`
+		} `json:"host"`
+	} `json:"data"`
+}
+
+// sevenTVEmoteInfos turns a 7TV emote list into EmoteInfo, skipping an entry
+// with no host URL or no file.
+func sevenTVEmoteInfos(list []sevenTVEmote) []EmoteInfo {
 	var emotes []EmoteInfo
-	for _, e := range resp.EmoteSet.Emotes {
+	for _, e := range list {
 		baseURL := e.Data.Host.URL
 		if baseURL == "" {
 			continue
@@ -459,7 +562,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) ([]Emot
 		}
 	}
 
-	return emotes, true
+	return emotes
 }
 
 // errEmoteProviderNotFound marks a 404 from a third-party emote provider.

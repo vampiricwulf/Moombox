@@ -116,7 +116,7 @@ func TestLiveLoopStopsOnALocalWriteFailure(t *testing.T) {
 	if i < 0 {
 		t.Fatal("the live loop no longer checks for engine.ErrLocalWrite")
 	}
-	if ret := strings.Index(body[i:], "return result, waitedForResume.value(), downloadErr"); ret < 0 || ret > 600 {
+	if ret := strings.Index(body[i:], "return result, end(), downloadErr"); ret < 0 || ret > 600 {
 		t.Error("the ErrLocalWrite check no longer returns the download error")
 	}
 }

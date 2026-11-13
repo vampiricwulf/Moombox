@@ -24,7 +24,7 @@ func TestReachabilityProbe_SuccessOnLiveTarget(t *testing.T) {
 	}()
 
 	// One dead target + one live target: race must report the live one.
-	ok := reachabilityProbe(context.Background(), []string{"127.0.0.1:1", ln.Addr().String()})
+	ok, _ := reachabilityProbe(context.Background(), []string{"127.0.0.1:1", ln.Addr().String()}, nil)
 	if !ok {
 		t.Fatal("expected reachable when at least one target accepts")
 	}
@@ -33,20 +33,13 @@ func TestReachabilityProbe_SuccessOnLiveTarget(t *testing.T) {
 func TestReachabilityProbe_FailWhenAllDead(t *testing.T) {
 	// 127.0.0.1:1 is reserved/closed; the dial fails fast.
 	start := time.Now()
-	ok := reachabilityProbe(context.Background(), []string{"127.0.0.1:1"})
+	ok, _ := reachabilityProbe(context.Background(), []string{"127.0.0.1:1"}, nil)
 	if ok {
 		t.Fatal("expected unreachable when no target accepts")
 	}
 	if time.Since(start) > probeRaceTimeout+time.Second {
 		t.Fatalf("probe took too long: %v", time.Since(start))
 	}
-}
-
-func TestReachabilityProbe_EmptyTargetsUsesDefaults(t *testing.T) {
-	// Empty slice must fall back to defaultProbeTargets (don't panic / don't
-	// treat as trivially reachable). We can't assume network access in CI, so
-	// only assert it doesn't panic and returns a bool within the deadline.
-	_ = reachabilityProbe(context.Background(), nil)
 }
 
 // TestReachabilityProbe_RecoversFromDialPanic: a panicking dial goroutine must
@@ -59,7 +52,10 @@ func TestReachabilityProbe_RecoversFromDialPanic(t *testing.T) {
 	probeDial = func(context.Context, *net.Dialer, string) (net.Conn, error) { panic("boom") }
 
 	done := make(chan bool, 1)
-	go func() { done <- reachabilityProbe(context.Background(), []string{"127.0.0.1:1", "127.0.0.1:2"}) }()
+	go func() {
+		ok, _ := reachabilityProbe(context.Background(), []string{"127.0.0.1:1", "127.0.0.1:2"}, []string{"127.0.0.1:3"})
+		done <- ok
+	}()
 	select {
 	case ok := <-done:
 		if ok {

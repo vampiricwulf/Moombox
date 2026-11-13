@@ -108,6 +108,10 @@ func (o *releaseNotesOverlay) withdraw(notice string) {
 func (o *releaseNotesOverlay) applySize(width, height int) {
 	o.width = width
 	o.height = height
+	if o.bare() {
+		o.applyBareSize() // below the normal layout: release_notes_bare.go
+		return
+	}
 
 	// -4 borders + padding; -6 rows, of which the borders, title and footer
 	// take four and the notice, when there is one, a fifth.
@@ -159,6 +163,9 @@ func (o *releaseNotesOverlay) Update(msg tea.Msg) tea.Cmd {
 func (o *releaseNotesOverlay) View() string {
 	if !o.open_ {
 		return ""
+	}
+	if o.bare() {
+		return o.bareView() // below the normal layout: release_notes_bare.go
 	}
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorGreen).Padding(0, 1)
@@ -490,4 +497,17 @@ func hangingWrap(line string, hang, limit int) []string {
 		}
 	}
 	return rows
+}
+
+// scroll moves the notes n rows (negative is up): the mouse wheel's route,
+// three rows a notch (mouseReleaseNotes).
+func (o *releaseNotesOverlay) scroll(n int) {
+	if !o.open_ {
+		return
+	}
+	if n < 0 {
+		o.vp.ScrollUp(-n)
+	} else {
+		o.vp.ScrollDown(n)
+	}
 }

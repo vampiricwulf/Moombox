@@ -50,6 +50,21 @@ import "errors"
 // needs a reader in the same change, and if it moves on every tick it also
 // needs a line in authStatusChanged's exclusion list.
 type AuthStatus struct {
+	// Checked is false until a check has finished in this process (or
+	// SkipStartupCheck said none will run at startup), and true from then on.
+	// While it is false every other field is a zero value that says NOTHING:
+	// not "no cookies", not "not authenticated". The dashboard and the TUI are
+	// both up before the first check answers (owner ruling R-H2 and its
+	// amendment), so both UIs show "checking
+	// cookies" for an unchecked status and neither the no-cookies nor the
+	// re-login indicator, and nothing may decide anything on one.
+	//
+	// Readers: CookieStatusPayload and TwitchAuthStatusPayload (the wire's
+	// additive `checked` key) and cmd/moombox's cookieBadgesFor (the TUI).
+	// It is in authStatusChanged, so the first check always fires
+	// OnAuthChange, even when it finds nothing configured.
+	Checked bool `json:"checked"`
+
 	YouTubeAuthenticated bool `json:"youtubeAuthenticated"`
 	TwitchAuthenticated  bool `json:"twitchAuthenticated"`
 
@@ -77,6 +92,15 @@ type AuthStatus struct {
 	// both status payloads project it and either badge can name it.
 	CookieFileError string `json:"cookieFileError,omitempty"`
 }
+
+// Unchecked reports that no cookie auth check has finished in this process,
+// so the status says nothing yet. It is the ONE predicate for "still
+// checking" (CLAUDE.md State machines rule 2): the TUI reads it through
+// cmd/moombox's cookieBadgesFor, and the dashboard's cookieCheckPending
+// (web/public/modules/utils.js) mirrors it over the wire's `checked` key; the
+// two are compared over web/tests/fixtures/cookie-check-parity.json. Derived
+// on every read and never persisted.
+func (s AuthStatus) Unchecked() bool { return !s.Checked }
 
 // verdictFromCheck projects one platform's (authenticated, err) pair onto the
 // shared three-way enum.
@@ -266,7 +290,8 @@ type twitchAuthMark struct {
 // becoming unreadable — or becoming readable again — is a transition that has
 // to be pushed or the bar stays wrong until some unrelated flip fires.
 func authStatusChanged(prev, next AuthStatus) bool {
-	return next.YouTubeAuthenticated != prev.YouTubeAuthenticated ||
+	return next.Checked != prev.Checked ||
+		next.YouTubeAuthenticated != prev.YouTubeAuthenticated ||
 		next.TwitchAuthenticated != prev.TwitchAuthenticated ||
 		next.HasYouTubeCookies != prev.HasYouTubeCookies ||
 		next.HasTwitchCookies != prev.HasTwitchCookies ||

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -596,20 +595,6 @@ func TestExecuteWithChatWarnsOfAJSLessExtraction(t *testing.T) {
 				t.Errorf("%d Warn line(s) that formats may be missing, want %d", n, want)
 			}
 		})
-	}
-}
-
-// TestChallengeFreeSeamsAreTheServiceMethods pins the two package seams'
-// production values: the cookieless chain's formats and its HLS master, the
-// youtube.Service methods themselves.
-//
-// Mutant: either seam pointing at another method (its check).
-func TestChallengeFreeSeamsAreTheServiceMethods(t *testing.T) {
-	if reflect.ValueOf(fetchCookielessHls).Pointer() != reflect.ValueOf((*youtube.Service).CookielessHlsManifest).Pointer() {
-		t.Error("fetchCookielessHls is not (*youtube.Service).CookielessHlsManifest")
-	}
-	if reflect.ValueOf(fetchCookielessFormats).Pointer() != reflect.ValueOf((*youtube.Service).CookielessFormats).Pointer() {
-		t.Error("fetchCookielessFormats is not (*youtube.Service).CookielessFormats")
 	}
 }
 

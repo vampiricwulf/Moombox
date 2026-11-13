@@ -69,6 +69,7 @@ func TestRecheckToastRendersTheSameSentenceAsTheTUI(t *testing.T) {
 		{
 			name: "both configured, both alive", ytActive: true, twActive: true,
 			status: cookies.AuthStatus{
+				Checked:              true,
 				YouTubeAuthenticated: true, TwitchAuthenticated: true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshOK, TwitchVerification: cookies.RefreshOK,
@@ -78,6 +79,7 @@ func TestRecheckToastRendersTheSameSentenceAsTheTUI(t *testing.T) {
 			name:     "both configured, YouTube rejected and Twitch unreachable",
 			ytActive: true, twActive: true,
 			status: cookies.AuthStatus{
+				Checked:           true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshUnknown,
 			},
@@ -87,6 +89,7 @@ func TestRecheckToastRendersTheSameSentenceAsTheTUI(t *testing.T) {
 			// to learn it.
 			name: "neither site could be asked", ytActive: true, twActive: true,
 			status: cookies.AuthStatus{
+				Checked:           true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshUnknown, TwitchVerification: cookies.RefreshUnknown,
 			},
@@ -98,6 +101,7 @@ func TestRecheckToastRendersTheSameSentenceAsTheTUI(t *testing.T) {
 			// bug shows up as a sentence that mentions it.
 			name: "youtube only", ytActive: true,
 			status: cookies.AuthStatus{
+				Checked:             true,
 				HasYouTubeCookies:   true,
 				YouTubeVerification: cookies.RefreshOK, TwitchVerification: cookies.RefreshFailed,
 			},
@@ -105,13 +109,14 @@ func TestRecheckToastRendersTheSameSentenceAsTheTUI(t *testing.T) {
 		{
 			name: "twitch only", twActive: true,
 			status: cookies.AuthStatus{
+				Checked:             true,
 				HasTwitchCookies:    true,
 				YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshOK,
 			},
 		},
 		{
 			name:   "nothing configured",
-			status: cookies.AuthStatus{YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshFailed},
+			status: cookies.AuthStatus{Checked: true, YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshFailed},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	version = "2.9.8"
+	version = "2.9.9"
 	commit  = ""
 )
 
@@ -314,6 +314,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	unsubSidecarAlerts := s.wireSidecarAlerts()
 	defer unsubSidecarAlerts()
 
+	// BotGuard sidecar health -> open dashboards, which re-read /api/status.
+	unsubSidecarNudge := s.wireSidecarStatusNudge()
+	defer unsubSidecarNudge()
+
 	// =========================================================================
 	// Start services (consumers first)
 	// =========================================================================
@@ -342,8 +346,25 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		dlWorker.Start(ctx)
 	}()
 
-	// Start cookie refresh (only if a cookie file is configured, like TS)
-	if cfg.Cookies.CookieFile != "" {
+	// Seed the cookie refresh service (only if a cookie file is configured,
+	// like TS). Its first check runs on the cookie startup goroutine, started
+	// further down after the web server is bound; the seeds stay here, ahead
+	// of the bind, so nothing the dashboard can ask for (a recheck) observes
+	// before them.
+	//
+	// The three cookie settings this function still needs after the bind are
+	// read ONCE, here, under the store lock. The dashboard is serving from the
+	// bind on, and a PUT /api/config replaces the struct under that lock, so a
+	// direct cfg read further down would race it; and a cookie file read twice
+	// (to choose SkipStartupCheck here, and the first check below) could disagree with
+	// itself and leave the status unchecked for good.
+	var startCookies cookieStartup
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		startCookies.HasFile = c.Cookies.CookieFile != ""
+		startCookies.AutoEnabled = c.Cookies.AutoEnabled
+		startCookies.RefreshInterval = c.Cookies.RefreshInterval.AsDuration(time.Minute)
+	})
+	if startCookies.HasFile {
 		// Seed expected auth from persisted platforms so auth loss is detected
 		// on restart.
 		//
@@ -375,43 +396,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// first check that finds the platform working sends its
 		// auth_recovered (withPersistedAuthFailureCooldown holds the stamp).
 		cookieRefresh.SetUnrecoveredPlatforms(s.openAlerts.authPlatforms())
-		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
-	}
-
-	// One browser-free import out of the configured browser profile, at most
-	// once per boot, on an install that has no cookies to lose.
-	//
-	// UNCONDITIONAL, and deliberately not under the flag below. This used to
-	// live inside the periodic goroutine, which coupled it to
-	// cookies.auto_enabled for no reason it could justify: the flag exists to
-	// govern a REPEATING read of a profile that nothing changes between ticks,
-	// and a boot is the one moment a mounted profile plausibly did change —
-	// something replaced it while the process was down. Its real safety
-	// condition is the cookie file, not the flag, and that condition lives in
-	// AutoCookieService.decideStartupSeed so there is exactly one site deciding
-	// it: no browser, an importable profile, and no cookies.txt worth
-	// protecting. An install that already has cookies is never touched here.
-	autoCookieSvc.StartProfileSeed(ctx)
-
-	// Start the headless-browser refresh timer. cookies.auto_enabled IS this
-	// timer — it governs nothing else automatic — so the flag is the whole
-	// start condition, along with an interval that means something.
-	//
-	// It deliberately no longer os.Stat's browserProfileDir first. That probe
-	// froze at boot the one thing that changes at runtime: completing setup is
-	// what CREATES the profile directory, so an operator who turned the setting
-	// on and then ran setup — the exact sequence an "auth lost" notification
-	// asks for — got no timer until the next restart, and nothing told them. No
-	// setting had changed by then, so the restart-required labelling could not
-	// fire either. The question is asked per tick now, quietly, by
-	// periodicRefreshHasSource.
-	if cfg.Cookies.AutoEnabled {
-		interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
-		if interval > 0 {
-			autoCookieSvc.StartPeriodicRefresh(ctx, interval)
-		}
+		// No startup check will run, so the status must not read "checking".
+		cookieRefresh.SkipStartupCheck()
 	}
 
 	// Start web server — wait for initial binding result before continuing.
@@ -434,38 +422,23 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		webErrCh <- webServer.Start(ctx)
 	}()
 
-	// Give the server a moment to bind (port binding is synchronous in Start).
-	// If it fails quickly, exit; otherwise proceed.
-	webBindFailed := false
-	select {
-	case err := <-webErrCh:
-		if err != nil {
-			if !useTUI {
-				log.Error("Web server failed to start", slog.String("error", err.Error()))
-				fmt.Fprintf(os.Stderr, "\nError: %s\n", err.Error())
-				fmt.Fprintln(os.Stderr, "Web dashboard is unavailable.")
-				// Deterministic: the port is taken or the bind address is
-				// unusable on this host. Never "the update is broken". And
-				// no keypress wait: this arm is headless, and a headless run
-				// never holds its exit (awaitKeypress).
-				os.Exit(exitCodeStartupError)
-			}
-			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
-			webBindFailed = true
-		}
-	case <-time.After(500 * time.Millisecond):
-		// Server is binding/listening successfully, drain errors in background
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("web error drainer panic", "panic", r)
-				}
-			}()
-			if err := <-webErrCh; err != nil {
-				log.Error("Web server error", slog.String("error", err.Error()))
-			}
-		}()
-	}
+	// Wait for the bind to resolve: Start's error, or the server's Bound
+	// signal (resolveWebBind, on awaitWebBind). A failure exits or falls back
+	// to TUI-only there; a bound server, or one that has said nothing by the
+	// backstop, proceeds.
+	webBindFailed := s.resolveWebBind(webErrCh, webServer.Bound())
+
+	// The cookie startup sequence: the first auth check, then the profile
+	// seed, then the browser refresh timer, in that order on one background
+	// goroutine (startCookieSequence, which states the order's reasons).
+	// Neither UI waits for it (owner ruling R-H2 and its amendment): the web
+	// server is bound above, runTUI starts below, and until the check answers
+	// the status is unchecked (cookies.AuthStatus.Unchecked) and both UIs show
+	// "checking cookies" in place of the no-cookies and re-login indicators.
+	// Each of the check's two round trips can take up to 15 s on a bad link,
+	// and both UIs used to stay down for all of it. Nothing below this line in
+	// run() reads cookie state. shutdown waits for the goroutine, boundedly.
+	s.cookieStartupDone = startCookieSequence(ctx, startCookies, cookieRefresh, autoCookieSvc, log)
 
 	// The port the listener actually bound is not always the configured one:
 	// Start probes the next ten ports when the preferred one is in use
@@ -522,39 +495,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	if exeErr == nil {
 		rolledBackFrom = rolledBackRelease(exeSelf, version)
 	}
-	if configLoaded && lastRunVersion != version {
-		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
-			// Reflect whether the dashboard actually came back: in TUI mode
-			// a failed web bind logs-and-continues above, and "restarted
-			// successfully" on the operator's phone while the dashboard is
-			// dead would be a lie. FAILED only on a CONFIRMED bind error —
-			// a slow bind (>500ms select timeout, e.g. AV-scanned first
-			// boot) leaves ActualPort briefly 0, and claiming failure then
-			// would be a false alarm on exactly the boots that matter.
-			fields := []notifications.Field{
-				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
-				{Name: "Current Version", Value: "v" + version, Inline: true},
-			}
-			ntype := notifications.TypeSuccess
-			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
-			switch {
-			case webBindFailed:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
-				ntype = notifications.TypeWarning
-				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
-			case webServer.ActualPort() > 0:
-				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
-			}
-			notifyMgr.Send("Update Applied", desc, ntype, fields,
-				notifications.SendOptions{Event: "update_applied"},
-			)
-		}
-		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
-			c.Updates.LastRunVersion = version
-		}); err != nil {
-			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
-		}
-	}
+	s.recordVersionChange(lastRunVersion, configLoaded, rolledBackFrom, webBindFailed)
 
 	// Launcher-staleness note: an in-place update replaces the binary on
 	// disk, but the supervisor PROCESS keeps running the code it started
@@ -643,7 +584,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}
 
 	// Auto-update check: initial check + daily ticker, plus a check within a
-	// minute of the toggle turning on (runUpdateCheckLoop). The goroutine runs
+	// minute of the toggle turning on (runUpdateCheckLoop). A failed check is
+	// tried again after 15 minutes and then an hour, and a check due while the
+	// connectivity monitor reports offline waits for it to report online (at
+	// most updateCheckOfflineGrace). The goroutine runs
 	// whenever the updater exists and re-reads auto_check_updates every time
 	// — previously the flag was consulted once at boot, so disabling checks
 	// (the dismiss route / settings toggle) couldn't stop an armed ticker
@@ -665,9 +609,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// One notification per pending version, not one per tick —
 			// state lives here because this goroutine is the only caller.
 			var lastNotifiedTag string
-			runUpdateCheckLoop(ctx, checkEnabled, func() {
-				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
+			runUpdateCheckLoop(ctx, checkEnabled, func() bool {
+				return checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
+			}, updateCheckTiming{
+				initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute,
+				retry: updateCheckRetry, online: s.connMon.IsOnline, offlineGrace: updateCheckOfflineGrace,
+			})
 		}()
 	}
 
@@ -693,27 +640,34 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// The boot-time reading (UpdateDiskStatus above) goes through the
 		// alert decision too: the ticker's first disk check is three ticks
 		// away, so a volume already full at boot was not announced for six
-		// minutes while recordings kept writing to it.
-		if ds := routes.SharedDiskStatus.Load(); ds != nil {
-			var bootOutputDir string
+		// minutes while recordings kept writing to it. A boot reading that
+		// FAILED (nothing stored: the output volume absent at start) counts
+		// as the first failed reading, so "Disk Monitoring Failed" goes out
+		// on the ticker's first check rather than its second.
+		{
+			var bootOutputDir, bootStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				bootOutputDir = c.Paths.OutputDirectory
+				bootStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
-			diskAlerter.onReading(ds, bootOutputDir, time.Now())
+			diskAlerter.onBootReading(routes.SharedDiskStatus.Load(), bootOutputDir, bootStagingDir, time.Now())
 		}
 		// checkDisk takes a reading, publishes it to both UIs and runs the
-		// alert decision. The ticker calls it every third tick; a save that
+		// alert decision. The gauge and the frame are the output directory's
+		// volume; the alerts also judge the staging directory's when it is
+		// on another volume, and act on the fuller of the two. The ticker calls it every third tick; a save that
 		// changes the thresholds or the output directory asks for one at once
 		// (requestDiskRecheck), so the gauge and the alerts do not keep the
 		// old settings for up to six minutes.
 		checkDisk := func() {
-			var diskOutputDir string
+			var diskOutputDir, diskStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				diskOutputDir = c.Paths.OutputDirectory
+				diskStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
@@ -738,7 +692,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// cooldown, the level escalation, and the all-clear
 				// that closes them — lives in diskAlerts, where it
 				// can be tested.
-				diskAlerter.onReading(ds, diskOutputDir, time.Now())
+				diskAlerter.onVolumes(ds, diskOutputDir,
+					diskAlerter.readStaging(diskOutputDir, diskStagingDir), diskStagingDir, time.Now())
 			} else {
 				// GetDiskSpace failed (volume offline, I/O error): the
 				// dashboard disk gauge and low-disk notifications are
@@ -820,6 +775,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				}
 
 				log.Debug(line)
+
+				// While downloader.keep_awake is on, the hold is checked against
+				// the jobs' statuses in both directions: taken when a capture or
+				// mux is running and none is held, released when none is running
+				// (one GetAllJobs per tick, Windows only).
+				if s.keepAwake != nil {
+					s.keepAwake.reconcile()
+				}
 
 				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
 				// interval — close enough to the 5-min target while reusing the

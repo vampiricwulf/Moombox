@@ -64,3 +64,53 @@ test("a single-file recording's load error does not blame a segment", { skip }, 
   h.video.dispatchEvent(new h.window.Event("error"));
   assert.deepEqual(h.app.toasts.map((t) => t.message), ["Video failed to load"]);
 });
+
+// Owner ruling R-D1 of 2026-11-10: a Muxing row's progress line is the worker's mux readout
+// ("Muxing 42%", then "Muxing: finalizing"), and the dashboard shows the line
+// as it is, on the card and in the details dialog (both call formatProgress;
+// the dialog's row is the next test).
+// The percent bar is not the readout's. Mutant: formatProgress answering the
+// fixed "Muxing..." for every Muxing row.
+test("a Muxing row shows the mux readout the worker wrote", { skip }, async () => {
+  const h = await harness.makeApp();
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "Muxing 42%", percent: 100 }), "Muxing 42%");
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "Muxing: finalizing", percent: 100 }), "Muxing: finalizing");
+  assert.equal(h.app.formatProgress({ status: "Muxing", progress: "" }), "Muxing...");
+});
+
+// The dialog half of R-D1. A live capture (not a VOD) takes the dialog's
+// "Type: Live" arm, which had no Progress row, so the readout showed on the
+// card only while the TUI's details pane showed it. Mutant: the Progress row
+// drawn for VOD rows alone.
+test("the details dialog of a live capture being muxed shows the mux readout", { skip }, async () => {
+  const row = (status, progress) => ({
+    id: "A", title: "T A", videoId: "A", channelName: "Chan", platform: "youtube", isVod: false,
+    status, progress, percent: 100, lastVideoSeq: 1300, lastAudioSeq: 1300,
+    createdAt: "2026-09-05T11:00:00Z", updatedAt: "2026-09-05T11:00:00Z",
+  });
+  let status = "Muxing";
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/jobs/:id": () => ({ ...row(status, ""), hasStaging: true, hasSegments: true, asides: [], keptChatSidecar: false, unmuxedParts: false }),
+      "GET /api/jobs/:id/logs": () => [],
+    },
+  });
+  const dlg = h.el("details-dialog");
+  Object.defineProperty(dlg, "open", { get() { return !!this._open; } });
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [row("Muxing", "Muxing 42%")] } });
+  await h.flush();
+  h.app.details.showJobDetails(h.app.jobs[0]);
+  await h.flush(); await h.flush();
+  const field = () => h.el("job-details-content").querySelector('[data-field="progress"]');
+  assert.equal(field()?.textContent, "Muxing 42%");
+  assert.ok(h.el("job-details-content").querySelector('[data-field="segments"]'), "the Segments row is kept beside it");
+
+  h.app.details.updateJobDetails(row("Muxing", "Muxing: finalizing"));
+  assert.equal(field()?.textContent, "Muxing: finalizing");
+
+  // Outside Muxing a live capture has no Progress row, as before.
+  status = "Finished";
+  h.app.details.updateJobDetails(row("Finished", ""));
+  await h.flush();
+  assert.equal(field(), null);
+});

@@ -21,16 +21,66 @@ import (
 // minTermWidth; the untruncated text is in moombox.log.
 const maxOverlayReasonRunes = 80
 
-// Update implements tea.Model.
+// Update implements tea.Model. It runs update and then hands Bubble Tea the
+// commands update queued for the details panel's disk probe (setAsideCmds):
+// updateSelectedJob is reached from twenty call sites that return no command.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case setAsideArchivesMsg:
+		a.handleSetAsideArchives(msg)
+	case setAsideReaskMsg:
+		a.handleSetAsideReask(msg)
+	case setAsideSelectMsg:
+		a.handleSetAsideSelect(msg)
+	default:
+		_, cmd = a.update(msg)
+	}
+	if len(a.setAsideCmds) > 0 {
+		cmd = tea.Batch(append(a.setAsideCmds, cmd)...)
+		a.setAsideCmds = nil
+	}
+	return a, cmd
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// A prefix hint still on the feedback line was written for the old
+		// size: it lists the overlay chords a smaller layout refuses, or
+		// only the keys where the labels now fit.
+		hintShown := false
+		if a.chord.prefix != "" && a.chord.action == "" {
+			old, _ := a.chordHint(a.chord.prefix)
+			hintShown = a.feedback.msg == old
+		}
 		a.width = msg.Width
 		a.height = msg.Height
 		a.recalcLayout()
+		// Below the compact floor nothing is drawn but the notice, so a
+		// chord armed above it must not stay armed: its confirm key would
+		// act with no prompt on screen (owner ruling R-C6).
+		if a.layoutMode() == layoutTooSmall {
+			a.cancelChord()
+		} else if hintShown {
+			// Rewritten in place: the line's hold and the chord's own
+			// three seconds are not restarted.
+			until := a.feedback.until
+			a.setPrefixHint(a.chord.prefix)
+			a.feedback.until = until
+		}
 		// A narrower title column can push a previously-fitting title into
-		// overflow — (re)start the marquee if so.
-		return a, a.ensureMarqueeTicking()
+		// overflow — (re)start the marquee if so. A terminal grown back out
+		// of a notice puts live progress on screen again: back to the fast
+		// progress class now, not on the next idle tick.
+		return a, tea.Batch(a.ensureMarqueeTicking(), a.ensureProgressTicking())
+
+	case tea.PasteMsg:
+		// A paste is typing: none of it reaches what a notice hides.
+		if a.screenHeld() {
+			return a, nil
+		}
+		return a, a.routeComponentMsg(msg)
 
 	case tea.BackgroundColorMsg:
 		a.isDark = msg.IsDark()
@@ -58,6 +108,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !a.feedback.until.IsZero() && time.Now().After(a.feedback.until) {
 			a.clearFeedback()
 		}
+		// A Resume or Reinitialize still running keeps its line up.
+		a.keepJobVerbShown()
 		// (Terminal title is event-driven — updated by the job-lifecycle
 		// handlers on status change, not polled here every second.)
 		// Keep the details panel's wall-clock text ("5m ago" suffixes) live
@@ -148,7 +200,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the task list. Either way it restarts via ensureMarqueeTicking when
 		// the condition clears. Checked before Tick() so a covered marquee
 		// doesn't advance its offset while hidden.
-		if a.hasActiveOverlay() ||
+		if a.hasActiveOverlay() || a.layoutMode() != layoutNormal ||
 			(!a.taskList.marquee.NeedsScroll() && !a.details.marquee.NeedsScroll()) {
 			a.marqueeTicking = false
 			return a, nil
@@ -222,6 +274,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenForUpdates(), a.ensureMarqueeTicking())
 
 	case JobsUpdateMsg:
+		// A list that states a floor below the one already applied was read
+		// before that one (two catch-up reads can overlap and arrive out of
+		// order). Applying it would put older rows back, and the events that
+		// would have corrected them are at or below the applied floor and are
+		// dropped as stale. The list already applied holds every write this
+		// one does, so it is dropped whole. A list with no floor still applies.
+		if msg.Floor != 0 && msg.Floor < a.snapshotFloor {
+			return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
+		}
 		// If jobs already exist, the user has used the app before — dismiss the newcomer hint.
 		if len(msg.Jobs) > 0 {
 			a.seenChordHint = true
@@ -229,6 +290,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
 		a.progressStore.Clear()
 		a.statusMap = make(map[string]database.JobStatus)
+		a.raiseJobVersionFloor(msg)
 		for _, j := range msg.Jobs {
 			a.statusMap[j.ID] = j.Status
 			// Terminal rows get no entry: handleJobUpdate would delete one on
@@ -308,8 +370,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.listenForUpdates()
 
 	case CookieStatusMsg:
-		a.statusBar.SetCookieStatus(msg.YT, msg.TW)
-		a.statusBar.SetActivePlatforms(msg.YTActive, msg.TWActive)
+		a.SetCookieStatus(msg.YT, msg.TW, msg.YTActive, msg.TWActive)
 		return a, a.listenForUpdates()
 
 	case DiskStatusMsg:
@@ -326,6 +387,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case AdmissionHoldsMsg:
 		a.SetAdmissionHolds(msg.Holds)
+		return a, nil
+
+	case ChannelFailingMsg:
+		a.settings.SetFailingChannels(msg.Failing)
 		return a, nil
 
 	case SidecarStatusMsg:
@@ -602,15 +667,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// `importedFromProfile || browserActed`, so an import that reaches
 			// a verdict always renewed and this arm is unreachable for one.
 			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
-			a.setFeedback("Cookies still work, but this pass could not confirm the browser refreshed them")
+			a.setFeedbackWithSeverity("Cookies still work, but this pass could not confirm the browser refreshed them", severityWarning)
 		default:
 			a.setFeedback(mechanismLabel + " successful")
 		}
 		return a, nil
 
 	case addVideoResultMsg:
+		// A refused add leaves its own dialog open, with the URL, the format
+		// picks and the time range as they were, and the reason as the
+		// dialog's error: the feedback line is under the dialog, and closing
+		// threw the input away. With that dialog gone (Esc during the
+		// request) the reason goes to the feedback line, in red.
+		if msg.Err && a.addVideo.FailSubmit(msg.VideoID, msg.Feedback) {
+			return a, nil
+		}
 		if msg.Feedback != "" {
-			if msg.Warn {
+			if msg.Err {
+				a.setFeedbackWithSeverity(msg.Feedback, severityError)
+			} else if msg.Warn {
 				a.setFeedbackWithSeverity(msg.Feedback, severityWarning)
 			} else {
 				a.setFeedback(msg.Feedback)
@@ -746,6 +821,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
 		return a, nil
 
+	case jobVerbResultMsg:
+		a.finishJobVerb(msg)
+		return a, nil
+
 	case deleteJobsResultMsg:
 		// Row removal + selection refresh already happened via the
 		// JobDeleted lifecycle events; this just reports completion.
@@ -768,7 +847,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.Watched {
 			verb = "Unmarked"
 		}
-		a.setFeedback(fmt.Sprintf("%s %d job(s) watched", verb, msg.Count))
+		a.setFeedback(verb + " " + jobCount(msg.Count) + " watched")
 		return a, nil
 
 	case fetchOrphansResultMsg:
@@ -1131,14 +1210,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setupWiz.resetCookieFlow()
 			a.setupWiz.errorMsg = msg.Text
 		} else {
-			a.setFeedback(msg.Text)
+			// A recovered panic is an error whatever its text says; unstated,
+			// "unexpected error: ..." matched nothing and drew in success green.
+			a.setFeedbackWithSeverity(msg.Text, severityError)
 		}
 		return a, nil
 
 	case tea.KeyPressMsg:
 		var cmds []tea.Cmd
-		if cmd := a.routeComponentMsg(msg); cmd != nil {
-			cmds = append(cmds, cmd)
+		// Not while a notice has replaced the screen: a key must not type
+		// into, or scroll, what is hidden (keyReachesComponents).
+		if a.keyReachesComponents(msg) {
+			if cmd := a.routeComponentMsg(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		_, cmd := a.handleKey(msg)
 		if cmd != nil {
@@ -1148,6 +1233,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := a.ensureMarqueeTicking(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// A key that closed an overlay puts the panels back on screen: go
+		// back to the fast progress class now, not on the next idle tick.
+		if cmd := a.ensureProgressTicking(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return a, tea.Batch(cmds...)
 
 	case tea.MouseMsg:
@@ -1155,6 +1245,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A click can move the selection onto a long title.
 		if mCmd := a.ensureMarqueeTicking(); mCmd != nil {
 			cmd = tea.Batch(cmd, mCmd)
+		}
+		// A click can close an overlay too (the Settings buttons, the action
+		// menu): same upshift as the key case above.
+		if pCmd := a.ensureProgressTicking(); pCmd != nil {
+			cmd = tea.Batch(cmd, pCmd)
 		}
 		return model, cmd
 
@@ -1480,15 +1575,50 @@ type appliedJobVersions struct {
 // about the title, quality or anything else a tick does not write, so it
 // never makes a write stale. A row with no version (0: read rather than
 // written) makes no claim and is never stale.
+//
+// A write at or below the snapshot floor is stale for both stores, and for a
+// job the snapshot did not hold as well (it was deleted before the snapshot
+// was read): see raiseJobVersionFloor.
 func (a *App) staleJobUpdate(job *database.Job, tick bool) bool {
 	if job.Version == 0 {
 		return false
+	}
+	if job.Version <= a.snapshotFloor {
+		return true
 	}
 	applied := a.jobVersions[job.ID]
 	if tick {
 		return job.Version <= applied.progress
 	}
 	return job.Version <= applied.row
+}
+
+// raiseJobVersionFloor records what a full snapshot covers. msg.Floor is a
+// write version the snapshot is at least as new as (JobsUpdateMsg), so every
+// job in it has that version applied to both of its stores, and every event
+// still queued from before the snapshot was read is dropped by staleJobUpdate
+// instead of being put back over it. Without this, the events a stalled TUI
+// had not yet read were applied after the catch-up snapshot: a tick queued
+// before a dropped Finished write counted the job active again for good, and
+// a queued Muxing write put the row itself back.
+//
+// Entries of jobs the snapshot does not hold are dropped: those jobs are
+// gone. A Floor of 0 claims nothing and changes nothing.
+func (a *App) raiseJobVersionFloor(msg JobsUpdateMsg) {
+	if msg.Floor == 0 {
+		return
+	}
+	if msg.Floor > a.snapshotFloor {
+		a.snapshotFloor = msg.Floor
+	}
+	versions := make(map[string]appliedJobVersions, len(msg.Jobs))
+	for _, j := range msg.Jobs {
+		applied := a.jobVersions[j.ID]
+		applied.row = max(applied.row, msg.Floor)
+		applied.progress = max(applied.progress, msg.Floor)
+		versions[j.ID] = applied
+	}
+	a.jobVersions = versions
 }
 
 // noteJobVersion records job's version as applied: to the progress store
@@ -1608,8 +1738,15 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 		return
 	}
 	job := ev.Job
-	// Never dropped, however old: the row has to exist. An update that
-	// overtook it found no row to apply to, so nothing newer is lost.
+	// An add from before a full snapshot was read is in that snapshot, or
+	// its job was deleted before it: either way the snapshot has the last
+	// word, and applying the add would put the job's first status back in
+	// the status map and the progress store (see raiseJobVersionFloor).
+	if job.Version != 0 && job.Version <= a.snapshotFloor {
+		return
+	}
+	// Otherwise never dropped, however old: the row has to exist. An update
+	// that overtook it found no row to apply to, so nothing newer is lost.
 	a.noteJobVersion(job, false)
 
 	// Existing app already has data → user has used the app before; the
@@ -1727,6 +1864,106 @@ func (a *App) updateSelectedJob() {
 	// SetAsides is a no-op when nothing changed.
 	a.details.SetAsides(a.asidesFor(job))
 	a.details.SetGapFill(a.gapFillFor(job))
+	a.details.SetSetAsideArchives(a.setAsideArchivesFor(job))
+}
+
+// setAsideArchivesFor is the archives set aside for job, for the details
+// panel: the last answer for this job, and never a disk read. The probe
+// (JobSetAsideArchives: a row read and one or two directory reads of the
+// output tree, which can be a slow or unreachable volume) runs in a command.
+// A job the cursor comes to is asked about once the cursor has rested on it
+// for setAsideSelectDelay, so holding an arrow key down a long list starts
+// one probe, not one per row. A status change of the selected job is asked
+// about at once, and once more setAsideReaskDelay later; nothing asks
+// periodically. An active job is asked too: the files are in the output
+// tree, not its staging, and the new recording is when the operator looks
+// for them.
+//
+// The same job in a new status keeps showing its last answer until the new
+// one arrives; another job shows none.
+func (a *App) setAsideArchivesFor(job *database.Job) []SetAsideArchiveEntry {
+	if job == nil || a.JobSetAsideArchives == nil {
+		if a.setAsideJobID != "" {
+			a.setAsideJobID, a.setAsideStatus, a.setAsideCache = "", "", nil
+			a.setAsideGen++
+		}
+		return nil
+	}
+	if a.setAsideJobID == job.ID && a.setAsideStatus == job.Status {
+		return a.setAsideCache
+	}
+	statusChange := a.setAsideJobID == job.ID
+	a.setAsideJobID, a.setAsideStatus = job.ID, job.Status
+	a.setAsideGen++
+	gen := a.setAsideGen
+	if !statusChange {
+		a.setAsideCache = nil
+		a.setAsideCmds = append(a.setAsideCmds, tea.Tick(setAsideSelectDelay, func(time.Time) tea.Msg {
+			return setAsideSelectMsg{Gen: gen}
+		}))
+		return nil
+	}
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(job.ID, gen),
+		tea.Tick(setAsideReaskDelay, func(time.Time) tea.Msg {
+			return setAsideReaskMsg{Gen: gen}
+		}))
+	return a.setAsideCache
+}
+
+// setAsideSelectDelay is how long the cursor rests on a job before its
+// set-aside archives are asked for. A variable so a test need not wait for
+// it; production never assigns it.
+var setAsideSelectDelay = 120 * time.Millisecond
+
+// setAsideReaskDelay is how long after a status change of the selected job
+// its set-aside archives are asked for once more. A Reinitialize writes the
+// new status, which is what the panel hears, before it renames the archive
+// aside: the ask the status change starts can read the directory in between.
+// A variable so a test need not wait for it; production never assigns it.
+var setAsideReaskDelay = 2 * time.Second
+
+// setAsideProbeCmd asks JobSetAsideArchives for jobID off the update
+// goroutine. The callback and the IDs are captured here; the closure touches
+// no App field.
+func (a *App) setAsideProbeCmd(jobID string, gen int) tea.Cmd {
+	fn := a.JobSetAsideArchives
+	return safeCmd(func() tea.Msg {
+		return setAsideArchivesMsg{JobID: jobID, Gen: gen, List: fn(jobID)}
+	})
+}
+
+// handleSetAsideArchives shows a probe's answer, unless the selection or the
+// status has moved on since it was asked (State machines rule 6): every such
+// move takes a new generation, so the generation alone decides.
+func (a *App) handleSetAsideArchives(msg setAsideArchivesMsg) {
+	if msg.Gen != a.setAsideGen {
+		return
+	}
+	a.setAsideCache = msg.List
+	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == msg.JobID {
+		a.details.SetSetAsideArchives(msg.List)
+	}
+}
+
+// handleSetAsideReask starts the one delayed ask after a status change. It
+// takes a new generation, so the first ask's answer, should it still be on
+// its way from a slow volume, cannot land over this one's.
+func (a *App) handleSetAsideReask(msg setAsideReaskMsg) {
+	if msg.Gen != a.setAsideGen || a.JobSetAsideArchives == nil {
+		return
+	}
+	a.setAsideGen++
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(a.setAsideJobID, a.setAsideGen))
+}
+
+// handleSetAsideSelect starts the ask for the job the cursor came to, when
+// the cursor is still on it and its status has not changed since: either
+// took a new generation, and a status change has asked already.
+func (a *App) handleSetAsideSelect(msg setAsideSelectMsg) {
+	if msg.Gen != a.setAsideGen || a.JobSetAsideArchives == nil {
+		return
+	}
+	a.setAsideCmds = append(a.setAsideCmds, a.setAsideProbeCmd(a.setAsideJobID, a.setAsideGen))
 }
 
 // gapFillFor is job's gap-fill for the details panel: asked of JobGapFill

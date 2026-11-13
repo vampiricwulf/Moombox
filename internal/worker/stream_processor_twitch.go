@@ -610,7 +610,9 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 				VodDuration:   vodInfo.Duration,
 				VodStartMs:    vodStartMs,
 				EmoteResolver: sp.tw.Emotes,
-			}, sp.logger)
+				// Scoped to the job: the downloader logs vodID=<digits>, which is
+				// not the job ID the per-job log routes on (RouteLogToJobs).
+			}, newScopedLogger(sp.logger, "jobID", job.ID))
 			result.TwitchVodChatDl = vodChatDl
 			// Registered with the run: a panic or a failure stops it
 			// (runChatRegistry). Its "downloading" write is ExecuteTwitch's own
@@ -813,7 +815,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 				OnAuthDowngrade: twitchChatDowngradeCallback(
 					sp.notifierSend, sp.twitchAuthLossReporter, job, chatChannel),
 				EmoteResolver: sp.tw.Emotes,
-			}, sp.logger)
+				// Scoped to the job, as the VOD twin's: these lines carry
+				// channel=<login> and no job ID of their own.
+			}, newScopedLogger(sp.logger, "jobID", job.ID))
 			sp.runChats.add(job.ID, twitchChatDl) // as the VOD twin's
 
 			// "pending" until ExecuteTwitch starts it — see the VOD twin.

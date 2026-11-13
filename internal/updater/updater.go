@@ -149,7 +149,7 @@ type Updater struct {
 // deadline this used to carry killed every download slower than about
 // 2.3 Mbit/s however steadily it was arriving — on exactly the connections
 // that most needed the time.
-var downloadClient = httpx.Client(downloadMaxDuration)
+var downloadClient = httpx.UnprobedClient(downloadMaxDuration)
 
 // downloadMaxDuration bounds one download whatever its progress — a trickle
 // of a byte a minute never stalls. Two hours is about 12 KB/s for the
@@ -209,7 +209,7 @@ func New(currentVersion string, log logger) (*Updater, error) {
 		logger:          log,
 		repoOwner:       "vampiricwulf",
 		repoName:        "Moombox",
-		client:          httpx.Client(10 * time.Second),
+		client:          httpx.UnprobedClient(10 * time.Second),
 		apiBaseURL:      "https://api.github.com",
 		verifySignature: VerifySignature,
 	}, nil

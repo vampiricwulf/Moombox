@@ -207,3 +207,45 @@ func TestDominantActivityIncludesOrchSlot(t *testing.T) {
 		t.Errorf("got (%v, %v), want (Reconnecting, -20s)", act, start)
 	}
 }
+
+// TestWaitShowsOnceTheGraceAfterABrokenFetchHasPassed: bytes of a whole-file
+// chunk that then breaks off are reported as arrival while they are read
+// (engine-3), which moves the grace that holds a wait line back. The wait
+// the failure raises is held back for that grace and no longer: it shows as
+// soon as activitySegmentGrace has passed with nothing more arriving.
+//
+// Mutant: dominantActivity keyed on a grace that never ends once a fetch has
+// been seen (the retry line never shows).
+func TestWaitShowsOnceTheGraceAfterABrokenFetchHasPassed(t *testing.T) {
+	for _, act := range []engine.DownloadActivity{engine.ActivityRetrying, engine.ActivityReconnecting} {
+		t.Run(act.String(), func(t *testing.T) {
+			pt, db := newDBProgressTracker(t)
+			defer pt.Close()
+			clk := &fakeClock{t: time.Now()}
+			pt.mu.Lock()
+			pt.now = clk.now
+			pt.activityInterval = time.Hour // only this test's calls write
+			pt.mu.Unlock()
+			want := activityMessage(act, 0)
+			want = want[:strings.Index(want, "...")]
+
+			pt.noteFetch(100 * 1024) // the broken attempt's bytes
+			pt.setActivity(streamVideo, act)
+			if line, _, _ := jobProgress(t, db); strings.HasPrefix(line, want) {
+				t.Fatalf("line right after the bytes arrived = %q, want the wait held back for the grace", line)
+			}
+
+			pt.mu.Lock()
+			clk.t = clk.t.Add(activitySegmentGrace)
+			pt.mu.Unlock()
+			pt.setActivity(streamVideo, act) // the retry's next emission
+			line, speed, eta := jobProgress(t, db)
+			if !strings.HasPrefix(line, want) {
+				t.Errorf("line once the grace has passed = %q, want %q", line, want)
+			}
+			if speed != "" || eta != "" {
+				t.Errorf("speed/eta = %q/%q, want blanked beside a wait", speed, eta)
+			}
+		})
+	}
+}

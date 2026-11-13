@@ -63,6 +63,19 @@ type jobWithStaging struct {
 	// filled or kept and why (worker.TwitchGapFillStateOf). Absent for a job
 	// that has none.
 	GapFill *worker.GapFillState `json:"gapFill,omitempty"`
+	// UnusedRootRecording names the recording a Finished job's staging root
+	// still holds that the archive was not made from (worker.ScanUnusedRoot,
+	// owner ruling R-E1): file name, path and size. It keeps the staging with
+	// no age rule, and the details views are the only place that says so once
+	// the job's in-memory log is gone. Absent for a job that has none and for
+	// every row that is not Finished. On this route only: list rows and
+	// WebSocket frames never carry it.
+	UnusedRootRecording *worker.UnusedRecording `json:"unusedRootRecording,omitempty"`
+	// SetAsideArchives lists the archives a Reinitialize of this job set
+	// aside that are still beside where the job writes
+	// (worker.ScanSetAsideArchives, owner ruling R2-W1b): name, path and
+	// size. Read from the disk, never stored. Never null. On this route only.
+	SetAsideArchives []worker.SetAsideArchive `json:"setAsideArchives"`
 	// PendingAutoAction is the automatic action the Twitch monitor will take
 	// for this row (jobstate.PendingAutoAction, owner ruling R-D2):
 	// "auto_mux" once the broadcast is confirmed over, "auto_retry" when it
@@ -73,7 +86,7 @@ type jobWithStaging struct {
 }
 
 // enrichJob adds computed staging fields to a job response.
-func enrichJob(db *database.Database, job *database.Job, stagingBase string) jobWithStaging {
+func enrichJob(db *database.Database, job *database.Job, stagingBase, outputDir, outputTemplate string) jobWithStaging {
 	report := worker.ScanAsides(stagingBase, job.ID)
 	return jobWithStaging{
 		Job:             job,
@@ -84,6 +97,9 @@ func enrichJob(db *database.Database, job *database.Job, stagingBase string) job
 		UnmuxedParts:    jobverbs.MuxNeedsUnmuxedParts(job.Status) && worker.HasUnmuxedParts(db, stagingBase, job.ID),
 		MuxGaps:         worker.ScanMuxGaps(stagingBase, job.ID),
 		GapFill:         worker.TwitchGapFillStateOf(db, job),
+
+		UnusedRootRecording: worker.ScanUnusedRoot(db, stagingBase, job),
+		SetAsideArchives:    worker.ScanSetAsideArchives(job, outputDir, outputTemplate),
 
 		PendingAutoAction: jobstate.PendingAutoAction(job),
 	}
@@ -193,8 +209,9 @@ func effectiveStagingDir(store *config.Store) string {
 // sendPaginated applies optional offset/limit pagination and writes the response.
 // Matches TypeScript validateOffsetPagination: returns 400 for invalid values.
 // Each row of the page is sent as worker.ListJob makes it, with hasStaging
-// read from stagingBase for a terminal row (owner decision PE-5) — one
-// directory read per row of the page, not of the whole list.
+// read from stagingBase for a row Resume can be offered on (owner decision
+// PE-5, narrowed by owner ruling R-B2) — one directory read per such row of
+// the page, not of the whole list.
 func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.Job, stagingBase string) {
 	offsetStr := req.URL.Query().Get("offset")
 	limitStr := req.URL.Query().Get("limit")
@@ -303,12 +320,14 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// /api/jobs/{id}/thumbnail is the only long-lived cache left.
 		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 
-		var stagingBase string
+		var stagingBase, outputDir, outputTemplate string
 		store.Read(func(c *config.MoomboxConfig) {
 			stagingBase = c.Paths.EffectiveStagingDir()
+			outputDir = c.Paths.OutputDirectory
+			outputTemplate = c.Downloader.OutputTemplate
 		})
 
-		jsonResponse(rw, enrichJob(db, job, stagingBase))
+		jsonResponse(rw, enrichJob(db, job, stagingBase, outputDir, outputTemplate))
 	})
 
 	// GET /api/jobs/:id/video — range-request video streaming
@@ -622,17 +641,20 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 	// GET /api/jobs/:id/logs — per-job log buffer
 	r.Get("/api/jobs/{id}/logs", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		// Verify job exists
+		// The job's in-memory log buffer (written by database.RouteLogToJobs).
+		// The open details dialog reads this every second,
+		// so a buffer with lines is answered without touching SQLite, as the
+		// TUI's O L overlay reads it: the buffer goes with its row
+		// (ClearJobLogs), so lines mean the job exists.
+		if logs := db.GetJobLogs(jobID); len(logs) > 0 {
+			jsonResponse(rw, logs)
+			return
+		}
+		// No lines: 404 for an unknown job, [] for one that has logged nothing.
 		if _, ok := loadJob(rw, db, jobID); !ok {
 			return
 		}
-		// The job's in-memory log buffer (written by database.AddJobLog and
-		// RouteLogToJobs); [] when it has none.
-		logs := db.GetJobLogs(jobID)
-		if logs == nil {
-			logs = []string{}
-		}
-		jsonResponse(rw, logs)
+		jsonResponse(rw, []string{})
 	})
 
 	// POST /api/jobs — create a new job
@@ -1404,16 +1426,17 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 }
 
-var (
-	youtubeURLRe = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
-	// twitchIDRe is a Twitch login or a numeric VOD ID, at Twitch's
-	// 25-character login limit.
-	twitchIDRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,25}$`)
-)
+// twitchIDRe is a Twitch login or a numeric VOD ID, at Twitch's
+// 25-character login limit.
+var twitchIDRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,25}$`)
 
+// extractVideoIDFromURL reads the ID a URL-only POST /api/jobs names: a
+// YouTube video's, by the one parser every add path uses
+// (utils.ExtractVideoIDFromURL, which takes no bare ID: an 11-character
+// Twitch login is not a video), or a Twitch channel's login.
 func extractVideoIDFromURL(url string) string {
-	if m := youtubeURLRe.FindStringSubmatch(url); m != nil {
-		return m[1]
+	if id := utils.ExtractVideoIDFromURL(url); id != "" {
+		return id
 	}
 	// A Twitch URL yields its login only when it names a CHANNEL, by the one
 	// URL table every add path follows (utils.ExtractTwitchTarget). VOD, clip
@@ -1863,6 +1886,12 @@ type StatusRouteDeps struct {
 	// place of a bare "Waiting in queue...", and what turns its disk gauge
 	// to "holding". The WebSocket's admission_holds frame pushes each change.
 	GetAdmissionHolds func() jobstate.AdmissionHolds
+	// GetChannelMonitors is each monitor's health list by platform
+	// (monitor.ChannelMonitors), sent as the additive channelMonitors field:
+	// what the dashboard's channel list derives its "checks failing" flag
+	// from (owner ruling R-H1). channelHealth, the merged list, is unchanged.
+	// The WebSocket's channel_monitors frame pushes each change of the flag.
+	GetChannelMonitors func() any
 }
 
 // hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
@@ -1945,6 +1974,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetAdmissionHolds != nil {
 			resp["admissionHolds"] = deps.GetAdmissionHolds()
+		}
+		if deps.GetChannelMonitors != nil {
+			resp["channelMonitors"] = deps.GetChannelMonitors()
 		}
 
 		// BotGuard sidecar liveness. ABSENT (not false) when nothing was ever

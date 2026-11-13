@@ -770,6 +770,13 @@ const cookieLoadErrorUnknownCause = "the file could not be read"
 // os.Root-rooted open, a decrypting reader or a network-mount shim would each
 // bring their own error type with them. Anything that is not an errno
 // therefore renders cookieLoadErrorUnknownCause, which still names the file.
+//
+// The PATH is what gives way when the sentence is too long, and it gives way
+// from the front: a cookie file deep under a long mount path would otherwise
+// fill the whole bound, and a cut from the end drops the cause, which is the
+// one thing the operator needs. The file name and the directories nearest it
+// stay. The final boundString is a backstop for an op or errno text long
+// enough to overflow on its own.
 func cookieLoadErrorSentence(filePath string, err error) string {
 	op, cause := "open", cookieLoadErrorUnknownCause
 	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
@@ -780,10 +787,11 @@ func cookieLoadErrorSentence(filePath string, err error) string {
 			cause = errno.Error()
 		}
 	}
-	return boundString(op+" "+filePath+": "+cause, cookieLoadErrorMaxLen)
+	room := cookieLoadErrorMaxLen - len(op) - len(" ") - len(": ") - len(cause)
+	return boundString(op+" "+boundStringTail(filePath, room)+": "+cause, cookieLoadErrorMaxLen)
 }
 
-// cookieLoadErrorEllipsis marks a sentence boundString had to cut.
+// cookieLoadErrorEllipsis marks what boundString or boundStringTail had to cut.
 const cookieLoadErrorEllipsis = "..."
 
 // boundString truncates s to at most n bytes without splitting a rune, adding
@@ -811,6 +819,29 @@ func boundString(s string, n int) string {
 		cut--
 	}
 	return s[:cut] + marker
+}
+
+// boundStringTail keeps the END of s: at most n bytes, never splitting a rune,
+// with a leading ellipsis when it cuts and there is room for one. A bound
+// narrower than the ellipsis cuts silently, and a bound of zero or less
+// returns "", as boundString does at the other end.
+func boundStringTail(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	keep := n - len(cookieLoadErrorEllipsis)
+	marker := cookieLoadErrorEllipsis
+	if keep < 0 {
+		keep, marker = n, ""
+	}
+	start := len(s) - keep
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return marker + s[start:]
 }
 
 // Reload reloads cookies from the same file.

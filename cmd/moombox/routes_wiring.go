@@ -88,6 +88,9 @@ func (s *runState) wireRoutes() func() {
 			}
 		},
 		GetAdmissionHolds: s.dlWorker.AdmissionHolds,
+		// Every monitor's own list, unmerged: the failing flag needs each
+		// monitor's streak, which the merged channelHealth above drops.
+		GetChannelMonitors: func() any { return s.channelMonitors() },
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: s.applyConfiguredLogLevel,
@@ -109,6 +112,7 @@ func (s *runState) wireRoutes() func() {
 		OnTrustForwardedProtoChange: s.applyTrustForwardedProto,
 		OnFfmpegPathChange:          s.applyFfmpegPath,
 		OnReorderBudgetChange:       s.applyReorderBudget,
+		OnKeepAwakeChange:           s.applyKeepAwake,
 		ResolveRateLimit:            s.apiRL,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
@@ -177,7 +181,7 @@ func (s *runState) wireRoutes() func() {
 	})
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
 	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore, s.log)
-	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL)
+	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL, s.resumeAfterVerifiedCookies)
 	routes.YtdlpRoutes(s.r, s.currentWebPort, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
@@ -209,6 +213,11 @@ func (s *runState) wireRoutes() func() {
 		LoginRL:    s.loginRL,
 		PasswordRL: s.passwordRL,
 		Logger:     s.log,
+		CloseAuthenticatedSockets: func() {
+			if s.wsHub != nil {
+				s.wsHub.CloseAuthenticated()
+			}
+		},
 	}
 	routes.AuthRoutes(s.r, authDeps, s.configStore)
 	routes.ClientTokenRoutes(s.r, authDeps)

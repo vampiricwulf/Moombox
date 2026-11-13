@@ -17,6 +17,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		singleGoneRetry:        singleGoneRetryDelay,
 		interruptionStallRetry: interruptionStallRetryDelay,
 		transientFailureRetry:  transientFailureRetryDelay,
+		segmentRetryUnit:       segmentRetryUnitDelay,
 		genericRetry:           genericRetryDelay,
 		hlsPlaylistRetry:       hlsPlaylistRetryDelay,
 		hlsStuckRetry:          hlsStuckRetryDelay,
@@ -25,6 +26,7 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		hlsReloadUnit:          time.Second,
 		hlsResumeSave:          hlsResumeSaveInterval,
 		fetchHardCeiling:       segmentHardCeiling,
+		headFreshWindow:        headFreshWindow,
 	}
 	if got := defaultDelays(); got != want {
 		t.Fatalf("defaultDelays() = %+v, want %+v", got, want)
@@ -34,12 +36,14 @@ func TestDefaultDelaysMatchConstants(t *testing.T) {
 		"singleGoneRetry":        {want.singleGoneRetry, 500 * time.Millisecond},
 		"interruptionStallRetry": {want.interruptionStallRetry, 5 * time.Second},
 		"transientFailureRetry":  {want.transientFailureRetry, time.Second},
+		"segmentRetryUnit":       {want.segmentRetryUnit, 5 * time.Second},
 		"genericRetry":           {want.genericRetry, 2 * time.Second},
 		"hlsPlaylistRetry":       {want.hlsPlaylistRetry, 5 * time.Second},
 		"hlsStuckRetry":          {want.hlsStuckRetry, 2 * time.Second},
 		"connectivityPoll":       {want.connectivityPoll, 5 * time.Second},
 		"hlsResumeSave":          {want.hlsResumeSave, 15 * time.Second},
 		"fetchHardCeiling":       {want.fetchHardCeiling, 15 * time.Minute},
+		"headFreshWindow":        {want.headFreshWindow, time.Minute},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %v, want %v (production timing must not move in this arc)", name, pair[0], pair[1])
@@ -102,6 +106,7 @@ func fastDelays() delays {
 		singleGoneRetry:        d.singleGoneRetry / fastScale,
 		interruptionStallRetry: d.interruptionStallRetry / fastScale,
 		transientFailureRetry:  d.transientFailureRetry / fastScale,
+		segmentRetryUnit:       d.segmentRetryUnit / fastScale,
 		genericRetry:           d.genericRetry / fastScale,
 		hlsPlaylistRetry:       d.hlsPlaylistRetry / fastScale,
 		hlsStuckRetry:          d.hlsStuckRetry / fastScale,
@@ -110,6 +115,7 @@ func fastDelays() delays {
 		hlsReloadUnit:          d.hlsReloadUnit / fastScale,
 		hlsResumeSave:          d.hlsResumeSave / fastScale,
 		fetchHardCeiling:       d.fetchHardCeiling / fastScale,
+		headFreshWindow:        d.headFreshWindow / fastScale,
 	}
 }
 

@@ -544,7 +544,19 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 	case http.StatusOK:
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB max player JS
 		if err != nil {
-			return FetchResult{}, fmt.Errorf("read player JS: %w", err)
+			// A body that broke off mid-read — a reset, or the client's 30s
+			// timeout, which covers the body of a player of about 3 MB — is
+			// the same blip as a failed connection above: serve the cached
+			// copy, or fail as ErrPlayerJSFetch so a cold fetch is tried
+			// again (retryablePlayerFetch) and the worker reads it as
+			// systemic, not as a fault of the one format it had chosen.
+			if cachedExists {
+				if pc.logger != nil {
+					pc.logger.Debug("cipher: revalidation body broke off, serving cached", "err", err)
+				}
+				return FetchResult{JS: cachedJS, Changed: false}, nil
+			}
+			return FetchResult{}, fmt.Errorf("%w: read body: %v", ErrPlayerJSFetch, err)
 		}
 		js := string(body)
 

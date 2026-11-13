@@ -8,7 +8,7 @@ inside a jsdom document. jsdom is the only dev dependency, and it is
 
 ## Running
 
-From the repo root:
+Here, `npm test` runs every file with a two-minute limit per test. From the repo root:
 
 ```bash
 # Run every test file (the DOM suites skip if jsdom is not installed)
@@ -41,7 +41,9 @@ Pure — no DOM, nothing to install:
 | `nico-geometry.test.mjs` | `nico-geometry.js`: the video's box inside the player (letterbox, pillarbox) for the chat overlay |
 | `nico-lanes.test.mjs` | `nico-lanes.js`: lane allocation for the scrolling chat overlay |
 | `nico-scheduler.test.mjs` | `nico-scheduler.js`: the overlay's cursor, anchor, pending list and drop count |
+| `toast-duration.test.mjs` | how long a toast stays: an error until closed, a warning or a long message for a time scaled to its length, a short success 3 s; the countdown bar runs for the same time |
 | `template-preview.test.mjs` | the Settings page's output-template example, formatted as `config.ResolveTemplate` writes a name |
+| `channel-failing.test.mjs` | `channelFailing`, `failingChannels` and `failingChannel` in `utils.js` against Go over `fixtures/channel-failing-parity.json` (owner ruling R-H1) |
 | `utils.test.mjs` | `utils.js`: the formatters (`formatBytes`, timestamps, durations) and the small helpers beside them |
 
 DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-dom.mjs`
@@ -53,6 +55,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `app.test.mjs` | rendering pins: job cards, Files rows and the details dialog against `fixtures/app-job-items.json` (see [The app harness](#the-app-harness)) |
 | `app-resync.test.mjs` | a mid-session `initial_state` replaces the job list and the log buffer, and keeps the details dialog |
 | `archive-boundary.test.mjs` | the dashboard's archive cutoff, the JS twin of `internal/jobfilter` |
+| `archived-panel.test.mjs` | the Archived panel: a failed fetch keeps the list and selection and offers Retry, late answers are dropped, the newest 200 cards with Show more, filter and Select All over every row, and Arrow/Enter on its rows; the fetch notices follow the newest fetch only, Retry shows busy, the failure line is not rewritten on a redraw; one row is a tab stop, Arrow moves real focus, a focused row is the highlighted row, Enter and Space open it |
 | `boot-and-login.test.mjs` | `boot-theme.js` and `login.js` evaluated against the real `index.html` and `login.html` |
 | `channel-removal.test.mjs` | removing a channel asks: keep its jobs (the default) or delete the pending ones, and the toast says what it did; its prompt-text tests are pure |
 | `dashboard-text.test.mjs` | small user-facing strings: a singular chat count, the Stats tab with no disk reading, a single-file recording's load error |
@@ -75,6 +78,7 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `log-panel.test.mjs` | the Logs panel: batched appends, the 500-line window, the snapshot and frame numbers (`logSeq`/`seq`) across connects and resyncs |
 | `open-folder.test.mjs` | Open Folder surfaces a refusal |
 | `password-forms.test.mjs` | the wizard's External Access Password and Settings' Set Password: the bounds the login enforces, checked before posting; the password sent as typed; the warning while it starts or ends with a space |
+| `twitch-moderation.test.mjs` | `chat-timeline.js` `applyTwitchModeration` and the player: a Twitch chat's stored timeouts, bans, clears and deletions mark their messages and show no row of their own |
 | `player.test.mjs` | `player.js`: selection, the chat sidebar and offset, seeking, search, the overlay; a few pure helper tests |
 | `player-chapters.test.mjs` | `player.js`'s chapters: the marker strip under the video and the chapter list, laid out on the global timeline, seeking on click, the current chapter highlighted, nothing drawn for none or a failed fetch, and a slow fetch never holding up playback |
 | `chapter-import-busy.test.mjs` | the chapter-import dialog's committing state: Restore disabled and refused during a Save, Escape through `close()`, and (owner ruling R-B1) a failure of a save Escape dismissed reported as a toast |
@@ -93,12 +97,16 @@ DOM — jsdom, through `helpers/app-dom.mjs` (the dashboard), `helpers/player-do
 | `ws-connection-state.test.mjs` | the WebSocket's `ConnState` on `#connection-status`; a close before open probes `GET /api/status` once, a 401 ends in unauthorized (no socket, a re-probe every 30 s that reconnects on the first non-401), anything else backs off; a probe answering after a newer socket changes nothing |
 | `ws-session-reload.test.mjs` | one test, so app.js's fetch wrapper is on the path: the probe's 401 reloads the page (seen through the harness's `navigations`, jsdom's refused navigations), once, and a later 200 reconnects |
 | `settings-text.test.mjs` | Settings and setup text that pointed the wrong way or dropped the server's reason |
+| `settings-channel-health.test.mjs` | the "Checks failing" flag on the Settings channel cards (owner ruling R-H1): set and cleared by `channel_monitors` frames, seeded by `initial_state`, never on a disabled channel, the error escaped |
 | `settings-channels.test.mjs` | both Add Channel dialogs: a URL or bare `@handle` resolved first, a configured ID switching to editing it, the edit mark, and a stale list's `409` |
 | `setup-wizard.test.mjs` | the first-run wizard's Finish: the address it redirects the tab to after the restart |
 | `sidecar-warning.test.mjs` | the header warning while the BotGuard sidecar is down |
 | `stats-storage.test.mjs` | the Stats tab's storage breakdown, Cancelled included |
+| `ws-refused-notice.test.mjs` | the Tasks notice after three refused upgrades with HTTP reachable on a page that never connected: the count restarts on an unreachable answer, a stale probe is not counted, the first open clears it, a page that connected before never shows it; its text names both causes, it is content of an always-rendered status region, and a render while it shows draws no empty state |
+| `tasks-incremental.test.mjs` | the Tasks list's cheap paths against a full rebuild: the sort's precomputed keys, the channel list, one-card removal and re-placement, and the hidden-tab repaint; a thumbnail that arrives in a same-status update, archive-at-once without a rebuild, a status-changing progress frame reaching the open dialog, and the one-row tab stop through inserts, moves and deletes |
 | `trimmer.test.mjs` | the trim dialog's failure states and keyboard reach |
 | `twitch-urls.test.mjs` | `extractTwitchTarget` against the shared Twitch URL table (`internal/utils/testdata/twitch_urls.json`), and the Add dialog refusing clips and lists |
+| `youtube-urls.test.mjs` | `extractVideoId` against the shared YouTube URL table (`internal/utils/testdata/youtube_urls.json`) |
 | `update-check-debounce.test.mjs` | a debounced update check reports the wait, not "Up to date" |
 | `update-check-keep.test.mjs` | an up-to-date check keeps a release that reached the page during its round trip |
 | `update-dialog.test.mjs` | the update dialog's Update Now and Skip name the release on screen, and the dialog closes, saying why, once that release is skipped or withdrawn elsewhere |
@@ -178,9 +186,13 @@ with `h.flushRaf()`.
 
 `helpers/app-dom.mjs` exports `makeApp(opts)`, the same shape one level up: it
 builds a jsdom document from the **whole `<body>` of `web/public/index.html`**
-(the dashboard touches every panel), publishes the globals, answers the boot
-fetches, imports `app.js` **dynamically** — it has module-level side effects,
-so every global has to exist first — and constructs a real `MoomboxApp`:
+(the dashboard touches every panel), waits for the window's `load`, publishes
+the globals, answers the boot fetches, imports `app.js` **dynamically** — it
+has module-level side effects, so every global has to exist first — and
+constructs a real `MoomboxApp`. The wait for `load` is what keeps that app the
+only one: `app.js` also builds one on `DOMContentLoaded`, which jsdom 31 fires
+in a task after the constructor returns, so the event has to be over before the
+import registers the listener:
 
 ```js
 const h = await harness.makeApp({
@@ -206,7 +218,10 @@ string on every machine.
 dashboard draws so the controller extractions can be proved to change nothing.
 The snapshot lives in `fixtures/app-job-items.json` and its inputs in
 `fixtures/app-render-inputs.mjs`. When a rendering change is *intended*,
-regenerate it deliberately — from `web/tests/`:
+regenerate it deliberately — from `web/tests/`. The rows are serialised HTML, so
+the snapshot also follows the serialiser: since jsdom 31 (parse5 8.1) `<` and
+`>` inside attribute values are written `&lt;` and `&gt;`, as the HTML spec's
+fragment serialisation now has it; the attribute values themselves are the same:
 
 ```bash
 node --input-type=module -e '

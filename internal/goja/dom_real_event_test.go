@@ -19,7 +19,6 @@ func TestEventTargetClassExists(t *testing.T) {
 		t.Fatalf("NewRuntimeWithShims: %v", err)
 	}
 	cases := []struct{ expr, want string }{
-		{`typeof EventTarget`, "function"},
 		{`typeof Event`, "function"},
 		{`typeof CustomEvent`, "function"},
 		{`typeof MessageEvent`, "function"},

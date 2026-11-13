@@ -22,31 +22,16 @@ func (db *Database) HasProcessed(videoID string) (bool, error) {
 	return true, nil
 }
 
-// AddToHistory adds a video ID to the processing history.
+// AddToHistory adds a video ID to the processing history. History is never
+// pruned: a row is the only record that keeps a video whose job was deleted
+// from being archived again, however old it is. Re-recording a present ID
+// leaves its date alone.
 func (db *Database) AddToHistory(videoID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.db.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now)
-	if err != nil {
-		return err
-	}
-
-	// Prune if over limit
-	return db.pruneHistory()
-}
-
-// historyCap is how many rows history keeps. pruneHistory evicts the oldest
-// (by added_at) beyond it, never the row just recorded: that row is what keeps
-// the archive pass from re-creating the job it was recorded for.
-const historyCap = 10000
-
-func (db *Database) pruneHistory() error {
-	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM history WHERE video_id IN (
-		SELECT video_id FROM history ORDER BY added_at ASC
-		LIMIT MAX(0, (SELECT COUNT(*) FROM history) - ?)
-	)`, historyCap)
 	return err
 }
 
@@ -96,8 +81,11 @@ func (db *Database) ListOrphanedHistory() ([]OrphanedHistoryEntry, error) {
 }
 
 // DeleteHistoryEntries removes the given video IDs from the processing history
-// and returns the number of rows deleted. Batched to stay under SQLite's bound
-// on parameters per statement.
+// and returns the number of rows deleted. Only an orphaned row goes: one whose
+// video has a job (the rule ListOrphanedHistory lists by) is left, so a list
+// fetched before the video was added again cannot take the history row of a
+// job that now exists. Batched to stay under SQLite's bound on parameters per
+// statement; the batches are separate statements, not one transaction.
 func (db *Database) DeleteHistoryEntries(videoIDs []string) (int, error) {
 	if len(videoIDs) == 0 {
 		return 0, nil
@@ -118,7 +106,8 @@ func (db *Database) DeleteHistoryEntries(videoIDs []string) (int, error) {
 			args[i] = id
 		}
 		res, err := db.db.ExecContext(db.getCtx(),
-			"DELETE FROM history WHERE video_id IN ("+strings.Join(placeholders, ",")+")", args...)
+			"DELETE FROM history WHERE video_id IN ("+strings.Join(placeholders, ",")+")"+
+				" AND video_id NOT IN (SELECT id FROM jobs)", args...)
 		if err != nil {
 			return total, err
 		}

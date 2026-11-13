@@ -31,7 +31,8 @@ func TestClientTokenTTLIsEnforcedServerSide(t *testing.T) {
 	t.Cleanup(func() { log.Close() })
 	cfg := config.Defaults()
 	cfg.Network.ClientTokenTTLDays = 30
-	s := &runState{db: db, log: log, configStore: config.NewStore(cfg, "")}
+	auth := web.NewAuthService()
+	s := &runState{db: db, log: log, configStore: config.NewStore(cfg, ""), authSvc: auth}
 
 	add := func(id string, age time.Duration) string {
 		raw, err := web.GenerateToken()
@@ -54,11 +55,23 @@ func TestClientTokenTTLIsEnforcedServerSide(t *testing.T) {
 	fresh := add("fresh", 24*time.Hour)
 	stale := add("stale", 31*24*time.Hour)
 
+	// The session a token mints carries no link to it and slides for as long
+	// as it is used, so it must end when the token does.
+	session, err := auth.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if s.clientTokenFor(fresh) == nil {
 		t.Error("a 1-day-old token was refused under a 30-day TTL")
 	}
+	if !auth.ValidateSession(session) {
+		t.Error("a token that is still good ended the sessions")
+	}
 	if s.clientTokenFor(stale) != nil {
 		t.Error("a 31-day-old token still authenticates under a 30-day TTL")
+	}
+	if auth.ValidateSession(session) {
+		t.Error("a session outlived the expired token that may have minted it")
 	}
 	tokens, err := db.ListClientTokens()
 	if err != nil {
@@ -88,5 +101,40 @@ func TestClientTokenExpired(t *testing.T) {
 		if got := clientTokenExpired(tc.created, tc.ttl, now); got != tc.want {
 			t.Errorf("clientTokenExpired(%q, %d) = %v, want %v", tc.created, tc.ttl, got, tc.want)
 		}
+	}
+}
+
+// TestATokenRevokedWhileItsSessionIsMintedGetsNoSession: a revoke deletes the
+// token's row and then ends every session. A request from the revoked device
+// that passed the token check just before the delete used to mint its
+// session after the sessions were ended, and keep it. The row is read again
+// once the session exists.
+//
+// Mutant: mint without the second read: the revoked token gets a session.
+func TestATokenRevokedWhileItsSessionIsMintedGetsNoSession(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "revoke.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s := &runState{db: db, authSvc: web.NewAuthService()}
+
+	ct := &database.ClientToken{
+		ID: "phone", TokenPrefix: "abcd1234", TokenHash: "x:y", Label: "phone",
+		CreatedAt: "2026-11-01T00:00:00Z", LastUsedAt: "2026-11-01T00:00:00Z",
+	}
+	if err := db.AddClientToken(ct); err != nil {
+		t.Fatal(err)
+	}
+	if session, ok := s.sessionForClientToken(ct); !ok || !s.authSvc.ValidateSession(session) {
+		t.Fatal("a token whose row stands was given no session")
+	}
+
+	// The check passed on ct; the revoke lands before the session is minted.
+	if err := db.DeleteClientToken(ct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if session, ok := s.sessionForClientToken(ct); ok {
+		t.Errorf("a token revoked after its check still got a session (%q)", session)
 	}
 }

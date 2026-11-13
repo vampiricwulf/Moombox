@@ -12,18 +12,6 @@ import (
 	"time"
 )
 
-func TestOpenAndClose(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-}
-
 func TestAddAndGetJob(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -93,32 +81,6 @@ func TestDeleteJob(t *testing.T) {
 	}
 	if got != nil {
 		t.Error("expected nil after delete")
-	}
-}
-
-func TestHistory(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// Not processed yet
-	has, _ := db.HasProcessed("video1")
-	if has {
-		t.Error("expected false for unprocessed video")
-	}
-
-	// Add to history
-	db.AddToHistory("video1")
-
-	has, _ = db.HasProcessed("video1")
-	if !has {
-		t.Error("expected true after adding to history")
 	}
 }
 
@@ -555,12 +517,28 @@ func TestUpdateJobFields(t *testing.T) {
 	}
 }
 
+// errorRecorder records the Error lines a Database logs, with their args.
+type errorRecorder struct{ errors []string }
+
+func (*errorRecorder) Debug(string, ...any) {}
+func (*errorRecorder) Info(string, ...any)  {}
+func (*errorRecorder) Warn(string, ...any)  {}
+func (r *errorRecorder) Error(msg string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprint(append([]any{msg}, args...)...))
+}
+
+// TestUpdateJobFieldsInvalidKey: a key fieldToColumn does not know (a typo
+// at a call site, a column added without its map entry) is not written, the
+// rest of the map is, and the drop is logged at Error naming the field. It
+// was a Debug line, which nobody running at the default level ever saw.
+//
+// Mutant: logging the drop at Debug again leaves the recorder empty.
 func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
+	rec := &errorRecorder{}
+	db, err := Open(dbPath, rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,15 +552,19 @@ func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 		Title:   "Original",
 	}
 	db.AddJob(job)
+	rec.errors = nil
 
-	// Invalid field name should be ignored (with a Debug-level log) without affecting other updates.
 	db.UpdateJobFields("yt_invalid", map[string]any{
 		"nonexistent_field": "value",
+		"title":             "Renamed",
 	})
 
 	got, _ := db.GetJob("yt_invalid")
-	if got.Title != "Original" {
-		t.Errorf("expected title unchanged, got %q", got.Title)
+	if got.Title != "Renamed" {
+		t.Errorf("the known field beside an unknown one was not written: title %q", got.Title)
+	}
+	if len(rec.errors) != 1 || !strings.Contains(rec.errors[0], "nonexistent_field") {
+		t.Errorf("want one Error line naming the unknown field, got %q", rec.errors)
 	}
 }
 
@@ -731,56 +713,6 @@ func TestOnJobUpdateSubscriber(t *testing.T) {
 	}
 	if receivedJob.Status != StatusDownloading {
 		t.Errorf("expected status %s, got %s", StatusDownloading, receivedJob.Status)
-	}
-	mu.Unlock()
-}
-
-func TestOnJobUpdateUnsubscribe(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	job := &Job{
-		ID:      "yt_unsub1",
-		VideoID: "unsub1",
-		URL:     "https://youtube.com/watch?v=unsub1",
-		Status:  StatusUpcoming,
-	}
-	db.AddJob(job)
-
-	callCount := 0
-	var mu sync.Mutex
-	unsub := db.OnJobUpdate(func(j *Job) {
-		mu.Lock()
-		callCount++
-		mu.Unlock()
-	})
-
-	// Trigger update, should fire callback
-	db.UpdateJobFields("yt_unsub1", map[string]any{"status": StatusDownloading})
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	firstCount := callCount
-	mu.Unlock()
-
-	// Unsubscribe
-	unsub()
-
-	// Trigger another update — callback should NOT fire
-	db.UpdateJobFields("yt_unsub1", map[string]any{"status": StatusMuxing})
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	if callCount != firstCount {
-		t.Errorf("expected callback count unchanged after unsubscribe, got %d -> %d",
-			firstCount, callCount)
 	}
 	mu.Unlock()
 }

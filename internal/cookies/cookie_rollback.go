@@ -139,7 +139,7 @@ func (s *AutoCookieService) restorePreviousCookies(restored string, platforms []
 		} else {
 			failure = fmt.Errorf("%s (%w)%s", head, cause, tail)
 		}
-		s.setError(failure.Error())
+		s.setFileError(failure.Error())
 		s.logger.Error(logMsg, "err", cause, "platforms", strings.Join(platforms, ","))
 		return &rollbackFailure{stage: stage, err: failure, cause: cause}
 	}

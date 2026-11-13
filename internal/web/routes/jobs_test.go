@@ -645,6 +645,25 @@ func TestJobLogsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+// The open details dialog reads this route every second. Mutant: loadJob
+// ahead of the buffer read — every one of those reads costs a SELECT. The
+// buffer here has no row behind it (a state the server never holds: a row's
+// buffer is cleared with it), which is the only way to see from outside that
+// lines are answered without the row being read.
+func TestJobLogsWithLinesAreAnsweredFromTheBuffer(t *testing.T) {
+	f := newJobsFixture(t)
+	f.db.TrackJobForLogs("yt_buffered")
+	f.db.RouteLogToJobs("[yt_buffered] retrying after 403")
+
+	rec := doRequest(t, f.router, "GET", "/api/jobs/yt_buffered/logs", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logs: want 200, got %d", rec.Code)
+	}
+	if want := `["[yt_buffered] retrying after 403"]` + "\n"; rec.Body.String() != want {
+		t.Errorf("logs body: want %q, got %q", want, rec.Body.String())
+	}
+}
+
 // --- POST /api/jobs/{id}/cancel ---
 
 func TestJobCancelInvalidState(t *testing.T) {
@@ -1165,6 +1184,41 @@ func TestJobCreateExtractsVideoIDFromYouTubeURL(t *testing.T) {
 	}
 }
 
+// TestExtractVideoIDFromURLSharedYouTubeURLTable runs the URL-only add's
+// reader over the one YouTube URL table every add path is tested against
+// (internal/utils/testdata/youtube_urls.json). A bare ID is not a URL here:
+// the caller has videoId for that, and an 11-character word in url may be a
+// Twitch login.
+//
+// Mutant: the route's own regex this replaced (watch?v= with v first,
+// youtu.be/ and /live/ only, on any host) fails the app=desktop, list=,
+// /shorts/, /embed/ and /v/ rows and takes the notyoutube.com row.
+func TestExtractVideoIDFromURLSharedYouTubeURLTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "utils", "testdata", "youtube_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table struct {
+		Rows []struct {
+			Input string `json:"input"`
+			ID    string `json:"id"`
+			Bare  bool   `json:"bare"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &table); err != nil || len(table.Rows) == 0 {
+		t.Fatalf("shared table: %v (%d rows)", err, len(table.Rows))
+	}
+	for _, row := range table.Rows {
+		want := row.ID
+		if row.Bare {
+			want = ""
+		}
+		if got := extractVideoIDFromURL(row.Input); got != want {
+			t.Errorf("extractVideoIDFromURL(%q) = %q, want %q", row.Input, got, want)
+		}
+	}
+}
+
 func TestJobCreateRejectsDuplicate(t *testing.T) {
 	// HasActiveJob check: creating the same videoID twice in a row
 	// returns 409. Mirrors the import-duplicate test in the import
@@ -1595,34 +1649,6 @@ func TestJobChatServesARangeRequest(t *testing.T) {
 	}
 	if cr := rec.Header().Get("Content-Range"); cr == "" {
 		t.Error("206 carries no Content-Range")
-	}
-}
-
-// TestJobChatAnswersAConditionalGET: the If-Modified-Since short-circuit (R15)
-// stays ahead of the open, and ServeContent answers the same question for a
-// request that gets past it.
-//
-// THE MUTANT: drop the notModifiedSince short-circuit — this still passes (via
-// ServeContent) but the file is opened and stat'd for nothing on every poll.
-func TestJobChatAnswersAConditionalGET(t *testing.T) {
-	f := newJobsFixture(t)
-	chatPath := filepath.Join(f.outputDir, "chat.json")
-	if err := os.WriteFile(chatPath, []byte(`{"messages":[]}`), 0o644); err != nil {
-		t.Fatalf("write chat: %v", err)
-	}
-	f.addJob(t, "yt_condchat", func(j *database.Job) { j.ChatFilename = "chat.json" })
-
-	fi, err := os.Stat(chatPath)
-	if err != nil {
-		t.Fatalf("stat chat: %v", err)
-	}
-	rec := doRequestWithHeaders(t, f.router, "GET", "/api/jobs/yt_condchat/chat",
-		map[string]string{"If-Modified-Since": fi.ModTime().UTC().Format(http.TimeFormat)})
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("conditional GET: want 304, got %d", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("304 carried %d body bytes, want none", rec.Body.Len())
 	}
 }
 

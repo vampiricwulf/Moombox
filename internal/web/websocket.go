@@ -13,7 +13,15 @@ import (
 )
 
 const (
+	// wsWriteTimeout bounds the write of every frame but an initial_state
+	// snapshot, and is the base of a snapshot's own bound (see
+	// snapshotWriteTimeout).
 	wsWriteTimeout = 10 * time.Second
+	// wsSnapshotFloorRate is the slowest link, in bytes a second, a snapshot
+	// is still delivered over, and wsSnapshotWriteCap the longest one write
+	// may take whatever its size.
+	wsSnapshotFloorRate = 32 << 10
+	wsSnapshotWriteCap  = 2 * time.Minute
 	// wsPingInterval is also the worst-case latency of a pending resync: the
 	// ping tick is the only place a snapshot can be flushed without a
 	// broadcast to ride on (see flushResync), so on a completely quiet hub a
@@ -39,12 +47,32 @@ const (
 	// wsWriteQueueSize bounds the per-client outbound queue so a stalled
 	// client can't accumulate unbounded backpressure (memory blow-up plus
 	// a 10s× per-message Broadcast stall on every subsequent send). On
-	// queue overflow the oldest queued frame is dropped with a warn log.
-	// 16 is comfortably above the typical burst (initial state + a couple
-	// of job updates) without letting a slow client buffer megabytes of
-	// stale state. Audit reports/web.md C-7.
+	// queue overflow one frame is dropped (wsQueue.push says which) and
+	// counted. 16 is comfortably above the typical burst (initial state + a
+	// couple of job updates) without letting a slow client buffer megabytes
+	// of stale state. Audit reports/web.md C-7.
 	wsWriteQueueSize = 16
 )
+
+// snapshotWriteTimeout is how long the write of an initial_state snapshot of
+// n bytes may take: wsWriteTimeout plus the time n bytes need at
+// wsSnapshotFloorRate, capped at wsSnapshotWriteCap.
+//
+// The snapshot is megabytes on a busy instance (1.7 MB at 500 Tasks rows, 7 MB
+// at 2,000: TestInitialStateSnapshotSize, cmd/moombox) and is not compressed.
+// Under the flat 10 s every frame used to get, a link below about 1.4 Mbit/s
+// could never finish the first write at 500 rows: the connection was closed,
+// the dashboard reconnected, and each attempt cost another GetAllJobs and
+// marshal for a job list that never arrived. Only snapshots are scaled; every
+// other frame is small and keeps wsWriteTimeout exactly.
+//
+// The cost is a stalled peer holding its goroutines for up to the cap rather
+// than 10 s when the frame it stalls on is a snapshot. The 16-slot queue
+// still bounds what is buffered for it meanwhile.
+func snapshotWriteTimeout(n int) time.Duration {
+	d := wsWriteTimeout + time.Duration(n)*time.Second/wsSnapshotFloorRate
+	return min(d, wsSnapshotWriteCap)
+}
 
 // WSMessage is a WebSocket message sent to clients.
 // Uses "payload" field to match the TypeScript frontend protocol.
@@ -72,6 +100,12 @@ type WebSocketHub struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
 	closed  bool
+
+	// authGen counts CloseAuthenticated calls. An upgrade reads it before
+	// its AuthCheck and again, under mu, as it joins clients: a change in
+	// between means the credential it was checked on may be one that call
+	// revoked, after the call had already listed the sockets to close.
+	authGen atomic.Uint64
 
 	// jobVersions is the newest write version broadcast per job, in either
 	// frame (see jobVersioned); jobRowVersions is the newest a job_update
@@ -131,15 +165,185 @@ type WebSocketHub struct {
 	}
 }
 
+// wsFrame is one marshalled frame in a client's write queue, with what the
+// queue needs to know about it when it has to drop one.
+type wsFrame struct {
+	data []byte
+	// restated is set for a job_progress frame only: a later tick OF THE SAME
+	// JOB carries every column it does, so once one is queued behind it (or
+	// is the frame arriving) a client that never saw this one has lost
+	// nothing. Until then it is the client's only copy of that job's
+	// progress, and losing it arms a resync like any other loss (see
+	// wsQueue.push).
+	restated bool
+	// job is the job a restated frame is a tick of. Ticks whose payload does
+	// not say (no JobVersion) share the empty name.
+	job string
+	// snapshot is set for a full initial_state frame queued as a resync:
+	// it restates the frames it displaces (see enqueue) and its write gets
+	// snapshotWriteTimeout.
+	snapshot bool
+}
+
+// wsQueue is one client's bounded outbound queue: a slice under a mutex, with
+// a one-slot channel that wakes the write loop. It was a buffered channel,
+// which can only give up its head: on overflow the oldest frame went whatever
+// it was, so a log line queued ahead of a run of progress ticks was the frame
+// lost. push has to take a frame out of the middle and leave the rest in
+// order, and a channel cannot do that while writePump is receiving from it.
+//
+// Every method takes mu and none blocks under it.
+type wsQueue struct {
+	mu     sync.Mutex
+	frames []wsFrame
+	limit  int
+	closed bool
+	// ready holds a token whenever a push has happened since the write loop
+	// last found the queue empty. A push sends without blocking; the loop
+	// takes the token and then pops until empty, so a frame pushed after its
+	// last pop always leaves a token behind.
+	ready chan struct{}
+}
+
+func newWSQueue(limit int) *wsQueue {
+	return &wsQueue{
+		frames: make([]wsFrame, 0, limit),
+		limit:  limit,
+		ready:  make(chan struct{}, 1),
+	}
+}
+
+// wsPushResult is what a push cost the client.
+type wsPushResult uint8
+
+const (
+	// wsPushQueued: there was room. Nothing was lost.
+	wsPushQueued wsPushResult = iota
+	// wsPushLostRestated: the queue was full and a tick was given up for it
+	// that a newer tick of the same job, queued or arriving, repeats in
+	// full. The client loses nothing.
+	wsPushLostRestated
+	// wsPushLostState: the queue was full, held no such tick, and a frame
+	// nothing queued repeats was given up.
+	wsPushLostState
+	// wsPushClosed: the client is gone and the frame was not queued.
+	wsPushClosed
+)
+
+// push appends one frame. On a full queue exactly one frame is given up, the
+// same number as when the queue was a channel, chosen in this order:
+//
+//  1. the oldest queued tick that a newer tick of the same job follows, in
+//     the queue or as the incoming frame;
+//  2. the incoming frame itself, when it is a tick;
+//  3. the oldest queued tick;
+//  4. the oldest queued frame.
+//
+// Only the first loses nothing (wsPushLostRestated). The others give up a
+// frame nothing queued repeats (wsPushLostState), a tick before anything else
+// because the snapshot that loss arms carries every column of a tick and not
+// every other frame (queueOrDrop). A tick is never given up as "restated by
+// the job's next tick" on the strength of a tick that has not come: a job
+// that stalls or waits may not write again for minutes, and the tab would
+// show its progress as of the overflow until it did.
+//
+// The frames that stay keep their order exactly, and the incoming frame, when
+// it is queued, is last.
+func (q *wsQueue) push(msg wsFrame) wsPushResult {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return wsPushClosed
+	}
+	result := wsPushQueued
+	if len(q.frames) < q.limit {
+		q.frames = append(q.frames, msg)
+	} else {
+		result = wsPushLostState
+		victim, oldestTick := -1, -1
+		for i := range q.frames {
+			if !q.frames[i].restated {
+				continue
+			}
+			if oldestTick < 0 {
+				oldestTick = i
+			}
+			job := q.frames[i].job
+			followed := msg.restated && msg.job == job
+			for j := i + 1; j < len(q.frames) && !followed; j++ {
+				followed = q.frames[j].restated && q.frames[j].job == job
+			}
+			if followed {
+				victim = i
+				break
+			}
+		}
+		switch {
+		case victim >= 0:
+			result = wsPushLostRestated
+		case msg.restated:
+			q.mu.Unlock()
+			return wsPushLostState
+		case oldestTick >= 0:
+			victim = oldestTick
+		default:
+			victim = 0
+		}
+		copy(q.frames[victim:], q.frames[victim+1:])
+		q.frames[len(q.frames)-1] = msg
+	}
+	q.mu.Unlock()
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+	return result
+}
+
+// pop takes the oldest frame; ok is false when the queue is empty or closed.
+func (q *wsQueue) pop() (frame wsFrame, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	n := len(q.frames)
+	if n == 0 {
+		return wsFrame{}, false
+	}
+	frame = q.frames[0]
+	copy(q.frames, q.frames[1:])
+	q.frames[n-1] = wsFrame{} // let go of the frame's bytes
+	q.frames = q.frames[:n-1]
+	return frame, true
+}
+
+// size is the number of frames queued.
+func (q *wsQueue) size() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.frames)
+}
+
+// close refuses every later push and lets go of what is queued. Safe to call
+// more than once. It does not wake the write loop: detachClient cancels the
+// client's ctx, which does.
+func (q *wsQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.frames = nil
+	q.mu.Unlock()
+}
+
 type wsClient struct {
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
-	// writes is the per-client outbound queue drained by writePump. A
-	// closed `writes` (set by removeClient) signals the writePump to exit
-	// without depending on ctx cancellation timing. Audit reports/web.md
-	// C-7.
-	writes chan []byte
+	// writes is the per-client outbound queue drained by writePump, closed
+	// by detachClient. Audit reports/web.md C-7.
+	writes *wsQueue
+
+	// authenticated says the upgrade had to pass AuthCheck: the peer is not
+	// one the network_access mode trusts as local. Set once, before the
+	// client joins the hub. CloseAuthenticated closes exactly these.
+	authenticated bool
 
 	// drops counts frames this client will never receive. Incremented on
 	// every queue-overflow drop; see noteLag for why the LINE is rate
@@ -158,6 +362,12 @@ type wsClient struct {
 	// or gets evicted still costs the interval. Seeded at connect from the
 	// initial state the client is handed there.
 	lastResync atomic.Int64
+	// slowWriteUntil is the UnixNano deadline of the snapshot writePump is
+	// writing right now, 0 when it is writing none. A ping or a pong has to
+	// wait for that write to release the connection (one frame is written
+	// at a time), so its own timeout is extended by what is left of it:
+	// see controlTimeout.
+	slowWriteUntil atomic.Int64
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -198,7 +408,11 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Read before AuthCheck; compared when the client joins the hub.
+	authGen := hub.authGen.Load()
+
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
+	authenticated := false
 	if hub.AuthCheck != nil {
 		ip := ExtractIP(r)
 		if hub.ClientIP != nil {
@@ -214,6 +428,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Authentication required", http.StatusUnauthorized)
 				return
 			}
+			authenticated = true
 		}
 	}
 
@@ -246,6 +461,15 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// The check above IS the origin policy; skipping the library's leaves
 		// exactly one (sweep chain-close F6).
 		InsecureSkipVerify: true,
+		// No CompressionMode: permessage-deflate stays off. The initial_state
+		// snapshot is megabytes of mostly text on a busy instance
+		// (TestInitialStateSnapshotSize, cmd/moombox), and deflate would
+		// shrink it well, but owner ruling R-B4 allows compression only once
+		// it is shown safe with every browser the dashboard is used from, and
+		// it has been tried against Chromium and Node only, not Safari or
+		// Firefox. TestWebSocketDoesNotNegotiateCompression holds this; turn
+		// it on (CompressionNoContextTakeover, with a threshold above the
+		// ~300-byte job_progress frame) together with that check.
 	})
 	if err != nil {
 		hub.logger.Error("websocket upgrade failed", "err", err)
@@ -256,16 +480,19 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Set read limit to prevent oversized messages
 	conn.SetReadLimit(int64(wsMaxMessageSize))
 
-	// Use a detached context so the WebSocket connection is NOT killed by the
-	// HTTP server's ReadTimeout. The request context (r.Context()) is cancelled
-	// after ReadTimeout (30s), which would close the WebSocket prematurely.
+	// Use a detached context: the request context (r.Context()) ends when this
+	// handler returns, and must not take the socket with it. The server sets
+	// no ReadTimeout, and bodyReadDeadline sets no deadline on an upgrade: it
+	// has no body, and one that claims a body is refused before it gets here.
 	// The connection lifetime is managed by pingPump/readPump instead.
 	ctx, cancel := context.WithCancel(context.Background())
 	client = &wsClient{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
-		writes: make(chan []byte, wsWriteQueueSize),
+		writes: newWSQueue(wsWriteQueueSize),
+
+		authenticated: authenticated,
 	}
 	// Start the resync rate-limit clock BEFORE the client joins hub.clients:
 	// the snapshot sendInitialState is about to write IS a resync, and from the
@@ -277,6 +504,18 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	client.lastResync.Store(time.Now().UnixNano())
 
 	hub.mu.Lock()
+	if authenticated && hub.authGen.Load() != authGen {
+		// A credential was revoked between this upgrade's AuthCheck and
+		// here, and CloseAuthenticated may already have taken its list of
+		// clients without this one. Refuse rather than register: a browser
+		// whose credential is still good reconnects through AuthCheck.
+		hub.mu.Unlock()
+		cancel()
+		client = nil
+		hub.logger.Debug("websocket upgrade dropped: a credential was revoked while it authenticated")
+		conn.Close(websocket.StatusPolicyViolation, "session ended")
+		return
+	}
 	hub.clients[client] = struct{}{}
 	clientCount := len(hub.clients)
 	hub.mu.Unlock()
@@ -315,7 +554,8 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 // writePump drains client.writes onto the websocket connection one frame
 // at a time. Per-client serialisation lets Broadcast's hot path enqueue
 // non-blocking and decouple slow consumers from fast ones. Audit
-// reports/web.md C-7.
+// reports/web.md C-7. It returns when client.ctx is cancelled, which every
+// removal path does, or when a write fails.
 func (hub *WebSocketHub) writePump(client *wsClient) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -326,13 +566,29 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 		select {
 		case <-client.ctx.Done():
 			return
-		case msg, ok := <-client.writes:
-			if !ok {
+		case <-client.writes.ready:
+		}
+		// Everything queued, including what arrives during these writes: the
+		// token taken above may stand for any number of pushes.
+		for {
+			if client.ctx.Err() != nil {
 				return
 			}
-			writeCtx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
-			err := client.conn.Write(writeCtx, websocket.MessageText, msg)
+			msg, ok := client.writes.pop()
+			if !ok {
+				break
+			}
+			timeout := wsWriteTimeout
+			if msg.snapshot {
+				timeout = snapshotWriteTimeout(len(msg.data))
+				client.slowWriteUntil.Store(time.Now().Add(timeout).UnixNano())
+			}
+			writeCtx, cancel := context.WithTimeout(client.ctx, timeout)
+			err := client.conn.Write(writeCtx, websocket.MessageText, msg.data)
 			cancel()
+			if msg.snapshot {
+				client.slowWriteUntil.Store(0)
+			}
 			if err != nil {
 				hub.removeClient(client, "write failed")
 				return
@@ -341,12 +597,27 @@ func (hub *WebSocketHub) writePump(client *wsClient) {
 	}
 }
 
+// controlTimeout is the timeout for a ping, or for the pong that answers the
+// dashboard's {"type":"ping"}: wsWriteTimeout, plus whatever is left of a
+// snapshot write in progress. The library writes one frame at a time, so
+// either waits behind that write, and at a flat 10 s the first one to come
+// due during a longer snapshot write closed a connection that was doing
+// exactly what it should.
+func (hub *WebSocketHub) controlTimeout(client *wsClient) time.Duration {
+	left := time.Duration(client.slowWriteUntil.Load() - time.Now().UnixNano())
+	if left <= 0 {
+		return wsWriteTimeout
+	}
+	return wsWriteTimeout + left
+}
+
 // wsLagLogInterval bounds how often ONE client's drops may produce a log line.
 const wsLagLogInterval = 30 * time.Second
 
 // wsResyncMinInterval bounds how often ONE client may be handed a full
 // initial-state snapshot in place of an incremental frame. A client that
-// never drains drops — and so re-arms — on EVERY frame, and a snapshot costs
+// never drains drops — and so re-arms — on every frame but a tick that
+// replaces its own job's older one (see enqueue), and a snapshot costs
 // a GetAllJobs plus a whole-state marshal; without this bound a single slow
 // tab would provoke one of those per broadcast, i.e. tens per second while a
 // download is running. One second is far below any human-visible ghost-row
@@ -409,12 +680,11 @@ func (hub *WebSocketHub) logDropTotal(client *wsClient) {
 // the snapshot cannot be built — in every one of those cases the caller sends
 // its original incremental frame instead.
 //
-// It carries its OWN recover, and deliberately not the silent one the enqueue
-// step below has: this is where hub.InitialState runs, an application closure
-// that reads the database. Under the enqueue's catch-all a panic in there
-// would be swallowed with no log line at all, and the frame would vanish
-// before either select without even counting a drop — one bad provider and
-// every broadcast to every client disappears in silence.
+// It carries its own recover, which logs: this is where hub.InitialState
+// runs, an application closure that reads the database, on whichever
+// goroutine is broadcasting. A panic in there must neither reach that
+// goroutine nor cost the caller its frame, and must not be silent — one bad
+// provider would otherwise take every broadcast to every client with it.
 //
 // A failed build does NOT re-arm the flag. initialStateBytes reports a marshal
 // failure through the app logger, whose subscriber broadcasts that line
@@ -427,7 +697,8 @@ func (hub *WebSocketHub) logDropTotal(client *wsClient) {
 //
 // Not re-arming breaks the PER-FRAME loop; it does not bound that Error line on
 // its own. A client that is permanently behind re-arms from the other
-// direction — enqueue's eviction sets needsResync on every drop, independently
+// direction — enqueue's eviction sets needsResync on every drop of a frame
+// nothing restates (every one but a tick with a newer one behind it), independently
 // of anything decided here — so the flag comes straight back and the next
 // frame tries the build again. wsResyncMinInterval is what turns that into at
 // most one failed build, and so one Error line, per second per client. The two
@@ -471,7 +742,7 @@ func (hub *WebSocketHub) resyncSnapshot(client *wsClient) (snap []byte) {
 // wsPingInterval.
 func (hub *WebSocketHub) flushResync(client *wsClient) {
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		hub.enqueue(client, snap, true)
+		hub.enqueue(client, wsFrame{data: snap, snapshot: true})
 	}
 }
 
@@ -484,47 +755,54 @@ func (hub *WebSocketHub) flushResync(client *wsClient) {
 // are recovered on the next reconnect or the next daily check rather than
 // immediately — acceptable against a ghost row that never goes away.
 //
-// Returns false when the client is gone (channel closed by removeClient).
+// Returns false when the client is gone (its queue closed by detachClient).
 // Audit reports/web.md C-7.
-func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
-	resync := false
+func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
 	if snap := hub.resyncSnapshot(client); snap != nil {
-		msg = snap
-		resync = true
+		msg = wsFrame{data: snap, snapshot: true}
 	}
-	return hub.enqueue(client, msg, resync)
+	return hub.enqueue(client, msg)
 }
 
-// enqueue pushes one frame into a client's write queue. On a full queue the
-// OLDEST queued frame is dropped (it's stale state for a client that's
-// already behind) and the new frame replaces it. `resync` says the frame
-// being pushed is a full-state snapshot, which changes what an eviction
-// means — see the comment on the drop.
+// enqueue pushes one frame into a client's write queue. A queue with room
+// takes it and that is all: one lock, one append, one wake-up, which is what
+// a healthy client always gets, so nothing here makes any frame rarer for it.
+// On a full queue exactly one frame is given up (wsQueue.push), counted as a
+// drop whichever it is.
 //
-// The recover here is narrow BY DESIGN: it exists for exactly one thing, the
-// send-on-closed-channel race with removeClient, and stays silent because
-// that race is expected. Nothing that can fail in an interesting way — the
-// snapshot build above, in particular — belongs underneath it.
-func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool {
-	defer func() {
-		// Recover from a send-on-closed-channel race with removeClient.
-		if r := recover(); r != nil {
-			// Already removed — caller doesn't need to retry.
-		}
-	}()
-
-	select {
-	case client.writes <- msg:
+// A lost frame arms a resync only when nothing restates it. A job_progress
+// frame (wsFrame.restated) is restated by a newer tick of the same job, so
+// giving one up for a newer one that is queued or arriving is counted and
+// nothing more. It used to arm like any other: progress
+// frames arrive ~60 times a second per active job, the write loop sends one
+// frame at a time, and so any client whose snapshot took longer to write than
+// 16 ticks take to arrive (about a quarter of a second) overflowed during the
+// snapshot's own write, armed the next snapshot, and was sent megabytes back
+// to back for as long as a download ran.
+//
+// And such a tick is the one given up whenever there is one, wherever it
+// sits. While the queue was a channel it could only lose its head, so a
+// log line or job_update queued during a slow snapshot write was pushed out by
+// the progress ticks behind it, and that loss armed the next snapshot: the
+// same loop, at one snapshot per wsResyncMinInterval. Now a job's ticks
+// displace each other and the frames nothing restates stay, in order. A
+// resync arms only when a full queue holds at most one tick per job, none of
+// the incoming frame's job, and so every frame in it and the one arriving are
+// each the only copy of something: one of them really is lost. That includes
+// a tick, which is not written off against a next tick that has not come: a
+// job that stalls may not write again for minutes. With one job downloading
+// that takes wsWriteQueueSize-1 frames nothing restates waiting at once; each
+// further job ticking takes one slot more.
+//
+// Returns false when the client is gone (its queue closed by detachClient).
+func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame) bool {
+	switch client.writes.push(msg) {
+	case wsPushQueued:
 		return true
-	default:
-	}
-
-	// Drop oldest, then push the new frame. If we lose another race,
-	// the new frame is dropped silently (caller sees true).
-	select {
-	case <-client.writes:
-		client.drops.Add(1)
-		if !resync {
+	case wsPushClosed:
+		return false
+	case wsPushLostState:
+		if !msg.snapshot {
 			// A frame the client never saw is gone and nothing queued after it
 			// restates it. When we ARE carrying a snapshot, the frame we just
 			// evicted is almost always older than that snapshot (a whole queue
@@ -532,40 +810,94 @@ func (hub *WebSocketHub) enqueue(client *wsClient, msg []byte, resync bool) bool
 			// re-arming here would fight wsResyncMinInterval for no gain.
 			client.needsResync.Store(true)
 		}
-		hub.noteLag(client)
-	default:
 	}
-	select {
-	case client.writes <- msg:
-		return true
-	default:
-		client.drops.Add(1)
-		client.needsResync.Store(true)
-		hub.noteLag(client)
-		return true
+	client.drops.Add(1)
+	hub.noteLag(client)
+	return true
+}
+
+// removeClient closes the client's write queue + cancels its ctx,
+// removes it from the hub, and closes the underlying websocket. Safe
+// to call multiple times: only the call that finds the client in the hub
+// acts.
+func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
+	defer func() {
+		_ = recover()
+	}()
+	if hub.detachClient(client) {
+		client.conn.Close(websocket.StatusInternalError, reason)
 	}
 }
 
-// removeClient closes the client's write channel + cancels its ctx,
-// removes it from the hub, and closes the underlying websocket. Safe
-// to call multiple times — idempotent on the closed-channel guard.
-func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
+// detachClient takes a client out of the hub, cancels its ctx and closes its
+// write queue, leaving the connection itself to the caller. It reports
+// whether this call was the one that removed it. From its return on, no
+// broadcast reaches the client.
+func (hub *WebSocketHub) detachClient(client *wsClient) bool {
 	hub.mu.Lock()
 	if _, ok := hub.clients[client]; !ok {
 		hub.mu.Unlock()
-		return
+		return false
 	}
 	delete(hub.clients, client)
 	hub.mu.Unlock()
 
+	// The cancel is what stops writePump; the close refuses a broadcast that
+	// listed this client before it left the map.
 	client.cancel()
-	// Close on a closed channel panics; the recover() in queueOrDrop
-	// guards the senders. The drain in writePump exits on `!ok`.
-	defer func() {
-		_ = recover()
-	}()
-	close(client.writes)
-	client.conn.Close(websocket.StatusInternalError, reason)
+	client.writes.close()
+	return true
+}
+
+// CloseAuthenticated closes every socket whose upgrade had to authenticate,
+// and returns how many. It is called when a credential stops being good (a
+// client token revoked or expired, the password changed or removed): the
+// upgrade is the only place a socket's credential is checked, so one opened
+// with a credential that has since been revoked would otherwise keep
+// receiving job titles, logs and state for as long as its tab stays open.
+//
+// A browser that still holds a good credential reconnects within a second or
+// two and passes AuthCheck again; one that does not is refused. Sockets of
+// loopback and other local peers never authenticated, and are not touched.
+//
+// An upgrade whose AuthCheck ran before this call and which has not joined
+// the hub yet is refused when it tries to (authGen).
+//
+// By the time it returns, no broadcast reaches a closed client. The close
+// handshake itself waits on the peer, so it runs on its own goroutine.
+func (hub *WebSocketHub) CloseAuthenticated() int {
+	// Before the list is taken: an upgrade that registers after it either
+	// sees this change and refuses itself, or registered first and is in
+	// the list (both happen under mu).
+	hub.authGen.Add(1)
+	hub.mu.RLock()
+	var targets []*wsClient
+	for c := range hub.clients {
+		if c.authenticated {
+			targets = append(targets, c)
+		}
+	}
+	hub.mu.RUnlock()
+
+	closed := 0
+	for _, c := range targets {
+		if !hub.detachClient(c) {
+			continue
+		}
+		closed++
+		go func(c *wsClient) {
+			defer func() {
+				if r := recover(); r != nil && hub.logger != nil {
+					hub.logger.Error("panic closing an authenticated websocket", "panic", r)
+				}
+			}()
+			c.conn.Close(websocket.StatusPolicyViolation, "session ended")
+		}(c)
+	}
+	if closed > 0 && hub.logger != nil {
+		hub.logger.Info("closed authenticated websockets: a credential was revoked or changed", "count", closed)
+	}
+	return closed
 }
 
 // initialStateBytes marshals the snapshot a freshly-connected client receives.
@@ -606,7 +938,9 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+	// Nothing else writes to this connection yet (the pumps start after this
+	// returns), so no ping or pong waits behind it.
+	ctx, cancel := context.WithTimeout(client.ctx, snapshotWriteTimeout(len(msgBytes)))
 	defer cancel()
 	if err := client.conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
 		// Client failed to receive initial state — remove and close
@@ -638,7 +972,7 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 			// hub.closed check under hub.mu was a TOCTOU (closed could
 			// flip between the unlock and the Ping) that the cancelled
 			// ctx + Ping error already cover.
-			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			ctx, cancel := context.WithTimeout(client.ctx, hub.controlTimeout(client))
 			err := client.conn.Ping(ctx)
 			cancel()
 			if err != nil {
@@ -730,7 +1064,7 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		case "ping":
 			pong := WSMessage{Type: "pong"}
 			pongBytes, _ := json.Marshal(pong)
-			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			ctx, cancel := context.WithTimeout(client.ctx, hub.controlTimeout(client))
 			err := client.conn.Write(ctx, websocket.MessageText, pongBytes)
 			cancel()
 			if err != nil {
@@ -748,6 +1082,13 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 // broadcastMessage is Broadcast for a message already built — the one way a
 // frame carrying more than a type and a payload (a log line's Seq) goes out.
 func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
+	hub.broadcastFrame(msg, msg.Type == "job_progress", "")
+}
+
+// broadcastFrame marshals a message once and queues it for every client.
+// restated says the frame is a tick of job, one that job's next tick repeats
+// in full (wsFrame.restated, wsFrame.job).
+func (hub *WebSocketHub) broadcastFrame(msg WSMessage, restated bool, job string) {
 	hub.mu.RLock()
 	n := len(hub.clients)
 	hub.mu.RUnlock()
@@ -768,7 +1109,7 @@ func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
 	hub.mu.RUnlock()
 
 	for _, client := range clients {
-		hub.queueOrDrop(client, msgBytes)
+		hub.queueOrDrop(client, wsFrame{data: msgBytes, restated: restated, job: job})
 	}
 }
 
@@ -839,7 +1180,7 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 		}
 		hub.jobVersions[id] = version
 		hub.jobLastTick[id] = data
-		hub.Broadcast(msgType, data)
+		hub.broadcastFrame(WSMessage{Type: msgType, Payload: data}, msgType == "job_progress", id)
 		return
 	}
 	if rowVersion, sent := hub.jobRowVersions[id]; sent && version <= rowVersion {
@@ -851,7 +1192,11 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 		hub.jobVersions[id] = version
 		delete(hub.jobLastTick, id)
 	} else if tick, ok := hub.jobLastTick[id]; ok {
-		hub.Broadcast("job_progress", tick)
+		// Not marked restated: this is not the job's stream of ticks but the
+		// one frame that puts back the columns the older row just took away,
+		// and a job that is stalled or waiting may not tick again for
+		// minutes. A client that loses it is resynced like any other loss.
+		hub.broadcastFrame(WSMessage{Type: "job_progress", Payload: tick}, false, "")
 	}
 }
 

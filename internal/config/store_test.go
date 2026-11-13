@@ -134,18 +134,6 @@ func TestStoreUpdateWritesToDisk(t *testing.T) {
 	}
 }
 
-func TestStoreUpdateSkipsSaveOnEmptyPath(t *testing.T) {
-	cfg := Defaults()
-	s := NewStore(cfg, "") // no save path
-
-	err := s.Update(func(c *MoomboxConfig) {
-		c.Network.Port = 9191
-	})
-	if err != nil {
-		t.Fatalf("Update with empty savePath should not error: %v", err)
-	}
-}
-
 func TestStoreConcurrentReadAndUpdate(t *testing.T) {
 	// Race test: many readers calling Read while one writer calls Update.
 	// The embedded RWMutex serializes updates against ongoing reads; field

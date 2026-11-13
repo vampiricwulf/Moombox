@@ -27,6 +27,18 @@ type AuthRoutesDeps struct {
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
 	}
+	// CloseAuthenticatedSockets closes every WebSocket whose upgrade had to
+	// authenticate (web.WebSocketHub.CloseAuthenticated). Called wherever a
+	// credential stops being good: a socket is checked only when it opens.
+	// Nil closes nothing.
+	CloseAuthenticatedSockets func()
+}
+
+// closeAuthenticatedSockets calls CloseAuthenticatedSockets when it is set.
+func (deps *AuthRoutesDeps) closeAuthenticatedSockets() {
+	if deps.CloseAuthenticatedSockets != nil {
+		deps.CloseAuthenticatedSockets()
+	}
 }
 
 // AuthRoutes registers authentication endpoints. The Store carries both
@@ -127,27 +139,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 					deps.DB.DeleteClientToken(oldCT.ID)
 				}
 			}
-			if rawToken, err := web.GenerateToken(); err == nil {
-				if tokenHash, err := web.HashToken(rawToken); err == nil {
-					now := time.Now().UTC().Format(time.RFC3339)
-					ct := &database.ClientToken{
-						ID:          generateShortID(),
-						TokenPrefix: web.TokenPrefix(rawToken),
-						TokenHash:   tokenHash,
-						Label:       buildTokenLabel(store, req),
-						CreatedAt:   now,
-						LastUsedAt:  now,
-						LastIP:      web.EffectiveClientIP(store, req),
-					}
-					if err := deps.DB.AddClientToken(ct); err == nil {
-						var ttlDays int
-						store.Read(func(c *config.MoomboxConfig) {
-							ttlDays = c.Network.ClientTokenTTLDays
-						})
-						setClientCookie(rw, req, rawToken, ttlDays)
-					}
-				}
-			}
+			issueClientToken(rw, req, deps, store)
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -245,18 +237,30 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		}
 		mu.Unlock()
 
-		// Invalidate other sessions (keep current if authenticated)
-		if isAuthenticated && token != "" {
-			deps.Auth.InvalidateOtherSessions(token)
-		} else {
-			deps.Auth.InvalidateAllSessions()
-		}
-
-		// Clear all client tokens — password changed, all remotes must re-auth
+		// Clear all client tokens — password changed, all remotes must
+		// re-auth. Before the sessions go: a token still in the table when
+		// they are cleared would mint a fresh one on its next request.
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
-		clearClientCookie(rw, req)
+		// Invalidate other sessions (keep current if authenticated). The
+		// caller whose session is kept gets a new client token in place of
+		// the one just deleted, as a login would give it: a browser left with
+		// a session and no token is logged out by the next revoke or expiry
+		// of any other device's token, which ends every session and relies
+		// on each browser's own token to re-session it.
+		if isAuthenticated && token != "" {
+			deps.Auth.InvalidateOtherSessions(token)
+			if deps.DB == nil || !issueClientToken(rw, req, deps, store) {
+				clearClientCookie(rw, req)
+			}
+		} else {
+			deps.Auth.InvalidateAllSessions()
+			clearClientCookie(rw, req)
+		}
+		// Open sockets were authenticated under the old password. The
+		// caller's own reconnects on the session it keeps.
+		deps.closeAuthenticatedSockets()
 
 		if deps.Logger != nil {
 			deps.Logger.Info("[Auth] Password set/changed from " + web.EffectiveClientIP(store, req))
@@ -321,10 +325,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		}
 		mu.Unlock()
 
-		deps.Auth.InvalidateAllSessions()
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
+		deps.Auth.InvalidateAllSessions()
+		deps.closeAuthenticatedSockets()
 		clearSessionCookie(rw, req)
 		clearClientCookie(rw, req)
 
@@ -371,7 +376,16 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		jsonResponse(rw, out)
 	})
 
-	// DELETE /api/client-tokens/{id} — revoke one token
+	// DELETE /api/client-tokens/{id} — revoke one token.
+	//
+	// Deleting the row is not enough: the session the token minted is good
+	// for 24 hours and slides for as long as it is used, and a socket is
+	// checked only when it opens, so a tab left open on the revoked device
+	// kept full access. Every session is ended and every authenticated
+	// socket closed. A browser whose own token is still good notices
+	// nothing: AuthMiddleware's client-token fallback hands it a fresh
+	// session on its next request and its socket reconnects. The revoked
+	// device has neither.
 	r.Delete("/api/client-tokens/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		id := chi.URLParam(req, "id")
 		if id == "" {
@@ -386,8 +400,45 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			jsonError(rw, "failed to delete token", http.StatusInternalServerError)
 			return
 		}
+		if deps.Auth != nil {
+			deps.Auth.InvalidateAllSessions()
+		}
+		deps.closeAuthenticatedSockets()
 		jsonResponse(rw, map[string]any{"success": true})
 	})
+}
+
+// issueClientToken stores a new persistent client token for the caller and
+// sets its moombox_client cookie, and reports whether it did. Login and a
+// password change that keeps the caller's session both call it.
+func issueClientToken(rw http.ResponseWriter, req *http.Request, deps *AuthRoutesDeps, store *config.Store) bool {
+	rawToken, err := web.GenerateToken()
+	if err != nil {
+		return false
+	}
+	tokenHash, err := web.HashToken(rawToken)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	ct := &database.ClientToken{
+		ID:          generateShortID(),
+		TokenPrefix: web.TokenPrefix(rawToken),
+		TokenHash:   tokenHash,
+		Label:       buildTokenLabel(store, req),
+		CreatedAt:   now,
+		LastUsedAt:  now,
+		LastIP:      web.EffectiveClientIP(store, req),
+	}
+	if err := deps.DB.AddClientToken(ct); err != nil {
+		return false
+	}
+	var ttlDays int
+	store.Read(func(c *config.MoomboxConfig) {
+		ttlDays = c.Network.ClientTokenTTLDays
+	})
+	setClientCookie(rw, req, rawToken, ttlDays)
+	return true
 }
 
 // redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64

@@ -97,7 +97,7 @@ func TestLoginPageAssetsAreReachableUnauthenticated(t *testing.T) {
 }
 
 // TestUnauthenticatedAllowListContents enumerates the allow-list itself,
-// through the middleware rather than by reading source: exactly these eight
+// through the middleware rather than by reading source: exactly these seven
 // paths reach the handler behind it, and nothing else does.
 //
 // The sentinel handler is what makes "reached" observable — a blocked request
@@ -121,10 +121,10 @@ func TestUnauthenticatedAllowListContents(t *testing.T) {
 		return rr.Body.String()
 	}
 
-	// The five that predate WEB-10, plus /login.html, plus the two it adds.
+	// The four that predate WEB-10, plus /login.html, plus the two it adds.
 	for _, path := range []string{
 		"/api/auth/login", "/api/auth/status",
-		"/ping", "/minter_cache",
+		"/ping",
 		"/favicon.svg", "/login.html",
 		"/boot-theme.js", "/login.js",
 	} {
@@ -134,7 +134,11 @@ func TestUnauthenticatedAllowListContents(t *testing.T) {
 	}
 
 	// Everything else still stops here. /app.js and / are the dashboard.
+	// /minter_cache was on the list until web-api-8: it is loopback-gated on
+	// the direct peer, which a same-host reverse proxy satisfies for every
+	// remote visitor, so it must need a session like the rest.
 	for _, path := range []string{
+		"/minter_cache", "/get_pot", "/pot_stats",
 		"/", "/index.html", "/app.js", "/moombox.css",
 		"/api/jobs", "/api/config", "/modules/settings.js",
 	} {

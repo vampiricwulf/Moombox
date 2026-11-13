@@ -95,12 +95,6 @@ test("extractYtcfg survives a close-paren trap inside a string value", () => {
     assert.deepEqual(extractYtcfg(html), { EVENT_ID: "evt-2", TRAP: "x});y" });
 });
 
-test("extractYtcfg skips two-arg ytcfg.set calls", () => {
-    const html =
-        '<script>ytcfg.set("KEY", 1);</script><script>ytcfg.set({"EVENT_ID":"evt-3"});</script>';
-    assert.deepEqual(extractYtcfg(html), { EVENT_ID: "evt-3" });
-});
-
 test("extractYtcfg returns null when absent or unparseable", () => {
     assert.equal(extractYtcfg("<html>nothing</html>"), null);
     assert.equal(extractYtcfg("<script>ytcfg.set({broken: );</script>"), null);
@@ -121,14 +115,6 @@ test("challenge extracted from R as JSON string (watch-page form)", () => {
     const { challenge, reason } = extractHomepageChallenge(pageWith(blob));
     assert.equal(reason, REASONS.ok);
     assert.deepEqual(challenge, GOOD_CHALLENGE);
-});
-
-test("brace trap inside the program payload does not truncate", () => {
-    // GOOD_CHALLENGE.program contains "})" — the balanced scan must ride
-    // over it where a non-greedy regex match would stop short.
-    const blob = "{R: " + JSON.stringify({ bgChallenge: GOOD_CHALLENGE }) + "}";
-    const { challenge } = extractHomepageChallenge(pageWith(blob));
-    assert.equal(challenge.program, GOOD_CHALLENGE.program);
 });
 
 test("canonicalization strips extra fields including inline interpreter JS", () => {

@@ -302,8 +302,13 @@ func TestCatchUpReportsFetchArrival(t *testing.T) {
 // Without rb.markFailed() wired to every fetch failure, workers holding
 // later, already-fetched segments could stay parked in admit() forever once
 // the buffer filled, because the dead segment can never become head and
-// free room. This must complete promptly and report the gap exactly like
-// the pre-task unbounded buffer did.
+// free room. This must complete promptly, stopping at the dead segment.
+//
+// It reports no gap: the DASH loop fetches the segment next, and what that
+// loop cannot get it records itself. A gap reported from here was a "segment
+// gap" warning and a persisted gap row for a recording with no hole.
+//
+// Mutant: runParallelCatchUp calling OnGap for the unflushed claimed range.
 func TestRunParallelCatchUpNoDeadlockOnPermanentGap(t *testing.T) {
 	t.Parallel()
 	const head = 200
@@ -364,8 +369,8 @@ func TestRunParallelCatchUpNoDeadlockOnPermanentGap(t *testing.T) {
 
 	gapMu.Lock()
 	defer gapMu.Unlock()
-	if len(gaps) != 1 || gaps[0].From != failSeq {
-		t.Errorf("gaps reported = %+v, want exactly one gap starting at %d", gaps, failSeq)
+	if len(gaps) != 0 {
+		t.Errorf("gaps reported = %+v, want none: the main loop re-fetches from %d", gaps, failSeq)
 	}
 }
 
@@ -635,80 +640,5 @@ func TestRunParallelCatchUpCancelWhileBlockedAtCeilingUnwinds(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("runParallelCatchUp did not return within 10s after cancel — permanent hang (the CRITICAL cancel-while-blocked bug)")
-	}
-}
-
-// TestRunParallelCatchUpCancelReportsNoGap: a cancel abandons every in-flight
-// claim through markFailed, so at exit nextSeq sat below claimedUpTo and the
-// catch-up reported OnGap for the abandoned span. The worker turns that into
-// a "segment gap" warning and a persisted gap row on the job, for segments the
-// successor downloader (a quality switch's Cancel) or the resume fetches
-// normally.
-//
-// Mutant: drop the cancellation condition on the gap report — OnGap fires
-// from seq 0.
-func TestRunParallelCatchUpCancelReportsNoGap(t *testing.T) {
-	t.Parallel()
-	var headRequests atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Head-Seqnum", "999")
-		if seq, _ := strconv.Atoi(r.URL.Query().Get("sq")); seq == 0 {
-			headRequests.Add(1)
-			<-r.Context().Done() // the head never lands; only the cancel ends it
-			return
-		}
-		w.Write(make([]byte, 1<<10))
-	}))
-	defer srv.Close()
-
-	out := filepath.Join(t.TempDir(), "v")
-	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		t.Fatalf("open output: %v", err)
-	}
-	defer f.Close()
-
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:        srv.URL + "/videoplayback?id=gap.cancel&itag=140",
-		OutputFile:     out,
-		SegmentWorkers: 4,
-	})
-	d.outputFile = f
-	d.currentSeq.Store(0)
-	d.headSeq.Store(200)
-	var gaps atomic.Int64
-	d.OnGap = func(g DownloadGap) {
-		gaps.Add(1)
-		t.Logf("OnGap %+v", g)
-	}
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan int, 1)
-	go func() {
-		nextSeq, _ := d.runParallelCatchUp(ctx)
-		done <- nextSeq
-	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for headRequests.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if headRequests.Load() == 0 {
-		t.Fatal("the head request never arrived")
-	}
-	time.Sleep(50 * time.Millisecond) // let the other workers claim past the head
-	cancel()
-
-	select {
-	case nextSeq := <-done:
-		if nextSeq != 0 {
-			t.Errorf("nextSeq = %d, want 0: the head was never written", nextSeq)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("runParallelCatchUp did not return within 10s of the cancel")
-	}
-	if n := gaps.Load(); n != 0 {
-		t.Errorf("a cancelled catch-up reported %d gap(s)", n)
 	}
 }

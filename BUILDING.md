@@ -4,7 +4,7 @@ This document covers prerequisites and build commands for Moombox on Windows and
 
 ## Prerequisites
 
-- **Go 1.27+** — https://go.dev/dl/ (go.mod carries `toolchain go1.27.3`; any Go ≥ 1.21 auto-downloads it)
+- **Go 1.27+** — https://go.dev/dl/ (go.mod carries `toolchain go1.27.4`; any Go ≥ 1.21 auto-downloads it)
 - **Node.js 24 LTS** — https://nodejs.org/ (only required for building the BotGuard sidecar tarball; not a runtime dep)
 - **FFmpeg** — only required at runtime, not at build time
 
@@ -37,7 +37,7 @@ go build -o Moombox.exe ./cmd/moombox
 
 With version info (release builds):
 ```bash
-go build -ldflags "-s -w -X main.version=2.7.0 -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
+go build -ldflags "-s -w -X main.version=X.Y.Z -X main.commit=$(git rev-parse --short HEAD)" -o Moombox.exe ./cmd/moombox
 ```
 
 ### Linux x64 (cross-compile or native)
@@ -104,14 +104,16 @@ go test -v -run TestParseDash ./internal/engine/... # one test
 go vet ./...                                        # static analysis
 ```
 
+`bash .github/scripts/local-gate.sh` runs the checks of CI's lint job on the tree you are in (`--full` adds the node suites, the whole Go suite and a race run), and `bash .github/scripts/new-worktree.sh <branch>` makes a git worktree that already holds the embed blobs. On Windows, go test needs `GOTMPDIR` set to a directory outside `%TEMP%`, spelled with backslashes; both scripts set it when it is unset, and the header of `local-gate.sh` says why. `t.TempDir` makes its directories in `GOTMPDIR` too, beside the go command's build directories, and a run that is killed leaves both behind: `bash .github/scripts/local-gate.sh --prune-gotmp` removes them (run it only while no go command is running in any worktree) and lists every other entry it left. Keep scratch files of your own out of that directory.
+
 go test runs each package's tests in the package's own directory, so a test that writes to a relative path (a config built from `config.Defaults()`, whose `./output` and `./staging` a handler then creates; a file named without a directory; `C:\Moombox\staging`, which is only a relative name on Linux) writes beside the source. Every tested package's `TestMain` runs its tests through `treeguard.Run` (`internal/treeguard/treeguard.go`), which fails the run and names what it left when anything new is in the package directory afterwards; write such files under `t.TempDir()`. The leftovers are kept for inspection, so it is the first run after a leak appears that fails. `TestEveryTestedPackageRunsTheGuard` fails a tested package that has no such `TestMain`, so a new package needs one too: `func TestMain(m *testing.M) { os.Exit(treeguard.Run(m)) }`.
 
 ## CI Workflows
 
 - **`.github/workflows/release.yml`** — runs on tag push (`v*`). Runs the test suite on the tagged commit beside the build, reported in the same run but gating nothing, and builds and signs all three platforms, creates a GitHub release with the matching assets and a body listing all download links, and publishes the Docker image. Run it by hand ("Run workflow") for a dry run: every step runs and nothing is published (the image is not pushed; the release upload goes to a draft the job deletes). A tag must equal the version in `cmd/moombox/main.go` or the release fails.
 - **`.github/workflows/ci.yml`** — runs on every PR/push to `main` (and by hand), as parallel jobs: `lint` (gofmt, `go mod tidy -diff`, vet for linux/amd64, windows/amd64 and linux/arm64, staticcheck for linux and windows, build and the cross-builds), `js` (the sidecar's and the frontend's node suites), and the Go test suite in three flavours — linux, race and windows — each split by package into shards that `.github/scripts/test-shard.sh` defines. `bash .github/scripts/test-shard.sh <flavour>/<shard>` (e.g. `race/worker`) prints the packages one shard runs. Also the test job release.yml runs beside each release.
-- **`.github/workflows/vuln-scan.yml`** — weekly, and on manual dispatch: `govulncheck` over the Go module and `npm audit` over both npm projects.
-- **`.github/workflows/docker-publish.yml`** — called by release.yml on a tag, or run by manual dispatch. Builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`).
+- **`.github/workflows/vuln-scan.yml`** — weekly, and on manual dispatch: `govulncheck` over the Go module for linux and for windows, `npm audit` over both npm projects and over the two libraries bundled into the sidecar's ejs bundle, and a check that the pinned Node (`go run ./tools/fetch-node -check-security`) is not behind a Node security release.
+- **`.github/workflows/docker-publish.yml`** — called by release.yml on a tag, or run by manual dispatch. Builds the linux/amd64 image first and starts it once (`.github/scripts/image-smoke.sh`: `--version` through the entrypoint on an empty `/data`), then builds the multi-arch (linux/amd64 + linux/arm64) Docker image and pushes it to `ghcr.io/vampiricwulf/moombox` (release tags → `X.Y.Z`, `X.Y`, `latest`; manual dispatch on `main` → `edge`). Only a tag push or a run on `main` pushes; a manual run on a tag only builds — but that holds only for tags newer than `v2.9.9`, because a manual run on a tag uses that tag's copy of the workflow.
 
 ## Profiling
 

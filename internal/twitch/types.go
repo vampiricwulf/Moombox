@@ -94,7 +94,7 @@ type TwitchChatMessage struct {
 	Message      string           `json:"message"`
 	Emotes       []TwitchEmoteRef `json:"emotes,omitempty"`
 	Bits         int              `json:"bits,omitempty"`
-	MessageType  string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
+	MessageType  string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system", "moderation"
 	// IsAction marks a /me message. Twitch sends those as the CTCP form
 	// \x01ACTION <text>\x01; parsePrivmsg unwraps them so Message holds only
 	// the text and the emote offsets (which index the UNWRAPPED text — see
@@ -106,7 +106,54 @@ type TwitchChatMessage struct {
 	ViewerCount       int    `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
 	AnnouncementColor string `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
 	Raw               string `json:"raw,omitempty"`               // Lossless raw IRC line
+
+	// The five fields below are set only on a moderation row (MessageType
+	// MessageTypeModeration, owner ruling R-G1): a CLEARCHAT or CLEARMSG
+	// stored as a row of its own, in arrival order, counted like any other
+	// row. The row is the EVENT; the messages it took off the screen are kept
+	// exactly as sent and are never rewritten. The player hides the row and
+	// marks its targets deleted when it loads the file; a full chat clear
+	// marks nothing and is shown as one line in the sidebar instead
+	// (applyTwitchModeration, web/public/modules/chat-timeline.js).
+	//
+	// Moderation is one of the ModerationKind constants. TargetMsgID names the
+	// one message a ModerationDeleted row removed; TargetUserID the user
+	// whose earlier messages a ModerationAuthorDeleted row removed, with
+	// BanDurationSec the timeout's length (0 = a permanent ban). TargetLogin
+	// is the user's login as the wire gave it. A ModerationChatCleared row
+	// names nobody: a moderator cleared the whole chat at that moment.
+	//
+	// On such a row Message and AuthorID are empty and SystemMsg is the
+	// event as a sentence. All five are omitempty, so no other row and no
+	// file written before them changes.
+	Moderation     ModerationKind `json:"moderation,omitempty"`
+	TargetMsgID    string         `json:"targetMsgId,omitempty"`
+	TargetUserID   string         `json:"targetUserId,omitempty"`
+	TargetLogin    string         `json:"targetLogin,omitempty"`
+	BanDurationSec int            `json:"banDurationSec,omitempty"`
 }
+
+// MessageTypeModeration is the MessageType of a stored CLEARCHAT or CLEARMSG.
+const MessageTypeModeration = "moderation"
+
+// ModerationKind is what a moderation row did: TwitchChatMessage.Moderation's
+// closed vocabulary. The player reads the same three words
+// (applyTwitchModeration, web/public/modules/chat-timeline.js), and
+// web/tests/fixtures/twitch-moderation-parity.json holds both sides to them.
+type ModerationKind string
+
+// The first two are the YouTube markers' own words (internal/chat
+// MarkerDeleted, MarkerAuthorDeleted) for the same two events; Twitch adds
+// the full clear.
+const (
+	ModerationDeleted       ModerationKind = "deleted"        // CLEARMSG: one message, by id
+	ModerationAuthorDeleted ModerationKind = "author_deleted" // CLEARCHAT naming a user: a timeout or a ban
+	ModerationChatCleared   ModerationKind = "chat_cleared"   // CLEARCHAT naming nobody: the whole chat
+)
+
+// moderationAuthorName is the AuthorName of a moderation row: what a player
+// from before the rows existed prints beside its empty text.
+const moderationAuthorName = "Moderation"
 
 // TwitchEmoteRef references an emote within a message.
 type TwitchEmoteRef struct {

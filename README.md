@@ -126,6 +126,8 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 2. Place it in a directory of your choice
 3. Run `Moombox.exe`
 
+While a capture or a mux is running, Moombox asks Windows not to go to sleep on its idle timer (the screen may still turn off), and lets it sleep again as soon as none is. A PC that is already asleep is not woken: one that should catch streams unattended needs a power plan that keeps it on. Turn this off with `downloader.keep_awake = false` or in Settings.
+
 ### Linux (x64)
 
 ```bash
@@ -338,6 +340,28 @@ Either append style works — extending the existing header line or adding
 a second `X-Forwarded-For` line (HAProxy's `option forwardfor`) — since
 Moombox reads every line of the header, not just the first.
 
+The proxy must also **forward WebSocket upgrades**: the dashboard's job
+list, progress and logs arrive over a WebSocket on the same address as the
+page. Caddy and Traefik forward upgrades by default. nginx does not; add
+these lines to the `location` block that proxies to Moombox:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+Without them the page loads but stays empty, and after a few attempts the
+Tasks tab says "Live updates cannot connect".
+
+If the proxy already forwards upgrades and the notice still shows, look in
+the Moombox log for `websocket upgrade rejected: origin refused`. Moombox
+refuses a WebSocket whose `Origin` (the address in the browser) does not
+match the host it sees. Set `public_url` to the address browsers type, or
+have the proxy pass the original `Host` (nginx: `proxy_set_header Host $http_host;`),
+or send `X-Forwarded-Host`, which Moombox reads only from a proxy listed in
+`trusted_proxies`.
+
 The address to declare is the one **Moombox actually sees**, which is not
 always the proxy's own IP:
 
@@ -472,6 +496,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.download_chat` | `true` | No | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
 | `downloader.prefer_hdr` | `true` | No | YouTube: prefer HDR over SDR at the same resolution and fps |
+| `downloader.keep_awake` | `true` | No | Windows: no idle sleep while a capture or mux is running (the screen may still turn off); no effect on Linux |
 | `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
 | `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |
@@ -515,7 +540,7 @@ See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows,
 
 ## Terminal UI
 
-The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a "Terminal too small" message instead of the panels.
+The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space. A terminal narrower than 60 columns or shorter than 20 rows shows a compact layout instead of the panels: the task list filling the screen, one line per job (a status tag such as `DOWN`, `LIVE` or `DONE`, the title, and a percent, elapsed time or countdown), with a one-line status bar and the feedback line under it (a long message wraps upward over the list). Navigation, selection, the `/` filter and the job chords (with their confirms) work there. Settings (`` ` ``), the action menu (`M`), Add Video (`A A`), Trim (`A T`), Import Archive (`A Z`), Help (`?`), the release notes (`R N`), the Job Log (`O L`), Statistics (`E T`), client tokens (`A K`), orphaned items (`A O`), the yt-dlp plugin status (`E Y`) and the cookie file import (`E I`) open in a bare form that fills the small screen, and Help lists only the keys that work at that size. Import Chapters (`A C`) does too from 30 columns by 10 rows. Through the small menu, Reinitialize asks for its confirmation only where its summary of what it deletes fits the screen whole; otherwise it names the size to enlarge to. Settings shows one setting per row with the selected one on two, a one-line explanation of it (more lines on a taller screen), and still asks before closing with unsaved changes. The cookie login (`E L`), first-run setup and the FFmpeg installer (also `Ctrl+O` in Settings) answer "Enlarge the terminal to 60x20 for this"; a dialog that is open when the terminal shrinks below what it needs is kept and comes back when it grows. Below 30 columns or 6 rows the screen shows "Terminal too small" and only Ctrl+C works.
 
 ### Keyboard Controls
 
@@ -587,7 +612,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | ? | Toggle help overlay |
 | c | Clear log view (log panel focused) |
 
-**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn to page (Tasks, Details, Logs, Job Log), Home/End to jump to the first/last task (End also resumes auto-scroll in Logs and the Job Log), Ctrl+U/Ctrl+D for a half page (Details, Logs, Job Log), Space to select a task for batch actions, Ctrl+A to select every task shown (Esc clears the selection), Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate — in the panels and in every overlay with something to scroll (Help, release notes, lists and tables).
 
 ### Add Video Dialog
 
@@ -603,7 +628,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 
 - **Tasks tab** — Real-time job list with progress bars, add/cancel/retry/delete actions, and job details with embedded YouTube player
 - **Advanced Options** — Format selection (video/audio dropdowns with codec badges) and timestamp range when adding videos
-- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
+- **Archived tab** — Browse finished jobs older than `hide_finished_age_days`. The newest 200 are drawn, with a Show more button; the filter and Select All cover the whole archive
 - **Player tab** — Replay archived videos with synchronized chat:
   - Niconico-style flying chat overlay (togglable)
   - Sidebar chat panel with auto-scroll and search (togglable); click a timestamp to jump the video to 3 s before that message
@@ -612,7 +637,7 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 - **Imports tab** — Upload `.zip` archives holding one recording each (a video, or a split recording's `<name> - partN` parts) + optional chat JSON named after it, for playback in the Player tab. YouTube and Moombox Twitch archives are both recognised; re-importing an archive whose files are still in `output/imports/` re-adopts identical files and never overwrites a different one
 - **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
-- **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
+- **Settings** — General config, downloader settings, channel management (YouTube + Twitch; drag a channel to reorder it on the dashboard, Shift+Up/Down in the TUI), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
 
 ### API
 
@@ -650,7 +675,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/stats` | Get download statistics |
 | GET | `/api/logs` | Get recent log lines (from the in-memory ring buffer) |
 
-WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `trim_status`, `pong`
+WebSocket messages: `{"type": ..., "payload": ...}` frames. The types and their payloads are listed in [docs/spec/user-interfaces.md](docs/spec/user-interfaces.md) under "Server-to-Client Message Types".
 
 ## yt-dlp Integration
 
@@ -691,7 +716,7 @@ auto_enabled = true
 browser_profile_dir = "./browser-profile"
 ```
 
-`auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and one automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
+`auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and an automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). A job parked on its cookies is retried this way up to 3 times; after that it stays parked, and its error says the cookies are not the cause, until you resume it, or until a cookie refresh, import or setup verifies the platform more than a day after the last retry. Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
 
 #### Reading your real browser profile instead
 
@@ -728,7 +753,7 @@ cookie_file = "/data/cookies.txt"
 ```
 
 Leave `auto_enabled` off here. It only starts the headless-browser refresh
-timer and allows one automatic browser attempt on auth failure, and there is
+timer and allows an automatic browser attempt on auth failure, and there is
 no browser on such a host to run either; it has never gated the import.
 
 `browser_profile_dir` needs no entry: it defaults to `./browser-profile`,
@@ -857,7 +882,7 @@ behaviour.
 Upcoming -> Live -> Downloading -> Muxing -> Finished
 ```
 
-A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
+A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive — or the staging drive, if you keep staging on a different one — reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
 
 Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies expired or missing, a sign-in wall, or a membership the account does not hold; resumes on its own once the credentials check out, or for a membership refusal once the cookie file carries a different account)
 

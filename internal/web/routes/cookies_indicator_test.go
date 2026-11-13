@@ -214,6 +214,7 @@ func TestCookieIndicatorReadsTheHandlersOwnPayload(t *testing.T) {
 		{
 			name: "both alive",
 			status: cookies.AuthStatus{
+				Checked:              true,
 				YouTubeAuthenticated: true, TwitchAuthenticated: true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshOK, TwitchVerification: cookies.RefreshOK,
@@ -223,6 +224,7 @@ func TestCookieIndicatorReadsTheHandlersOwnPayload(t *testing.T) {
 		{
 			name: "both conclusively rejected",
 			status: cookies.AuthStatus{
+				Checked:           true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshFailed,
 			},
@@ -234,6 +236,7 @@ func TestCookieIndicatorReadsTheHandlersOwnPayload(t *testing.T) {
 			// both, and neither badge may say so.
 			name: "neither site could be asked",
 			status: cookies.AuthStatus{
+				Checked:           true,
 				HasYouTubeCookies: true, HasTwitchCookies: true,
 				YouTubeVerification: cookies.RefreshUnknown, TwitchVerification: cookies.RefreshUnknown,
 			},
@@ -243,6 +246,7 @@ func TestCookieIndicatorReadsTheHandlersOwnPayload(t *testing.T) {
 		{
 			name: "nothing configured",
 			status: cookies.AuthStatus{
+				Checked:             true,
 				YouTubeVerification: cookies.RefreshFailed, TwitchVerification: cookies.RefreshFailed,
 			},
 			wantYT: "indicator-warn", wantTW: "indicator-off",
@@ -487,6 +491,7 @@ func TestHandlerPayloadCarriesTheReasonToTheBadge(t *testing.T) {
 	vm := utilsVM(t)
 
 	status := cookies.AuthStatus{
+		Checked:           true,
 		HasYouTubeCookies: true, HasTwitchCookies: true,
 		YouTubeVerification: cookies.RefreshUnknown, TwitchVerification: cookies.RefreshUnknown,
 		YouTubeError: "youtube.com: no answer within 10s",
@@ -578,10 +583,16 @@ func TestReloginWarningIsNotGatedOnAutoCookies(t *testing.T) {
 	}
 
 	// The exact condition, rendered. Each warning turns on the platform being
-	// active and the platform's own re-login flag, and on nothing else.
+	// active and the platform's own re-login flag, and on one thing more: the
+	// first cookie check of the server process having answered (owner ruling
+	// R-H2; checkPending is cookieCheckPending over the two status payloads,
+	// pinned below). Until then the badges read "checking" and a re-login
+	// prompt would be a conclusion nothing has drawn. The TUI holds its own
+	// back the same way (cmd/moombox cookieBadgesFor).
 	for _, want := range []string{
-		"if (ytActive && this.autoCookieReloginRequired?.youtube)",
-		"if (twActive && this.autoCookieReloginRequired?.twitch)",
+		"const checkPending = cookieCheckPending(this.cookieStatus, this.twitchAuthStatus);",
+		"if (!checkPending && ytActive && this.autoCookieReloginRequired?.youtube)",
+		"if (!checkPending && twActive && this.autoCookieReloginRequired?.twitch)",
 	} {
 		if !strings.Contains(code, want) {
 			t.Errorf("the status-bar warning is no longer exactly %q — either a condition was added "+

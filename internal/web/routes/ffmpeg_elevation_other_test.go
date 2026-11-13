@@ -16,10 +16,3 @@ func TestRunElevatedNotSupported(t *testing.T) {
 		t.Errorf("expected errElevationNotSupported, got: %v", err)
 	}
 }
-
-func TestIsElevatedReportsRoot(t *testing.T) {
-	// Just verify the function returns without panicking. The actual
-	// boolean depends on test runner UID; we don't assert a specific
-	// value because CI may run as either root or unprivileged.
-	_ = isElevated()
-}

@@ -17,8 +17,14 @@ import (
 // its run writes progress of its own (the replacing writer Upcoming lacks),
 // and the dashboard and TUI read its line as the last thing it did.
 //
+// A Muxing row with nothing staged is reset to Downloading; a mux-slot wait
+// line a dead process left on it (acquireMuxSlot) goes with the reset, and
+// any other line stays.
+//
 // Mutants: enqueueExistingJobs not clearing — the stale line survives; the
-// clear applied to every re-enqueued status — the Downloading line is wiped.
+// clear applied to every re-enqueued status — the Downloading line is wiped;
+// the Muxing reset not clearing — the mux-slot wait stays on the Downloading
+// row; the Muxing reset clearing every line — the counters are wiped.
 func TestBootClearsAStaleWaitLine(t *testing.T) {
 	w, db := testWorkerSetup(t)
 	add := func(id string, st database.JobStatus, progress string) {
@@ -32,6 +38,8 @@ func TestBootClearsAStaleWaitLine(t *testing.T) {
 	add("twitch_wait", database.StatusUpcoming, "Waiting for stream...")
 	add("queued_wait", database.StatusQueued, waitLine("Waiting for a download slot", "3m"))
 	add("downloading_wait", database.StatusDownloading, waitLine("Network unavailable; waiting", "2m"))
+	add("mux_slot_wait", database.StatusMuxing, muxSlotWaitLine(0))
+	add("mux_counters", database.StatusMuxing, "(V: 10/10 A: 10/10)")
 
 	w.enqueueExistingJobs()
 
@@ -40,6 +48,8 @@ func TestBootClearsAStaleWaitLine(t *testing.T) {
 		"twitch_wait":      "Waiting for stream...",
 		"queued_wait":      waitLine("Waiting for a download slot", "3m"),
 		"downloading_wait": waitLine("Network unavailable; waiting", "2m"),
+		"mux_slot_wait":    "",
+		"mux_counters":     "(V: 10/10 A: 10/10)",
 	} {
 		j, _ := db.GetJob(id)
 		if j.Progress != want {

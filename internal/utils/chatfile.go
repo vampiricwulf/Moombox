@@ -1,12 +1,14 @@
 package utils
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -487,4 +489,184 @@ func PreserveFileCopy(path, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// chatFileRewriteBuffer is the read and write buffer SetChatFileHeaderField
+// streams through.
+const chatFileRewriteBuffer = 256 << 10
+
+// SetChatFileHeaderField rewrites the chat file at path with the header field
+// key set to value, placed directly before the messages array, and every
+// other byte of content carried over: the other header fields keep their
+// order and values, and each message is copied as the raw JSON it already is
+// (an indented message stays indented, an appended compact one stays
+// compact). Nothing is decoded into a message struct, so peak memory is the
+// header plus one message, never the file.
+//
+// The result is the layout WriteChatFileAtomic and AppendChatMessages write:
+// two-space indent, the padded messageCount, the messages array last and
+// closed by "\n  ]\n}", so the file still takes appends and in-place header
+// updates. A key already present, before or after the messages array, is
+// replaced. It is written through a temp file beside path (fsync, chmod 0644,
+// ReplaceFile); on any error the temp is removed and path is as it was.
+//
+// A file that is not a whole JSON object, or that holds any other field after
+// its messages array, is an error: the messages array could not stay last.
+func SetChatFileHeaderField(path, key string, value any) error {
+	valBytes, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", key, err)
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	done := false
+	defer func() {
+		if !done {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+	out := bufio.NewWriterSize(tmpFile, chatFileRewriteBuffer)
+
+	dec := json.NewDecoder(bufio.NewReaderSize(src, chatFileRewriteBuffer))
+	if tok, terr := dec.Token(); terr != nil || tok != json.Delim('{') {
+		return fmt.Errorf("parse chat file: top level is not a JSON object")
+	}
+
+	// The header, compact, in the file's own field order. It is indented and
+	// written the moment the messages array (or the object's end) is reached.
+	var hdr bytes.Buffer
+	hdr.WriteByte('{')
+	addField := func(k string, raw []byte) {
+		if hdr.Len() > 1 {
+			hdr.WriteByte(',')
+		}
+		kb, _ := json.Marshal(k)
+		hdr.Write(kb)
+		hdr.WriteByte(':')
+		hdr.Write(raw)
+	}
+	headerWritten := false
+	writeHeader := func() error {
+		addField(key, valBytes)
+		addField("messages", []byte("[]"))
+		hdr.WriteByte('}')
+		var indented bytes.Buffer
+		if err := json.Indent(&indented, hdr.Bytes(), "", "  "); err != nil {
+			return fmt.Errorf("indent chat header: %w", err)
+		}
+		// Everything up to the empty array's "[]\n}"; the array itself is
+		// written by the message loop below.
+		head := bytes.TrimSuffix(PadMessageCountJSON(indented.Bytes()), []byte("[]\n}"))
+		headerWritten = true
+		_, err := out.Write(head)
+		return err
+	}
+
+	n := 0
+	var raw json.RawMessage
+	for {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("parse chat file: %w", err)
+		}
+		if keyTok == json.Delim('}') {
+			break
+		}
+		k, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("parse chat file: unexpected token %v", keyTok)
+		}
+		if k == key {
+			if err := SkipJSONValue(dec); err != nil {
+				return fmt.Errorf("parse chat file: %w", err)
+			}
+			continue
+		}
+		if headerWritten {
+			return fmt.Errorf("parse chat file: field %q follows the messages array", k)
+		}
+		if k != "messages" {
+			if err := dec.Decode(&raw); err != nil {
+				return fmt.Errorf("parse chat file: %w", err)
+			}
+			addField(k, raw)
+			continue
+		}
+		if err := writeHeader(); err != nil {
+			return err
+		}
+		opening, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("parse chat messages: %w", err)
+		}
+		if opening == nil { // "messages": null
+			continue
+		}
+		if opening != json.Delim('[') {
+			return fmt.Errorf("parse chat messages: not an array")
+		}
+		for dec.More() {
+			if err := dec.Decode(&raw); err != nil {
+				return fmt.Errorf("parse chat messages: %w", err)
+			}
+			sep := ",\n    "
+			if n == 0 {
+				sep = "[\n    "
+			}
+			if _, err := out.WriteString(sep); err != nil {
+				return err
+			}
+			if _, err := out.Write(raw); err != nil {
+				return err
+			}
+			n++
+		}
+		if _, err := dec.Token(); err != nil { // the array's ']'
+			return fmt.Errorf("parse chat messages: %w", err)
+		}
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("parse chat file: trailing data after the top-level object")
+	}
+	if !headerWritten {
+		if err := writeHeader(); err != nil {
+			return err
+		}
+	}
+	closing := "\n  ]\n}"
+	if n == 0 {
+		closing = "[]\n}"
+	}
+	if _, err := out.WriteString(closing); err != nil {
+		return err
+	}
+	if err := out.Flush(); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := syncFile(tmpFile); err != nil {
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	// Windows refuses to replace a file that is still open.
+	src.Close()
+	if err := ReplaceFile(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	done = true
+	return nil
 }

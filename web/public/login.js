@@ -15,6 +15,26 @@
     var errorText = document.getElementById("login-error-text");
     if (!passwordInput || !submitBtn || !errorAlert || !errorText) return;
 
+    // After a login, load the dashboard and keep the URL fragment: a
+    // notification's deep link ({public_url}/#job=<id>) reaches this form with
+    // its hash still in the address bar, because the server answers the login
+    // page in place, and the dashboard opens that job from the hash. Only the
+    // fragment is carried and the path is always "/", so nothing in the URL
+    // can send the visitor to another page or origin.
+    function goToDashboard() {
+      var hash = window.location.hash;
+      var target = "/" + hash;
+      // Assigning a URL that differs from the current one by nothing, or by
+      // its fragment alone, scrolls instead of loading: the visitor would
+      // stay on this form. Already at "/" with a hash, reload instead (the
+      // fragment survives a reload).
+      if (hash && new URL(target, window.location.href).href === window.location.href) {
+        window.location.reload();
+        return;
+      }
+      window.location.href = target;
+    }
+
     async function doLogin() {
       if (submitBtn.disabled) return;
       const password = passwordInput.value;
@@ -39,7 +59,7 @@
           // Redirect to dashboard — keep button in loading state
           // to avoid a flicker before navigation completes
           success = true;
-          window.location.href = "/";
+          goToDashboard();
         } else {
           const data = await response.json().catch(() => ({ error: response.statusText }));
           errorText.textContent = data.error || "Login failed";

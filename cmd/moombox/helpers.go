@@ -113,7 +113,10 @@ func youtubeThumbnailURL(videoID string) string {
 
 // resolveOutputDir returns the channel-specific output directory if set,
 // otherwise falls back to the global default under store.Read (per audit
-// reports/cmd-moombox.md D-5).
+// reports/cmd-moombox.md D-5). It is what the monitors store on a new row;
+// the worker resolves the same two settings again when the row's download
+// starts, so a row that waited follows a change made meanwhile (owner ruling
+// R2-X1, internal/worker/output_dir.go).
 func resolveOutputDir(ch *config.ChannelConfig, store *config.Store) string {
 	if ch.OutputDirectory != "" {
 		return ch.OutputDirectory
@@ -162,7 +165,27 @@ type updateCheckTiming struct {
 	initialDelay time.Duration // before the boot check, so it does not slow startup
 	period       time.Duration // between scheduled checks
 	poll         time.Duration // how often the toggle is re-read for a false→true flip
+	// retry is the wait before each further try after a failed check; when
+	// it is used up the next try is the next scheduled check. Empty: no retry.
+	retry []time.Duration
+	// online reports whether the connectivity monitor calls the network up
+	// (nil: always). A check that falls due while it says no is held, without
+	// a request or a Warn, and made at the first poll that finds it up, or
+	// after offlineGrace whatever it says: the monitor can be wrong, and a
+	// wrong one must not stop update checks for good.
+	online       func() bool
+	offlineGrace time.Duration
 }
+
+// updateCheckRetry is the production ladder after a failed automatic check
+// (a boot before the network is up, one 403 or 429 from GitHub): 15 minutes,
+// then an hour, then the normal daily check. A failing day costs two more
+// unauthenticated GitHub requests.
+var updateCheckRetry = []time.Duration{15 * time.Minute, time.Hour}
+
+// updateCheckOfflineGrace is how long a due check waits for the connectivity
+// monitor to report online before it is made anyway.
+const updateCheckOfflineGrace = 10 * time.Minute
 
 // runUpdateCheckLoop runs the auto-update check: once shortly after boot, then
 // every period, each only while enabled() — re-read every time, so disabling
@@ -173,16 +196,62 @@ type updateCheckTiming struct {
 // covers every writer of the flag — the web Settings save
 // (config_routes.go) and the TUI's — and any added later. (The dismiss route
 // is not one: it records SkippedVersion and leaves the toggle alone.)
+// check reports whether the check got an answer. A failed one is tried again
+// on t.retry, the same day, rather than at the next daily tick; a check due
+// while t.online says the network is down is held for the poll that finds it
+// up (see updateCheckTiming). Only this schedule knows about either: the
+// check itself, and everything an update does after it, is unchanged.
 // Returns when ctx ends.
-func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), t updateCheckTiming) {
+func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func() bool, t updateCheckTiming) {
 	select {
 	case <-time.After(t.initialDelay):
 	case <-ctx.Done():
 		return
 	}
+	var (
+		held      bool             // a due check is waiting for the network
+		heldSince time.Time        // when that check fell due
+		retries   int              // rungs of t.retry used since the last scheduled check
+		retryT    *time.Timer      // armed after a failed check
+		retryC    <-chan time.Time // retryT.C, nil while not armed
+	)
+	stopRetry := func() {
+		if retryT != nil {
+			retryT.Stop()
+		}
+		retryC = nil
+	}
+	defer stopRetry()
+	// attempt makes the check that is due, or holds it while offline.
+	attempt := func() {
+		if t.online != nil && !t.online() && time.Since(heldSince) < t.offlineGrace {
+			// A retry still armed from an earlier failed check is dropped: the
+			// held check stands in for it, and its timer firing would start
+			// the grace again.
+			stopRetry()
+			held = true
+			return
+		}
+		held = false
+		stopRetry()
+		if check() {
+			retries = 0
+			return
+		}
+		if retries < len(t.retry) {
+			retryT = time.NewTimer(t.retry[retries])
+			retryC = retryT.C
+			retries++
+		}
+	}
+	// due starts a check that has just fallen due.
+	due := func() {
+		heldSince = time.Now()
+		attempt()
+	}
 	wasEnabled := enabled()
 	if wasEnabled {
-		check()
+		due()
 	}
 	ticker := time.NewTicker(t.period)
 	defer ticker.Stop()
@@ -193,13 +262,28 @@ func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func(), 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			retries = 0 // a scheduled check starts the ladder afresh
 			if wasEnabled = enabled(); wasEnabled {
-				check()
+				due()
+			}
+		case <-retryC:
+			retryC = nil
+			if wasEnabled = enabled(); wasEnabled {
+				due()
 			}
 		case <-poll.C:
 			on := enabled()
-			if on && !wasEnabled {
-				check()
+			switch {
+			case !on:
+				// Turned off: nothing is owed, held or to be retried.
+				held = false
+				retries = 0
+				stopRetry()
+			case !wasEnabled:
+				retries = 0
+				due()
+			case held:
+				attempt()
 			}
 			wasEnabled = on
 		}
@@ -237,6 +321,9 @@ var checkForUpdate = (*updater.Updater).CheckForUpdate
 // effect. lastNotifiedTag (single check-goroutine state) suppresses the
 // daily re-ping: one notification per NEW version, not one per 24h tick
 // while the same update sits pending.
+//
+// It reports whether the check got an answer; false only for a failed check
+// (not one cut short by shutdown), which runUpdateCheckLoop tries again.
 func checkAndBroadcastUpdate(
 	ctx context.Context,
 	upd *updater.Updater,
@@ -246,17 +333,17 @@ func checkAndBroadcastUpdate(
 	log *logger.Logger,
 	configStore *config.Store,
 	lastNotifiedTag *string,
-) {
+) bool {
 	seen := routes.SharedUpdateInfo.Load() // what an up-to-date answer may withdraw
 	release, err := checkForUpdate(upd, ctx)
 	if err != nil {
 		// A check cut short by shutdown is not a failure worth a warning.
 		if ctx.Err() != nil {
 			log.Debug("[Updater] Check cancelled", slog.String("error", err.Error()))
-			return
+			return true
 		}
 		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
-		return
+		return false
 	}
 	if release == nil {
 		// Already up to date — and so a release still pending names one that
@@ -264,7 +351,7 @@ func checkAndBroadcastUpdate(
 		if tag := routes.ClearPendingUpdate(seen); tag != "" {
 			announceUpdateCleared(wsHub, tuiCh, tag)
 		}
-		return
+		return true
 	}
 
 	var enabled bool
@@ -274,7 +361,7 @@ func checkAndBroadcastUpdate(
 		skipped = c.Updates.SkippedVersion
 	})
 	if !enabled {
-		return // disabled while the check was in flight
+		return true // disabled while the check was in flight
 	}
 
 	if release.TagName == skipped {
@@ -284,7 +371,7 @@ func checkAndBroadcastUpdate(
 		// operator's explicit override is the manual "Check for updates"
 		// button (POST /api/update/check), which stores unconditionally.
 		log.Debug("[Updater] Suppressing user-skipped version", slog.String("tag", release.TagName))
-		return
+		return true
 	}
 
 	routes.SharedUpdateInfo.Store(release)
@@ -300,7 +387,7 @@ func checkAndBroadcastUpdate(
 	}
 
 	if *lastNotifiedTag == release.TagName {
-		return // already pinged the operator about this exact version
+		return true // already pinged the operator about this exact version
 	}
 	if notifyMgr.HasTargets() {
 		// Link the embed title to the GitHub release page and carry the
@@ -317,6 +404,7 @@ func checkAndBroadcastUpdate(
 		)
 	}
 	*lastNotifiedTag = release.TagName
+	return true
 }
 
 // filterJobsByAge removes finished jobs older than hide_finished_age_days from
@@ -324,9 +412,10 @@ func checkAndBroadcastUpdate(
 // around filterJobsByAgeThreshold for callers that don't already hold the value.
 // listedJobs and listedJob are the dashboard's WebSocket job rows
 // (initial_state, jobs_update, job_update) as the REST jobs list sends them
-// (worker.ListJob): a terminal row carries hasStaging, read from the
+// (worker.ListJob): a row Resume can be offered on carries hasStaging, read from the
 // configured staging base, so the row's inline button can be Resume only
-// where there is staging to resume (owner decision PE-5).
+// where there is staging to resume (owner decision PE-5, narrowed to those
+// rows by owner ruling R-B2).
 func listedJobs(store *config.Store, jobs []*database.Job) []worker.ListedJob {
 	return worker.ListJobs(stagingBaseOf(store), jobs)
 }
@@ -499,6 +588,51 @@ func rolledBackRelease(exePath, currentVersion string) string {
 // this: the version recorded is still the restored one.
 func announcesVersionChange(lastRunVersion, currentVersion, rolledBackFrom string) bool {
 	return lastRunVersion != "" && lastRunVersion != currentVersion && rolledBackFrom == ""
+}
+
+// recordVersionChange is run()'s update-applied step, taken once the web
+// bind has resolved. When a config file exists and the version the previous
+// run recorded (lastRunVersion) is not this one, it sends "Update Applied"
+// if announcesVersionChange says this boot announces it, and then records
+// this version as the last run, announced or not. configLoaded is the
+// config's ConfigLoaded and rolledBackFrom is rolledBackRelease's answer,
+// both as run() read them; webBindFailed is resolveWebBind's. run() states
+// why the step is gated on ConfigLoaded.
+func (s *runState) recordVersionChange(lastRunVersion string, configLoaded bool, rolledBackFrom string, webBindFailed bool) {
+	log, notifyMgr, webServer := s.log, s.notifyMgr, s.webServer
+	if configLoaded && lastRunVersion != version {
+		if announcesVersionChange(lastRunVersion, version, rolledBackFrom) {
+			// Reflect whether the dashboard actually came back: in TUI mode
+			// a failed web bind logs-and-continues (resolveWebBind), and "restarted
+			// successfully" on the operator's phone while the dashboard is
+			// dead would be a lie. FAILED only on a CONFIRMED bind error —
+			// a bind still unanswered at webBindBackstop leaves ActualPort
+			// 0, and claiming failure then would be a false alarm; the
+			// notice then says nothing about the dashboard.
+			fields := []notifications.Field{
+				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
+				{Name: "Current Version", Value: "v" + version, Inline: true},
+			}
+			ntype := notifications.TypeSuccess
+			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
+			switch {
+			case webBindFailed:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
+				ntype = notifications.TypeWarning
+				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
+			case webServer.ActualPort() > 0:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
+			}
+			notifyMgr.Send("Update Applied", desc, ntype, fields,
+				notifications.SendOptions{Event: "update_applied"},
+			)
+		}
+		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+			c.Updates.LastRunVersion = version
+		}); err != nil {
+			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
+		}
+	}
 }
 
 // resolveUpdateBreadcrumb consumes the .update-pending breadcrumb beside

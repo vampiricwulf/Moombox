@@ -36,7 +36,7 @@ func TestUpdateCheckRunsWhenTheToggleIsTurnedOn(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runUpdateCheckLoop(ctx, enabled, func() { checks.Add(1) },
+		runUpdateCheckLoop(ctx, enabled, func() bool { checks.Add(1); return true },
 			updateCheckTiming{initialDelay: time.Millisecond, period: time.Hour, poll: 5 * time.Millisecond})
 	}()
 	t.Cleanup(func() { cancel(); <-done })

@@ -102,7 +102,7 @@ func ircHandshakeLines(token, login string) (pass, nick string, authenticated bo
 // prefix. Both are "" for a line with no command.
 //
 // Deliberately minimal. It exists for the two facts noteHandshakeOutcome needs
-// and nothing else; the message parser proper is parseLine.
+// and the RECONNECT check in runIRCSession, and nothing else; the message parser proper is parseLine.
 func ircCommandOf(line string) (cmd, params string) {
 	if after, ok := strings.CutPrefix(line, "@"); ok {
 		_, rest, found := strings.Cut(after, " ")
@@ -598,7 +598,11 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			// value, so returning it ended chat capture for the rest of the
 			// job. Logged at the loop rather than here, so one directive still
 			// writes exactly one line — see errServerReconnect.
-			if strings.HasPrefix(line, "RECONNECT") {
+			//
+			// Matched on the parsed command, not the line start: Twitch sends
+			// it with a server prefix (":tmi.twitch.tv RECONNECT"), and a
+			// bare "RECONNECT" is accepted too.
+			if cmd, _ := ircCommandOf(line); cmd == "RECONNECT" {
 				// Read by the noteHandshakeOutcome defer above: a directive
 				// that arrives before the 001 must not read as a refused
 				// login, because Twitch ruled on an edge, not on us.
@@ -653,9 +657,28 @@ func (cd *ChatDownloader) parseLine(line string) *TwitchChatMessage {
 		return cd.parsePrivmsg(tags, parts, line)
 	case "USERNOTICE":
 		return cd.parseUsernotice(tags, parts, line)
+	case "CLEARCHAT":
+		return parseClearchat(tags, parts, line)
+	case "CLEARMSG":
+		return parseClearmsg(tags, line)
 	default:
 		return nil
 	}
+}
+
+// ircPrefixNick returns the nick of an IRC sender prefix
+// (":nick!user@host" gives "nick"), or "" when the prefix names no user: a
+// server prefix such as ":tmi.twitch.tv" has no '!'.
+func ircPrefixNick(prefix string) string {
+	rest, ok := strings.CutPrefix(prefix, ":")
+	if !ok {
+		return ""
+	}
+	nick, _, ok := strings.Cut(rest, "!")
+	if !ok {
+		return ""
+	}
+	return nick
 }
 
 func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
@@ -688,10 +711,13 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	// renders the word "ACTION" as part of the message.
 	messageText, isAction := stripActionWrapper(messageText)
 
-	// Author name fallback chain
+	// Author name fallback chain. display-name can be empty (an account that
+	// never set one), and a PRIVMSG has no login tag: the login is the nick in
+	// the line's prefix, which is what chatterino7 falls back to
+	// (MessageBuilder.cpp, displayName = loginName).
 	authorName := unescapeIRCTag(tags["display-name"])
 	if authorName == "" {
-		authorName = tags["login"]
+		authorName = ircPrefixNick(parts[0])
 	}
 	if authorName == "" {
 		authorName = "Anonymous"
@@ -797,6 +823,115 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	}
 
 	return msg
+}
+
+// parseClearchat turns a CLEARCHAT into a moderation row (owner ruling R-G1).
+//
+//	@ban-duration=600;target-user-id=42;tmi-sent-ts=… :tmi.twitch.tv CLEARCHAT #chan :login   a timeout
+//	@target-user-id=42;tmi-sent-ts=…                  :tmi.twitch.tv CLEARCHAT #chan :login   a ban
+//	@tmi-sent-ts=…                                    :tmi.twitch.tv CLEARCHAT #chan          the whole chat cleared
+//
+// The three are told apart as chatterino does (references/chatterino7
+// IrcMessageHandler.cpp parseClearChatMessage): no user parameter is a full
+// clear, and a named user with no ban-duration is a permanent ban.
+//
+// CLEARCHAT carries no id tag, so the row's ID is derived from the time and
+// the target. It only has to be stable: addMessage drops a second row with
+// the same ID, which is the same event heard twice.
+func parseClearchat(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
+	ts := tags["tmi-sent-ts"]
+	tmiSentTs, _ := strconv.ParseInt(ts, 10, 64)
+	if tmiSentTs == 0 {
+		tmiSentTs = time.Now().UnixMilli()
+	}
+	ts = strconv.FormatInt(tmiSentTs, 10)
+	msg := &TwitchChatMessage{
+		TimestampMs: tmiSentTs,
+		AuthorName:  moderationAuthorName,
+		MessageType: MessageTypeModeration,
+		Raw:         rawLine,
+	}
+	var login string
+	if len(parts) >= 4 {
+		login = strings.TrimSpace(strings.TrimPrefix(parts[3], ":"))
+	}
+	userID := tags["target-user-id"]
+	if login == "" && userID == "" {
+		msg.ID = "clearchat-" + ts + "-all"
+		msg.Moderation = ModerationChatCleared
+		msg.SystemMsg = "Chat was cleared by a moderator"
+		return msg
+	}
+	target := userID
+	if target == "" {
+		target = login
+	}
+	msg.ID = "clearchat-" + ts + "-" + target
+	msg.Moderation = ModerationAuthorDeleted
+	msg.TargetUserID = userID
+	msg.TargetLogin = login
+	who := login
+	if who == "" {
+		who = "A user"
+	}
+	if sec, err := strconv.Atoi(tags["ban-duration"]); err == nil && sec > 0 {
+		msg.BanDurationSec = sec
+		msg.SystemMsg = who + " was timed out for " + formatBanDuration(sec) + "."
+	} else {
+		msg.SystemMsg = who + " was banned."
+	}
+	return msg
+}
+
+// parseClearmsg turns a CLEARMSG — one message deleted, named by
+// target-msg-id — into a moderation row. The deleted text the line repeats
+// stays in Raw only: the message itself is already in the file, as sent. A
+// line that names no message is dropped, since it could mark nothing.
+func parseClearmsg(tags map[string]string, rawLine string) *TwitchChatMessage {
+	targetID := tags["target-msg-id"]
+	if targetID == "" {
+		return nil
+	}
+	tmiSentTs, _ := strconv.ParseInt(tags["tmi-sent-ts"], 10, 64)
+	if tmiSentTs == 0 {
+		tmiSentTs = time.Now().UnixMilli()
+	}
+	login := tags["login"]
+	sentence := "A message was deleted by a moderator."
+	if login != "" {
+		sentence = "A message from " + login + " was deleted by a moderator."
+	}
+	return &TwitchChatMessage{
+		ID:          "clearmsg-" + targetID,
+		TimestampMs: tmiSentTs,
+		AuthorName:  moderationAuthorName,
+		MessageType: MessageTypeModeration,
+		SystemMsg:   sentence,
+		Moderation:  ModerationDeleted,
+		TargetMsgID: targetID,
+		TargetLogin: login,
+		Raw:         rawLine,
+	}
+}
+
+// formatBanDuration writes a timeout's length the short way chat clients do:
+// "10m", "1h 30m", "14d".
+func formatBanDuration(sec int) string {
+	var b strings.Builder
+	for _, u := range [...]struct {
+		size int
+		unit string
+	}{{86400, "d"}, {3600, "h"}, {60, "m"}, {1, "s"}} {
+		if n := sec / u.size; n > 0 {
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString(strconv.Itoa(n))
+			b.WriteString(u.unit)
+			sec -= n * u.size
+		}
+	}
+	return b.String()
 }
 
 // parseIRCTags parses IRC tags from a string like "key=value;key2=value2".

@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -473,10 +474,19 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 
 		ch := &channels[i]
 		if err := fm.checkChannel(ctx, ch); err != nil {
-			fm.health.recordError(ch.ID, err)
-			fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
-		} else {
-			fm.health.recordSuccess(ch.ID)
+			// One Warn when a channel starts failing, Debug for each repeat
+			// (the level the other two monitors log a failing channel at), one
+			// Info when it answers again. A dead channel, or the RSS errors
+			// YouTube serves at peak hours, would otherwise put a Warn in the
+			// log every cycle. The streak is the health tracker's, so the alert
+			// threshold and /api/status count the same failures.
+			if n := fm.health.recordError(ch.ID, err); n == 1 {
+				fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
+			} else {
+				fm.logger.Debug("feed check still failing", "channel", ch.Name, "failures", n, "err", err)
+			}
+		} else if n := fm.health.recordSuccess(ch.ID); n > 0 {
+			fm.logger.Info("feed check recovered", "channel", ch.Name, "failures", n)
 		}
 
 		// Stagger between requests to avoid looking like a scraper and to
@@ -764,7 +774,7 @@ func (fm *FeedMonitor) fetchFeed(ctx context.Context, ch *config.ChannelConfig) 
 		// 4xx/5xx isn't necessarily a connectivity problem (rate-limiting or a
 		// dead channel ID), but isn't a success either — leave the tracker alone.
 		drainBounded(resp.Body) // bounded drain for connection reuse
-		return nil, fmt.Errorf("feed http %d", resp.StatusCode)
+		return nil, feedStatusError(resp.StatusCode)
 	}
 	reportMonitorResult("monitor/feed", false)
 
@@ -1150,4 +1160,31 @@ func (fm *FeedMonitor) getYouTubeChannels() []config.ChannelConfig {
 		}
 	})
 	return channels
+}
+
+// feedBusy404Note is what a feed 404 says after its status (owner ruling
+// R2-M3). YouTube's feed answers 404 for a while when YouTube is busy, for
+// channels that exist, and an operator who reads a bare "404" takes the
+// channel for gone. The words that matter come first: the TUI channel list
+// shows only the first 48 cells of a failing channel's error.
+const feedBusy404Note = "common when YouTube is busy, usually clears by itself; the channel is still checked"
+
+// feedStatusError is the error for a feed answer that is not 200. It is the
+// one text every reader of a failed feed check shows: the monitor's Warn, the
+// failing-channel flag in both Settings channel lists (ChannelHealth.LastError)
+// and the "Last Error" field of the Channel Not Responding alert. Only the 404
+// carries a note; every other status reads as it always has.
+func feedStatusError(status int) error {
+	if status == http.StatusNotFound {
+		return fmt.Errorf("feed http %d: %s", status, feedBusy404Note)
+	}
+	return fmt.Errorf("feed http %d", status)
+}
+
+// IsFeedBusy404 reports whether a channel's last error (ChannelHealth.LastError)
+// is the feed 404 that feedStatusError words as YouTube being busy, so the
+// Channel Not Responding alert can say the same instead of matching the text
+// itself.
+func IsFeedBusy404(lastErr string) bool {
+	return strings.Contains(lastErr, feedStatusError(http.StatusNotFound).Error())
 }

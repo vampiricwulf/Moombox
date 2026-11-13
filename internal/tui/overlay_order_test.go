@@ -13,10 +13,15 @@ import (
 // the registry: opened through its own production entry point, its
 // visibility and its own view read straight off the model.
 type overlayCase struct {
-	name    string
-	open    func(*App)
-	visible func(*App) bool
-	view    func(*App) string
+	name string
+	// bareW and bareH are the smallest terminal the overlay opens bare in
+	// below the normal layout (overlay_bare.go). 0, 0: it has no bare form
+	// and needs the normal layout. Every overlay states its answer here;
+	// TestOverlayRegistryOrder holds the registry to it.
+	bareW, bareH int
+	open         func(*App)
+	visible      func(*App) bool
+	view         func(*App) string
 }
 
 // overlayCases lists every overlay in the order handleKey, View and
@@ -25,37 +30,37 @@ type overlayCase struct {
 // failure and not a silent change of which overlay a key reaches.
 func overlayCases(t *testing.T) []overlayCase {
 	return []overlayCase{
-		{"settings", func(a *App) { a.settings.Open(a.cfg) },
+		{"settings", 30, 6, func(a *App) { a.settings.Open(a.cfg) },
 			func(a *App) bool { return a.settings.IsVisible() }, func(a *App) string { return a.settings.View() }},
-		{"help", func(a *App) { a.help.Toggle() },
+		{"help", 30, 6, func(a *App) { a.help.Toggle() },
 			func(a *App) bool { return a.help.IsVisible() }, func(a *App) string { return a.help.View() }},
-		{"release notes", func(a *App) { a.releaseNotesPopup.open("v9.9.9", "# notes", a.width, a.height) },
+		{"release notes", 30, 6, func(a *App) { a.releaseNotesPopup.open("v9.9.9", "# notes", a.width, a.height) },
 			func(a *App) bool { return a.releaseNotesPopup.isOpen() }, func(a *App) string { return a.releaseNotesPopup.View() }},
-		{"ffmpeg check", func(a *App) { a.ffmpegCheck.Open() },
+		{"ffmpeg check", 0, 0, func(a *App) { a.ffmpegCheck.Open() },
 			func(a *App) bool { return a.ffmpegCheck.IsVisible() }, func(a *App) string { return a.ffmpegCheck.View() }},
-		{"setup wizard", func(a *App) { a.setupWiz.Open() },
+		{"setup wizard", 0, 0, func(a *App) { a.setupWiz.Open() },
 			func(a *App) bool { return a.setupWiz.IsVisible() }, func(a *App) string { return a.setupWiz.View() }},
-		{"action menu", func(a *App) { a.actionMenu.Open(a.buildMenuItems()) },
+		{"action menu", 30, 6, func(a *App) { a.actionMenu.Open(a.buildMenuItems()) },
 			func(a *App) bool { return a.actionMenu.IsVisible() }, func(a *App) string { return a.actionMenu.View() }},
-		{"import", func(a *App) { a.importDlg.Open(t.TempDir()) },
+		{"import", 30, 6, func(a *App) { a.importDlg.Open(t.TempDir()) },
 			func(a *App) bool { return a.importDlg.IsVisible() }, func(a *App) string { return a.importDlg.View() }},
-		{"cookie import", func(a *App) { a.cookieImportDlg.Open() },
+		{"cookie import", 30, 6, func(a *App) { a.cookieImportDlg.Open() },
 			func(a *App) bool { return a.cookieImportDlg.IsVisible() }, func(a *App) string { return a.cookieImportDlg.View() }},
-		{"chapter import", func(a *App) { a.chapterDlg.Open(a.taskList.GetJobByID("j1")) },
+		{"chapter import", 30, 10, func(a *App) { a.chapterDlg.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.chapterDlg.IsVisible() }, func(a *App) string { return a.chapterDlg.View() }},
-		{"add video", func(a *App) { a.addVideo.Open() },
+		{"add video", 30, 6, func(a *App) { a.addVideo.Open() },
 			func(a *App) bool { return a.addVideo.IsVisible() }, func(a *App) string { return a.addVideo.View() }},
-		{"trim", func(a *App) { a.trimDlg.Open("j1", "a job") },
+		{"trim", 30, 6, func(a *App) { a.trimDlg.Open("j1", "a job") },
 			func(a *App) bool { return a.trimDlg.IsVisible() }, func(a *App) string { return a.trimDlg.View() }},
-		{"files", func(a *App) { a.filesDlg.Open() },
+		{"files", 30, 6, func(a *App) { a.filesDlg.Open() },
 			func(a *App) bool { return a.filesDlg.IsVisible() }, func(a *App) string { return a.filesDlg.View() }},
-		{"client tokens", func(a *App) { a.clientTokensDlg.Open() },
+		{"client tokens", 30, 6, func(a *App) { a.clientTokensDlg.Open() },
 			func(a *App) bool { return a.clientTokensDlg.IsVisible() }, func(a *App) string { return a.clientTokensDlg.View() }},
-		{"ytdlp plugin", func(a *App) { a.ytdlpDlg.Open() },
+		{"ytdlp plugin", 30, 6, func(a *App) { a.ytdlpDlg.Open() },
 			func(a *App) bool { return a.ytdlpDlg.IsVisible() }, func(a *App) string { return a.ytdlpDlg.View() }},
-		{"stats", func(a *App) { a.statsDlg.Open() },
+		{"stats", 30, 6, func(a *App) { a.statsDlg.Open() },
 			func(a *App) bool { return a.statsDlg.IsVisible() }, func(a *App) string { return a.statsDlg.View() }},
-		{"job log", func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
+		{"job log", 30, 6, func(a *App) { a.jobLog.Open(a.taskList.GetJobByID("j1")) },
 			func(a *App) bool { return a.jobLog.IsVisible() }, func(a *App) string { return a.jobLog.View() }},
 	}
 }
@@ -107,7 +112,8 @@ func TestOverlayPriorityViewAndKey(t *testing.T) {
 // The registry is the one place the order lives: it must be exactly the
 // order the five hand-written chains had, every entry needs the three
 // required handlers, and every entry needs a case above — so a new overlay
-// cannot skip the census below or the Ctrl+C census.
+// cannot skip the censuses below (live progress, the mouse wheel), the
+// held-Esc census (heldEscBase, app_compact_test.go) or the Ctrl+C census.
 func TestOverlayRegistryOrder(t *testing.T) {
 	cases := overlayCases(t)
 	if len(overlayRegistry) != len(cases) {
@@ -119,6 +125,18 @@ func TestOverlayRegistryOrder(t *testing.T) {
 		}
 		if o.visible == nil || o.view == nil || o.key == nil {
 			t.Errorf("overlay %q: visible, view and key are all required", o.name)
+		}
+		switch c := cases[i]; {
+		case c.bareW == 0 && c.bareH == 0:
+			if o.bare != nil {
+				t.Errorf("overlay %q has a bare form, overlayCases says none", o.name)
+			}
+		case o.bare == nil:
+			t.Errorf("overlay %q has no bare form, overlayCases says %dx%d", o.name, c.bareW, c.bareH)
+		case o.bare.openW != c.bareW || o.bare.openH != c.bareH:
+			t.Errorf("overlay %q opens bare at %dx%d, overlayCases says %dx%d", o.name, o.bare.openW, o.bare.openH, c.bareW, c.bareH)
+		case c.bareW < compactMinWidth || c.bareH < compactMinHeight || (c.bareW >= minTermWidth && c.bareH >= minTermHeight):
+			t.Errorf("overlay %q: a bare minimum of %dx%d is outside the compact layout", o.name, c.bareW, c.bareH)
 		}
 	}
 }
@@ -156,5 +174,124 @@ func TestOverlayMouseFollowsKeyOrder(t *testing.T) {
 	_, _ = a.handleMouse(tea.MouseWheelMsg{X: 10, Y: 10, Button: tea.MouseWheelDown})
 	if a.actionMenu.mainList.Index() != before {
 		t.Fatalf("a wheel notch reached the action menu under settings")
+	}
+}
+
+// overlayLiveProgress is the census of which overlays draw progress the
+// progress tick delivers. While such an overlay is on top the tick stays at
+// the fast class (wantsFastProgress); under every other overlay it idles,
+// because the panels the tick feeds are hidden. Every overlay states its
+// answer here, so a new one has to decide.
+//
+// Only the trim dialog says yes: its bar is fed by progressTickMsg
+// (trimDlg.SetProgress). The others either draw nothing that moves or are
+// driven by their own messages (spinners, log batches, the stats refresh).
+var overlayLiveProgress = map[string]bool{
+	"settings":       false,
+	"help":           false,
+	"release notes":  false,
+	"ffmpeg check":   false,
+	"setup wizard":   false,
+	"action menu":    false,
+	"import":         false,
+	"cookie import":  false,
+	"chapter import": false,
+	"add video":      false,
+	"trim":           true,
+	"files":          false,
+	"client tokens":  false,
+	"ytdlp plugin":   false,
+	"stats":          false,
+	"job log":        false,
+}
+
+func TestOverlayLiveProgressCensus(t *testing.T) {
+	for _, e := range overlayRegistry {
+		want, stated := overlayLiveProgress[e.name]
+		if !stated {
+			t.Errorf("overlay %q is not in overlayLiveProgress: state whether it draws tick-fed progress", e.name)
+			continue
+		}
+		if got := e.liveProgress != nil; got != want {
+			t.Errorf("overlay %q: liveProgress set = %v, census says %v", e.name, got, want)
+		}
+	}
+	if len(overlayLiveProgress) != len(overlayRegistry) {
+		t.Errorf("overlayLiveProgress has %d rows, the registry %d", len(overlayLiveProgress), len(overlayRegistry))
+	}
+
+	// With a download running, each overlay on top gives the class the
+	// census states: idle, or fast only while its own progress is live.
+	for _, c := range overlayCases(t) {
+		a := overlayTestApp(t)
+		a.statusMap["d"] = database.StatusDownloading
+		c.open(a)
+		if !c.visible(a) {
+			t.Fatalf("%s did not open", c.name)
+		}
+		if a.wantsFastProgress() {
+			t.Errorf("%s on top, nothing of its own running: the progress tick should idle", c.name)
+		}
+		a.trimInProgress = true
+		if got := a.wantsFastProgress(); got != overlayLiveProgress[c.name] {
+			t.Errorf("%s on top with a trim running: fast = %v, census says %v", c.name, got, overlayLiveProgress[c.name])
+		}
+	}
+}
+
+// The two answers an overlay gives the mouse wheel (owner ruling R-C2).
+const (
+	wheelScrolls = "wheel scrolls"
+	wheelInert   = "deliberately inert"
+)
+
+// overlayWheel is the census of what the mouse wheel does over each overlay.
+// Every overlay states its answer here, so a new one has to decide. One that
+// scrolls needs a row in overlayWheelCases (overlay_wheel_test.go) too, which
+// proves it.
+//
+// The inert ones have nothing to scroll: cookie import is one path field
+// and the yt-dlp plugin overlay is a fixed screen that fits. Statistics
+// scrolls in its bare form only; its normal form is a fixed screen too.
+var overlayWheel = map[string]string{
+	"settings":       wheelScrolls, // the section under the cursor
+	"help":           wheelScrolls, // three rows a notch
+	"release notes":  wheelScrolls, // three rows a notch
+	"ffmpeg check":   wheelScrolls, // the install-script review, three rows a notch
+	"setup wizard":   wheelScrolls, // the channel list's cursor
+	"action menu":    wheelScrolls, // the menu's cursor
+	"import":         wheelScrolls, // the file picker's cursor
+	"cookie import":  wheelInert,
+	"chapter import": wheelScrolls, // a long preview under the pointer, else the paste box's cursor
+	"add video":      wheelScrolls, // the format table's cursor
+	"trim":           wheelScrolls, // the delete list's cursor
+	"files":          wheelScrolls, // the list's cursor
+	"client tokens":  wheelScrolls, // the list's cursor
+	"ytdlp plugin":   wheelInert,
+	"stats":          wheelScrolls, // its bare form, three rows a notch; the normal form shows everything
+	"job log":        wheelScrolls, // three rows a notch
+}
+
+// Every overlay states what the wheel does over it, and the registry agrees:
+// a handler exactly where the census says "wheel scrolls".
+func TestOverlayWheelCensus(t *testing.T) {
+	for _, e := range overlayRegistry {
+		want, stated := overlayWheel[e.name]
+		if !stated {
+			t.Errorf("overlay %q is not in overlayWheel: state %q or %q", e.name, wheelScrolls, wheelInert)
+			continue
+		}
+		if want != wheelScrolls && want != wheelInert {
+			t.Errorf("overlay %q: census says %q", e.name, want)
+		}
+		if got := e.mouse != nil; got != (want == wheelScrolls) {
+			t.Errorf("overlay %q: mouse handler set = %v, census says %q", e.name, got, want)
+		}
+		if _, has := overlayWheelCases[e.name]; has != (want == wheelScrolls) {
+			t.Errorf("overlay %q: census says %q, a row in overlayWheelCases = %v", e.name, want, has)
+		}
+	}
+	if len(overlayWheel) != len(overlayRegistry) {
+		t.Errorf("overlayWheel has %d rows, the registry %d", len(overlayWheel), len(overlayRegistry))
 	}
 }

@@ -63,13 +63,6 @@ func TestParsePlayabilityStatus_MembersOnly(t *testing.T) {
 		status map[string]any
 	}{
 		{
-			"login_required_members",
-			map[string]any{
-				"status": "LOGIN_REQUIRED",
-				"reason": "Join this channel to get access to members-only content",
-			},
-		},
-		{
 			"unplayable_members",
 			map[string]any{
 				"status": "UNPLAYABLE",

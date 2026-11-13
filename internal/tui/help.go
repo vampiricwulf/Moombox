@@ -53,6 +53,7 @@ var navigationKeys = helpSection{
 		{"End", "Resume auto-scroll (Logs · Job Log)"},
 		{"Enter", "Expand/collapse archives"},
 		{"Space", "Select task for batch actions (Tasks)"},
+		{"Ctrl+A", "Select every task shown (Tasks)"},
 		{"Esc", "Clear batch selection · filter · armed chord · close Job Log"},
 		{"/", "Filter query (Tasks) · Find text (Logs · Job Log)"},
 		{"", "Filter: status:live channel:\"name\" platform:youtube"},
@@ -67,7 +68,7 @@ var mouseKeys = helpSection{
 	title: "Mouse",
 	keys: []helpKey{
 		{"Click", "Select task / focus panel"},
-		{"Scroll", "Scroll the panel under the cursor"},
+		{"Scroll", "Scroll the panel under the cursor, or the overlay on top"},
 	},
 }
 
@@ -168,6 +169,10 @@ func (m *HelpModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 
 // buildContent constructs the help text and sets it into the viewport.
 func (m *HelpModel) buildContent() {
+	if m.bare() {
+		m.buildBareContent() // below the normal layout: help_bare.go
+		return
+	}
 	sections := m.orderedSections()
 
 	w := max(m.width-4, 20)
@@ -209,6 +214,9 @@ func (m *HelpModel) buildContent() {
 func (m *HelpModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView() // below the normal layout: help_bare.go
 	}
 
 	w := max(m.width-4, 20)
@@ -284,4 +292,17 @@ func (m *HelpModel) orderedSections() []helpSection {
 	// Static sections
 	sections = append(sections, quickKeys, navigationKeys, mouseKeys)
 	return sections
+}
+
+// Scroll moves the help text n rows (negative is up): the mouse wheel's
+// route, three rows a notch (mouseHelp).
+func (m *HelpModel) Scroll(n int) {
+	if !m.visible {
+		return
+	}
+	if n < 0 {
+		m.viewport.ScrollUp(-n)
+	} else {
+		m.viewport.ScrollDown(n)
+	}
 }

@@ -156,6 +156,18 @@ type RefreshService struct {
 	// note about a manual recheck that appears to do nothing.
 	refreshInFlight bool
 
+	// passDone is non-nil exactly while refreshInFlight is true: the claim
+	// makes it and the release closes it and sets it back to nil, both under
+	// mu. AwaitPass reads it to wait for the pass in flight to end. It is how
+	// Start keeps "the seed and the timer follow the first finished check"
+	// true when a dashboard recheck won the single-flight ahead of it.
+	passDone chan struct{}
+
+	// stopped is set by Stop and never lowered. cmd/moombox runs Start on its
+	// cookie startup goroutine, so a shutdown can call Stop before Start has
+	// run; Start then starts nothing.
+	stopped bool
+
 	// refreshPassHook, when non-nil, is called once per pass that gets PAST
 	// the in-flight guard, before any work begins.
 	//
@@ -508,46 +520,72 @@ func (rs *RefreshService) SetUnrecoveredPlatforms(platforms []string) {
 	}
 }
 
-// Start begins the cookie refresh loop.
+// Start runs the first check and then begins the cookie refresh loop. It
+// returns when the first check of the process has finished (its own pass, or
+// the pass that was already in flight), or when ctx ends.
+//
+// cmd/moombox calls it first on its cookie startup goroutine
+// (startCookieSequence), after the web server is bound and before the TUI
+// starts, so neither UI waits for it (owner rulings R-H2 and its amendment).
+// A service that Stop has already been called on starts nothing.
 func (rs *RefreshService) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
-	rs.mu.Lock()
-	rs.cancel = cancel
-	rs.mu.Unlock()
+	stopped := func() bool {
+		rs.mu.Lock()
+		defer rs.mu.Unlock()
+		if rs.stopped {
+			return true
+		}
+		rs.cancel = cancel
+		return false
+	}()
+	if stopped {
+		cancel()
+		rs.logger.Debug("cookie refresh service not started, it is already stopped")
+		return
+	}
 
-	// Initial check. allowFallback is false, for exactly the reason CheckNow's
-	// is: this call runs SYNCHRONOUSLY on the caller's goroutine, and
-	// cmd/moombox's run() blocks on it before the web server binds. At startup
-	// nothing has observed liveness yet, so the freshness skip cannot help —
-	// every install with a YouTube auth cookie would pay a full page fetch (up
-	// to livenessFetchTimeout, 20s in internal/youtube) ahead of the dashboard
-	// coming up, on every start. Config changes restart the process, so that
-	// would be one delayed startup per settings tweak.
+	// Initial check. allowFallback is false. This call runs synchronously on
+	// the caller's goroutine, and the caller is cmd/moombox's cookie startup
+	// goroutine: both UIs are already up and show "checking cookies" until
+	// this pass publishes a status with Checked set, and the profile seed and
+	// the browser refresh timer wait behind it. At startup nothing has
+	// observed liveness yet, so the freshness skip cannot help: every install
+	// with a YouTube auth cookie would pay a full page fetch (up to
+	// livenessFetchTimeout, 20s in internal/youtube) before either UI could
+	// say what the cookies are, on every start. Config changes restart the
+	// process, so that would be one such wait per settings tweak.
 	//
 	// The cost of skipping it is that tier-2 coverage begins one cadence in
 	// rather than immediately, which is the cheaper of the two.
 	//
-	// Wrapped in the same recover the ticker goroutine below carries, and for
-	// a sharper reason. This call runs on the CALLER's goroutine — cmd/moombox's
-	// run(), before the web server binds — so an unrecovered panic in the first
-	// pass does not lose a refresh, it takes the whole process down at boot,
-	// with no dashboard, no TUI and no log surface up to say why. The ticker's
-	// identical panic one cadence later is survivable purely because something
-	// recovers it.
-	//
-	// The wrap goes around the CALL, not around a new goroutine: CLAUDE.md's
-	// rule is that every goroutine carries an inline recover, and making this
-	// one asynchronous to satisfy that rule would break what the comment above
-	// documents — run() blocks on this pass so a dead-credential install is
-	// told within seconds of launch.
+	// Wrapped in the same recover the ticker goroutine below carries. A panic
+	// in the first pass must cost that pass only: the ticker below still has
+	// to start, and the caller still has to go on to the seed and the timer.
+	// The single-flight's release ends the "checking" state for a pass that
+	// panicked (see refresh).
+	ran := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				rs.logger.Error("startup cookie refresh panic", "panic", r)
 			}
 		}()
-		rs.refresh(ctx, false)
+		ran = rs.refresh(ctx, false)
 	}()
+	// Turned away by the single-flight: a dashboard recheck (CheckNow) landed
+	// between the web bind and this call and its pass is the first check.
+	// Wait for it, so the caller's next steps follow a finished check here
+	// too. A pass of this service that panicked reports ran=false as well;
+	// nothing is in flight then and this returns at once.
+	if !ran {
+		rs.AwaitPass(ctx)
+	}
+	// Stopped, or the run ended, while the first check ran: no ticker.
+	if ctx.Err() != nil {
+		rs.logger.Debug("cookie refresh loop not started, the service stopped during the first check")
+		return
+	}
 
 	go func() {
 		defer func() {
@@ -586,15 +624,49 @@ func (rs *RefreshService) Start(ctx context.Context) {
 		"interval", rs.refreshInterval.String())
 }
 
-// Stop stops the cookie refresh service.
+// Stop stops the cookie refresh service, for good: it ends the ticker and cuts
+// short a first check Start is still running, and a Start that comes after it
+// starts nothing. It does not wait for a pass in flight.
 func (rs *RefreshService) Stop() {
 	rs.mu.Lock()
+	rs.stopped = true
 	cancel := rs.cancel
 	rs.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	rs.logger.Info("cookie refresh service stopped")
+}
+
+// SkipStartupCheck marks the status checked without a check. cmd/moombox
+// calls it on an install with no cookie file configured (its cookie startup
+// goroutine then never calls Start), on run()'s own goroutine before the web
+// server binds and so before either UI can read the status: no startup check will ever answer there, and
+// the status must read as it always has (nothing configured), not as
+// "checking cookies" forever.
+func (rs *RefreshService) SkipStartupCheck() {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.status.Checked = true
+}
+
+// AwaitPass waits for the pass in flight, if there is one, to finish, or for
+// ctx to end. It reports whether nothing is in flight any more. A pass has
+// published its status (or, on a panic, ended the "checking" state) by the
+// time this returns true for it.
+func (rs *RefreshService) AwaitPass(ctx context.Context) bool {
+	rs.mu.RLock()
+	done := rs.passDone
+	rs.mu.RUnlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // GetStatus returns the current auth status.
@@ -625,8 +697,59 @@ func (rs *RefreshService) GetStatus() AuthStatus {
 // running publishes its own result through OnAuthChange and GetStatus, one
 // pass later at worst. A caller that has just REWRITTEN cookies.txt and wants
 // this specific file re-verified cannot be given that guarantee here — the
-// in-flight pass may have read the old file — and should say so in its log.
-// Nothing today blocks or queues on this; a skipped pass is skipped.
+// in-flight pass may have read the old file — and calls CheckNowAfterWrite
+// instead. CheckNow itself never blocks or queues; a skipped pass is skipped.
 func (rs *RefreshService) CheckNow(ctx context.Context) bool {
 	return rs.refresh(ctx, false)
+}
+
+// recheckCollisionWait bounds how long CheckNowAfterWrite waits for the pass
+// it collided with: a little over that pass's two 15 s auth round trips and
+// its fallback probes.
+const recheckCollisionWait = 45 * time.Second
+
+// RecheckAfterWriteBudget is the context a detached caller gives
+// CheckNowAfterWrite: the collision wait and then one whole pass. A context
+// of the wait's own length left the pending re-check whatever the wait had
+// not used, less than its two auth round trips need after a slow pass, so it
+// ended cut short and the write went unobserved until the next tick.
+const RecheckAfterWriteBudget = recheckCollisionWait + 45*time.Second
+
+// CheckNowAfterWrite is CheckNow for a caller that has just rewritten
+// cookies.txt, and reports whether a pass ran AFTER that write.
+//
+// A plain CheckNow turned away by the single-flight leaves the new file
+// unread: the pass in flight may have loaded the old one, and its status block
+// is the only place the Twitch fingerprint is compared, the auth mark cleared
+// and the recovered and credentials-changed edges fired. The write then went
+// unobserved until the next tick, 30 minutes by default. So a turned-away
+// call here waits for that pass to end (AwaitPass, at most
+// recheckCollisionWait and never past ctx) and runs CheckNow once more.
+//
+// One pending re-check, not a queue: the second call is not retried. It can
+// be turned away too, by a pass that started in the gap, and that pass began
+// after the write, so it read the new file. False then means only that this
+// caller ran no pass itself, or that the wait ran out.
+//
+// ctx covers the wait AND the pass after it, so a caller with a deadline
+// budgets for both (RecheckAfterWriteBudget).
+//
+// The wait runs on the caller's goroutine. Never call this from inside a
+// pass (an OnAuthChange, OnAuthRecovered or OnCredentialsChanged callback):
+// it would wait for itself until the bound.
+func (rs *RefreshService) CheckNowAfterWrite(ctx context.Context) bool {
+	if rs.CheckNow(ctx) {
+		return true
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, recheckCollisionWait)
+	defer cancel()
+	if !rs.AwaitPass(waitCtx) {
+		return false
+	}
+	if ctx.Err() != nil {
+		// Nothing left to run a pass under: one started now could only come
+		// back inconclusive, and would be reported as the re-check having run.
+		return false
+	}
+	return rs.CheckNow(ctx)
 }

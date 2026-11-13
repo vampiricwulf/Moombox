@@ -131,7 +131,7 @@ func TestTwitchClipJobDownloadsTheBestRenditionAndFinalizes(t *testing.T) {
 		t.Errorf("row = title %q channel %q thumb %q start %q category %q isVod %v quality %q",
 			got.Title, got.ChannelName, got.ThumbnailURL, got.StreamStartTime, got.TwitchCategory, got.IsVod, got.TwitchQuality)
 	}
-	if !strings.Contains(got.OutputFile, "[tw_clip_FaintLightGullWholeWheat].mp4") || !strings.HasPrefix(got.OutputFile, outDir) {
+	if !strings.Contains(got.OutputFile, "[tw_clip_FaintLightGullWholeWheat].mp4") || !strings.HasPrefix(got.OutputFile, filepath.Clean(outDir)) {
 		t.Errorf("output_file = %q, want the template's name under %s", got.OutputFile, outDir)
 	}
 	if _, err := os.Stat(got.OutputFile); err != nil {
@@ -312,16 +312,6 @@ func TestClipsHostURLNamesNoChannel(t *testing.T) {
 		if got := TwitchJobLogin(job); got != tc.want {
 			t.Errorf("TwitchJobLogin(%s) = %q, want %q", tc.url, got, tc.want)
 		}
-	}
-}
-
-// TestClipFnSeamIsUnsetInProduction pins the clip seam's production value:
-// the worker's stream processor reads clips through tw.GetClip, never a
-// stand-in.
-func TestClipFnSeamIsUnsetInProduction(t *testing.T) {
-	w, _ := testWorkerSetup(t)
-	if w.streamProc.clipFn != nil {
-		t.Error("NewDownloadWorker wired a clipFn; production must read clips through tw.GetClip")
 	}
 }
 

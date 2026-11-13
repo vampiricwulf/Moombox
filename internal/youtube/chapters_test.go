@@ -85,3 +85,59 @@ func TestFetchChaptersFallsBackToTheDescription(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchChaptersPassesTheConsentWall: the finalize-time chapter read is a
+// YouTube page read like the others, so it sends the consent and language
+// cookies they send (Auth.PageCookieHeader). An EU, EEA or UK address without
+// a consented SOCS is sent to consent.youtube.com, whose page holds no
+// chapter markers, and the archive then got the description's chapters or
+// none. A jar that is not signed in sends SOCS=CAI; a signed-in jar sends its
+// own session and consent.
+//
+// Mutants: the header built from the raw jar (the empty jar meets the wall
+// and the description's chapters come back); the consent cookies alone sent
+// for a signed-in jar (its session cookies are missing).
+func TestFetchChaptersPassesTheConsentWall(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		jar        []string // cookie name, value pairs
+		wantCookie string
+	}{
+		{name: "no cookies at all", wantCookie: "PREF=hl=en&tz=UTC; SOCS=CAI"},
+		{name: "signed in, with its own consent",
+			jar:        []string{"SAPISID", "sapisid-a", "LOGIN_INFO", "logininfo-a", "SOCS", "CAESEwgDEgk2NjI4NDQ2OTIaAmVuIAEaBgiA_LyuBg"},
+			wantCookie: "LOGIN_INFO=logininfo-a; PREF=hl=en&tz=UTC; SAPISID=sapisid-a; SOCS=CAESEwgDEgk2NjI4NDQ2OTIaAmVuIAEaBgiA_LyuBg"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rec := &pageRecorder{}
+				servePagesInBubble(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Host == "consent.youtube.com" {
+						_, _ = w.Write([]byte(`<html>Before you continue to YouTube</html>`))
+						return
+					}
+					rec.note(r.URL.Path, r.Header.Get("Cookie"))
+					if !consented(r.Header.Get("Cookie")) {
+						http.Redirect(w, r, "https://consent.youtube.com/m?continue=x&gl=NL", http.StatusFound)
+						return
+					}
+					_, _ = w.Write(chapterPage(playerBarChapters))
+				}), 0)
+
+				jar := cookies.NewCookieJar()
+				if len(tc.jar) > 0 {
+					jar = loadCookieRows(t, tc.jar...)
+				}
+				s := NewService(jar, noopLogger{})
+				got := s.FetchChapters(context.Background(), "test1234567", "0:00 Hello\n1:00 World\n", 600_000)
+				want := []utils.Chapter{{StartMs: 0, Title: "Intro"}, {StartMs: 95_000, Title: "Main"}}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("FetchChapters = %s, want the page's own markers %s", fmt.Sprint(got), fmt.Sprint(want))
+				}
+				if sent := rec.of("/watch"); len(sent) == 0 || sent[0] != tc.wantCookie {
+					t.Errorf("watch page Cookie = %q, want %q", sent, tc.wantCookie)
+				}
+			})
+		})
+	}
+}

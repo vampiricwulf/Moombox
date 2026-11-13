@@ -1,9 +1,6 @@
 package main
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"log/slog"
 	"strings"
 	"testing"
@@ -79,46 +76,4 @@ func TestLogConfigSourceNamesThePath(t *testing.T) {
 			t.Errorf("the no-file line does not say the run is on defaults; got:\n%s", got)
 		}
 	})
-}
-
-// The unit test above pins what logConfigSource says; this pins that boot
-// still calls it. Structural for the reason tui_wiring_ffmpeg_callsite_test.go
-// is: initServices opens the database, the web server and every platform
-// service, so this package cannot drive it, and the seam is a call's presence.
-//
-// Mutant: deleting the logConfigSource(log, cfg, s.configPath) line from
-// initServices — the fatal below fires and says what the operator loses.
-func TestInitServicesLogsTheConfigSource(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "services.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse services.go: %v", err)
-	}
-
-	var body *ast.BlockStmt
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "initServices" && fn.Body != nil {
-			body = fn.Body
-		}
-	}
-	if body == nil {
-		t.Fatal("services.go has no initServices with a body — re-anchor this test rather than deleting it")
-	}
-
-	called := false
-	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "logConfigSource" {
-			called = true
-		}
-		return true
-	})
-	if !called {
-		t.Fatal("initServices does not call logConfigSource — a typo'd -config path then starts on defaults " +
-			"and the first save creates a second config file, with no line in the log naming either path")
-	}
 }

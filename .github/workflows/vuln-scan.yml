@@ -12,10 +12,22 @@ name: Vulnerability scan
 #
 #   - govulncheck reports a Go module or standard-library vulnerability only
 #     when the code actually reaches the vulnerable symbol, so a failure is
-#     something to act on, not a list to triage.
+#     something to act on, not a list to triage. It analyses one build
+#     configuration per run, so it runs twice: for this runner (linux/amd64)
+#     and for windows/amd64, which has files, dependencies and
+#     standard-library halves of its own that the first pass never loads.
 #   - npm audit covers the two npm projects: the sidecar's runtime
 #     dependencies (what ships inside the binary) and the frontend test
 #     harness. Moderate and above fail; low is reported and passes.
+#   - audit-bundled.mjs covers meriyah and astring. They are the sidecar's
+#     devDependencies, so the audit above skips them, but build.mjs bundles
+#     them into vendor/ejs.bundle.js and they parse YouTube's player code on
+#     every cipher solve.
+#   - fetch-node -check-security fails when Node has published a security
+#     release on the pinned major line newer than the pin in
+#     tools/fetch-node/main.go (owner ruling R2-O1). npm audit cannot see the
+#     Node runtime the binary embeds, nor the undici inside it. A run that
+#     cannot reach nodejs.org warns and passes.
 
 on:
   schedule:
@@ -47,25 +59,51 @@ jobs:
       - name: Stand in for the embed blobs
         # govulncheck has to load every package, and internal/bgutils/embed
         # does not load without the files its go:embed directives name. It
-        # analyses code, never the embedded bytes, so two empty files replace
-        # the sidecar build and ~150 MB of Node downloads.
-        run: |
-          : > internal/bgutils/embed/sidecar.tar.gz
-          : > internal/bgutils/embed/node-linux-amd64.gz
+        # analyses code, never the embedded bytes, so empty files replace the
+        # sidecar build and ~150 MB of Node downloads. The script finds the
+        # names from the go:embed directives, so the Windows pass below has
+        # its blob too.
+        run: bash .github/scripts/embed-standins.sh
 
-      - name: govulncheck (Go modules and standard library)
+      - name: Install govulncheck
         # Pinned, like staticcheck in ci.yml. The vulnerability database it
-        # queries is live either way.
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+        # queries is live either way. Installed once, for this runner, and
+        # not `go run` in each pass: under GOOS=windows `go run` would build
+        # govulncheck itself for Windows, which this runner cannot start.
+        run: GOBIN="$RUNNER_TEMP/bin" go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+
+      - name: govulncheck (linux/amd64, Go modules and standard library)
+        run: '"$RUNNER_TEMP/bin/govulncheck" ./...'
 
       # The remaining steps run even when an earlier scan failed: one
       # finding should not hide another.
+      - name: govulncheck (windows/amd64)
+        # The Windows build is the one most installs run. Its *_windows.go
+        # files, golang.org/x/sys/windows and the Windows halves of os/exec
+        # and path/filepath are not in the linux pass above. GOOS and GOARCH
+        # choose the configuration govulncheck analyses.
+        if: ${{ !cancelled() }}
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: '"$RUNNER_TEMP/bin/govulncheck" ./...'
+
       - name: npm audit (sidecar runtime dependencies)
         if: ${{ !cancelled() }}
         working-directory: bgutil-sidecar
         run: npm audit --omit=dev --audit-level=moderate
 
+      - name: npm audit (libraries bundled into the sidecar's ejs bundle)
+        if: ${{ !cancelled() }}
+        working-directory: bgutil-sidecar
+        run: node audit-bundled.mjs
+
       - name: npm audit (frontend test harness)
         if: ${{ !cancelled() }}
         working-directory: web/tests
         run: npm audit --audit-level=moderate
+
+      - name: Node pin is not behind a security release
+        # Reads nodejs.org/dist/index.json; fetches no binary.
+        if: ${{ !cancelled() }}
+        run: go run ./tools/fetch-node -check-security

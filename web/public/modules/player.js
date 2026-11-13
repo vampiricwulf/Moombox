@@ -13,6 +13,7 @@ import {
   formatChatHeader,
   dividerLabelFor,
   correctLegacyTwitchEmotes,
+  applyTwitchModeration,
 } from "./chat-timeline.js";
 import { LaneAllocator, seedCursorIndex } from "./nico-lanes.js";
 import { letterboxStage, rowsFor, sameStage, nextGeometry, NICO_GEO_SETTLE_MS } from "./nico-geometry.js";
@@ -1535,8 +1536,22 @@ export class PlayerController {
             chatStreamStartTime: chatData.streamStartTime,
             jobStreamStartTime: this.playerJob.streamStartTime,
           });
-          this.playerChatMessages = (chatData.messages || [])
-            .map((m) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
+          // `raw` (a live Twitch message's whole tagged IRC line, usually
+          // larger than the rest of the message) is left behind here: its one
+          // reader, correctLegacyTwitchEmotes, already ran in _fetchChatData,
+          // and kept it would stay in memory for as long as the job is open.
+          // This map sees the single-file and the merged multi-part result.
+          //
+          // First, while the list is still in file order: a Twitch file's
+          // moderation rows (a stored CLEARCHAT or CLEARMSG, owner ruling
+          // R-G1) mark the messages they removed `deleted` and leave the
+          // list, so nothing below — the sidebar's rows, the overlay's
+          // cursor, the counts — ever holds one. The one exception is a
+          // full chat clear, which marks nothing and stays as a `system`
+          // marker row for the sidebar. A file with none comes back as the
+          // same array.
+          this.playerChatMessages = applyTwitchModeration(chatData.messages || [])
+            .map(({ raw: _raw, ...m }) => ({ ...m, offsetMs: normalizeOffsetMs(m.offsetMs) - chatBiasMs }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
           // Build 3rd-party emote lookup map for Twitch chat
@@ -1846,7 +1861,13 @@ export class PlayerController {
       div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
     }
     div.appendChild(this._timeSpan(msg));
-    div.appendChild(this._authorSpan(msg, true));
+    // A Twitch /me message (isAction, set by the recorder or by the legacy
+    // repair in chat-timeline.js) reads "Name waves", not "Name: waves", with
+    // the text in italics as Twitch draws it.
+    const isAction = msg.isAction === true;
+    const author = this._authorSpan(msg, !isAction);
+    if (isAction) author.textContent += " ";
+    div.appendChild(author);
     // K3: a cheer's amount, coloured by Twitch's scale. Gated on the count
     // rather than on messageType === "bits": a bits message with no count has
     // nothing to put in a chip, and a cheer that arrived typed as ordinary
@@ -1854,6 +1875,9 @@ export class PlayerController {
     const bits = Number(msg.bits) || 0;
     if (bits > 0) div.appendChild(this._cheerChip(bits));
     const contentSpan = document.createElement("span");
+    // On the content span itself, never a wrapper: _markChatChange strikes a
+    // deleted row's last child.
+    if (isAction) contentSpan.classList.add("chat-msg-action");
     this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
     div.appendChild(contentSpan);
   }
@@ -2627,6 +2651,9 @@ export class PlayerController {
     // its replacement, the text the sidebar row shows. The archived message
     // is not touched.
     if (msg.deleted === true) return null;
+    // A sidebar-only row (the "chat was cleared" marker applyTwitchModeration
+    // leaves for a moderator's /clear) is a line of the replay, not chat.
+    if (msg.sidebarOnly === true) return null;
     const el = document.createElement("div");
     el.className = "nico-message";
     if (msg.messageType === "announcement") {

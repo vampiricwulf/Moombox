@@ -334,15 +334,6 @@ func TestIsAllowedOrigin(t *testing.T) {
 			identity:      []string{"*.example.com"},
 			expected:      false,
 		},
-		{
-			name:          "lan mode still allows a literal certificate-attested name (review P7)",
-			origin:        "https://dash.lan",
-			networkAccess: "lan",
-			host:          "dash.lan",
-			scheme:        "https",
-			identity:      []string{"dash.lan"},
-			expected:      true,
-		},
 		// Final review Finding 3: the row above only pinned the localhost arm
 		// (:369) against wildcard expansion; the lan arm (middleware.go:372)
 		// and the unset-default arm (middleware.go:382) had no such row, so

@@ -285,9 +285,10 @@ func TestFinishedEmbedDropsTheDeadTwitchImage(t *testing.T) {
 // Mutants this kill:
 //   - matching "mux" anywhere in the string: an ffmpeg stderr tail from a
 //     DOWNLOAD failure that happens to mention muxing flips the answer.
-//   - dropping the two non-"mux" finalize prefixes: "no media files to mux"
-//     and "create output dir" are mux-stage failures that do not start with
-//     the word.
+//   - dropping a non-"mux" finalize prefix: "no media files to mux", "create
+//     output dir", "create segment output dir" and "no segment files found in
+//     staging directory" are mux-stage failures that do not start with the
+//     word.
 func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
 	for msg, want := range map[string]string{
 		"mux: ffmpeg: exit status 1 (stderr: …)":                           "mux",
@@ -299,10 +300,9 @@ func TestErrorStageClassifiesTheFinalizeErrors(t *testing.T) {
 		"twitch channel is offline":                                        "download",
 		"failed to fetch segment 1234: context deadline exceeded":          "download",
 		"ffmpeg stderr mentions muxing somewhere in the tail":              "download",
-		// The two finalize returns the prefixes still miss — pinned so the
-		// residual is a fact in the suite, not only in a report.
-		"create segment output dir: mkdir: denied":    "download",
-		"no segment files found in staging directory": "download",
+		// The split finalize's two returns.
+		"create segment output dir: mkdir: denied":    "mux",
+		"no segment files found in staging directory": "mux",
 	} {
 		if got := errorStage(msg); got != want {
 			t.Errorf("errorStage(%q) = %q, want %q", msg, got, want)

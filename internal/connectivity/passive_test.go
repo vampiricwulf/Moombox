@@ -184,7 +184,7 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 	// arrive, no ReportSuccess fires.
 	clk.advance(150 * time.Millisecond)
 
-	// IsTriggered alone doesn't prune (it just reads the flag).
+	// isTriggered alone doesn't prune (it just reads the flag).
 	// ShouldTriggerOffline does prune AND now also clears the latch
 	// when failures fall below threshold.
 	if pt.ShouldTriggerOffline() {

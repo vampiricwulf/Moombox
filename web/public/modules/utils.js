@@ -3,6 +3,25 @@
  */
 
 /**
+ * The one collator for case-insensitive name order: the Tasks list's title
+ * sort and the filter bar's channel list. String.localeCompare(b, undefined,
+ * { sensitivity: "base" }) gives the same order but builds a collator on
+ * every call, which made a 3,000-row sort cost about twenty times this one.
+ *
+ * Built on the first comparison, not when the module loads: the Go tests
+ * that run this file (utilsVM, internal/web/routes) use a runtime with no
+ * Intl, and a load-time `new Intl.Collator` failed every one of them.
+ * `compare` reads no `this`, so it can be passed straight to Array.sort.
+ */
+let nameCollator = null;
+export const NAME_COLLATOR = {
+  compare(a, b) {
+    if (!nameCollator) nameCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+    return nameCollator.compare(a, b);
+  },
+};
+
+/**
  * Format seconds into H:MM:SS or M:SS timestamp.
  */
 export function formatTimestamp(seconds) {
@@ -471,6 +490,7 @@ export function cookieSetupAbortReport(probe, baseline, { wizard = false } = {})
 const COOKIE_INDICATOR_PLATFORMS = {
   youtube: {
     name: "YouTube",
+    code: "YT",
     absent: { className: "indicator-warn", title: "YouTube: No cookies" },
     // Which key of the platform's status payload carries WHY an inconclusive
     // check could not conclude. See CookieStatusPayload / TwitchAuthStatus-
@@ -480,6 +500,7 @@ const COOKIE_INDICATOR_PLATFORMS = {
   },
   twitch: {
     name: "Twitch",
+    code: "TW",
     absent: { className: "indicator-off", title: "Twitch: Anonymous" },
     errorKey: "twitchError",
   },
@@ -488,7 +509,8 @@ const COOKIE_INDICATOR_PLATFORMS = {
 /**
  * The job status a park lands on. database.StatusCookies in Go
  * (internal/database/types.go); app.js carries its own copies for the action
- * sets. Pinned against the Go constant by TestWebParkedStatusMatchesGo.
+ * sets. Pinned against the Go constant by
+ * TestParkedCookiePlatformsAttributesToTheRightPlatform.
  */
 const PARKED_JOB_STATUS = "COOKIES?";
 
@@ -586,6 +608,8 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
   switch (state) {
+    case "checking":
+      return { className: "indicator-checking", title: `${meta.name}: Checking cookies…` };
     case "relogin":
       return { className: "indicator-error", title: `${meta.name}: Re-login required` };
     case "fileUnreadable":
@@ -610,8 +634,12 @@ export function cookieIndicatorState(platform, status, reloginRequired, parked) 
  * ruling R-D4), the TUI's: tui.CookieBadgePrecedence, which renderCookieStatus
  * (internal/tui/status_bar.go) follows. Parked and rejected render alike in the
  * TUI and sit side by side. cmd/moombox's parity test compares the two lists.
+ *
+ * "checking" is first (owner ruling R-H2): until the first auth check of the
+ * server process has answered, the status says nothing, so the badge shows
+ * neither the no-cookies nor the re-login state, whatever else holds.
  */
-export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
+export const COOKIE_BADGE_PRECEDENCE = ["checking", "relogin", "fileUnreadable", "parked", "rejected", "unknown", "none", "ok"];
 
 /**
  * cookieCheckState is what the auth check alone says, the dashboard's twin of
@@ -621,15 +649,58 @@ export const COOKIE_BADGE_PRECEDENCE = ["relogin", "fileUnreadable", "parked", "
  * then "fileUnreadable", "none" (no cookies), "unknown" (inconclusive) and
  * "rejected" (cookies the site refused). `fileError` and `verification` are
  * additive keys an older binary omits; their arms then never fire.
+ *
+ * "checking" comes before all of them (cookieCheckPending): the first auth
+ * check of the server process has not answered, and every other key is then
+ * a zero value that says nothing.
  * @param {object|null|undefined} status
- * @returns {"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
+ * @returns {"checking"|"ok"|"fileUnreadable"|"none"|"unknown"|"rejected"}
  */
 export function cookieCheckState(status) {
+  if (cookieCheckPending(status)) return "checking";
   if (status?.authenticated) return "ok";
   if (status?.fileError) return "fileUnreadable";
   if (!status?.found) return "none";
   if (status?.verification === "unknown") return "unknown";
   return "rejected";
+}
+
+/**
+ * cookieCheckPending says the first cookie auth check of the server process
+ * has not finished, for any of the status payloads given (`cookieStatus`,
+ * `twitchAuthStatus`). The dashboard is served before that check answers
+ * (owner ruling R-H2). It is the twin of Go's cookies.AuthStatus.Unchecked,
+ * which cmd/moombox cookieBadgesFor reads for the TUI; the two are compared
+ * over web/tests/fixtures/cookie-check-parity.json.
+ *
+ * POSITIVE on `checked === false`: an older binary sends no `checked` key, and
+ * a missing status is not a pending one, so both read as checked and the
+ * dashboard behaves as it always did.
+ *
+ * While it holds, nothing may be shown or decided as "no cookies" or
+ * "re-login required": the badge reads "checking" (cookieCheckState), the
+ * re-login warnings are held back, and app.js asks /api/status again shortly.
+ * @param {...(object|null|undefined)} statuses
+ * @returns {boolean}
+ */
+export function cookieCheckPending(...statuses) {
+  return statuses.some((s) => s?.checked === false);
+}
+
+/**
+ * cookieIndicatorText is the text inside a platform's pill: its code ("YT",
+ * "TW"), with an ellipsis while the first cookie check is pending ("YT…", the
+ * TUI's short form of the same state). The pending state must not depend on
+ * a tooltip, a colour or a pulse: a phone has no hover, and the pulse is off
+ * under prefers-reduced-motion. "checking" is first in
+ * COOKIE_BADGE_PRECEDENCE, so the check's state alone decides it.
+ * @param {"youtube"|"twitch"} platform
+ * @param {object|null|undefined} status
+ * @returns {string}
+ */
+export function cookieIndicatorText(platform, status) {
+  const code = COOKIE_INDICATOR_PLATFORMS[platform].code;
+  return cookieCheckState(status) === "checking" ? `${code}…` : code;
 }
 
 /**
@@ -871,6 +942,30 @@ export function applyChannelOverrides(channel, { outputDirectory, archiveWindowD
 }
 
 /**
+ * How many jobs a process restart interrupts: the ones downloading, live or
+ * muxing. "Queued" and "Upcoming" are absent: nothing of theirs is running
+ * yet. The dashboard's one copy of the rule the TUI holds as
+ * activeDownloadCount (internal/tui/app.go); the status bar's active count
+ * and every restart warning read it.
+ */
+export function activeDownloadCount(jobs) {
+  return (jobs || []).filter(
+    (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
+  ).length;
+}
+
+/**
+ * The sentence every restart prompt shows while downloads are active, or ""
+ * when none are. `restart` names what restarts ("update restart" from the
+ * update dialog, "restart" from Settings), so the wording has one home.
+ */
+export function activeDownloadsRestartWarning(count, restart = "restart") {
+  if (!(count > 0)) return "";
+  const noun = count === 1 ? "download is" : "downloads are";
+  return `${count} ${noun} active — the ${restart} interrupts them, and live segments during the ~30s gap may be lost (Twitch especially).`;
+}
+
+/**
  * Job-status action sets — the dashboard's copy of which statuses each
  * quick action targets, read by the details dialog (job-details.js), the job
  * cards, and the batch action bar (app.js). Each mirrors a Go predicate in
@@ -941,6 +1036,76 @@ export const BACKFILL_STATE = Object.freeze({
  */
 export function isBackfillRetained(state) {
   return state === BACKFILL_STATE.SCANNING || state === BACKFILL_STATE.ERROR;
+}
+
+// ── Failing channels ─────────────────────────────────────────────────────────
+// Owner ruling R-H1: a channel is flagged in the Settings channel list once
+// EVERY monitor covering it has failed CHANNEL_FAILING_STREAK or more checks
+// in a row, and the flag clears on the next success. The Discord alert (20
+// checks) is separate. Derived on every read from the `channelMonitors`
+// object (GET /api/status, the initial_state and channel_monitors frames),
+// never stored.
+
+/** Go: monitor.FailingStreak. */
+export const CHANNEL_FAILING_STREAK = 3;
+
+/**
+ * channelFailing is Go's monitor.ChannelFailing: `covering` holds one health
+ * entry per monitor that tracks the channel, and the channel is failing when
+ * there is at least one and each has CHANNEL_FAILING_STREAK or more
+ * consecutive failed checks. A monitor that still reaches the channel vouches
+ * for it; one that has not checked it has no entry and says nothing. The two
+ * are compared over web/tests/fixtures/channel-failing-parity.json.
+ * @param {Array<{consecutiveErrors?: number}>|null|undefined} covering
+ * @returns {boolean}
+ */
+export function channelFailing(covering) {
+  if (!Array.isArray(covering) || covering.length === 0) return false;
+  return covering.every((h) => (Number(h?.consecutiveErrors) || 0) >= CHANNEL_FAILING_STREAK);
+}
+
+/**
+ * failingChannels is Go's monitor.FailingChannels: one platform's monitor
+ * lists in, the failing channels out by ID. The entry kept for a channel is
+ * its most recently checked one (a later list wins a tie), so the error shown
+ * is the newest.
+ * @param {Array<Array<object>>|null|undefined} monitors
+ * @returns {Object<string, object>}
+ */
+export function failingChannels(monitors) {
+  const covering = new Map();
+  for (const list of Array.isArray(monitors) ? monitors : []) {
+    for (const h of Array.isArray(list) ? list : []) {
+      if (!h || typeof h.channelId !== "string") continue;
+      if (!covering.has(h.channelId)) covering.set(h.channelId, []);
+      covering.get(h.channelId).push(h);
+    }
+  }
+  const out = {};
+  for (const [id, entries] of covering) {
+    if (!channelFailing(entries)) continue;
+    let shown = entries[0];
+    for (const h of entries.slice(1)) {
+      if ((h.lastCheckedAt || 0) >= (shown.lastCheckedAt || 0)) shown = h;
+    }
+    out[id] = shown;
+  }
+  return out;
+}
+
+/**
+ * failingChannel is Go's monitor.ChannelMonitors.Failing: the entry to show
+ * for a failing channel, or null. Any platform but "twitch" is YouTube. An
+ * older binary sends no channelMonitors, and nothing is then flagged.
+ * @param {{youtube?: Array, twitch?: Array}|null|undefined} channelMonitors
+ * @param {string|undefined} platform
+ * @param {string} channelId
+ * @returns {object|null}
+ */
+export function failingChannel(channelMonitors, platform, channelId) {
+  const lists = platform === "twitch" ? channelMonitors?.twitch : channelMonitors?.youtube;
+  const found = failingChannels(lists);
+  return Object.hasOwn(found, channelId) ? found[channelId] : null;
 }
 
 // ── Channel removal ──────────────────────────────────────────────────────────
@@ -1019,8 +1184,10 @@ export function channelRemovedToast(choice, summary, data) {
  * three conditions (jobs.go resume route); this keeps the UI from offering
  * what the server will refuse.
  *
- * `hasStaging` is on every terminal list row (the server's worker.ListJob,
- * owner decision PE-5) and on the details view's fetched job; a row without
+ * `hasStaging` is on every list row that passes the status and platform
+ * arms below (the server's worker.ListJob applies the same two, owner
+ * decision PE-5 as ruling R-B2 narrowed it) and on the details view's
+ * fetched job, whatever its status; a row without
  * it (`undefined`) is unknown, and by default passes through to the server's
  * check — only a known `false` excludes.
  *
@@ -1055,6 +1222,31 @@ export function liveEdgeText(job) {
   if (join === 0) return "";
   const joined = typeof join === "number" && join > 0 ? `, joined ${formatTimestamp(join)} in` : "";
   return `Recorded from the live edge: ${reason}${joined}`;
+}
+
+/**
+ * setAsideArchiveText is the job-details line for an archive a Reinitialize
+ * of the job set aside (owner ruling R2-W1b), from the job API's
+ * setAsideArchives field (worker.SetAsideArchive): the file and that it is
+ * kept. The TUI's twin is setAsideArchiveLine (internal/tui/job_details.go).
+ * @param {{name?: string, size?: number}} archive
+ * @returns {string}
+ */
+export function setAsideArchiveText(archive) {
+  return `${archive.name || ""} (${formatBytes(archive.size)}, kept, never replaced)`;
+}
+
+/**
+ * unusedRecordingText is the job-details line for a recording a Finished
+ * job's staging still holds that the archive was not made from (owner ruling
+ * R-E1), from the job API's unusedRootRecording field
+ * (worker.UnusedRecording). The TUI's twin is unusedRecordingLine
+ * (internal/tui/job_details.go).
+ * @param {{name?: string, size?: number}} kept
+ * @returns {string}
+ */
+export function unusedRecordingText(kept) {
+  return `Kept recording not in the archive: ${kept.name || ""} (${formatBytes(kept.size)})`;
 }
 
 /**
@@ -1237,6 +1429,43 @@ export function diskGaugeLevel(disk, holds) {
 }
 
 /**
+ * How long a job's automatic cookie retry count stands after its last retry
+ * (jobstate.CookieRetryWindow, 24 hours). The shared table's boundary cases
+ * hold the two sides together.
+ */
+export const COOKIE_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * cookieRetry is jobstate.AdmissionHolds.CookieRetryFor (owner ruling
+ * R2-C1): the automatic cookie retries of a job parked in COOKIES? on its
+ * credentials, from the admissionHolds snapshot's cookieRetries. count 0 for
+ * any other row (a membership park is settled by an account change), for a
+ * job that has used none, and once the window has passed since the last one.
+ * @param {{cookieRetries?: Object<string, {count: number, of: number, last: string}>}|null} holds
+ * @param {object} job
+ * @param {number} [now] epoch milliseconds
+ * @returns {{count: number, of?: number, last?: string}}
+ */
+export function cookieRetry(holds, job, now = Date.now()) {
+  if (!holds || !job || job.status !== "COOKIES?" || job.parkReason === "membership") return { count: 0 };
+  const r = holds.cookieRetries?.[job.id];
+  if (!r || !(r.count > 0) || !(now < Date.parse(r.last) + COOKIE_RETRY_WINDOW_MS)) return { count: 0 };
+  return { count: r.count, of: r.of, last: r.last };
+}
+
+/**
+ * cookieRetryText is jobstate.CookieRetry.Text: the parked row's line in the
+ * TUI's words, "" when the job has used no retry.
+ * @param {{count: number, of?: number}} retry
+ * @returns {string}
+ */
+export function cookieRetryText(retry) {
+  if (!retry || !(retry.count > 0)) return "";
+  if (retry.count >= retry.of) return `Cookie retries used up (${retry.count} of ${retry.of}): no more automatic retries`;
+  return `Cookie retry ${retry.count} of ${retry.of} used`;
+}
+
+/**
  * The Twitch monitor's automatic-recovery budget, as the Go side declares it
  * (jobstate.MaxTwitchAutoRetries); the job-state parity test (cmd/moombox)
  * compares the two.
@@ -1313,9 +1542,13 @@ export function pendingAutoActionText(action) {
  * pendingAutoRetry, owner ruling R-D2) leads with what the reset cancels:
  * "cancels the pending automatic mux, and deletes …" (first, as the TUI line
  * that is cut to the terminal's width puts it).
+ * A job that already has a single-file archive names it next (existingArchives,
+ * owner ruling R2-W1b): the reset renames it aside where it is,
+ * "sets the existing archive (3.2GB) aside, and deletes …".
  * @param {{setAsideRecordings?: number, recordedParts?: number, recordedPartBytes?: number,
  *          stagedFiles?: number, stagedBytes?: number, importedChapters?: number,
- *          pendingAutoMux?: number, pendingAutoRetry?: number}} p
+ *          pendingAutoMux?: number, pendingAutoRetry?: number,
+ *          existingArchives?: number, existingArchiveBytes?: number}} p
  * @returns {string}
  */
 export function reinitializeDeletesText(p) {
@@ -1334,7 +1567,14 @@ export function reinitializeDeletesText(p) {
   const cancels = [];
   if (n("pendingAutoMux") > 0) cancels.push(pending(n("pendingAutoMux"), "mux", "muxes"));
   if (n("pendingAutoRetry") > 0) cancels.push(pending(n("pendingAutoRetry"), "retry", "retries"));
-  return cancels.length ? `cancels ${cancels.join(" and ")}, and ${deletes}` : deletes;
+  const lead = [];
+  if (cancels.length) lead.push(`cancels ${cancels.join(" and ")}`);
+  const archives = n("existingArchives");
+  // No size when none could be read (the archive's drive cannot be reached now).
+  const archiveSize = n("existingArchiveBytes") > 0 ? ` (${formatBytes(n("existingArchiveBytes"))})` : "";
+  if (archives === 1) lead.push(`sets the existing archive${archiveSize} aside`);
+  else if (archives > 1) lead.push(`sets ${archives} existing archives${archiveSize} aside`);
+  return lead.length ? `${lead.join(", ")}, and ${deletes}` : deletes;
 }
 
 /**
@@ -1344,7 +1584,7 @@ export function reinitializeDeletesText(p) {
  */
 export function sumReinitializePreviews(previews) {
   const keys = ["setAsideRecordings", "recordedParts", "recordedPartBytes", "stagedFiles", "stagedBytes", "importedChapters",
-    "pendingAutoMux", "pendingAutoRetry"];
+    "pendingAutoMux", "pendingAutoRetry", "existingArchives", "existingArchiveBytes"];
   const out = Object.fromEntries(keys.map((k) => [k, 0]));
   for (const p of previews) for (const k of keys) out[k] += Number(p?.[k]) || 0;
   return out;
@@ -1519,4 +1759,35 @@ export function bindPasswordSpaceWarning(input, base = "") {
   input.addEventListener("sl-input", update);
   update();
   return update;
+}
+
+/** A short success or neutral toast stays this long. */
+export const TOAST_SHORT_MS = 3000;
+/** A warning stays at least this long, however short it is. */
+export const TOAST_WARNING_MIN_MS = 6000;
+/** Reading time allowed per character of a toast's text. */
+export const TOAST_MS_PER_CHAR = 60;
+/** No timed toast stays longer than this. */
+export const TOAST_MAX_MS = 15000;
+
+/**
+ * How long a toast stays up, in milliseconds (owner ruling R2-D3). The one
+ * place that decides it: showToast in app.js reads it for every toast, and
+ * the countdown bar runs for the same time.
+ *
+ *  - danger: Infinity. An error stays until the operator closes it.
+ *  - everything else: TOAST_MS_PER_CHAR per character, never under the
+ *    variant's floor (TOAST_WARNING_MIN_MS for a warning, TOAST_SHORT_MS for
+ *    the rest) and never over TOAST_MAX_MS. A short success toast is 3 s as
+ *    it always was; a long one of any variant gets time to be read.
+ *
+ * @param {string} message
+ * @param {string} [variant]
+ * @returns {number}
+ */
+export function toastDuration(message, variant = "primary") {
+  if (variant === "danger") return Infinity;
+  const floor = variant === "warning" ? TOAST_WARNING_MIN_MS : TOAST_SHORT_MS;
+  const reading = String(message ?? "").length * TOAST_MS_PER_CHAR;
+  return Math.min(TOAST_MAX_MS, Math.max(floor, reading));
 }

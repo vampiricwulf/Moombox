@@ -180,16 +180,20 @@ func (w *DownloadWorker) BacklogRetryState(jobID string, now time.Time) (hold jo
 // AdmissionHolds is the snapshot both UIs show on Queued rows (owner ruling
 // R-D3): the scheduler's holds (Scheduler.Holds), each held row's attempt
 // the one its hold was placed for, with the retry budget filled in. The zero
-// value when the worker has no scheduler.
+// value when the worker has no scheduler. The snapshot also carries each
+// job's automatic cookie retries (cookieRetrySnapshot, owner ruling R2-C1),
+// which hold no admission: it is what already reaches both UIs.
 func (w *DownloadWorker) AdmissionHolds() jobstate.AdmissionHolds {
 	if w.scheduler == nil {
 		return jobstate.AdmissionHolds{}
 	}
-	h := w.scheduler.Holds(time.Now())
+	now := time.Now()
+	h := w.scheduler.Holds(now)
 	for id, own := range h.Jobs {
 		own.Of = backlogRetryLimit
 		h.Jobs[id] = own
 	}
+	h.CookieRetries = w.cookieRetrySnapshot(w.cookieRetryTime())
 	return h
 }
 

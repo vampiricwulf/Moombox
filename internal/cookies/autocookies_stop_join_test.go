@@ -57,7 +57,7 @@ func newPassInFlight(t *testing.T) *passInFlight {
 		return true, nil
 	}
 	p.s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
-	p.s.OnPassCompleted = func(context.Context) { p.hooked.Add(1) }
+	p.s.OnPassCompleted = func(context.Context, RefreshResult) { p.hooked.Add(1) }
 	return p
 }
 
@@ -238,7 +238,7 @@ func TestStopJoinsThePostPassReCheck(t *testing.T) {
 			pointTwitchValidateAt(t, statusServer(t, http.StatusOK))
 
 			var hookReturned atomic.Int64
-			s.OnPassCompleted = func(ctx context.Context) {
+			s.OnPassCompleted = func(ctx context.Context, _ RefreshResult) {
 				rs.CheckNow(ctx)
 				hookReturned.Store(time.Now().UnixNano())
 			}

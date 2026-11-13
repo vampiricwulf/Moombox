@@ -125,6 +125,9 @@ func (m *YtdlpDialogModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.bare() {
+		return m.bareView()
+	}
 
 	boxW, _ := dialogBox(70, m.width)
 	boxH := max(min(m.height-4, 20), 12)

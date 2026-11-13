@@ -680,12 +680,13 @@ func TestCheckNowSkipsFallbackProbe(t *testing.T) {
 }
 
 // TestStartupRefreshSkipsFallbackProbe: Start runs its initial check
-// SYNCHRONOUSLY on the caller's goroutine, and cmd/moombox's run() blocks on it
-// before the web server binds. Nothing has observed liveness at that point, so
-// the freshness skip cannot help — every install holding a YouTube auth cookie
-// would put a full page fetch, up to a 20s timeout, in front of the dashboard
-// coming up, on every start. Config changes restart the process, so that is one
-// delayed startup per settings tweak.
+// SYNCHRONOUSLY on its caller, cmd/moombox's cookie startup goroutine,
+// with both UIs showing "checking cookies" (R-H2 and its amendment). Nothing has
+// observed liveness at that point, so the freshness skip cannot help — every
+// install holding a YouTube auth cookie would put a full page fetch, up to a
+// 20s timeout, in front of both UIs leaving "checking cookies" and of the
+// profile seed and the refresh timer, on every start. Config changes restart the process, so that is one
+// such wait per settings tweak.
 //
 // Same reasoning that excludes CheckNow, and it was missed there first.
 func TestStartupRefreshSkipsFallbackProbe(t *testing.T) {

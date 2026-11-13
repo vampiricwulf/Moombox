@@ -233,7 +233,7 @@ is `go:embed`-ed - rebuild after any frontend change.
 | 16 | 8 | Same capture with the `login` row renamed on the throwaway | Log; Discord | One Warn `auth-token present but no usable login cookie`; one "Twitch chat is anonymous for <channel>" warning notification with the next-capture sentence; the running download unaffected |
 | 17 | 5 | Start the binary | Log | `Cookies loaded completeAuthSet= anyAuthCookie= expiredYouTubeAuth= expiredTwitchAuth= youtubeAuthHorizon= twitchAuthHorizon= twitchLoginExpiry=` - both platforms always printed, seven fields, the last three ISO-8601 UTC or `none` and never a cookie value (`cookiesLoadedFields`, `cmd/moombox/services.go`; H2 R2) |
 | 18 | 8 | `POST /api/cookies/recheck` twice within a second, or `R C` twice | Log at `DEBUG` | Second call: `cookie refresh skipped, another pass is already in flight`; exactly one `cookie refresh done` Debug line. Second `R C` is a no-op, not a `RefreshDeclinedCauses` message |
-| 19 | 8 | `R F` while the ticker pass is running | Log | Info `auth re-check after browser refresh was skipped, a cookie refresh was already in flight - status may lag until the next refresh` (`tui_wiring.go:436`); badge catches up next tick |
+| 19 | 8 | `R F` while the ticker pass is running | Log | A second pass runs right after the ticker pass ends (`CheckNowAfterWrite`) and the badge catches up then. Only if that retry is turned away too or the 45 s wait runs out: Info `auth re-check after browser refresh was skipped: a cookie refresh was in flight, and the one retry after it was turned away or timed out - status may lag until the next refresh` |
 | 20 | 3 | Browser cookie setup on Firefox: finish it; separately, cancel it | The browser window | Finish and Cancel both CLOSE the Firefox window Moombox opened (Arc 3 T3; the window used to dangle). Quitting Moombox mid-setup closes it too |
 | 21 | 3 | TUI setup wizard: walk away | TUI | The countdown is 300 s, not 60 (`internal/tui/setup_wizard.go:46`) |
 | 22 | 3 | Web setup: close the dashboard TAB mid-login | The browser window | The window stays open - a tab unload is not consent (`/api/cookies/auto-setup/abandon` releases the slot only where releasing cannot kill). Escape / Cancel still close it |
@@ -272,8 +272,8 @@ gofmt -l internal/ cmd/          # must print nothing (repo-wide since Arc 8 T5)
 go test -count=1 ./... 2>&1 | Tee-Object gates.txt   # count 'ok' lines: 28; FAIL: 0
 ```
 
-Do not run two `go test ./...` at once - concurrent runs starve `TestPotProvider_BypassCache` past
-its 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real build disproves
+Do not run two `go test ./...` at once - concurrent runs have starved a network-dependent
+`internal/bgutils` test past the 10-minute timeout (progress-arc2.md). Ignore gopls diagnostics that a real build disproves
 (~18 phantom batches on this plan). Run every `go test` with `$env:GOTMPDIR = "D:/Git/Moombox/.superpowers/gotmp"` (gitignored): since 2026-09-03 Windows Defender quarantines the `internal/cookies` test binary when it is built under `%TEMP%\go-build*` (`Trojan:Win32/Bearfoos.B!ml`, an ML heuristic); a Defender exclusion is your call.
 
 **Live gates** (each skips unless its variable is set; none prints a cookie value):

@@ -76,30 +76,33 @@ export class FooController {
 ```
 
 ### Existing Modules
+Every file under `web/public/` and what it owns is in `docs/spec/user-interfaces.md` § File Layout — read that table before deciding where a feature goes (the job details dialog, filter bar, log panel, Files tab, update indicator and cookie-setup dialog each have their own module). The ones feature work touches most:
+
 | Module | File | Purpose |
 |--------|------|---------|
-| App | `app.js` | Main SPA shell, WebSocket, job list, status bar, logs |
-| Player | `modules/player.js` | Video playback, chat overlay, multi-segment seeking, chapter strip and list (`GET /api/jobs/{id}/chapters`) |
-| Chapter import | `modules/chapter-import.js` | The player's Import chapters dialog: paste box, offset, debounced preview from `POST /api/jobs/{id}/chapters/preview` (no client-side parser), save and restore (`POST /api/jobs/{id}/chapters`, `/chapters/restore`) |
-| Setup | `modules/setup.js` | First-run wizard, FFmpeg install |
-| Settings | `modules/settings.js` | Config editor (all sections) |
-| Trimmer | `modules/trimmer.js` | Clip creation |
-| Stats | `modules/stats.js` | Statistics dashboard |
-| Imports | `modules/imports.js` | Zip archive import |
-| Utils | `modules/utils.js` | Shared formatters (`formatTimestamp`, `formatBytes`, `formatDurationSeconds`, etc.) |
+| App | `web/public/app.js` | Main SPA shell, WebSocket, job list, status bar |
+| Job details | `web/public/modules/job-details.js` | The job details dialog: render, live updates, action buttons, per-job logs |
+| Player | `web/public/modules/player.js` | Video playback, chat overlay, multi-segment seeking, chapter strip and list (`GET /api/jobs/{id}/chapters`) |
+| Chapter import | `web/public/modules/chapter-import.js` | The player's Import chapters dialog: paste box, offset, debounced preview from `POST /api/jobs/{id}/chapters/preview` (no client-side parser), save and restore (`POST /api/jobs/{id}/chapters`, `/chapters/restore`) |
+| Setup | `web/public/modules/setup.js` | First-run wizard, FFmpeg install |
+| Settings | `web/public/modules/settings.js` | Config editor (all sections) |
+| Trimmer | `web/public/modules/trimmer.js` | Clip creation |
+| Stats | `web/public/modules/stats.js` | Statistics dashboard |
+| Imports | `web/public/modules/imports.js` | Zip archive import |
+| Utils | `web/public/modules/utils.js` | Shared formatters (`formatTimestamp`, `formatBytes`, `formatDurationSeconds`, etc.) |
 
 ## WebSocket Message Handling
 
-`app.js` manages the WebSocket connection and routes messages by type:
+`web/public/app.js` manages the WebSocket connection and routes messages by type in `handleMessage`, one `case` per frame type.
 
-**All message types** (the fifteen `case` labels in the handler, in order): `initial_state`, `jobs_update`, `job_update`, `job_progress`, `config_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `backfill_status`, `trim_status`, `update_available`, `update_cleared`, `connectivity`, `pong`
+**All message types:** the table in `docs/spec/user-interfaces.md` § Server-to-Client Message Types is the one list, with each payload and sender. A new frame type needs a `case` in `handleMessage` and a row in that table; `TestWebSocketFrameTableMatchesTheClient` (`internal/docs/drift_test.go`) fails until both exist.
 
 ## Toast Notifications
 
 ```javascript
 showToast(message, variant = "primary") // variants: "success", "warning", "danger", "primary"
 ```
-Uses `<sl-alert>` with `alert.toast()`. Auto-closes after 3s with countdown animation. Icons mapped per variant.
+Uses `<sl-alert>` with `alert.toast()`. Always go through `showToast`: it is the one place a toast is made, and `toastDuration` (`web/public/modules/utils.js`) decides how long each stays. A `danger` toast stays until closed; any other stays 60 ms per character, at least 6 s for a `warning` and 3 s for the rest, at most 15 s, with a countdown bar that runs for the same time. Icons mapped per variant.
 
 ## Theme System
 

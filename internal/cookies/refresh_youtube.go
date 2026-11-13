@@ -62,8 +62,8 @@ func youtubeGuideRequestBody() string {
 //   - cmd/moombox/tui_wiring.go's OnRecheckCookies, which passes it through as
 //     the reason on the R C result line.
 //
-// Nothing else reads it. authStatusToTUI's badge and the Web indicators still
-// project from the booleans and the verdicts alone, and the second possible
+// Nothing else reads it. The TUI's badge (cookieBadgesFor in cmd/moombox) and
+// the Web indicators still project from the booleans and the verdicts alone, and the second possible
 // route stays closed: checkPlatformAuth consumes the error for an errors.Is
 // test and discards the value, so the rollback messaging composes from the
 // verification STATE and never interpolates this text.

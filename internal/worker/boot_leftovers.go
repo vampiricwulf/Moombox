@@ -16,8 +16,14 @@ import (
 const opBootCleanup jobOp = "boot cleanup"
 
 // bootSweepClaimed, when set, is called with each job ID whose staging claim
-// the boot sweep took. A test seam; nil in production.
-var bootSweepClaimed func(jobID string)
+// the boot sweep, or the end-of-stream tail pass ahead of it
+// (clearToleratedTail), took. tailClearChecked is called by that pass alone,
+// after it has read the row under the claim and before its write. Test seams;
+// nil in production.
+var (
+	bootSweepClaimed func(jobID string)
+	tailClearChecked func(jobID string)
+)
 
 // reclaimBootLeftovers deletes, once per start, the staging leftovers that are
 // PROVABLY redundant, and nothing else:

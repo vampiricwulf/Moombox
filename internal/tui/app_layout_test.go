@@ -414,20 +414,22 @@ func TestSecurityBannerText(t *testing.T) {
 	}
 }
 
-// TestViewWarnsBelowMinimumTerminalSize pins the minimum-size guard: below
-// minTermWidth x minTermHeight, every panel/overlay renders garbage (negative
-// widths, wrapped borders), so View() must short-circuit to a single-line
-// warning instead — the same shape as the "Initializing..." guard it sits
-// beside, one check further down.
+// TestViewWarnsBelowMinimumTerminalSize pins the size guards: below
+// minTermWidth x minTermHeight every panel/overlay renders garbage (negative
+// widths, wrapped borders), so View() draws the compact layout instead, and
+// below that layout's own floor (compactMinWidth x compactMinHeight) the
+// too-small notice. TestLayoutBySize has the full table.
 func TestViewWarnsBelowMinimumTerminalSize(t *testing.T) {
 	tests := []struct {
 		name        string
 		w, h        int
 		wantTooSmal bool
 	}{
-		{"narrow width", minTermWidth - 1, minTermHeight + 5, true},
-		{"short height", minTermWidth + 5, minTermHeight - 1, true},
-		{"both under", 50, 10, true},
+		{"narrow width", compactMinWidth - 1, minTermHeight + 5, true},
+		{"short height", minTermWidth + 5, compactMinHeight - 1, true},
+		{"both under", 20, 4, true},
+		{"compact", 50, 10, false},
+		{"exactly at the compact floor", compactMinWidth, compactMinHeight, false},
 		{"exactly at minimum", minTermWidth, minTermHeight, false},
 		{"comfortably sized", 120, 40, false},
 	}
@@ -451,19 +453,18 @@ func TestViewWarnsBelowMinimumTerminalSize(t *testing.T) {
 // go rather than guessing.
 func TestViewTerminalTooSmallNamesTheSize(t *testing.T) {
 	app := NewApp()
-	app.width = 50
-	app.height = 10
+	app.width = 28
+	app.height = 4
 	view := app.View().Content
-	for _, want := range []string{"50", "10", fmt.Sprintf("%d", minTermWidth), fmt.Sprintf("%d", minTermHeight)} {
+	for _, want := range []string{"28", "4", fmt.Sprintf("%d", compactMinWidth), fmt.Sprintf("%d", compactMinHeight)} {
 		if !strings.Contains(view, want) {
 			t.Errorf("terminal-too-small view lacks %q:\n%s", want, view)
 		}
 	}
 
-	// It must also FIT: shown only in terminals narrower than minTermWidth,
-	// the message is no use if the required size is past the right edge.
-	app.width = 40
-	for line := range strings.SplitSeq(app.View().Content, "\n") {
+	// It must also FIT: shown only in terminals under the compact floor, the
+	// message is no use if the required size is past the right edge.
+	for line := range strings.SplitSeq(view, "\n") {
 		if w := runewidth.StringWidth(line); w > app.width {
 			t.Errorf("line %q is %d columns, wider than the %d-column terminal it is shown in", line, w, app.width)
 		}

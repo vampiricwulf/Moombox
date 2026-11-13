@@ -136,7 +136,7 @@ func deriveFFprobePath(ffmpegPath string) string {
 // before it is renamed into place (writeOutput): an archive mux passes its
 // duration check here, so a short copy never takes the archive's name.
 func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, "", "", checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, InputOffsets{}, "", "", nil, checks)
 }
 
 // InputOffsets delays the inputs of a MuxCopyAt, in seconds, each passed to
@@ -149,7 +149,7 @@ type InputOffsets struct{ Video, Audio float64 }
 // MuxCopyAt is MuxCopy with each input delayed by its offset: the input's
 // first sample lands that far into the output.
 func (m *Muxer) MuxCopyAt(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", "", checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", "", nil, checks)
 }
 
 // MuxCopyAspect is MuxCopyAt that also sets the video's display aspect ratio
@@ -160,7 +160,7 @@ func (m *Muxer) MuxCopyAt(ctx context.Context, videoPath, audioPath, outputPath 
 // as a second remux: the yt:stretch fix for an old anamorphic upload. An
 // empty aspect is MuxCopyAt.
 func (m *Muxer) MuxCopyAspect(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, aspect string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, "", checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, "", nil, checks)
 }
 
 // MuxCopyAtChapters is MuxCopyAt that also embeds the chapters of an
@@ -175,14 +175,22 @@ func (m *Muxer) MuxCopyAspect(ctx context.Context, videoPath, audioPath, outputP
 // stream selection — no -map is given — still picks the same video and audio.
 // Owner decision D23: the chapter plumbing is new to Moombox.
 func (m *Muxer) MuxCopyAtChapters(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, chaptersPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", chaptersPath, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, "", chaptersPath, nil, checks)
 }
 
 // MuxCopyArchive is MuxCopyAt with both of the archive's own extras: the
 // yt:stretch display aspect (MuxCopyAspect) and the chapter list
 // (MuxCopyAtChapters). Either may be empty; both empty is MuxCopyAt.
 func (m *Muxer) MuxCopyArchive(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, aspect, chaptersPath string, checks ...OutputCheck) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, chaptersPath, checks)
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, chaptersPath, nil, checks)
+}
+
+// MuxCopyArchiveWithProgress is MuxCopyArchive that reports the copy's
+// progress to progress while FFmpeg runs (CopyProgress), on the calling
+// goroutine. FFmpeg is then run with `-nostats -progress pipe:1` ahead of the
+// same arguments; a nil progress is MuxCopyArchive exactly, argv included.
+func (m *Muxer) MuxCopyArchiveWithProgress(ctx context.Context, videoPath, audioPath, outputPath string, off InputOffsets, aspect, chaptersPath string, progress func(CopyProgress), checks ...OutputCheck) error {
+	return m.mux(ctx, videoPath, audioPath, outputPath, nil, off, aspect, chaptersPath, progress, checks)
 }
 
 // RemuxChapters rewrites a finished archive with a new chapter list (owner
@@ -234,10 +242,13 @@ func withAllStreamsKept(args []string, dropChapters bool) []string {
 // temporary file renamed onto outputPath once FFmpeg has exited 0
 // (writeOutput).
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
-	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, "", "", nil)
+	return m.mux(ctx, videoPath, audioPath, outputPath, opts, InputOffsets{}, "", "", nil, nil)
 }
 
-func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, aspect, chaptersPath string, checks []OutputCheck) error {
+// mux is the one FFmpeg run behind Mux and the MuxCopy family. copyProgress
+// is the stream copy's optional progress callback
+// (MuxCopyArchiveWithProgress); it is read only when opts is nil.
+func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions, off InputOffsets, aspect, chaptersPath string, copyProgress func(CopyProgress), checks []OutputCheck) error {
 	// Validate inputs
 	if videoPath != "" {
 		if _, err := os.Stat(videoPath); err != nil {
@@ -268,6 +279,11 @@ func (m *Muxer) mux(ctx context.Context, videoPath, audioPath, outputPath string
 		args := m.buildArgs(videoPath, audioPath, tmp, opts, needsEncode, off, chaptersPath)
 		if videoPath != "" {
 			args = withDisplayAspect(args, aspect)
+		}
+		if opts == nil && copyProgress != nil {
+			args = withCopyProgress(args)
+			m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
+			return m.runFFmpegCopyProgress(ctx, args, inputBytes(videoPath, audioPath), copyProgress)
 		}
 		m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
 		if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {

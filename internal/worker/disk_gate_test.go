@@ -411,3 +411,150 @@ func TestSchedulerReportsItsDiskHold(t *testing.T) {
 		t.Errorf("recorded holds = %v, want %v (close, reopen, restore)", got, want)
 	}
 }
+
+// TestGateReadsTheWorseOfOutputAndStaging: with the staging directory on a
+// volume of its own, the gate judges the fuller of the two and names it; on
+// one volume, or with staging unreadable, the output reading decides alone.
+// The gap filler's reading (readOutputDisk) stays the output volume's.
+//
+// Mutants: wire readOutputDisk back into the scheduler, or drop the staging
+// read — a full staging volume reads clear; prefer staging on a tie or when
+// emptier — the reading names the wrong directory.
+func TestGateReadsTheWorseOfOutputAndStaging(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	out := filepath.Join(t.TempDir(), "archive")
+	stg := filepath.Join(t.TempDir(), "scratch")
+	w.cfg.Paths.OutputDirectory = out
+	w.cfg.Paths.StagingDirectory = stg
+	w.cfg.Disk.CriticalPercent = 95
+	used := map[string]float64{out: 50, stg: 97}
+	var stagingErr error
+	var asked []string
+	w.diskSpace = func(path string) (*disk.DiskSpace, error) {
+		asked = append(asked, path)
+		if path == stg && stagingErr != nil {
+			return nil, stagingErr
+		}
+		return &disk.DiskSpace{Free: 5 << 30, Total: 100 << 30, UsedPct: used[path]}, nil
+	}
+	split := true
+	w.sameVolume = func(a, b string) bool { return !split }
+
+	r, err := w.readGateDisk()
+	if err != nil || r.dir != stg || !r.critical {
+		t.Fatalf("staging at 97%% on its own volume: dir=%q critical=%v err=%v, want the staging directory, critical", r.dir, r.critical, err)
+	}
+	if o, _ := w.readOutputDisk(); o.dir != out || o.critical {
+		t.Errorf("the output-only reading: dir=%q critical=%v, want the output directory, not critical", o.dir, o.critical)
+	}
+
+	used[stg] = 94 // inside the recovery margin: neither critical nor clear
+	if r, _ := w.readGateDisk(); r.dir != stg || r.critical || r.clear {
+		t.Errorf("staging at 94%%: dir=%q critical=%v clear=%v, want staging, neither", r.dir, r.critical, r.clear)
+	}
+	used[stg] = 50 // a tie is the output directory's
+	if r, _ := w.readGateDisk(); r.dir != out || !r.clear {
+		t.Errorf("both at 50%%: dir=%q clear=%v, want the output directory, clear", r.dir, r.clear)
+	}
+
+	used[stg] = 97
+	stagingErr = errors.New("offline")
+	if r, err := w.readGateDisk(); err != nil || r.dir != out || r.critical {
+		t.Errorf("staging unreadable: dir=%q critical=%v err=%v, want the output reading alone", r.dir, r.critical, err)
+	}
+	stagingErr = nil
+
+	split = false
+	asked = nil
+	if r, _ := w.readGateDisk(); r.dir != out || r.critical || len(asked) != 1 {
+		t.Errorf("one volume: dir=%q critical=%v reads=%v, want one reading of the output directory", r.dir, r.critical, asked)
+	}
+}
+
+// TestWorkerHoldsBacklogOnAFullStagingVolume is the gate through the
+// worker's own scheduler with staging on another volume: a Queued backlog
+// VOD waits while the staging volume reads critical though the output
+// volume has room, and is admitted once staging is 2 points clear.
+func TestWorkerHoldsBacklogOnAFullStagingVolume(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	stg := filepath.Join(t.TempDir(), "scratch")
+	w.cfg.Paths.StagingDirectory = stg
+	w.cfg.Disk.CriticalPercent = 95
+	stagingUsed := 99.0
+	w.diskSpace = func(path string) (*disk.DiskSpace, error) {
+		if path == stg {
+			return &disk.DiskSpace{Free: 1 << 30, Total: 100 << 30, UsedPct: stagingUsed}, nil
+		}
+		return &disk.DiskSpace{Free: 50 << 30, Total: 100 << 30, UsedPct: 50}, nil
+	}
+	w.sameVolume = func(a, b string) bool { return false }
+	w.scheduler.resolveSlots = func(string) int { return 1 }
+	queueBacklog(t, db, "UC_stg", "stg_a")
+
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("stg_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with the staging volume at 99%%, want Queued", row.Status)
+	}
+	stagingUsed = 94
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("stg_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with staging at 94%% against 95, want Queued until it is 2 points clear", row.Status)
+	}
+	stagingUsed = 93
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("stg_a"); row.Status != database.StatusUpcoming {
+		t.Errorf("status = %s once staging had room, want Upcoming", row.Status)
+	}
+}
+
+// TestWorkerKeepsTheBacklogHeldWhenAFullStagingVolumeGoesOffline: a staging
+// volume that closed the gate and then cannot be read (drive unplugged, share
+// offline) is not known to have room. The output volume's reading, with space
+// to spare, does not reopen admission into a directory that is absent or
+// still full; the first staging reading that answers clear does. A staging
+// volume whose last reading was clear changes nothing when it stops
+// answering: the output reading decides alone, as before.
+//
+// Mutant: readGateDisk returns the output reading untouched on a staging read
+// error — the backlog VOD is admitted while staging is offline.
+func TestWorkerKeepsTheBacklogHeldWhenAFullStagingVolumeGoesOffline(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	stg := filepath.Join(t.TempDir(), "scratch")
+	w.cfg.Paths.StagingDirectory = stg
+	w.cfg.Disk.CriticalPercent = 95
+	stagingUsed := 99.0
+	var stagingErr error
+	w.diskSpace = func(path string) (*disk.DiskSpace, error) {
+		if path == stg {
+			if stagingErr != nil {
+				return nil, stagingErr
+			}
+			return &disk.DiskSpace{Free: 1 << 30, Total: 100 << 30, UsedPct: stagingUsed}, nil
+		}
+		return &disk.DiskSpace{Free: 50 << 30, Total: 100 << 30, UsedPct: 50}, nil
+	}
+	w.sameVolume = func(a, b string) bool { return false }
+	w.scheduler.resolveSlots = func(string) int { return 1 }
+	queueBacklog(t, db, "UC_off", "off_a")
+
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with the staging volume at 99%%, want Queued", row.Status)
+	}
+	stagingErr = errors.New("the device is not ready")
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with the full staging volume offline, want Queued: nothing says it has room", row.Status)
+	}
+	stagingErr, stagingUsed = nil, 40
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusUpcoming {
+		t.Fatalf("status = %s once staging answered with room, want Upcoming", row.Status)
+	}
+
+	// Last staging reading clear, then offline: the output reading decides.
+	stagingErr = errors.New("the device is not ready")
+	if r, err := w.readGateDisk(); err != nil || r.critical || !r.clear {
+		t.Errorf("staging offline after a clear reading: critical=%v clear=%v err=%v, want the output reading, clear", r.critical, r.clear, err)
+	}
+}

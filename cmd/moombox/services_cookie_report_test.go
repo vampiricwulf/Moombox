@@ -229,6 +229,7 @@ func TestJobCookieRefreshOutcome(t *testing.T) {
 	noCredentials := cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed}
 	couldNotTell := cookies.RefreshResult{Ran: true}
 	declined := cookies.RefreshResult{}
+	inFlight := cookies.RefreshResult{InFlight: true}
 
 	cases := []struct {
 		name     string
@@ -250,6 +251,9 @@ func TestJobCookieRefreshOutcome(t *testing.T) {
 			worker.CookieRefreshUnconfirmed, "automatic cookie refresh ran but could not establish whether these cookies work"},
 		{"a declined pass keeps the failure line", declined, nil,
 			worker.CookieRefreshNotRestored, "automatic cookie refresh declined to run, so nothing was learned about these cookies"},
+		// A refresh already running is not a failed one (owner ruling R2-C2):
+		// no Warn, and the worker is told to wait for that pass.
+		{"a refresh already running is waited for", inFlight, nil, worker.CookieRefreshInFlight, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

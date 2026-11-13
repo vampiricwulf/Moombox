@@ -155,28 +155,6 @@ func TestResolvedBrowserUsesOverride(t *testing.T) {
 	}
 }
 
-// TestResolvedBrowserFallsBackWhenOverrideEmpty checks that empty values
-// from ConfiguredBrowserOverride are treated as "no override" and the
-// function falls through to DetectBrowser() without panicking.
-func TestResolvedBrowserFallsBackWhenOverrideEmpty(t *testing.T) {
-	s := NewAutoCookieService("", "", nil, nopAutoCookieLogger{})
-	s.ConfiguredBrowserOverride = func() (string, string) {
-		return "", ""
-	}
-	// Should fall back to DetectBrowser; result depends on test environment
-	// (may be nil if no browser installed). We only verify no panic.
-	_ = s.resolvedBrowser()
-}
-
-// TestResolvedBrowserNoOverrideFallsBackToDetect ensures that when
-// ConfiguredBrowserOverride is nil the method delegates to DetectBrowser()
-// without panicking.
-func TestResolvedBrowserNoOverrideFallsBackToDetect(t *testing.T) {
-	s := NewAutoCookieService("", "", nil, nopAutoCookieLogger{})
-	// ConfiguredBrowserOverride not set
-	_ = s.resolvedBrowser() // should not panic
-}
-
 // TestShouldSkipPeriodicRefreshCallbackInvocationCount makes sure each
 // tick consults the callback exactly once — a test buffer against future
 // "cache the result" optimisations that could mask a job appearing

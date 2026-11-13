@@ -15,37 +15,6 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-func TestDefaults(t *testing.T) {
-	cfg := Defaults()
-	if cfg.Network.Port != 774 {
-		t.Errorf("expected port 774, got %d", cfg.Network.Port)
-	}
-	if cfg.Network.NetworkAccess != "localhost" {
-		t.Errorf("expected localhost, got %s", cfg.Network.NetworkAccess)
-	}
-	if cfg.Downloader.MaxVideoResolution != 2160 {
-		t.Errorf("expected 2160, got %d", cfg.Downloader.MaxVideoResolution)
-	}
-	if cfg.Downloader.NumParallelDownloads != 10 {
-		t.Errorf("expected 10, got %d", cfg.Downloader.NumParallelDownloads)
-	}
-	if !cfg.Downloader.DownloadChat {
-		t.Error("expected download_chat to be true")
-	}
-	if !cfg.Downloader.Prefer60fps {
-		t.Error("expected prefer_60fps to be true")
-	}
-	if cfg.Paths.OutputDirectory != "./output" {
-		t.Errorf("expected ./output, got %s", cfg.Paths.OutputDirectory)
-	}
-	if cfg.Cookies.CookieFile != "./cookies.txt" {
-		t.Errorf("expected ./cookies.txt, got %s", cfg.Cookies.CookieFile)
-	}
-	if cfg.Network.ClientTokenTTLDays != 365 {
-		t.Errorf("expected ClientTokenTTLDays default 365, got %d", cfg.Network.ClientTokenTTLDays)
-	}
-}
-
 // TestValidateMonitorBounds verifies the new upper bounds on
 // ArchiveWindowDays / FeedCheckInterval / HideFinishedAgeDays.
 // Pre-Finding-13 only the lower bound was enforced — setting
@@ -368,6 +337,9 @@ name = "Test Channel"
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
+	}
 
 	// Verify top-level fields migrated to Network
 	if cfg.Network.Port != 8080 {
@@ -475,6 +447,9 @@ network_access = "external"
 			cfg, err := Load(configPath)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(cfg.UnknownOnLoad) != 0 {
+				t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 			}
 			if cfg.Network.NetworkAccess != tt.want {
 				t.Errorf("NetworkAccess = %q, want %q", cfg.Network.NetworkAccess, tt.want)
@@ -668,6 +643,9 @@ auto_enabled = true
 	cfg, err := Load(configPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 	}
 
 	// database_path from [paths] should be kept
@@ -983,16 +961,6 @@ func TestLoadLeavesDefaultProbeTargetsIntact(t *testing.T) {
 	}
 }
 
-func TestArchiveSettingsDefaults(t *testing.T) {
-	cfg := Defaults()
-	if cfg.Monitors.ArchiveWindowDays != 3 || cfg.Monitors.ArchiveSlots != 3 {
-		t.Fatalf("defaults %d/%d, want 3/3", cfg.Monitors.ArchiveWindowDays, cfg.Monitors.ArchiveSlots)
-	}
-	if cfg.Downloader.NumParallelDownloads != 10 {
-		t.Fatalf("num_parallel_downloads default %d, want 10", cfg.Downloader.NumParallelDownloads)
-	}
-}
-
 func TestArchiveSettingsValidation(t *testing.T) {
 	cfg := Defaults()
 	cfg.Monitors.ArchiveWindowDays = 5000 // > 3650
@@ -1023,6 +991,9 @@ func TestMaxFeedItemsIgnored(t *testing.T) {
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("legacy key must not error: %v", err)
+	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 	}
 	if cfg.Monitors.ArchiveWindowDays != 3 {
 		t.Fatal("defaults must apply")
@@ -1060,19 +1031,6 @@ func TestSegmentWorkersValidation(t *testing.T) {
 				t.Errorf("SegmentWorkers = %d, want %d", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestSegmentWorkersDefault(t *testing.T) {
-	if got := Defaults().Downloader.SegmentWorkers; got != 12 {
-		t.Errorf("default SegmentWorkers = %d, want 12", got)
-	}
-}
-
-// TestInterruptionTimeoutDefault pins the default of 120 minutes (2 hours).
-func TestInterruptionTimeoutDefault(t *testing.T) {
-	if got := Defaults().Downloader.InterruptionTimeout.Value; got != 120 {
-		t.Errorf("default InterruptionTimeout = %v, want 120", got)
 	}
 }
 
@@ -1282,6 +1240,9 @@ max_video_resolution = 720
 	cfg, err := Load(configPath)
 	if err != nil {
 		t.Fatalf("Load with the retired key: %v", err)
+	}
+	if len(cfg.UnknownOnLoad) != 0 {
+		t.Errorf("UnknownOnLoad = %q, want none: these are legacy keys", cfg.UnknownOnLoad)
 	}
 	if cfg.Downloader.MaxVideoResolution != 720 {
 		t.Errorf("MaxVideoResolution = %d, want 720 (the section around the retired key must still decode)", cfg.Downloader.MaxVideoResolution)

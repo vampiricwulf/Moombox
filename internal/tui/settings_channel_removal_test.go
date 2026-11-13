@@ -353,9 +353,10 @@ func TestChannelRemovalClickCancelsWithoutSelecting(t *testing.T) {
 // Mutants killed: the list window not shrunk by the prompt's extra rows;
 // the informational lines never dropped for space.
 func TestChannelRemovalPromptFitsTheScreen(t *testing.T) {
-	// 60x13 is below the floor the other fit tests hold: there the prompt
-	// drops its two informational lines to stay inside the frame.
+	// 60x13 is below the normal layout: there the prompt is the bare one
+	// (settings_bare_lists.go), which has no button row.
 	for _, size := range [][2]int{{60, 13}, {60, 20}, {80, 24}} {
+		bare := layoutModeFor(size[0], size[1]) == layoutCompact
 		m := newSettingsModelForSave(t)
 		m.SetSize(size[0], size[1])
 		m.switchSection(slices.IndexFunc(sections, func(s settingsSection) bool { return s.name == "Channels" }))
@@ -370,7 +371,11 @@ func TestChannelRemovalPromptFitsTheScreen(t *testing.T) {
 		}
 		// The box clips what overflows from the bottom: the prompt's keys
 		// and the action button under the list are what would go.
-		if plain := stripANSI(view); !strings.Contains(plain, "Esc: Cancel") || !strings.Contains(plain, "[ Return ]") {
+		if plain := stripANSI(view); bare {
+			if !strings.Contains(plain, "Esc: cancel") || !strings.Contains(plain, "P: remove + delete 2 pending") {
+				t.Errorf("%dx%d: the bare prompt's keys are cut off:\n%s", size[0], size[1], plain)
+			}
+		} else if !strings.Contains(plain, "Esc: Cancel") || !strings.Contains(plain, "[ Return ]") {
 			t.Errorf("%dx%d: the prompt's keys or the action button are cut off:\n%s", size[0], size[1], plain)
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -435,5 +437,96 @@ func TestDetailsPanelSaysWhyStagingIsKeptForAMuxGap(t *testing.T) {
 	}
 	if !strings.Contains(body, "could not be checked") {
 		t.Errorf("a changed reason was not rebuilt; rows were:\n%s", body)
+	}
+}
+
+// keptRecordingRows returns the details panel's Kept Recording section: its
+// header and the rows under it.
+func keptRecordingRows(m *JobDetailsModel) []detailRow {
+	var out []detailRow
+	in := false
+	for _, r := range m.rows {
+		if r.kind == rowHeader && r.label == "Kept Recording" {
+			in = true
+			out = append(out, r)
+			continue
+		}
+		if !in {
+			continue
+		}
+		if r.kind == rowSeparator || r.kind == rowHeader {
+			break
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// TestDetailsPanelNamesTheKeptRecordingNotInTheArchive: a Finished job whose
+// staging root still holds a recording the archive was not made from names
+// the file, its size and its path, in the dashboard's words (owner ruling
+// R-E1). That recording keeps the staging with no age rule, and the only
+// other account is a line in the job's in-memory log.
+//
+// Mutants this kills:
+//   - no section: keptRecordingRows is empty.
+//   - the path truncated or left out: it does not join back from the rows.
+//   - the path wrapped at its spaces (wrapText): a run of spaces collapses
+//     and the rows no longer join back to the path on disk.
+//   - sameAs ignoring UnusedRoot: the changed and the cleared summary are
+//     never rebuilt.
+func TestDetailsPanelNamesTheKeptRecordingNotInTheArchive(t *testing.T) {
+	m := NewJobDetailsModel()
+	m.SetSize(60, 40)
+	m.SetJob(&database.Job{ID: "j1", Title: "t", VideoID: "v", Status: database.StatusFinished, Platform: "youtube"})
+	if rows := keptRecordingRows(m); len(rows) != 0 {
+		t.Fatalf("a job with no kept recording grew a %d-row section", len(rows))
+	}
+	path := `C:\Users\First  Last\a long staging directory\that does not fit on one line of the panel\j1\video.mp4`
+	m.SetAsides(AsideSummary{UnusedRoot: &UnusedRecordingEntry{Name: "video.mp4", Path: path, Size: 3 << 30}})
+
+	rows := keptRecordingRows(m)
+	if len(rows) == 0 {
+		t.Fatal("the details panel shows no Kept Recording section for a job that has one")
+	}
+	var spaced, joined string
+	for _, r := range rows[1:] {
+		spaced += r.value + " "
+		joined += r.value
+	}
+	want := "Kept recording not in the archive: video.mp4 (" + formatFileSize(3<<30) + ")"
+	if !strings.Contains(spaced, want) {
+		t.Errorf("the section does not say %q; rows were: %q", want, spaced)
+	}
+	if !strings.Contains(joined, path) {
+		t.Errorf("the path is not shown whole beneath the line; rows were: %q", spaced)
+	}
+	// The path's own rows are the dimmed ones: joined with nothing between
+	// them they are the path exactly, spaces and all, and each fits the pane.
+	var pathRows string
+	for _, r := range rows[1:] {
+		if r.color == nil {
+			continue
+		}
+		pathRows += r.value
+		if w := ansi.StringWidth(r.value); w > m.blockWrapWidth() {
+			t.Errorf("path row %q is %d cells wide, over the pane's %d", r.value, w, m.blockWrapWidth())
+		}
+	}
+	if pathRows != path {
+		t.Errorf("the path rows join to %q, want the path on disk %q", pathRows, path)
+	}
+
+	m.SetAsides(AsideSummary{UnusedRoot: &UnusedRecordingEntry{Name: "audio.m4a", Path: "/s/j1/audio.m4a", Size: 5}})
+	spaced = ""
+	for _, r := range keptRecordingRows(m) {
+		spaced += r.value + " "
+	}
+	if !strings.Contains(spaced, "audio.m4a") {
+		t.Errorf("a changed recording was not rebuilt; rows were: %q", spaced)
+	}
+	m.SetAsides(AsideSummary{})
+	if rows := keptRecordingRows(m); len(rows) != 0 {
+		t.Errorf("the section outlived its recording: %d rows", len(rows))
 	}
 }

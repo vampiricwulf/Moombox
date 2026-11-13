@@ -54,14 +54,6 @@ func TestSweepStaleCookieTempFiles(t *testing.T) {
 	}
 }
 
-// TestSweepStaleCookieTempFilesMissingDir mirrors
-// sweepStaleCookieSnapshots's own contract: a directory that can't be read
-// (never written to yet) is not an error the sweep surfaces.
-func TestSweepStaleCookieTempFilesMissingDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	sweepStaleCookieTempFiles(dir, "cookies.txt", time.Hour) // must not panic
-}
-
 // TestSweepCookieTempFilesOnceFiresOnlyOnce asserts the sweep runs once
 // across two triggers: a stale temp file removed by the first call must
 // survive an identical second call through the same *sync.Once, because the

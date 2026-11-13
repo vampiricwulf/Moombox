@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -137,7 +138,7 @@ var sections = []settingsSection{
 		fields: []fieldDef{
 			{"database_path", "Database path", fieldText, nil, "SQLite database file (requires restart)", nil},
 			{"log_file_path", "Log file path", fieldText, nil, "log output file (requires restart)", nil},
-			{"output_directory", "Output directory", fieldText, nil, "where finished files go", nil},
+			{"output_directory", "Output directory", fieldText, nil, "where finished files go; waiting jobs follow a change", nil},
 			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download; new jobs use a change at once, but staging under the old dir is no longer found — move it across", nil},
 			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH", nil},
 		},
@@ -182,6 +183,7 @@ var sections = []settingsSection{
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
 			{"prefer_hdr", "Prefer HDR", fieldToggle, nil, "YouTube: prefer an HDR rendition over SDR at the same resolution and fps; No keeps SDR for players that cannot show HDR. Audio ranks as yt-dlp's: a 5.1 E-AC-3/AC-3 track wins over stereo, and most browsers cannot play it (VLC/mpv can)", nil},
+			{"keep_awake", "Keep PC awake (Windows)", fieldToggle, nil, "no idle sleep while a capture or mux runs (Windows only; the screen may still turn off; no effect on Linux; applies without a restart)", nil},
 			{"maximum_timeout", "YouTube max timeout", fieldNumber, nil, "seconds to keep retrying a stalled YouTube livestream (30s live-checks) before finalizing even if YouTube still reports it live (default: 600, min 30, no max; very large values risk account consequences)", nil},
 			{"interruption_timeout", "Interruption resume timeout", fieldNumber, nil, "minutes finalize may stall waiting for an interrupted broadcast to resume; 0 = disabled, finalize never stalls (default: 120, no max)", nil},
 			{"incomplete_staging_expiry_days", "Incomplete staging expiry", fieldNumber, nil, "days an incomplete-tail recording keeps staging preserved for Resume; badge never expires, 0 = preserve forever (default: 7, no max)", nil},
@@ -193,7 +195,7 @@ var sections = []settingsSection{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt (requires restart)", nil},
 			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar", nil},
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
-			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer (requires restart) + one browser retry on auth failure (applies now); R F imports either way", nil},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "adds a slow headless-browser refresh timer (requires restart) + a browser refresh when a job fails on its cookies, up to 3 retries a job (applies now); R F imports either way", nil},
 			{"acquisition", "Cookie source", fieldCycle, []string{"auto", "profile"}, "how a refresh gets cookies: auto = launch a browser when one is available, else read the profile; profile = never launch, read browser_profile_dir read-only (also allows a real browser's profile dir, which auto refuses). Takes effect immediately.", nil},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data (requires restart)", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
@@ -418,11 +420,21 @@ type SettingsModel struct {
 	channelDeleteConf bool
 	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
+	// failing is the set of channels the monitors cannot reach (owner ruling
+	// R-H1), as last derived by cmd/moombox: read when Settings opens and
+	// replaced by every ChannelFailingMsg. The channel list tags its rows
+	// from it (channelFailing).
+	failing FailingChannels
 	// channelsAtOpen is the channel list as Open copied it. A save writes
 	// back only what the editor changed relative to it (mergeChannelEdits),
 	// so a channel the dashboard added, disabled or removed while the
 	// overlay was open is not reverted by a save of something else.
 	channelsAtOpen []config.ChannelConfig
+	// channelsReordered is set once Shift+Up/Down has moved a channel since
+	// Open or the last save. Only then does a save carry the editor's
+	// order into the live list (applyChannelOrder); otherwise the live
+	// order, which the dashboard may have changed by drag, is left alone.
+	channelsReordered bool
 
 	// The channel-removal prompt and the choices it took
 	// (settings_channel_removal.go).
@@ -502,6 +514,14 @@ type SettingsModel struct {
 
 	// Restart overlay
 	showRestartOverlay bool
+	// activeDownloads is the App's count of the jobs a restart interrupts
+	// (App.activeDownloadCount), read each time the restart prompt is
+	// drawn. nil means none are known.
+	activeDownloads func() int
+	// runningNote is the App's note that a Resume or Reinitialize is still
+	// running (App.jobVerbRunningNote), read each time the restart prompt is
+	// drawn. nil, or "", means none is.
+	runningNote func() string
 
 	// Close confirmation
 	closeConfirm bool
@@ -513,6 +533,18 @@ type SettingsModel struct {
 	// Action buttons (bottom of settings panel when dirty)
 	// -1 = fields focused, 0 = Save button, 1 = Return button
 	buttonFocus int
+
+	// bareNote is a refusal or the password editor's result on the bare
+	// form (settings_bare.go), in bareNoteStyle. bareKey is its one writer and
+	// clears it on the next key.
+	bareNote      string
+	bareNoteStyle lipgloss.Style
+
+	// bareWrote records that the shared text input was loaded or edited
+	// while the bare form was on screen: its value is then laid out for a
+	// width the bare form never set. updateTextInputForField and
+	// UpdateComponents set it; bareLeave, its one reader, clears it.
+	bareWrote bool
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
@@ -543,6 +575,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.showRestartOverlay = false
 	m.closeConfirm = false
 	m.afterClose = ""
+	m.bareNote = ""
 	m.buttonFocus = -1
 	m.resetChannelRemoval()
 
@@ -559,6 +592,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 		m.channels = make([]config.ChannelConfig, len(c.Channels))
 		copy(m.channels, c.Channels)
 		m.channelsAtOpen = slices.Clone(c.Channels)
+		m.channelsReordered = false
 
 		// Notification editor
 		m.notifIndex = 0
@@ -608,6 +642,7 @@ func (m *SettingsModel) resyncFromLive() {
 		m.loadValues(c)
 		m.channels = slices.Clone(c.Channels)
 		m.channelsAtOpen = slices.Clone(c.Channels)
+		m.channelsReordered = false
 		m.notifications = slices.Clone(c.Notifications)
 		m.notificationsAtOpen = slices.Clone(c.Notifications)
 		m.notifFrom = openOrigins(len(c.Notifications))
@@ -641,9 +676,19 @@ func (m *SettingsModel) IsVisible() bool {
 
 // SetSize updates the panel dimensions.
 func (m *SettingsModel) SetSize(w, h int) {
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
+	if m.bare() {
+		// The bare form derives its window from the focus on every draw and
+		// leaves the scroll offset as the normal form had it.
+		return
+	}
+	m.bareNote = ""
 	m.ensureFieldVisible()
+	if was != layoutNormal && layoutModeFor(w, h) == layoutNormal {
+		m.bareLeave()
+	}
 }
 
 func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
@@ -714,6 +759,7 @@ func loadSettingsValues(v map[string]string, cfg *config.MoomboxConfig) {
 	v["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	v["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
 	v["prefer_hdr"] = boolToDisplay(cfg.Downloader.PreferHDR)
+	v["keep_awake"] = boolToDisplay(cfg.Downloader.KeepAwake)
 	v["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
 	v["interruption_timeout"] = strconv.FormatFloat(cfg.Downloader.InterruptionTimeout.Minutes(), 'f', -1, 64)
 	v["incomplete_staging_expiry_days"] = strconv.FormatFloat(cfg.Downloader.IncompleteStagingExpiryDays.Days(), 'f', -1, 64)
@@ -837,6 +883,13 @@ func (m *SettingsModel) applyValues() (settingsWrite, bool) {
 	// departed. Untouched, the live list is left exactly as it is.
 	if chs, changed := mergeChannelEdits(m.channelsAtOpen, m.channels, m.cfg.Channels); changed {
 		m.cfg.Channels = chs
+	}
+	// The order, when Shift+Up/Down moved a channel: the editor's order for
+	// the channels it holds, in the places they have in the list now.
+	if m.channelsReordered {
+		if chs, changed := applyChannelOrder(m.cfg.Channels, m.channels); changed {
+			m.cfg.Channels = chs
+		}
 	}
 	// Notification targets: the same rule, by each target's identity.
 	if ns, changed := notifications.MergeTargetEdits(m.notificationsAtOpen, m.notifications, m.notifFrom, m.cfg.Notifications); changed {
@@ -1266,6 +1319,8 @@ func writeSettingsField(c *config.MoomboxConfig, key string, v map[string]string
 		c.Downloader.Prefer60fps = yes
 	case "prefer_hdr":
 		c.Downloader.PreferHDR = yes
+	case "keep_awake":
+		c.Downloader.KeepAwake = yes
 	case "maximum_timeout":
 		c.Downloader.MaximumTimeout = n
 	case "interruption_timeout":

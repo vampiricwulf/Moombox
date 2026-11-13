@@ -136,7 +136,10 @@ export class LogPanelController {
       if (this._frames.length > 500) this._frames.shift();
     }
     this.logs.push(log);
-    if (this.logs.length > 500) {
+    // The line the 500-line cap pushes out, if any: a full buffer drops one
+    // per line added, for the rest of the tab's life.
+    const evicted = this.logs.length > 500 ? this.logs[0] : null;
+    if (evicted !== null) {
       this.logs = this.logs.slice(-500);
     }
 
@@ -161,9 +164,37 @@ export class LogPanelController {
       return;
     }
 
-    // Debounce full renderLogs for filtered/search cases
-    if (this._logRenderTimer) clearTimeout(this._logRenderTimer);
-    this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
+    // A filter or a search is on. A line it hides changes nothing drawn,
+    // unless the line the cap just dropped was one it showed.
+    if (!this._lineShown(log) && !(evicted !== null && this._lineShown(evicted))) return;
+
+    // Rebuild at most every 100 ms. The timer is never restarted: one that
+    // restarted on every line did not fire at all while lines kept arriving
+    // faster than ten a second.
+    if (this._logRenderTimer) return;
+    this._logRenderTimer = setTimeout(() => {
+      this._logRenderTimer = null;
+      this.renderLogs();
+    }, 100);
+  }
+
+  /**
+   * The Logs tab was just shown. While the panel is hidden (display: none)
+   * the viewer has no scroll box and every scroll-to-bottom written to it
+   * does nothing, so a first visit showed the oldest line. Scroll once the
+   * panel is laid out, unless the operator has scrolled up.
+   */
+  onShow() {
+    if (!this._logAutoScroll) return;
+    requestAnimationFrame(() => {
+      const viewer = document.getElementById("logs-viewer");
+      if (!viewer || !this._logAutoScroll) return;
+      // As the append paths: the scroll listener must not read this
+      // programmatic scroll as the operator's.
+      this._logRebuildingDOM = true;
+      viewer.scrollTop = viewer.scrollHeight;
+      requestAnimationFrame(() => { this._logRebuildingDOM = false; });
+    });
   }
 
   /** Append every queued line in one DOM write. Runs from a rAF. */
@@ -254,19 +285,34 @@ export class LogPanelController {
     return div;
   }
 
-  getFilteredLogs() {
-    if (this.logFilter === "all") return this.logs;
+  /** Whether the level filter shows this line. */
+  _passesLevel(log) {
+    if (this.logFilter === "all") return true;
 
     // Filter hierarchy: ERROR < WARN < INFO < DEBUG
     const levelPriority = { ERROR: 0, WARN: 1, WARNING: 1, INFO: 2, DEBUG: 3 };
     const threshold = levelPriority[this.logFilter] ?? 3;
 
-    return this.logs.filter((log) => {
-      const match = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
-      if (!match) return true; // Show untagged lines always
-      const level = match[1].toUpperCase();
-      return (levelPriority[level] ?? 2) <= threshold;
-    });
+    const match = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
+    if (!match) return true; // Show untagged lines always
+    const level = match[1].toUpperCase();
+    return (levelPriority[level] ?? 2) <= threshold;
+  }
+
+  /** Whether the search box shows this line. */
+  _passesSearch(log) {
+    const query = this._logSearchQuery || "";
+    return !query || log.toLowerCase().includes(query.toLowerCase());
+  }
+
+  /** Whether renderLogs would draw this line: the level filter and the search. */
+  _lineShown(log) {
+    return this._passesLevel(log) && this._passesSearch(log);
+  }
+
+  getFilteredLogs() {
+    if (this.logFilter === "all") return this.logs;
+    return this.logs.filter((log) => this._passesLevel(log));
   }
 
   renderLogs() {
@@ -288,8 +334,7 @@ export class LogPanelController {
 
     // Filter by search query
     if (searchQuery) {
-      const needle = searchQuery.toLowerCase();
-      filtered = filtered.filter((log) => log.toLowerCase().includes(needle));
+      filtered = filtered.filter((log) => this._passesSearch(log));
     }
 
     const frag = document.createDocumentFragment();

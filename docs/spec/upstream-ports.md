@@ -6,7 +6,7 @@ Where the last upstream review left off, so the next one (a local session, a sch
 
 ## Last review
 
-- **Date:** 2026-11-05
+- **Date:** 2026-11-12
 - **Last port:** `15fe37f4` — fix(youtube,chat): read ytInitialData from the dedicated script element ← yt-dlp `12ac9aca7` (#17703)
 - **Ported into:** `internal/youtube/channel_membership.go` (`ytInitialDataAnchors`, which `internal/youtube/watch_page.go` shares) and `internal/chat/api.go` (its twin anchor set)
 
@@ -19,7 +19,7 @@ git clone --filter=blob:none https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp
 git -C /tmp/yt-dlp log --oneline 412e7f0a4b0588fe884a02b344ac66a06538475b..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
 ```
 
-Locally, `bash references/update-all.sh` pulls all seven, but its "new commits" are only those since the local clone's previous pull. The SHAs below are the durable record: compare against them, not against the script's summary.
+Locally, `bash references/update-all.sh` pulls all seven and prints two things per repo: the "new commits" of that pull, which are only those since the local clone's previous pull, and a "since last review" line counting the commits after the SHA below, which it reads from this table. The SHAs below are the durable record and the review range. If the script cannot read a row (it reports that) or the table's layout changes, compare against the SHAs by hand. A clone, fetch or pull that fails is reported as FAILED and the script exits 1.
 
 | Repo | Clone URL | Last reviewed | Commit date | Notes |
 |---|---|---|---|---|
@@ -47,6 +47,7 @@ Reviewed and not ported. Newest first. Remove an entry when it is ported (and ad
 
 | Upstream | What | Moombox exposure | Status |
 |---|---|---|---|
+| yt-dlp `_extract_client_version` / `_extract_context` (`extractor/youtube/_base.py:744-759`) | The web client's version and context are read from the page ytcfg (`INNERTUBE_CLIENT_VERSION`, `INNERTUBE_CONTEXT`); the pinned table is only the fallback | Moombox always sends the pinned table (`internal/constants/constants.go`), which equals upstream's fallback table. A port must also hand the same version to the sidecar's `/att/get` context (`internal/constants/sidecar_version_test.go` keeps the two equal today), keep the constant for probe-only calls, web_embedded and web_creator, and pass the `MOOMBOX_LIVE_*` gates, since a newer version can change which formats come back. | Owner ruled 2026-11-12 (R2-Y1): the pinned table stays; no request change. |
 | yt-dlp `c7fb478d2` (issue #17666) | web_embedded can go SABR-only (itag 18 only); upstream gets HLS 91–96 back with a Safari UA | Swapping the UA on its own does nothing here: the port has three parts. | Owner deferred 2026-10-02. |
 
 ## Port log
@@ -55,6 +56,7 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-11-12 | `1cf0289d` | yt-dlp `_call_api` (`extractor/youtube/_base.py:862-866`: `prettyPrint=false` in the query of every Innertube call it makes; `downloader/youtube_live_chat.py` builds the chat URL with the key alone) | `/player` and `/browse` calls carry `prettyPrint=false` after the key (`innertubeURL`); chat's `get_live_chat` calls are unchanged |
 | 2026-10-31 | `c900dabd` | yt-dlp `extractor/youtube/_video.py` at `b77c9304e` (`adjust_incomplete_format`: "Post-live DASH and m3u8 manifests only have the last ~2 hours", marked "(Last 2 hours)") | A post-live stream whose DASH is all DRM-protected and falls to its HLS manifest is recorded as a late start (`live_edge_reason`, one `live_edge` notification; `drmLiveEdgeReason`), as a live capture's DRM fallback already was (owner decision PR-R2) |
 | 2026-10-31 | `15496254` | yt-dlp `YoutubeDL.py` at `b77c9304e` (`process_video_result` drops `has_drm` formats and takes whatever playable format remains; `extractor/common.py` `_parse_mpd_periods` marks `is_drm_protected` ones) | A DASH-manifest setup whose every Representation of a kind the job needs carries ContentProtection falls to the extraction's HLS manifest (`drmHlsFallback`); with no HLS, or an encrypted HLS playlist too, the job ends on "DRM-protected; Moombox cannot record it" (owner decision FE-1) |
 | 2026-10-31 | `51efb096` | yt-dlp `yt_dlp/extractor/twitch.py` at `b77c9304e` (`TwitchVideosCollectionsIE` 896-949: `ChannelCollectionsContent` op and hash, `ownerLogin`, edges `CollectionsItemEdge`/`Collection`, over `TwitchPlaylistBaseIE._entries` 649-697 paging; each entry handed to `TwitchCollectionIE`) | `/<ch>/videos?filter=collections` queues the VODs of every collection the channel lists (owner decision FE-27), deduped across collections, through `worker.QueueTwitchVideos`; `TwitchCollectionsListingRefusal` removed from every add path. Beyond upstream: a collection that cannot be read is left out with a warning rather than ending the listing. |
@@ -168,6 +170,4 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 Replace this section on each review. It is the reason the SHAs above moved past these commits.
 
-- yt-dlp `0b8f7258b`, `b77c9304e`, `b3b18f8fc`, `412e7f0a4`: pytest config, CI checks, dependency cooldown and dependency bumps. No extractor, downloader or networking change.
-- chatterino7 (`790291d2`..`910b01dd`): Qt/UI, CI, plugin API, followed-channels window, usercard mod actions, channel point redemption display fixes. No IRC/emote protocol change Moombox consumes.
-- ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, moombox (Python): nothing new.
+- All seven repos (yt-dlp, ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python): nothing new since the 2026-11-05 review; every HEAD is still the *Last reviewed* SHA above. The open `c7fb478d2` item is unchanged upstream.

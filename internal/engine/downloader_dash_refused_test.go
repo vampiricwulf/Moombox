@@ -802,16 +802,6 @@ func TestDashRefusedRunSplitsOnce(t *testing.T) {
 	})
 }
 
-// TestUnservedSegmentPersistenceIsTenMinutes pins the production value: a
-// segment that only fails (5xx, empty body) is given up past the rebuild cap
-// once it has failed for ten minutes (DefaultMaxTimeout's span) since the
-// first rebuild at it.
-func TestUnservedSegmentPersistenceIsTenMinutes(t *testing.T) {
-	if unservedSegmentPersistence != 10*time.Minute {
-		t.Errorf("unservedSegmentPersistence = %v, want 10m (DefaultMaxTimeout)", unservedSegmentPersistence)
-	}
-}
-
 // TestStoppedWellBehindHead pins the accessor the live loop's rebuild cap
 // counts by: more than two below the tracked head — which a refusal's header
 // raises too, since a downloader rebuilt at a hole may stop before any

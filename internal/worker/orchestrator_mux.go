@@ -654,7 +654,7 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 		// (engine.RestartSiblingStem) and so never offered for deletion, while
 		// asideOutputPath's counter wrote the successful retry to "-2" beside
 		// it.
-		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out, "")
+		verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, g.video, g.audio, out, "", nil)
 		if err != nil {
 			if verdict.short != nil {
 				o.logger.Error("a set-aside recording's copy came out short; it stays in staging and the dir is kept",
@@ -1097,6 +1097,15 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
+	// A file this job did not write is at this name — the archive a
+	// Reinitialize could not set aside (owner ruling R2-W1b), another
+	// recording's under a reused name: it is set aside with its sidecars,
+	// and the finalize goes on to write its own. Only when it cannot be
+	// renamed does the finalize stop, before anything is muxed and with the
+	// staging kept, so a Mux tries again once the operator has moved it.
+	if err := o.setForeignFileAside(jobCtx.Job.ID, outputFile, archiveSidecarExts); err != nil {
+		return err
+	}
 	// relBase preserves the full relative path (including channel subdir) for DB
 	// storage, so the web handler can resolve files via Join(outputDir, filename).
 	relBase := filenameBase
@@ -1162,8 +1171,13 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	}
 	kept := keptImportFor(jobCtx, o.logger, priorArchive)
 	chaptersPath := o.prepareArchiveChapters(ctx, jobCtx, videoPath, audioPath, kept)
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath)
+	// While FFmpeg copies, the row's progress line says how far it has got
+	// (muxReadout, owner ruling R-D1 of 2026-11-10); a copy that makes no archive gets the
+	// line it had back.
+	readout := o.newMuxReadout(jobCtx)
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputFile, chaptersPath, readout.callback())
 	if err != nil {
+		readout.restore()
 		if verdict.short != nil {
 			return verdict.short
 		}
@@ -1377,6 +1391,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		}
 	}
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		// The final part's readout may still be on the row, which is
+		// about to read Error.
+		o.dropMuxReadoutLine(jobCtx.Job.ID)
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -1413,8 +1430,31 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
 	// the stream never came back) shouldn't keep a " - part1" suffix — single
 	// outputs use the plain template name, exactly like jobs that never split.
+	// A file this job did not write at that name is set aside first
+	// (setForeignFileAside); when it cannot be, the part keeps its suffixed
+	// name, as it does when the rename itself fails. The part's chat takes
+	// the plain chat's name in the same move, so a chat there is asked about
+	// too: with an archive it went aside as its sidecar, without one (a reset
+	// moved the archive and the chat could not follow, the operator deleted
+	// the video and kept the chat) nothing else looks at it. Each name is
+	// asked about only while the part's own file is still at its part name:
+	// with that gone there is nothing to rename onto it, and the file at the
+	// plain name is the part itself, moved by a run that died before its row
+	// write (renameSinglePartToPlain adopts it).
 	if len(segments) == 1 {
-		segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		plain := filepath.Join(outputDir, filenameBase)
+		var err error
+		if fileExists(segments[0].FilePath) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".mp4", archiveSidecarExts)
+		}
+		if err == nil && fileExists(segments[0].ChatFile) {
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".chat.json", []string{chatRawSidecarSuffix})
+		}
+		if err != nil {
+			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
+		} else {
+			segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+		}
 	}
 
 	// Calculate total file size and duration from segments
@@ -1609,7 +1649,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	if _, err := os.Stat(chatSrc); err == nil && !skipChat {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
-		if err := copyFile(chatSrc, chatDst); err != nil {
+		// Not over a chat this job did not write (foreignFileAt): the one a
+		// Reinitialize could not set aside. It is set aside under the
+		// archive's set-aside name, with its raw sidecar; when it cannot be
+		// renamed the copy is refused like a failed one, so the capture is
+		// kept in staging.
+		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{chatRawSidecarSuffix})
+		// A chat still at the name is the job's own, and the raw sidecar
+		// beside it is that chat's: both are replaced.
+		ownChat := foreign == nil && fileExists(chatDst)
+		err := foreign
+		if err == nil {
+			err = copyFile(chatSrc, chatDst)
+		}
+		if err != nil {
 			// The archive has no chat, and the capture in staging is the
 			// only copy: "incomplete" is what keeps it. With no chat_status
 			// written the row read as it was, the staging cleanup saw no
@@ -1634,8 +1687,20 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// does above, logged at Error (owner decision PR-M6). It used to be a
 		// Warn, and the staging cleanup then deleted the only copy.
 		rawSrc := filepath.Join(jobCtx.StagingDir, "chat.raw.jsonl")
-		if _, err := os.Stat(rawSrc); err == nil {
-			if err := copyFile(rawSrc, filepath.Join(outputDir, filenameBase+".chat.raw.jsonl")); err != nil {
+		// Not over a raw sidecar this job did not write either, one with no
+		// chat of the job's beside it (a reset moved the chat and the raw
+		// could not follow): it is set aside first, and when it cannot be the
+		// copy is refused like a failed one.
+		if _, err := os.Stat(rawSrc); err == nil && foreign == nil {
+			rawDst := filepath.Join(outputDir, filenameBase+chatRawSidecarSuffix)
+			var err error
+			if !ownChat {
+				err = o.setForeignFileAside(jobCtx.Job.ID, rawDst, nil)
+			}
+			if err == nil {
+				err = copyFile(rawSrc, rawDst)
+			}
+			if err != nil {
 				updates["chat_status"] = database.ChatIncomplete
 				o.logger.Error("could not copy the chat's raw sidecar beside the archive; the chat capture is kept in staging",
 					"err", err, "raw", rawSrc, "jobID", jobCtx.Job.ID)
@@ -1655,7 +1720,9 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		}
 	}
 
-	// Download thumbnail — check staging first (Twitch pre-downloads while live)
+	// Download thumbnail — check staging first (Twitch pre-downloads while
+	// live, as "thumbnail.*"; a YouTube capture's early copy has its own name,
+	// startThumbnailFile, and is only the fallback further down).
 	thumbnailSaved := false
 	for _, ext := range []string{".jpg", ".webp", ".png"} {
 		stagingThumb := filepath.Join(jobCtx.StagingDir, "thumbnail"+ext)
@@ -1669,55 +1736,59 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		}
 	}
 	if !thumbnailSaved && jobCtx.Job.VideoID != "" {
-		// YouTube thumbnail quality progression. Order matters because
-		// only `maxresdefault` (1280x720 or more), `hq720` (1280x720) and
-		// `mqdefault` (320x180) are natively 16:9 -- the others
-		// (sddefault 640x480, hqdefault 480x360, default 120x90) are 4:3
-		// with black bars baked into the image. Once the Web UI prefers
-		// the local file, those 4:3 sources letterbox visibly inside the
-		// dashboard's 16:9 thumb box. Try the two HD sizes first, in
-		// yt-dlp's order (`'maxresdefault', 'hq720', ...`,
-		// _video.py:4113-4127, cca80fe61): a video with no maxresdefault
-		// often still has hq720, and without it one saved the 320x180
-		// mqdefault. Then mqdefault for clean 16:9 framing, and only then
-		// the letterboxed sizes. Upstream ranks sddefault and hqdefault
-		// above mqdefault, by size; keeping the 16:9 one ahead of them is
-		// Moombox's own choice, for the framing.
-		thumbQualities := []string{"maxresdefault", "hq720", "mqdefault", "hqdefault", "sddefault", "default"}
-		for _, quality := range thumbQualities {
-			thumbURL := fmt.Sprintf("%s/%s/%s.jpg", ytThumbnailBase, jobCtx.Job.VideoID, quality)
-			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
-			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger) == nil {
-				thumbnailSaved = true
-				updates["thumbnail_file"] = thumbDst
-				break
-			}
+		// The YouTube sizes, best framing first (ytThumbnailQualities).
+		thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
+		if fetchYouTubeThumbnail(ctx, jobCtx.Job.VideoID, thumbDst, o.logger) {
+			thumbnailSaved = true
+			updates["thumbnail_file"] = thumbDst
 		}
 	}
-	if !thumbnailSaved {
-		// Fallback: try explicit thumbnail URL or channel avatar
-		thumbURL := jobCtx.Job.ThumbnailURL
-		if thumbURL == "" {
-			thumbURL = jobCtx.Job.ChannelAvatarURL
-		}
-		if thumbURL != "" {
-			ext := ".jpg"
-			if strings.Contains(thumbURL, ".webp") {
-				ext = ".webp"
-			}
-			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			var fetch error
-			if jobCtx.Job.Platform == "twitch" && thumbURL == jobCtx.Job.ThumbnailURL {
-				// The original size first, the sized URL as the fallback (G45).
-				fetch = downloadTwitchThumbnail(ctx, thumbURL, thumbDst, o.logger)
-			} else {
-				fetch = DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger)
-			}
-			if fetch == nil {
-				updates["thumbnail_file"] = thumbDst
-			}
+	// Fallback: the row's explicit thumbnail URL.
+	if !thumbnailSaved && jobCtx.Job.ThumbnailURL != "" {
+		thumbnailSaved = o.fetchThumbnailURL(ctx, jobCtx, jobCtx.Job.ThumbnailURL, outputDir, filenameBase, updates)
+	}
+	// Then the copy a YouTube capture staged as it started (owner ruling
+	// R2-X2): the fresh thumbnail wins, and the staged one is used only when
+	// every fetch above failed — the video is gone, or the connection is.
+	if staged := filepath.Join(jobCtx.StagingDir, startThumbnailFile); !thumbnailSaved && fileExists(staged) {
+		thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
+		if err := copyFile(staged, thumbDst); err != nil {
+			o.logger.Warn("could not copy the thumbnail staged at capture start beside the archive",
+				"err", err, "jobID", jobCtx.Job.ID)
+		} else {
+			thumbnailSaved = true
+			updates["thumbnail_file"] = thumbDst
+			o.logger.Info("the thumbnail could not be fetched at finalize; the archive keeps the one staged as the capture started",
+				"jobID", jobCtx.Job.ID)
 		}
 	}
+	// Last, the channel avatar, for a row that has no thumbnail URL at all.
+	if !thumbnailSaved && jobCtx.Job.ThumbnailURL == "" && jobCtx.Job.ChannelAvatarURL != "" {
+		o.fetchThumbnailURL(ctx, jobCtx, jobCtx.Job.ChannelAvatarURL, outputDir, filenameBase, updates)
+	}
+}
+
+// fetchThumbnailURL saves thumbURL beside the archive as the job's thumbnail
+// and records it in updates; it reports whether it was saved. copyAssets'
+// fallback for the row's own thumbnail URL and for the channel avatar.
+func (o *DownloadOrchestrator) fetchThumbnailURL(ctx context.Context, jobCtx *JobContext, thumbURL, outputDir, filenameBase string, updates map[string]any) bool {
+	ext := ".jpg"
+	if strings.Contains(thumbURL, ".webp") {
+		ext = ".webp"
+	}
+	thumbDst := filepath.Join(outputDir, filenameBase+ext)
+	var fetch error
+	if jobCtx.Job.Platform == "twitch" && thumbURL == jobCtx.Job.ThumbnailURL {
+		// The original size first, the sized URL as the fallback (G45).
+		fetch = downloadTwitchThumbnail(ctx, thumbURL, thumbDst, o.logger)
+	} else {
+		fetch = DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger)
+	}
+	if fetch != nil {
+		return false
+	}
+	updates["thumbnail_file"] = thumbDst
+	return true
 }
 
 // sendDownloadFinished is the ONE "Download Finished" send. Both finalize
@@ -1858,6 +1929,37 @@ func (o *DownloadOrchestrator) muxSegment(
 	quality QualityInfo,
 	result *DownloadResult,
 ) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, nil)
+}
+
+// muxFinalPart is muxSegment for the last part of a split recording, muxed
+// once the capture is over and the row reads Muxing: the row's progress line
+// follows this copy (muxReadout, owner ruling R-D1 of 2026-11-10), as it
+// follows a single-file archive's. The parts muxed in the background while
+// the capture runs get no readout; the row is Downloading then and its line
+// is the download's.
+func (o *DownloadOrchestrator) muxFinalPart(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+) (*database.Segment, error) {
+	return o.muxSegmentWith(ctx, jobCtx, segIdx, unixStart, unixEnd, quality, result, o.newMuxReadout(jobCtx))
+}
+
+// muxSegmentWith is muxSegment with the readout its copy reports to, nil for
+// none.
+func (o *DownloadOrchestrator) muxSegmentWith(
+	ctx context.Context,
+	jobCtx *JobContext,
+	segIdx int,
+	unixStart, unixEnd int64,
+	quality QualityInfo,
+	result *DownloadResult,
+	readout *muxReadout,
+) (*database.Segment, error) {
 	// Part files carry the job's resolved name plus a 1-based part number —
 	// "{name} - partN.mp4" — so they group and sort beside the job's other
 	// assets. segIdx is stable across restarts and recovery (derived from
@@ -1942,8 +2044,9 @@ func (o *DownloadOrchestrator) muxSegment(
 	// A damaged part is repaired and recorded like the archive (copyStaged);
 	// its seg_N dir keeps the record that shields it, which the part merge
 	// and the staging cleanup both read.
-	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "")
+	verdict, err := o.copyStaged(ctx, jobCtx.Job.ID, videoPath, audioPath, outputPath, "", readout.callback())
 	if err != nil {
+		readout.restore()
 		return nil, fmt.Errorf("mux segment %d: %w", segIdx, err)
 	}
 	probeData := verdict.probe

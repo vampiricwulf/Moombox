@@ -20,9 +20,8 @@ func TestHandleHTTPErrorVerifiesEndedAfterGap(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-(streamStatusCheckInterval + 5*time.Second)))
 	d.lastHeadProbeTime.StoreNow() // skip the network head re-probe
 
-	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	err := d.handleHTTPError(t.Context(), true,
-		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	rs := newDashRetryState()
+	err := d.handleHTTPError(t.Context(), true, rs, 60)
 	if err != errStreamDone {
 		t.Fatalf("handleHTTPError = %v, want errStreamDone (ended stream caught by the 30s status check)", err)
 	}
@@ -41,9 +40,8 @@ func TestHandleHTTPErrorMaxTimeoutForcesFinalize(t *testing.T) {
 	d.lastSegTime.Store(time.Now().Add(-2 * time.Minute)) // gap already exceeds MaxTimeout
 	d.lastHeadProbeTime.StoreNow()                        // skip the network head re-probe
 
-	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	err := d.handleHTTPError(t.Context(), true,
-		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	rs := newDashRetryState()
+	err := d.handleHTTPError(t.Context(), true, rs, 60)
 	if err != errStreamDone {
 		t.Fatalf("handleHTTPError = %v, want errStreamDone (MaxTimeout force-finalize despite YouTube 'live')", err)
 	}
@@ -67,9 +65,8 @@ func TestHandleHTTPErrorBriefGapSkipsStatusCheck(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // the trailing backoff sleep returns immediately
 
-	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := 0, -1, 0, -1
-	_ = d.handleHTTPError(ctx, true,
-		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	rs := newDashRetryState()
+	_ = d.handleHTTPError(ctx, true, rs, 60)
 	if called {
 		t.Error("CheckStreamStatus must not be called for a brief (<30s) segment gap")
 	}
@@ -94,9 +91,8 @@ func TestHandleHTTPErrorBehindHeadStillLiveRefreshesFormat(t *testing.T) {
 	// Force "stuck on this segment" (sameSegRetries reaches MaxSegmentRetries for
 	// curSeq) so the behind-head EARLY retry (return nil) is bypassed and the
 	// status-check branch runs — where behind-head + still-live yields ErrQualityLost.
-	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := MaxSegmentRetries, 50, 0, -1
-	err := d.handleHTTPError(t.Context(), true,
-		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	rs := &dashRetryState{sameSegRetries: MaxSegmentRetries, lastRetrySeq: 50, lastConfirmedHead: -1}
+	err := d.handleHTTPError(t.Context(), true, rs, 60)
 	if err != ErrQualityLost {
 		t.Fatalf("handleHTTPError = %v, want ErrQualityLost (known segment gone but stream still live → refresh format)", err)
 	}

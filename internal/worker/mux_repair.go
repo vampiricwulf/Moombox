@@ -191,8 +191,10 @@ func (s *stagedInputs) keepsStaging() bool {
 // copies again. The verdict carries the inputs, so a caller knows whether its
 // staging must be kept (stagedInputs.keepsStaging) and what to report.
 // chaptersPath is an FFMETADATA chapter list to embed (prepareArchiveChapters),
-// "" for none — only the single-file archive passes one.
-func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath, audioPath, outputPath, chaptersPath string) (muxVerdict, error) {
+// "" for none — only the single-file archive passes one. progress is told how
+// far FFmpeg's copy has got (muxReadout), nil for a copy nobody watches: the
+// single-file archive's is the only one that passes it.
+func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath, audioPath, outputPath, chaptersPath string, progress func(engine.CopyProgress)) (muxVerdict, error) {
 	var v muxVerdict
 	ins, err := o.prepareStagedInputs(ctx, jobID, outputPath, videoPath, audioPath)
 	if err != nil {
@@ -204,7 +206,7 @@ func (o *DownloadOrchestrator) copyStaged(ctx context.Context, jobID, videoPath,
 	// The yt:stretch display aspect recorded beside the staged video, if any
 	// (stagedDisplayAspect): read off the original path, not a repaired copy.
 	aspect := stagedDisplayAspect(videoPath)
-	if err := o.mux().MuxCopyArchive(ctx, video, audio, outputPath, ins.offsets, aspect, chaptersPath, o.verifiedCopy(jobID, &v, ins)); err != nil {
+	if err := o.mux().MuxCopyArchiveWithProgress(ctx, video, audio, outputPath, ins.offsets, aspect, chaptersPath, progress, o.verifiedCopy(jobID, &v, ins)); err != nil {
 		return v, err
 	}
 	o.reportStagingRepairs(jobID, ins, outputPath)

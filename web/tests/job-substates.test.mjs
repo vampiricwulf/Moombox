@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 
 import {
   pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine, isAwaitingProcessing,
-  queuedHold, queuedHoldText, diskGaugeLevel,
+  queuedHold, queuedHoldText, diskGaugeLevel, cookieRetry, cookieRetryText,
 } from "../public/modules/utils.js";
 
 let jsdomMissing = null;
@@ -356,4 +356,51 @@ test("a Queued row's own hold running out redraws its line", { skip }, async () 
   } finally {
     Date.now = frozenNow;
   }
+});
+
+// Owner ruling R2-C1: the automatic cookie retries a parked job has used.
+// Mutants: the status or membership check dropped; the window compared the
+// wrong way round or changed on this side only.
+test("cookieRetry answers the shared table as jobstate does", () => {
+  assert.ok(PARITY.cookieRetries.length >= 8);
+  for (const c of PARITY.cookieRetries) {
+    assert.deepEqual(cookieRetry(c.holds, c.job, Date.parse(c.now)), c.want, c.name);
+  }
+  assert.deepEqual(cookieRetry(null, { id: "a", status: "COOKIES?" }), { count: 0 });
+});
+
+test("cookieRetryText words the count as the TUI does", () => {
+  assert.equal(cookieRetryText({ count: 0 }), "");
+  assert.equal(cookieRetryText({ count: 1, of: 3 }), "Cookie retry 1 of 3 used");
+  assert.equal(cookieRetryText({ count: 3, of: 3 }), "Cookie retries used up (3 of 3): no more automatic retries");
+});
+
+const parked = (over = {}) => ({
+  id: "c1", videoId: "c1", title: "Members", channelName: "C", platform: "youtube", status: "COOKIES?",
+  parkReason: "auth", error: "Login required", createdAt: "2026-11-12T11:00:00Z", updatedAt: "2026-11-12T11:00:00Z", ...over,
+});
+
+// A COOKIES? row says how many automatic retries it has used, from the holds
+// snapshot, and follows each admission_holds frame; a membership park keeps
+// its own line.
+//
+// Mutants: formatProgress not reading the count; _redrawQueuedHolds skipping
+// COOKIES? rows — the cell keeps "Needs cookie refresh" after the frame.
+test("a COOKIES? row shows its cookie retries and follows the holds frame", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [parked(), parked({ id: "c2", videoId: "c2", parkReason: "membership" })] } });
+  await h.flush();
+  const cell = (id) => h.document.querySelector(`.video-item[data-job-id="${id}"] .job-progress-text`);
+  assert.equal(cell("c1").textContent, "Needs cookie refresh");
+
+  const last = new Date(Date.now() - 60_000).toISOString();
+  h.app.handleMessage({ type: "admission_holds", payload: { cookieRetries: {
+    c1: { count: 2, of: 3, last }, c2: { count: 2, of: 3, last } } } });
+  await h.flush();
+  assert.equal(cell("c1").textContent, "Cookie retry 2 of 3 used");
+  assert.equal(cell("c2").textContent, "Not a member — needs member account");
+
+  h.app.handleMessage({ type: "admission_holds", payload: { cookieRetries: { c1: { count: 3, of: 3, last } } } });
+  await h.flush();
+  assert.equal(cell("c1").textContent, "Cookie retries used up (3 of 3): no more automatic retries");
 });

@@ -47,8 +47,21 @@ type (
 	// the new trim list to the cached row + (if selected) the detail
 	// panel. DECISIONS #21 lifecycle event.
 	TrimsChangedMsg struct{ Job *database.Job }
-	JobsUpdateMsg   struct{ Jobs []*database.Job }
-	LogBatchMsg     struct{ Lines []string }
+	// JobsUpdateMsg is a full job list. It is also the element of the
+	// full-list channel, so the wiring states Floor where it can.
+	//
+	// Floor is a database.Job.Version the list is at least as new as: every
+	// write with that version or a lower one was committed before the list
+	// was read. The wiring reads it (the highest version its forwarders have
+	// seen) BEFORE reading the list, so every job event queued ahead of the
+	// snapshot is at or below it and is dropped as stale once the snapshot is
+	// applied. 0 makes no claim: the bulk-write snapshots are read inside
+	// their write, and a later write's event may already have been seen.
+	JobsUpdateMsg struct {
+		Jobs  []*database.Job
+		Floor uint64
+	}
+	LogBatchMsg struct{ Lines []string }
 	// CheckTimersMsg sets one monitor's header countdown. A zero Next clears
 	// it (the monitor has no channels); see MonitorNextCheckTime.
 	CheckTimersMsg struct {
@@ -151,6 +164,12 @@ type (
 		// Warn shows Feedback as a warning: a pasted Twitch listing some of
 		// whose VODs could not be queued (owner decision PR-M9).
 		Warn bool
+		// Err says the add was refused or never reached the server. The
+		// dialog that sent it stays open with what was typed and shows
+		// Feedback as its error; with that dialog gone, Feedback goes to the
+		// feedback line in the error colour. A job that already exists is
+		// not one: it is a Warn, and closes the dialog as a success does.
+		Err bool
 	}
 	fetchFormatsResultMsg struct {
 		VideoID string
@@ -202,6 +221,16 @@ type (
 		TrimID   string
 		Filename string
 		Err      string
+	}
+	// jobVerbResultMsg is the answer of a Resume or Reinitialize run
+	// (runJobVerb, job_verb_flow.go). Gen is the run it answers; Title is
+	// set for a single job, a batch reports Count and Refused.
+	jobVerbResultMsg struct {
+		Gen     uint64
+		Chord   string // "A R" or "A I"
+		Title   string
+		Count   int
+		Refused verbRefusals
 	}
 	// deleteJobsResultMsg reports completion of an async job delete.
 	// OnDeleteJob blocks in WaitForJobExit (up to 5s per job), so deletes
@@ -370,6 +399,27 @@ type (
 		Err error
 	}
 
+	// setAsideArchivesMsg is the async answer of JobSetAsideArchives for
+	// the details panel. Gen is the App.setAsideGen it was asked under: an
+	// answer for a job the cursor has left, or for an older ask, is dropped.
+	setAsideArchivesMsg struct {
+		JobID string
+		Gen   int
+		List  []SetAsideArchiveEntry
+	}
+	// setAsideReaskMsg fires once, setAsideReaskDelay after a status change
+	// of the selected job, to ask again (see setAsideReaskDelay). Dropped
+	// when the selection or the status has moved on since.
+	setAsideReaskMsg struct {
+		Gen int
+	}
+	// setAsideSelectMsg fires once, setAsideSelectDelay after the cursor
+	// came to a job, to ask for its set-aside archives. Dropped when the
+	// cursor has moved on, so only the job it rests on is asked about.
+	setAsideSelectMsg struct {
+		Gen int
+	}
+
 	// statsSnapshotMsg is the async result of OnGetStats — the E T overlay's
 	// open, its r key, and the 60 s refresh tick all go through it. Epoch is
 	// the App.statsEpoch the fetch started under; a result that outlives its
@@ -435,6 +485,28 @@ type (
 		Text string
 	}
 )
+
+// FailingChannels is the set of channels both UIs flag as failing (owner
+// ruling R-H1, monitor.ChannelFailing): each one's newest check error, by
+// FailingChannelKey. It is derived from the monitors' health in cmd/moombox
+// and never stored anywhere but the Settings model that draws it.
+type FailingChannels map[string]string
+
+// FailingChannelKey is a channel's key in FailingChannels. A channel ID is
+// only unique within its platform; any platform but "twitch" is YouTube, as
+// config.ChannelConfig.GetPlatform reads it.
+func FailingChannelKey(platform, channelID string) string {
+	if platform != "twitch" {
+		platform = "youtube"
+	}
+	return platform + "\x00" + channelID
+}
+
+// ChannelFailingMsg carries the failing set each time it changes: a channel
+// started or stopped failing, or its newest error changed.
+type ChannelFailingMsg struct {
+	Failing FailingChannels
+}
 
 // AdmissionHoldsMsg carries the backlog scheduler's hold snapshot
 // (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3) each time it
@@ -537,6 +609,10 @@ type App struct {
 	// order to their writes; the older is dropped (see staleJobUpdate) rather
 	// than put back over the newer.
 	jobVersions map[string]appliedJobVersions
+	// snapshotFloor is the highest JobsUpdateMsg.Floor applied: every write
+	// at or below it is already in a snapshot the lists were rebuilt from.
+	// Written only by raiseJobVersionFloor.
+	snapshotFloor uint64
 
 	// Layout
 	focusedPanel FocusPanel
@@ -571,6 +647,18 @@ type App struct {
 	// TestStatedSeverityDoesNotLeakToTheNextMessage pins the invariant this
 	// makes structural.
 	feedback appFeedback
+
+	// jobVerb is the Resume or Reinitialize run in flight, if any
+	// (job_verb_flow.go).
+	jobVerb jobVerbFlow
+
+	// frame memoises the composed panel frame View returns, and the line
+	// measurements it is joined from (frame_compose.go). Written only by
+	// View.
+	frame frameComposer
+	// compact is the same memo for the compact layout's frame
+	// (app_compact.go). Written only by View.
+	compact compactFrame
 
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
@@ -613,7 +701,7 @@ type App struct {
 	jobAddedCh        <-chan *database.JobAdded
 	jobDeletedCh      <-chan *database.JobDeleted
 	jobTrimsChangedCh <-chan *database.Job
-	jobsUpdateCh      <-chan []*database.Job
+	jobsUpdateCh      <-chan JobsUpdateMsg
 	logCh             <-chan string
 	checkTimersCh     <-chan CheckTimersMsg
 	cookieStatusCh    <-chan CookieStatusMsg
@@ -686,6 +774,20 @@ type App struct {
 	asidesJobID     string
 	asidesUpdatedAt string // the row version the memo was probed for
 	asidesCache     AsideSummary
+	// setAsideJobID / setAsideStatus are the selected job and status the
+	// JobSetAsideArchives answer was last asked for, and setAsideCache the
+	// answer shown. The probe reads the output directory, so it never runs
+	// on the update goroutine: updateSelectedJob queues a command
+	// (setAsideCmds, flushed by Update) when the job or its status changes,
+	// and the answer comes back as a setAsideArchivesMsg. setAsideGen is
+	// the ask the panel is waiting on; an answer under another is dropped.
+	// Single writer: setAsideArchivesFor and the three message arms in
+	// Update.
+	setAsideJobID  string
+	setAsideStatus database.JobStatus
+	setAsideCache  []SetAsideArchiveEntry
+	setAsideGen    int
+	setAsideCmds   []tea.Cmd
 
 	// Callbacks for actions
 	OnAddVideo func(url string)
@@ -701,6 +803,8 @@ type App struct {
 	// OnResumeJob and OnReinitializeJob run the worker's verbs and return
 	// its refusal (worker.ErrResetPending: a different verb already waits on
 	// the job), which the feedback line shows in red, as REST's 409 does.
+	// Both are called from a command's goroutine, never the update loop
+	// (runJobVerb, job_verb_flow.go): a reinitialize deletes staging.
 	OnResumeJob       func(jobID string) error
 	OnReinitializeJob func(jobID string) error
 	// ReinitializeSummary says what reinitializing jobIDs would delete
@@ -747,10 +851,17 @@ type App struct {
 	// (worker.TwitchGapFillStateOf, the job API's gapFill; owner decision
 	// PR-R5), nil for none. One row read; asked on selection, and only for
 	// a Finished live Twitch job, the only kind that has one.
-	JobGapFill   func(jobID string) *GapFillView
-	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim func(jobID, trimID string) error
-	OnOpenFolder func(jobID string)
+	JobGapFill func(jobID string) *GapFillView
+	// JobSetAsideArchives reports the archives set aside for a job
+	// (worker.ScanSetAsideArchives, the job API's setAsideArchives; owner
+	// ruling R2-W1b). A disk probe: called from a command's goroutine, never
+	// the update goroutine, once for the job the cursor rests on
+	// (setAsideSelectDelay), once per status change and once more shortly
+	// after a status change (setAsideReaskDelay).
+	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
+	OnCreateTrim        func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
+	OnDeleteTrim        func(jobID, trimID string) error
+	OnOpenFolder        func(jobID string)
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).
@@ -775,10 +886,14 @@ type App struct {
 	OnRestart          func()
 	OnHashPassword     func(password string) string
 	OnVerifyPassword   func(password, hash string) bool
-	OnFetchFormats     func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
-	OnImportFile       func(path, title, channel string) (string, error) // optional: import zip, returns title
-	OnListOrphans      func() ([]OrphanedFileEntry, error)               // list orphaned files
-	OnDeleteOrphan     func(path string) error                           // delete orphaned file
+	// OnPasswordChanged runs after Settings, Security set or removed the
+	// dashboard password, so the wiring can end what the old one admitted
+	// (client tokens, sessions, open sockets).
+	OnPasswordChanged func()
+	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan    func(path string) error                           // delete orphaned file
 	// Orphaned processing-history rows (no matching job) shown in the same overlay.
 	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
 	OnDeleteHistoryEntry  func(videoID string) error
@@ -872,6 +987,12 @@ type App struct {
 	// later change. nil sends nothing.
 	OnAdmissionHoldsResync func()
 
+	// OnFailingChannels derives the failing-channel set now (owner ruling
+	// R-H1). Settings reads it each time it opens; ChannelFailingMsg carries
+	// every change after that. It takes only the monitors' health mutexes and
+	// does no I/O. nil flags nothing.
+	OnFailingChannels func() FailingChannels
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
@@ -915,7 +1036,7 @@ func NewApp() *App {
 	tl := NewTaskListModel()
 	tl.progressStore = ps
 
-	return &App{
+	a := &App{
 		taskList:          tl,
 		details:           NewJobDetailsModel(),
 		logs:              NewLogViewerModel(),
@@ -941,6 +1062,11 @@ func NewApp() *App {
 		jobVersions:       make(map[string]appliedJobVersions),
 		isDark:            true, // default to dark; updated by BackgroundColorMsg
 	}
+	// The Settings restart prompt warns from the App's own count, read when
+	// it is drawn.
+	a.settings.activeDownloads = a.activeDownloadCount
+	a.settings.runningNote = a.jobVerbRunningNote
+	return a
 }
 
 // BackfillLogs seeds the log viewer with historical lines (e.g. from the logger's ring buffer).
@@ -974,6 +1100,19 @@ func (a *App) SetInternalToken(token string) {
 // other pre-run Set* on this type.
 func (a *App) SetSidecarDown(down bool) {
 	a.statusBar.sidecarDown = down
+}
+
+// SetCookieStatus applies both platforms' cookie badges and which platforms
+// are active to the status bar: before Run as the seed, and for every
+// CookieStatusMsg after.
+//
+// The seed is what puts "checking…" in the first frame. The TUI starts while
+// the first cookie check of the process is still running, and the status
+// channel is drained only after that frame is drawn; without the seed it
+// would show no cookie badge at all (both platforms inactive).
+func (a *App) SetCookieStatus(yt, tw CookieStatus, ytActive, twActive bool) {
+	a.statusBar.SetCookieStatus(yt, tw)
+	a.statusBar.SetActivePlatforms(ytActive, twActive)
 }
 
 // SetAdmissionHolds applies the backlog scheduler's hold snapshot to the
@@ -1082,7 +1221,7 @@ func (a *App) SetUpdateChannels(
 	jobAdded <-chan *database.JobAdded,
 	jobDeleted <-chan *database.JobDeleted,
 	jobTrimsChanged <-chan *database.Job,
-	jobsUpdate <-chan []*database.Job,
+	jobsUpdate <-chan JobsUpdateMsg,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
@@ -1164,7 +1303,7 @@ func (a *App) ensureMarqueeTicking() tea.Cmd {
 	// replaces the whole view, hiding the task list and detail titles — no
 	// point animating a marquee nobody can see. It restarts when the overlay
 	// closes (the closing keypress hook, or the 1s backstop within <=1s).
-	if a.hasActiveOverlay() {
+	if a.hasActiveOverlay() || a.layoutMode() != layoutNormal {
 		return nil
 	}
 	if a.taskList.marquee.NeedsScroll() || a.details.marquee.NeedsScroll() {
@@ -1227,18 +1366,36 @@ const (
 	// rather than sitting through one. A no-change tick costs no rebuild
 	// (JobDetailsModel.SetProgress skips an unchanged pointer inside one
 	// wall-clock second) and no repaint (the renderer's viewEquals) — only
-	// the memoised View() bubbletea calls after every message, the 30-alloc
-	// frame TestFrameCostAtLogCap pins (~0.25-0.6 ms at 20-1,000 jobs), so
-	// doubling the tick count doubles that and nothing else.
+	// the memoised View() bubbletea calls after every message: four panel
+	// key comparisons and the frame memo's (frame_compose.go), which
+	// allocate nothing (TestFrameCostAtLogCap pins it; well under a
+	// microsecond at 1,000 jobs).
 	progressFastInterval = 8 * time.Millisecond   // ~120fps during active downloads
 	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
 )
 
 // wantsFastProgress reports whether the progress loop should run at the fast
-// class — one tick per frame at tuiTargetFPS: an actively-delivering
-// download, or a visible in-progress trim.
+// class — one tick per frame at tuiTargetFPS. That is only while the progress
+// it delivers is on screen: an actively-delivering download with the panels
+// showing, or an overlay on top that draws live progress itself (the trim
+// dialog while a trim runs; overlayEntry.liveProgress).
+//
+// Any other overlay hides the panels, and no overlay view is memoised, so a
+// fast tick under one redrew an identical Help or Settings screen ~120 times
+// a second. Nothing visible gets rarer: the loop keeps running at the idle
+// class, and the key or click that closes the overlay upshifts in the same
+// Update (ensureProgressTicking in the KeyPressMsg and MouseMsg cases). An
+// overlay closed by a message instead is back at the fast class on the next
+// idle tick, at most progressIdleInterval later.
 func (a *App) wantsFastProgress() bool {
-	return a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible())
+	// A notice has replaced the screen (app_compact.go): no progress is on it.
+	if a.screenHeld() {
+		return false
+	}
+	if o := a.activeOverlay(); o != nil {
+		return o.liveProgress != nil && o.liveProgress(a)
+	}
+	return a.hasActiveDownloads()
 }
 
 func (a *App) progressTick() tea.Cmd {
@@ -1303,11 +1460,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "jobTrimsChanged"}
 			}
 			return TrimsChangedMsg{Job: job}
-		case jobs, ok := <-a.jobsUpdateCh:
+		case snap, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}
 			}
-			return JobsUpdateMsg{Jobs: jobs}
+			return snap
 		case line, ok := <-a.logCh:
 			if !ok {
 				return channelClosedMsg{Name: "log"}
@@ -1362,7 +1519,8 @@ func (a *App) hasActiveDownloads() bool {
 }
 
 // activeDownloadCount counts jobs currently downloading/live/muxing —
-// used by hasActiveDownloads and the update-apply confirmation.
+// used by hasActiveDownloads and by every restart warning: the update-apply
+// confirmation, R P and the Settings restart prompt (restart_warning.go).
 func (a *App) activeDownloadCount() int {
 	n := 0
 	for _, s := range a.statusMap {
@@ -1379,20 +1537,21 @@ func (a *App) activeDownloadCount() int {
 // a SECOND invocation within 5s (mirroring the confirm-chord pattern):
 // updating restarts the process, interrupting recordings — live segments
 // broadcast during the restart gap may be lost (Twitch expires fastest) —
-// so that must be a deliberate choice. Returns nil when only feedback was
+// so that must be a deliberate choice. A Resume or Reinitialize still running
+// asks for the second press too: the restart can stop a reset between its
+// row write and its file deletion. Returns nil when only feedback was
 // shown (no update, or confirmation pending).
 func (a *App) applyUpdateAction() tea.Cmd {
 	if a.updateAvailable == nil || a.OnApplyUpdate == nil {
 		a.setFeedback("No update available — use R V to check")
 		return nil
 	}
-	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
+	warn := joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "update restart"), a.jobVerbRunningNote())
+	if warn != "" && time.Since(a.updateConfirmAt) > 5*time.Second {
 		a.updateConfirmAt = time.Now()
-		plural := "download is"
-		if n != 1 {
-			plural = "downloads are"
-		}
-		a.setFeedback(fmt.Sprintf("%d %s active — the update restart interrupts them; press R U again within 5s to confirm", n, plural))
+		// A confirm prompt, in the yellow every other confirm has: it starts
+		// with a count, so the "Press " scan never saw it.
+		a.setFeedbackWithSeverity(warn+"; press R U again within 5s to confirm", severityWarning)
 		return nil
 	}
 	a.updateConfirmAt = time.Time{}

@@ -213,7 +213,7 @@ func TestShouldObserveCredentials(t *testing.T) {
 // intermediate export from eating the only edge.
 //
 // The flow is the one Moombox's own advice steers users into — browsing on in
-// the source profile invalidates an earlier export (worker.go), so a
+// the source profile invalidates an earlier export (worker_failure.go), so a
 // first-attempt export arriving dead is routine:
 //
 //  1. membership park under account A, auth healthy

@@ -540,18 +540,3 @@ func TestParseFFprobeChaptersReadsTheTitleTag(t *testing.T) {
 		t.Errorf("unreadable output: err = %v, want errUnreadableChapters", err)
 	}
 }
-
-// TestChapterRouteSeamsProductionValues pins the production values behind
-// the route's seams: the cache's probe is the real ffprobe reader, the probe
-// is bounded at 10 s, and the cache at 256 files.
-func TestChapterRouteSeamsProductionValues(t *testing.T) {
-	if got, want := reflect.ValueOf(newChapterCache(1).probe).Pointer(), reflect.ValueOf(ffprobeChapters).Pointer(); got != want {
-		t.Error("newChapterCache's probe is not ffprobeChapters")
-	}
-	if chapterProbeTimeout != 10*time.Second {
-		t.Errorf("chapterProbeTimeout = %v, want 10s", chapterProbeTimeout)
-	}
-	if chapterCacheSize != 256 {
-		t.Errorf("chapterCacheSize = %d, want 256", chapterCacheSize)
-	}
-}

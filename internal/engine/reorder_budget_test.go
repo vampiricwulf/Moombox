@@ -417,26 +417,6 @@ func TestConfigureReorderDrivesTheSharedBudget(t *testing.T) {
 	}
 }
 
-// TestTheDefaultSharedBudgetMatchesTheEngineConstant pins what an
-// UNCONFIGURED process (every test in this package, and any embedding that
-// does not boot through cmd/moombox) gets: the engine's own conservative
-// per-job ceiling and no process-wide cap.
-//
-// MUTANT: initialise sharedReorderBudget with a total — every existing
-// ceiling test in this package starts sharing one budget and the ones that
-// never release begin starving their successors.
-func TestTheDefaultSharedBudgetMatchesTheEngineConstant(t *testing.T) {
-	withFreshSharedBudget(t) // the same constructor production uses at init
-
-	perJob, total := ReorderLimits()
-	if perJob != catchUpBufferBytes {
-		t.Errorf("the unconfigured per-job ceiling = %d, want catchUpBufferBytes (%d)", perJob, catchUpBufferBytes)
-	}
-	if total != 0 {
-		t.Errorf("the unconfigured process-wide total = %d, want 0 (unbounded)", total)
-	}
-}
-
 // TestManyBuffersUnderOneBudgetStayBounded is the fan-out proof: raising the
 // number of concurrent downloads must not multiply resident memory.
 //

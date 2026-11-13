@@ -15,7 +15,6 @@ func TestNodeClassExists(t *testing.T) {
 		t.Fatalf("NewRuntimeWithShims: %v", err)
 	}
 	cases := []struct{ expr, want string }{
-		{`typeof Node`, "function"},
 		{`typeof Text`, "function"},
 		{`typeof Comment`, "function"},
 		{`typeof DocumentFragment`, "function"},

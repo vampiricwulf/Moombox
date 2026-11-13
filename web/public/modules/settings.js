@@ -2,6 +2,8 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 import {
+  activeDownloadCount,
+  activeDownloadsRestartWarning,
   applyChannelOverrides,
   bindPasswordSpaceWarning,
   browserPathValidationOutcome,
@@ -21,6 +23,7 @@ import {
   snapshotRestartValues,
   viewerIsAtTheHost,
   BACKFILL_STATE,
+  failingChannel,
 } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
@@ -729,6 +732,10 @@ export class SettingsController {
     if (preferHdrSwitch) {
       preferHdrSwitch.checked = config.downloader?.prefer_hdr !== false;
     }
+    const keepAwakeSwitch = document.getElementById("cfg-keep-awake");
+    if (keepAwakeSwitch) {
+      keepAwakeSwitch.checked = config.downloader?.keep_awake !== false;
+    }
     this.app.setInputValue("cfg-maximum-timeout", config.downloader?.maximum_timeout);
     this.app.setInputValue("cfg-interruption-timeout", config.downloader?.interruption_timeout);
     this.app.setInputValue("cfg-incomplete-staging-expiry", config.downloader?.incomplete_staging_expiry_days);
@@ -992,6 +999,7 @@ export class SettingsController {
       "downloader.download_chat": checked("cfg-download-chat", true),
       "downloader.prefer_60fps": checked("cfg-prefer-60fps", true),
       "downloader.prefer_hdr": checked("cfg-prefer-hdr", true),
+      "downloader.keep_awake": checked("cfg-keep-awake", true),
       "downloader.maximum_timeout": num("cfg-maximum-timeout"),
       "downloader.interruption_timeout": num("cfg-interruption-timeout"),
       "downloader.incomplete_staging_expiry_days": num("cfg-incomplete-staging-expiry"),
@@ -1232,13 +1240,18 @@ export class SettingsController {
     const oldPort = this._originalRestartValues["network.port"] || 774;
     const oldHttps = !!this._originalRestartValues["network.https_enabled"];
 
+    // The same warning the update restart gives (update-indicator.js): this
+    // is the same process restart.
+    const activeWarning = activeDownloadsRestartWarning(activeDownloadCount(this.app.jobs));
     const shouldRestart = await this.app.showConfirm(
       // Enumerates the CATEGORIES RESTART_REQUIRED_FIELDS covers, and has to
       // keep pace with it: an operator who changed only a cookie setting and is
       // shown a list naming four things they did not touch reads this as a
       // prompt about something else and dismisses it — which is the failure the
       // cookie entries exist to prevent.
-      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID).\n\nRestart Moombox now?",
+      "Some settings require a restart to take effect (port, network access, HTTPS/TLS, connectivity probe targets, database path, log settings, cookie settings, sidecar settings, Twitch Client-ID).\n\n"
+        + (activeWarning ? activeWarning + "\n\n" : "")
+        + "Restart Moombox now?",
       { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
     );
     if (!shouldRestart) {
@@ -1299,9 +1312,15 @@ export class SettingsController {
    * operator allows — local, LAN, or authenticated external.
    */
   async restartNow() {
+    // With downloads active, say what the restart costs them, as the update
+    // restart does (one count and one sentence, from utils.js), and leave out
+    // the reassurance that nothing is lost.
+    const activeWarning = activeDownloadsRestartWarning(activeDownloadCount(this.app.jobs));
     const confirmed = await this.app.showConfirm(
-      "Restart Moombox now? In-progress downloads are saved on shutdown and resume automatically once it comes back up.",
-      { okLabel: "Restart", okVariant: "danger", title: "Restart Moombox" },
+      activeWarning
+        ? `${activeWarning} Restart anyway?`
+        : "Restart Moombox now? In-progress downloads are saved on shutdown and resume automatically once it comes back up.",
+      { okLabel: activeWarning ? "Restart Anyway" : "Restart", okVariant: "danger", title: "Restart Moombox" },
     );
     if (!confirmed) return;
 
@@ -1445,6 +1464,7 @@ export class SettingsController {
         ${ch.twitch_archive_clips ? '<sl-badge variant="neutral">Archive clips</sl-badge>' : ""}
         ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
         <span class="channel-backfill" data-backfill-for="${this.app.escapeHtml(ch.id)}">${this._backfillBadgeHtml(ch.id)}</span>
+        <div class="channel-health" data-health-for="${this.app.escapeHtml(ch.id)}">${this._channelHealthHtml(ch)}</div>
       </div>
     `;
         },
@@ -1489,6 +1509,29 @@ export class SettingsController {
       return `<sl-badge variant="warning" pill>Backfill failed — will retry</sl-badge>`;
     }
     return "";
+  }
+
+  /**
+   * Flag markup for a channel no monitor reaches ("" otherwise): owner
+   * ruling R-H1, failingChannel in utils.js over app.channelMonitors. A
+   * disabled channel is not monitored, so it is never flagged.
+   */
+  _channelHealthHtml(ch) {
+    if (!ch || ch.enabled === false) return "";
+    const failing = failingChannel(this.app.channelMonitors, ch.platform, ch.id);
+    if (!failing) return "";
+    const error = failing.lastError
+      ? ` <span class="channel-health-error">${this.app.escapeHtml(failing.lastError)}</span>`
+      : "";
+    return `<sl-badge variant="danger" pill>Checks failing</sl-badge>${error}`;
+  }
+
+  /** Redraw every rendered card's failing flag (a new channelMonitors snapshot). */
+  refreshChannelHealthBadges() {
+    const byId = new Map((this.app.config?.channels || []).map((c) => [c.id, c]));
+    document.querySelectorAll("#channels-list [data-health-for]").forEach((slot) => {
+      slot.innerHTML = this._channelHealthHtml(byId.get(slot.dataset.healthFor));
+    });
   }
 
   /** Patch one channel card's backfill badge in place (no-op when the card isn't rendered). */
@@ -2936,7 +2979,7 @@ export class SettingsController {
   // NOT gated on cfg-auto-cookies-enabled, deliberately. Everything below is
   // ACQUISITION — the browser login that puts cookies on disk, and the choice of
   // which browser runs it. The flag governs one thing: whether a slow
-  // headless-browser refresh timer exists, plus one automatic browser retry when
+  // headless-browser refresh timer exists, plus an automatic browser retry (up to 3 a job) when
   // auth fails. It has never governed setup (auto_enabled does not appear
   // anywhere in internal/cookies, and StartSetup is deliberately reachable with
   // it off), and hiding setup behind it made the setting impossible to reach the

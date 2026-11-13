@@ -164,6 +164,18 @@ func jobCookieRefreshOutcome(log interface {
 		log.Warn(msg, slog.String("platform", platform), cause)
 		return outcome
 	}
+	if result.InFlight {
+		// The refresh slot was held (another pass or an import is running) or
+		// a cookie setup is in progress.
+		// This was reported as a declined pass and answered NotRestored, and
+		// the worker followed it with the advice to replace the cookie file
+		// while a refresh was repairing it. The job waits for that pass,
+		// whose sweep resumes it if the platform verifies
+		// (resumeAfterCookieGesture).
+		log.Info("automatic cookie refresh not started — a refresh, import or setup is already running; the job waits for its result",
+			slog.String("platform", platform))
+		return worker.CookieRefreshInFlight
+	}
 	report := cookieRefreshReportFor(platform, result)
 	if report.msg != "" {
 		log.Warn(report.msg,
@@ -286,9 +298,8 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // surface than the loop was written against.
 //
 // The precedent is refresh.go's own Start, which wraps its synchronous first
-// pass in exactly this shape and explains why wrapping the CALL is right where
-// spawning a goroutine would not be: there is nothing to run concurrently here,
-// only something to survive.
+// pass in exactly this shape: there is nothing to run concurrently here, only
+// something to survive.
 //
 // recheck is the caller's whole body rather than a CheckNow func, so the guard
 // covers everything the hook does — the accessor lookup and the logging
@@ -298,19 +309,19 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // context (see AutoCookieService.OnPassCompleted), and the body has to run its
 // re-check under it: that is what lets the shutdown's cancel end the re-check's
 // round trips, and AutoCookieService.Stop's join cover them.
-func postRefreshRecheckHook(recheck func(ctx context.Context), log interface {
+func postRefreshRecheckHook(recheck func(ctx context.Context, result cookies.RefreshResult), log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}) func(ctx context.Context) {
-	return func(ctx context.Context) {
+}) func(ctx context.Context, result cookies.RefreshResult) {
+	return func(ctx context.Context, result cookies.RefreshResult) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("panic in the post-refresh cookie re-check", "panic", fmt.Sprint(r))
 			}
 		}()
-		recheck(ctx)
+		recheck(ctx, result)
 	}
 }
 
@@ -548,26 +559,18 @@ func archiveSlotsResolver(store *config.Store) func(channelID string) int {
 	}
 }
 
-// initServices runs the 16 numbered construction sections from the original
-// run() — config load, logger, updater, database, connectivity, cookies,
-// platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
-// web server + rate limiters + auth + core shared closures (triggerRestart,
-// kickMonitors, getActivePlatforms). On return, all runState fields for
-// those phases are populated and the close-once helpers (closeLog, closeDB,
-// closeLimiters) are ready for run() to defer.
+// initConfigAndLogger is initServices' sections 1 and 2: it loads the config
+// and builds its store, opens the logger at the level effectiveLogLevel
+// picks, arms the crash output, applies the soft memory limit, auto-persists
+// new config sections, creates the updater and hashes a plaintext password.
+// It is its own function so that a test can run the boot's three config
+// writers with a -log-level override and read the file back
+// (TestBootKeepsTheLogLevelOverrideOutOfTheConfigFile). The order inside is
+// the boot's order; nothing here may be reordered.
 //
-// Returns a wrapped error from the three fatal-exit points (config.Load,
-// logger.New, database.Open). The caller prints the error and exits with
-// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
-// where deferred cleanup is skipped on a fatal startup failure AND tells the
-// launcher this is the environment failing deterministically, so a
-// first-post-update boot that lands here is never rolled back as a broken
-// release (CORE-23).
-func (s *runState) initServices(logLevelOverride string) error {
-	if !s.useTUI {
-		fmt.Println("Loading configuration...")
-	}
-
+// Returns the wrapped error of its two fatal exits (config.Load, logger.New),
+// which initServices returns as is.
+func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 	// =========================================================================
 	// 1. Load config
 	// =========================================================================
@@ -619,10 +622,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.prevCrash = s.captureCrashOutput(cfg.Paths.LogFilePath)
 	logConfigSource(log, cfg, s.configPath)
 	for _, issue := range cfg.NormalizedOnLoad {
-		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
+		log.Warn("Config value corrected on load — the next save writes the correction to the file", slog.String("issue", issue))
 	}
 	for _, key := range cfg.IgnoredOnLoad {
 		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
+	}
+	for _, key := range cfg.UnknownOnLoad {
+		log.Warn("Config key is not recognised and was ignored (misspelt, or under the wrong section?) — the next save removes it from the file", slog.String("key", key))
 	}
 
 	s.warnSegmentWorkers(cfg.Downloader.SegmentWorkers)
@@ -663,11 +669,48 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
 	hashPlaintextPassword(log, s.configStore)
+	return nil
+}
+
+// initServices runs the 16 numbered construction sections from the original
+// run() — config load, logger, updater, database, connectivity, cookies,
+// platform services, worker, trim, monitors, cookie-refresh / auto-cookie,
+// web server + rate limiters + auth + core shared closures (triggerRestart,
+// kickMonitors, getActivePlatforms). On return, all runState fields for
+// those phases are populated and the close-once helpers (closeLog, closeDB,
+// closeLimiters) are ready for run() to defer.
+//
+// Returns a wrapped error from the three fatal-exit points (config.Load,
+// logger.New, database.Open). The caller prints the error and exits with
+// exitCodeStartupError (3), which both preserves the pre-refactor behaviour
+// where deferred cleanup is skipped on a fatal startup failure AND tells the
+// launcher this is the environment failing deterministically, so a
+// first-post-update boot that lands here is never rolled back as a broken
+// release (CORE-23).
+// consoleBannerFlush bounds the wait for queued log lines to reach the console
+// before something is printed to it directly: long enough for any console
+// that is taking output, short enough that one that is not delays a headless
+// start or exit by no more than this.
+const consoleBannerFlush = time.Second
+
+func (s *runState) initServices(logLevelOverride string) error {
+	if !s.useTUI {
+		fmt.Println("Loading configuration...")
+	}
+
+	// Sections 1 (load config) and 2 (initialize logger): initConfigAndLogger.
+	if err := s.initConfigAndLogger(logLevelOverride); err != nil {
+		return err
+	}
+	cfg, log := s.cfg, s.log
 
 	// =========================================================================
 	// 3. Open database
 	// =========================================================================
 	if !s.useTUI {
+		// Log lines reach the console through the logger's queue; let the
+		// ones before this banner print first.
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Initializing database...")
 	}
 	// The record `moombox add` finds this database by (daemon_record.go): at
@@ -707,6 +750,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 4. Load cookies
 	// =========================================================================
 	if !s.useTUI {
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Starting services...")
 	}
 	jar := cookies.NewCookieJar()
@@ -1049,6 +1093,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// carries the value. Warns here if the saved pair is incoherent.
 	s.applyReorderBudget(cfg.Downloader)
 
+	// downloader.keep_awake: while a capture or mux is running, ask Windows
+	// not to sleep on its idle timer. Started before the worker resumes the
+	// rows a previous run left Downloading or Muxing; re-applied on every
+	// config save from either UI (applyKeepAwake).
+	s.startKeepAwake(cfg.Downloader.KeepAwake)
+
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
 	// Feed and DECAPI each own a probe cooldown (created in their
@@ -1357,8 +1407,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	autoCookieSvc.LogProfileDirVerdict()
 	s.autoCookieSvc = autoCookieSvc
 
-	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
-	// func field exactly once (before cookieRefresh.Start()) to a dispatcher
+	// OnAuthChange is fired from whichever goroutine ran the pass (the cookie
+	// startup goroutine for the first check, the ticker, a recheck); set its
+	// plain func field exactly once (before startCookieSequence) to a dispatcher
 	// that atomically loads the TUI-side slot. The TUI branch stores a
 	// callback later — Store is race-free against the refresh goroutine's
 	// Load, unlike field reassignment.
@@ -1366,7 +1417,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 		if fn := s.authChangeTUI.Load(); fn != nil {
 			(*fn)(auth)
 		}
+		// The dashboard's half: a frame that says only "read your status
+		// again" (status_nudge.go).
+		s.nudgeDashboardStatus()
 	}
+	// The re-login flag is part of the same badge and has writers the auth
+	// check never sees (a failed recovery raises it, an import lowers it).
+	autoCookieSvc.OnReloginChange = s.nudgeDashboardStatus
 
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms).
@@ -1446,8 +1503,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// signal outlived the 2-second wait and rewrote cookies.txt after the
 	// shutdown had moved on. A re-check cut short is inconclusive, so a
 	// shutdown flags no auth loss.
-	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func(ctx context.Context) {
+	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func(ctx context.Context, result cookies.RefreshResult) {
 		recheckAfterCookieWrite(ctx, s.checkNowFn(), log, "an automatic cookie refresh")
+		s.resumeAfterAutomaticPass(ctx, result)
 	}, log)
 
 	// cookies.dpapi_fallback, read LIVE like AcquisitionMode and
@@ -1561,6 +1619,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		defer func() {
 			if result.Ran {
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "the job-triggered cookie refresh", "platform", platform)
+				// Then every other job parked on a platform this pass verified
+				// (owner ruling R2-C2): the ones that parked while it ran, and
+				// the ones a skipped or unconfirmed pass left behind. The
+				// asking job is usually among them; the worker hands on a row
+				// the sweep resumed first (attemptCookieRefresh).
+				s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "a job's cookie refresh")
 			}
 		}()
 
@@ -1656,6 +1720,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		feedMon.CheckNow()
 		decapiMon.CheckNow()
 		twitchMon.CheckNow()
+		// The Twitch VOD backlog too: a save that turns twitch_vod_backlog on
+		// is listed now, not at the next hourly tick. It spaces kicked cycles
+		// itself (twitchBacklogKickGap).
+		if s.twitchBacklog != nil {
+			s.twitchBacklog.CheckNow()
+		}
 	}
 
 	// Restart dispatcher — used by setup/update/API/TUI to unwind the run()

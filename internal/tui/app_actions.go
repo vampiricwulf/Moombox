@@ -146,6 +146,12 @@ func clipboardFeedback(url string, sentViaOSC52 bool) string {
 // dispatchAction executes a chord action. For job-specific actions, job comes from
 // the selected task (keyboard chords) or from the menu's job picker (menu flow).
 func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
+	// An action whose overlay needs a larger terminal than this one is
+	// refused on the feedback line (owner ruling R-C5). Every way to an
+	// action passes here: the chords, the single keys and the action menu.
+	if a.refusedForSize(chord) {
+		return a, nil
+	}
 	switch chord {
 	case "A A":
 		a.clearFeedback()
@@ -161,9 +167,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
+		// The worker's Resume and Reinitialize do their work on the caller's
+		// goroutine when the job is idle (a reinitialize deletes the staging
+		// directory there), so both run as a command, off the update loop:
+		// see runJobVerb. Which jobs are eligible is still decided here.
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnResumeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil || !jobverbs.ResumeSupported(j.Platform) {
@@ -175,29 +187,26 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
 					continue
 				}
-				if err := a.OnResumeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Resumed "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnResumeJob, ids, "")
 		} else if job != nil && a.OnResumeJob != nil {
-			if err := a.OnResumeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, job.Title)
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
-			count := 0
-			var refused verbRefusals
+			if a.jobVerbBusy() {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
 				if j == nil {
@@ -206,24 +215,19 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if !jobverbs.ReinitializableStatus(j.Status) {
 					continue
 				}
-				if err := a.OnReinitializeJob(id); err != nil {
-					refused.add(err)
-					continue
-				}
-				count++
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			if count == 0 && refused.n == 0 {
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
 				return a, nil
 			}
-			a.setBatchFeedback("Reinitialized "+jobCount(count), refused)
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, ids, "")
 		} else if job != nil && a.OnReinitializeJob != nil {
-			if err := a.OnReinitializeJob(job.ID); err != nil {
-				a.setFeedbackWithSeverity(err.Error(), severityError)
-			} else {
-				a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+			if a.jobVerbBusy() {
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, job.Title)
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
@@ -330,6 +334,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return deleteJobsResultMsg{Count: len(ids)}
 			})
 		} else if job != nil && a.OnDeleteJob != nil {
+			// The last check before the row is cancelled and deleted: every
+			// caller has already run the A D filter, but the server accepts a
+			// delete in any state, so nothing after this line would stop one
+			// aimed at a job that is recording.
+			if !isDeletableStatus(job.Status) {
+				a.setFeedbackWithSeverity(fmt.Sprintf("Delete Job not done: %s is now %s", job.Title, job.Status), severityWarning)
+				return a, nil
+			}
 			a.setFeedback(fmt.Sprintf("Deleting: %s", job.Title))
 			deleteFn := a.OnDeleteJob
 			id, title := job.ID, job.Title
@@ -434,7 +446,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// operator's Enter and are rendered inline by the wizard, which is
 		// where the web panel puts them too.
 		if a.setupWiz.OnStartAutoCookie == nil {
-			a.setFeedback("Cookie login is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie login is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.setupWiz.SetSize(a.width, a.height)
@@ -447,7 +459,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		// processSecondKey never reaches this case. The guard keeps a direct
 		// caller from opening an overlay whose Enter dead-ends.
 		if a.OnImportCookieFile == nil {
-			a.setFeedback("Cookie import is unavailable — no auto-cookie service is configured")
+			a.setFeedbackWithSeverity("Cookie import is unavailable — no auto-cookie service is configured", severityWarning)
 			return a, nil
 		}
 		a.clearFeedback()
@@ -633,9 +645,15 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				// rows it occupied must go back to the panels, or View()
 				// renders a dead row until the next resize.
 				a.recalcLayout()
+				if a.OnPasswordChanged != nil {
+					a.OnPasswordChanged()
+				}
 			}
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword
+			if a.OnFailingChannels != nil {
+				a.settings.SetFailingChannels(a.OnFailingChannels())
+			}
 			a.settings.Open(a.cfg)
 		}
 	case "?":
@@ -649,21 +667,54 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 
 // chordFeedback builds contextual feedback for a chord prefix.
 // It derives available options from buildMenuItems() using HintLabel.
+//
+// In the compact layout a hint too long for the feedback rows there
+// (compactFeedbackRows) is given as its keys alone, "Request: B C F V M U S
+// P (3s)": Help and the action menu are refused in that layout, so the hint
+// is the one list of the working keys, and all of them must be on screen.
 func (a *App) chordFeedback(prefix string) string {
+	hint, _ := a.chordHint(prefix)
+	return hint
+}
+
+// chordHint is chordFeedback, and whether the prefix has nothing to offer
+// only because of the terminal's size: every chord under it that would
+// otherwise be listed opens an overlay, which the layout refuses. The hint
+// is then the size refusal, not "(none available)", which reads as if
+// nothing were configured. The prefix still arms, so its second key is
+// taken as the chord it is and refused the same way.
+func (a *App) chordHint(prefix string) (hint string, refused bool) {
 	if prefix == "q" {
-		return "Quit: Q Confirm (3s)"
+		// Quitting in the middle of a reset can leave it half done, so the
+		// prompt says one is running.
+		if note := a.jobVerbRunningNote(); note != "" {
+			return "Quit: Q Confirm (3s) — " + note, false
+		}
+		return "Quit: Q Confirm (3s)", false
 	}
 
 	upperPrefix := strings.ToUpper(prefix)
 	items := a.buildMenuItems()
 	job := a.taskList.SelectedJob()
 
-	var parts []string
+	var parts, keys []string
+	droppedForSize := false
+	needW, needH := 0, 0 // the largest size a dropped chord's overlay needs
 	for i := range items {
 		item := &items[i]
 		// Match items whose chord starts with this prefix (e.g. "A " for prefix "a")
 		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
 			continue
+		}
+		// A chord whose overlay needs a larger terminal than this one is
+		// refused (refusedForSize), so the hint does not offer it. Help's
+		// compact list drops the same chords by the same predicate.
+		if item.Opens != "" {
+			if ok, w, h := a.overlayOpensHere(item.Opens); !ok {
+				droppedForSize = true
+				needW, needH = max(needW, w), max(needH, h)
+				continue
+			}
 		}
 		// For NeedsJob items, check if selected job passes the filter — unless
 		// the chord will act on the batch selection instead, which is what
@@ -677,6 +728,7 @@ func (a *App) chordFeedback(prefix string) string {
 		// Extract the second key character from the chord (e.g. "A K" → "K")
 		secondKey := item.Chord[len(upperPrefix)+1:]
 		parts = append(parts, secondKey+" "+item.HintLabel)
+		keys = append(keys, secondKey)
 	}
 
 	// Category label from prefix
@@ -695,9 +747,16 @@ func (a *App) chordFeedback(prefix string) string {
 	}
 
 	if len(parts) == 0 {
-		return label + ": (none available) (3s)"
+		if droppedForSize {
+			return compactRefusal(needW, needH), true
+		}
+		return label + ": (none available) (3s)", false
 	}
-	return label + ": " + strings.Join(parts, " | ") + " (3s)"
+	full := label + ": " + strings.Join(parts, " | ") + " (3s)"
+	if a.layoutMode() == layoutCompact && !compactFeedbackFits(full, a.width, a.height) {
+		return label + ": " + strings.Join(keys, " ") + " (3s)", false
+	}
+	return full, false
 }
 
 // canOpenFolder returns true if the job's folder can be opened.
@@ -921,8 +980,8 @@ func jobCount(n int) string {
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
-		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
-		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
+		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action", Opens: "add video"},
+		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action", Opens: "import"},
 		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no jobs to resume",
 			JobFilter: func(j *database.Job) bool {
@@ -992,16 +1051,16 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A W", Label: "Toggle Watched", HintLabel: "Watched", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no finished jobs",
 			JobFilter:      func(j *database.Job) bool { return jobverbs.WatchableStatus(j.Status) }},
-		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
+		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", Opens: "trim", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
 				return jobverbs.TrimmableStatus(j.Status) && j.OutputFile != ""
 			}},
-		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action"},
+		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action", Opens: "files"},
 	}
 
 	if a.OnListClientTokens != nil {
-		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action"})
+		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action", Opens: "client tokens"})
 	}
 	// The chapter import (owner decision CI-4): A C pastes a timestamp
 	// comment as the job's chapters, A U brings back the chapters an import
@@ -1010,7 +1069,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// reads the disk, so it runs when A U is chosen and its job selector is
 	// built; the menu's "no jobs" answer is the status alone (CORE-9).
 	if a.OnPreviewChapters != nil && a.OnSaveChapters != nil {
-		items = append(items, ActionMenuItem{Chord: "A C", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", NeedsJob: true,
+		items = append(items, ActionMenuItem{Chord: "A C", Label: "Import Chapters", HintLabel: "Chapters", Category: "Action", Opens: "chapter import", NeedsJob: true,
 			DisabledReason: "no finished jobs with an archive",
 			JobFilter:      chapterImportable})
 	}
@@ -1044,9 +1103,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// from GitHub. Registered whenever we have either source available
 	// so the chord parser doesn't reject it as invalid.
 	if a.updateAvailable != nil {
-		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request", Opens: "release notes"})
 	} else if a.OnFetchReleaseNotes != nil {
-		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes (current version)", HintLabel: "Notes", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes (current version)", HintLabel: "Notes", Category: "Request", Opens: "release notes"})
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
@@ -1055,7 +1114,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		items = append(items, ActionMenuItem{Chord: "R S", Label: "Verify Signature", HintLabel: "Signature", Category: "Request"})
 	}
 	if a.OnRestart != nil {
-		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true})
+		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true,
+			// The warning the update restart gives, on the confirm line and
+			// the menu's confirm (restart_warning.go).
+			ConfirmDetail: func([]string) string {
+				return joinRestartNotes(activeRestartClause(a.activeDownloadCount(), "restart"), a.jobVerbRunningNote())
+			}})
 	}
 
 	// Open
@@ -1083,7 +1147,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// the callback like the E chords, since without it there is nothing to
 	// read.
 	if a.OnGetJobLogs != nil {
-		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", NeedsJob: true,
+		items = append(items, ActionMenuItem{Chord: "O L", Label: "Open Job Log", HintLabel: "Log", Category: "Open", Opens: "job log", NeedsJob: true,
 			DisabledReason: "no jobs"})
 	}
 	items = append(items,
@@ -1102,24 +1166,24 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// the STATUS callback alone — the overlay is worth reading on a host where
 	// the install would fail, and I explains itself there.
 	if a.OnYtdlpPluginStatus != nil {
-		items = append(items, ActionMenuItem{Chord: "E Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E Y", Label: "yt-dlp Plugin", HintLabel: "yt-dlp", Category: "Extras", Opens: "ytdlp plugin"})
 	}
 	// E L: open the setup wizard's cookie step alone, so an interactive login
 	// is reachable after first run. Gated on the callback for the same reason
 	// R F is, and cmd/moombox binds it unconditionally: StartSetup is
 	// acquisition and is never gated on cookies.auto_enabled.
 	if a.setupWiz.OnStartAutoCookie != nil {
-		items = append(items, ActionMenuItem{Chord: "E L", Label: "Cookie Login", HintLabel: "Login", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E L", Label: "Cookie Login", HintLabel: "Login", Category: "Extras", Opens: "setup wizard"})
 	}
 	// E I: the browser-free half of the same answer E L gives. It imports a
 	// Netscape cookies.txt the operator exported elsewhere, through the same
 	// verify-and-roll-back path as the Web dashboard's import panel — the one
 	// re-authentication route that works on a headless host.
 	if a.OnImportCookieFile != nil {
-		items = append(items, ActionMenuItem{Chord: "E I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E I", Label: "Import Cookie File", HintLabel: "Import Cookies", Category: "Extras", Opens: "cookie import"})
 	}
 	if a.OnGetStats != nil {
-		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras"})
+		items = append(items, ActionMenuItem{Chord: "E T", Label: "Statistics", HintLabel: "Stats", Category: "Extras", Opens: "stats"})
 	}
 
 	// Filter + Other. F does what handleFilter does for the focused panel,
@@ -1134,8 +1198,8 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	items = append(items,
 		ActionMenuItem{Chord: "F", Label: filterLabel, HintLabel: "Filter", Category: "Filter"},
-		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other"},
-		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other"},
+		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other", Opens: "settings"},
+		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other", Opens: "help"},
 		ActionMenuItem{Chord: "Q Q", Label: "Quit", HintLabel: "Quit", Category: "Other"},
 	)
 	return items

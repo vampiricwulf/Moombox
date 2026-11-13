@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
@@ -225,5 +227,231 @@ func TestDiskAlertsHoldAnIncidentAcrossAThresholdFlap(t *testing.T) {
 	tick("warn", 92.5)
 	if got := events(); len(got) != 2 || got[1] != "disk_warning" {
 		t.Fatalf("stepping down past the critical margin sent %v, want a disk_warning", got)
+	}
+}
+
+// TestDiskAlertsJudgeTheFullerVolumeAndNameIt: with staging on a volume of
+// its own, the fuller of the two volumes opens the one alert and is named in
+// it; the recovery reports the volume the alert named; a tie, or an emptier
+// staging volume, is the output directory's as before.
+//
+// Mutants: judge the output reading alone — a full staging volume sends
+// nothing; name the output directory in a staging alert; report the output
+// volume in the staging alert's recovery; send one alert per volume.
+func TestDiskAlertsJudgeTheFullerVolumeAndNameIt(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	now := time.Now()
+	stg := filepath.Join(t.TempDir(), "scratch")
+
+	d.onVolumes(diskReading("ok", 50), "./output", diskReading("critical", 97), stg, now)
+	calls := rec.Calls()
+	if len(calls) != 1 || calls[0].Title != "Disk Space Critical" || calls[0].Opts.Event != "disk_critical" {
+		t.Fatalf("calls = %+v, want one Disk Space Critical", calls)
+	}
+	if got, _ := calls[0].Field("Staging Directory"); got != stg {
+		t.Errorf("Staging Directory field = %q, want %q", got, stg)
+	}
+	if _, ok := calls[0].Field("Output Directory"); ok {
+		t.Error("an alert for the staging volume named the output directory")
+	}
+	if want := "97.0% used — 40.0 GB free on staging drive"; calls[0].Description != want {
+		t.Errorf("description = %q, want %q", calls[0].Description, want)
+	}
+	rec.Reset()
+
+	// 94 against 95 is inside the recovery margin: still the same incident.
+	d.onVolumes(diskReading("ok", 50), "./output", diskReading("warn", 94), stg, now.Add(time.Minute))
+	if got := len(rec.Calls()); got != 0 {
+		t.Fatalf("a staging reading inside the margin recorded %d calls, want 0", got)
+	}
+
+	d.onVolumes(diskReading("ok", 50), "./output", diskReading("ok", 10), stg, now.Add(2*time.Minute))
+	calls = rec.Calls()
+	if len(calls) != 1 || calls[0].Title != "Disk Space Recovered" {
+		t.Fatalf("calls = %+v, want one Disk Space Recovered", calls)
+	}
+	if got, _ := calls[0].Field("Staging Directory"); got != stg {
+		t.Errorf("the recovery's Staging Directory field = %q, want the volume the alert named (%q)", got, stg)
+	}
+	if want := "10.0% used — 40.0 GB free on staging drive"; calls[0].Description != want {
+		t.Errorf("recovery description = %q, want %q", calls[0].Description, want)
+	}
+	rec.Reset()
+
+	// The output volume fuller, or level with staging: the alert is the
+	// output directory's, worded as it always was.
+	d.onVolumes(diskReading("warn", 91), "./output", diskReading("warn", 91), stg, now.Add(3*time.Minute))
+	calls = rec.Calls()
+	if len(calls) != 1 || calls[0].Title != "Disk Space Warning" {
+		t.Fatalf("calls = %+v, want one Disk Space Warning", calls)
+	}
+	if _, ok := calls[0].Field("Output Directory"); !ok {
+		t.Error("a tie did not name the output directory")
+	}
+	if want := "91.0% used — 40.0 GB free on output drive"; calls[0].Description != want {
+		t.Errorf("description = %q, want %q", calls[0].Description, want)
+	}
+}
+
+// TestDiskAlertsReadStagingOnlyOnAnotherVolume: the second reading is taken
+// only when staging is on another volume, judged by the alerts' thresholds,
+// and a staging volume that cannot be read leaves the output reading to
+// decide alone, with one warning per streak.
+func TestDiskAlertsReadStagingOnlyOnAnotherVolume(t *testing.T) {
+	log := &countingLogger{}
+	d := newDiskAlerts(notificationtest.New(), log)
+	d.setThresholds(90, 95)
+	split := true
+	var readErr error
+	d.sameVolume = func(a, b string) bool { return !split }
+	d.diskSpace = func(string) (*disk.DiskSpace, error) {
+		if readErr != nil {
+			return nil, readErr
+		}
+		return &disk.DiskSpace{Free: 1 << 30, Total: 100 << 30, UsedPct: 96}, nil
+	}
+
+	if st := d.readStaging("./output", "./staging"); st == nil || st.WarnLevel != "critical" || st.UsedPct != 96 {
+		t.Fatalf("staging on its own volume at 96%%: %+v, want a critical reading", st)
+	}
+	readErr = errors.New("offline")
+	if st := d.readStaging("./output", "./staging"); st != nil {
+		t.Errorf("an unreadable staging volume gave %+v, want nil", st)
+	}
+	d.readStaging("./output", "./staging")
+	if log.warns != 1 {
+		t.Errorf("two failed staging readings logged %d warnings, want 1 for the streak", log.warns)
+	}
+	readErr = nil
+	split = false
+	if st := d.readStaging("./output", "./staging"); st != nil {
+		t.Errorf("one volume gave a second reading %+v, want nil", st)
+	}
+}
+
+// TestFailedBootReadingCountsAsTheFirstFailure: with the output volume
+// absent at start, the boot reading is the streak's first failure, so the
+// ticker's first failed check sends "Disk Monitoring Failed" — not its
+// second, six minutes later. A boot reading that succeeded is judged like
+// any other.
+//
+// Mutant: ignore a nil boot reading — the first ticker failure sends nothing.
+func TestFailedBootReadingCountsAsTheFirstFailure(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	d.onBootReading(nil, "./output", "./staging", time.Now())
+	if got := len(rec.Calls()); got != 0 {
+		t.Fatalf("the failed boot reading alone recorded %d calls, want 0", got)
+	}
+	d.onReadFailure("./output")
+	if calls := rec.Calls(); len(calls) != 1 || calls[0].Title != "Disk Monitoring Failed" {
+		t.Fatalf("calls after the ticker's first failed check = %+v, want Disk Monitoring Failed", calls)
+	}
+
+	rec = notificationtest.New()
+	d = newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	d.sameVolume = func(a, b string) bool { return true }
+	d.onBootReading(diskReading("critical", 97), "./output", "./staging", time.Now())
+	if got := len(rec.ByEvent("disk_critical")); got != 1 {
+		t.Errorf("a full volume at boot sent %d criticals, want 1", got)
+	}
+}
+
+// countingLogger counts Warn lines.
+type countingLogger struct {
+	nopLogger
+	warns int
+}
+
+func (l *countingLogger) Warn(string, ...any) { l.warns++ }
+
+// TestStagingAlertStaysOpenWhileItsVolumeCannotBeRead: an alert that named the
+// staging volume is not closed by a reading that could not include it. With
+// the staging drive unplugged the output reading used to be judged alone, and
+// "Disk Space Recovered" went out for a drive nobody had seen recover. The
+// alert stays open until the staging volume answers again; the output volume
+// can still raise the alert in its own name meanwhile, and that does not let
+// the alert close before staging is seen.
+//
+// Mutants: drop the stagingUnseen return (the first unreadable reading sends
+// the recovery); forget lastStaging when the output volume takes the alert
+// over (the recovery goes out when output clears, staging still unread).
+func TestStagingAlertStaysOpenWhileItsVolumeCannotBeRead(t *testing.T) {
+	rec := notificationtest.New()
+	d := newDiskAlerts(rec, &nopLogger{})
+	d.setThresholds(90, 95)
+	stagingUsed, outUsed := 97.0, 50.0
+	var stagingErr error
+	d.sameVolume = func(a, b string) bool { return false }
+	d.diskSpace = func(string) (*disk.DiskSpace, error) {
+		if stagingErr != nil {
+			return nil, stagingErr
+		}
+		return &disk.DiskSpace{Free: 40 << 30, Total: 100 << 30, UsedPct: stagingUsed}, nil
+	}
+	now := time.Now()
+	tick := func() []string {
+		t.Helper()
+		rec.Reset()
+		now = now.Add(6 * time.Minute)
+		level := "ok"
+		if outUsed >= 95 {
+			level = "critical"
+		}
+		d.onVolumes(diskReading(level, outUsed), "./output", d.readStaging("./output", "./staging"), "./staging", now)
+		var titles []string
+		for _, c := range rec.Calls() {
+			titles = append(titles, c.Title)
+		}
+		return titles
+	}
+
+	if got := tick(); len(got) != 1 || got[0] != "Disk Space Critical" {
+		t.Fatalf("staging at 97%%: %v, want Disk Space Critical", got)
+	}
+	stagingErr = errors.New("the device is not ready")
+	for i := 0; i < 2; i++ {
+		if got := tick(); len(got) != 0 {
+			t.Fatalf("staging unreadable, output at 50%%: sent %v, want nothing (the alert stays open)", got)
+		}
+	}
+	if d.lastLevel != "critical" || !d.lastStaging {
+		t.Fatalf("open alert = %q staging=%v, want critical for the staging volume", d.lastLevel, d.lastStaging)
+	}
+
+	// The output volume fills too: the alert repeats in its name, and its
+	// clearing afterwards still does not close an alert staging is part of.
+	outUsed = 98
+	now = now.Add(diskNotifyCooldown)
+	if got := tick(); len(got) != 1 || got[0] != "Disk Space Critical" {
+		t.Fatalf("output at 98%% with staging unreadable: %v, want Disk Space Critical", got)
+	}
+	outUsed = 50
+	if got := tick(); len(got) != 0 {
+		t.Fatalf("output cleared, staging still unreadable: sent %v, want nothing", got)
+	}
+
+	stagingErr, stagingUsed = nil, 30
+	got := tick()
+	if len(got) != 1 || got[0] != "Disk Space Recovered" {
+		t.Fatalf("staging answered at 30%%: %v, want Disk Space Recovered", got)
+	}
+	if v, _ := rec.Calls()[0].Field("Staging Directory"); v == "" {
+		t.Error("the recovery did not name the staging directory")
+	}
+
+	// Staging moved onto the output volume while its alert was open: there is
+	// no separate volume left to wait for.
+	stagingUsed = 97
+	if got := tick(); len(got) != 1 || got[0] != "Disk Space Critical" {
+		t.Fatalf("staging at 97%% again: %v", got)
+	}
+	d.sameVolume = func(a, b string) bool { return true }
+	if got := tick(); len(got) != 1 || got[0] != "Disk Space Recovered" {
+		t.Fatalf("staging now on the output volume at 50%%: %v, want Disk Space Recovered", got)
 	}
 }

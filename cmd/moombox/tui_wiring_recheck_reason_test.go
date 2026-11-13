@@ -8,26 +8,22 @@ import (
 )
 
 // TestOnRecheckCookiesReturnsTheInconclusiveReasons guards the production call
-// site of Arc 8 Task 12a item (v)'s TUI half — the one thing internal/tui
+// site of Arc 8 Task 12a item (v)'s TUI half, the one thing internal/tui
 // cannot see.
 //
-// THE MUTANT THIS EXISTS FOR: replace `status.YouTubeError, status.TwitchError`
-// in this closure with `"", ""`. It compiles, every test in internal/tui stays
-// green — those tests inject cookieRecheckResultMsg directly, so they exercise
-// the RENDERER and never the wiring that fills it — and the whole feature
-// silently disappears: R C goes back to "could not establish" with no reason,
-// which is exactly the state item (v) was raised about. The chords test next
-// door only asserts the field is assigned at all, so it cannot see this either.
+// THE MUTANT THIS EXISTS FOR: R C's answer losing its two reasons (`"", ""`
+// in place of the status's error strings). Every test in internal/tui stays
+// green under it: those tests inject cookieRecheckResultMsg directly, so they
+// exercise the RENDERER and never the wiring that fills it, and R C goes back
+// to "could not establish" with no reason. The chords test next door only
+// asserts the field is assigned at all, so it cannot see this either.
 //
-// Parsed rather than pattern-matched, for the reasons findChordWirings gives:
-// runTUI needs the whole runState service graph to call, and a substring search
-// for "YouTubeError" would pass on the field appearing anywhere else in the file
-// while proving nothing about THIS return.
-//
-// The verdicts are asserted alongside the reasons, in POSITION. The callback
-// returns four values of which two are strings and two are verdicts; a
-// transposition compiles for the pair of strings, and would report YouTube's
-// reason against Twitch's verdict.
+// The answer is built by recheckCookiesForTUI, and which field lands in which
+// of the four positions is asserted by running it
+// (TestRecheckCookiesForTUIWaitsOnlyForTheFirstCheck, four distinct values).
+// What is left for this test is the closure: runTUI needs the whole runState
+// service graph to call, so it is parsed, and its one return must hand that
+// function's four results on untouched.
 func TestOnRecheckCookiesReturnsTheInconclusiveReasons(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tui_wiring.go", nil, 0)
@@ -56,9 +52,7 @@ func TestOnRecheckCookiesReturnsTheInconclusiveReasons(t *testing.T) {
 			"test cannot guard a site that moved")
 	}
 
-	// Its return. One, and it must still carry four values: the pair of verdicts
-	// R C has always reported, and the pair of reasons that says why an
-	// inconclusive one concluded nothing.
+	// Its return. One, and it is the call that builds the answer.
 	var returns []*ast.ReturnStmt
 	ast.Inspect(lit.Body, func(n ast.Node) bool {
 		// Do not descend into a nested closure: its return is not this
@@ -76,28 +70,15 @@ func TestOnRecheckCookiesReturnsTheInconclusiveReasons(t *testing.T) {
 			"test would be guarding whichever the walk happened to find", len(returns))
 	}
 	results := returns[0].Results
-	if len(results) != 4 {
-		t.Fatalf("OnRecheckCookies returns %d values, want 4 (two verdicts, two reasons)", len(results))
+	if len(results) != 1 {
+		t.Fatalf("OnRecheckCookies returns %d expressions, want the one call to recheckCookiesForTUI: "+
+			"anything built here is R C's answer with no test on it", len(results))
 	}
-
-	// Each position must read the field that belongs there. Selector NAME only:
-	// the receiver is a local whose spelling is not this test's business, but
-	// which AuthStatus field lands in which slot very much is.
-	for i, want := range []string{
-		"YouTubeVerification", "TwitchVerification", "YouTubeError", "TwitchError",
-	} {
-		sel, ok := results[i].(*ast.SelectorExpr)
-		if !ok {
-			t.Errorf("return value %d is %T, want a read of AuthStatus.%s. A literal here — `\"\"` "+
-				"is the mutant — deletes that half of R C's answer with nothing failing: "+
-				"internal/tui's tests inject the message directly and never run this closure",
-				i, results[i], want)
-			continue
-		}
-		if sel.Sel.Name != want {
-			t.Errorf("return value %d reads .%s, want .%s — the four values are positional, and a "+
-				"transposition reports one platform's reason against the other's verdict",
-				i, sel.Sel.Name, want)
-		}
+	call, ok := results[0].(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("OnRecheckCookies returns a %T, want the call to recheckCookiesForTUI", results[0])
+	}
+	if fn, ok := call.Fun.(*ast.Ident); !ok || fn.Name != "recheckCookiesForTUI" {
+		t.Errorf("OnRecheckCookies does not return recheckCookiesForTUI's results")
 	}
 }

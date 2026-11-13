@@ -157,6 +157,11 @@ type Database struct {
 	// must outlive the terminal transition because the operator reads a
 	// failed job's log right after it fails. Guarded by jobLogsMu.
 	logRouted map[string]struct{}
+	// logKept lists the untracked jobs that still hold a buffer, oldest
+	// first: the finished jobs whose log stays readable. It is bounded by
+	// finishedJobLogsKept (untrackForLogsLocked frees the oldest beyond it),
+	// and an ID is never in both logRouted and logKept. Guarded by jobLogsMu.
+	logKept []string
 
 	// GetJobStats cache — the aggregate is a full-table scan, so results are
 	// cached for jobStatsCacheTTL. Not invalidated on writes: stats drive UI
@@ -641,8 +646,13 @@ func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond 
 	for key, val := range fields {
 		col, ok := db.fieldToColumn[key]
 		if !ok {
+			// A key the map does not know is a bug at the call site (a typo,
+			// or a new column without its fieldToColumn entry): that field
+			// is never written while the rest of the map is, and the
+			// conditional forms still report the write as applied. Say so
+			// at Error, where it is seen.
 			if db.logger != nil {
-				db.logger.Debug("UpdateJobFields: ignoring unknown field", "jobID", id, "field", key)
+				db.logger.Error("UpdateJobFields: unknown field not written", "jobID", id, "field", key)
 			}
 			continue
 		}

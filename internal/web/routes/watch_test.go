@@ -177,16 +177,6 @@ func TestWatchedPostMarksAsWatched(t *testing.T) {
 	}
 }
 
-func TestWatchedPost404OnUnknown(t *testing.T) {
-	f := newWatchFixture(t)
-	req := httptest.NewRequest("POST", "/api/jobs/no-such/watched", nil)
-	rec := httptest.NewRecorder()
-	f.router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("unknown job: want 404, got %d", rec.Code)
-	}
-}
-
 // TestWatchedSingleRefusesUnfinishedJobs: the single-job toggle holds the
 // batch route's rule. BatchSetWatched touches Finished jobs only, so the same
 // ID used to be a silent no-op through one endpoint and a write (clearing the

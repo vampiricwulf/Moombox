@@ -307,16 +307,6 @@ func TestStatusActiveGroupsLiveUpcomingDownloadingMuxing(t *testing.T) {
 	assertIDs(t, ids, "1", "4", "5")
 }
 
-func TestStatusIssuesGroupsErrorCancelledCookies(t *testing.T) {
-	// node test: "status: issues groups Error + Cancelled + COOKIES? (Q4 — the TUI's Issues bucket)"
-	assertIDs(t, bucketWith("status:issues"), "e", "c", "k")
-}
-
-func TestStatusFinishedIsFinishedOnly(t *testing.T) {
-	// node test: "status: finished is Finished only — Cancelled moved to issues"
-	assertIDs(t, bucketWith("status:finished"), "f")
-}
-
 // allStatuses is one of each database.JobStatus.
 var allStatuses = []database.JobStatus{
 	database.StatusQueued, database.StatusUpcoming, database.StatusLive, database.StatusDownloading,

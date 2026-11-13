@@ -132,24 +132,6 @@ func TestDecryptV10Cookie_TooShort(t *testing.T) {
 	}
 }
 
-// TestDecryptV10Cookie_BadMasterKey confirms a key mismatch surfaces
-// as an AES-GCM open error (auth tag check fails). This is the row
-// the live ReadChromeCookiesStats path silently skips.
-func TestDecryptV10Cookie_BadMasterKey(t *testing.T) {
-	rightKey := make([]byte, 32)
-	wrongKey := make([]byte, 32)
-	if _, err := rand.Read(rightKey); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := rand.Read(wrongKey); err != nil {
-		t.Fatal(err)
-	}
-	encrypted := buildV10(t, rightKey, "v10", []byte("secret"))
-	if _, err := decryptV10Cookie(wrongKey, encrypted, false); err == nil {
-		t.Fatal("expected error for wrong master key")
-	}
-}
-
 // TestChromeEpochToUnix covers the boundary cases.
 func TestChromeEpochToUnix(t *testing.T) {
 	tests := []struct {

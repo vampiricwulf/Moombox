@@ -38,33 +38,38 @@ The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) 
 ## File Mappings
 
 ### yt-dlp → Moombox
+yt-dlp paths are under `yt_dlp/` in the upstream repo. The YouTube extractor is a package, `extractor/youtube/` — there is no `extractor/youtube.py` any more.
+
 | yt-dlp Path | Moombox File | What It Covers |
 |-------------|-------------|----------------|
-| `extractor/youtube.py` | `youtube/player_api.go` | Innertube API, format parsing |
-| `extractor/youtube.py` | `youtube/format_selector.go` | Format selection algorithm |
-| `extractor/youtube.py` | `youtube/watch_page.go` | Watch page scraping, visitor data |
-| `extractor/youtube.py` | `youtube/auth.go` | Client selection (WEB/ANDROID/IOS/TV_EMBEDDED/MWEB/WEB_CREATOR) |
-| `extractor/twitch.py` | `twitch/api.go` | GQL API, stream/VOD info |
-| `extractor/twitch.py` | `twitch/hls.go` | HLS playlist parsing |
-| `extractor/twitch.py` | `twitch/auth.go` | OAuth token handling |
-| `downloader/` | `engine/downloader.go` | Segment download strategies |
-| `downloader/` | `engine/manifest.go` | DASH manifest parsing |
+| `extractor/youtube/_video.py` | `internal/youtube/player_api.go`, `internal/youtube/player_api_parsing.go` | Innertube API, format parsing |
+| `extractor/youtube/_video.py` | `internal/youtube/format_selector.go` | Format selection algorithm |
+| `extractor/youtube/_video.py` | `internal/youtube/watch_page.go` | Watch page scraping, visitor data |
+| `extractor/youtube/_base.py` (`INNERTUBE_CLIENTS`) | `internal/constants/constants.go` (the client configs), `internal/youtube/player_api_strategy.go` (which client is asked, in what order) | Client selection: WEB_EMBEDDED_PLAYER, TV, WEB_CREATOR, VISIONOS, ANDROID_VR |
+| `extractor/youtube/_base.py` (SAPISID hash), `cookies.py` | `internal/youtube/auth.go` | Cookie auth: the SAPISID authorization header |
+| `extractor/youtube/pot/` | `internal/youtube/pot_binding.go`, `internal/bgutils/pot_provider.go` | PO token policy and providers |
+| `extractor/youtube/jsc/` | `bgutil-sidecar/vendor/ejs/`, `internal/cipher/` | Signature and n-challenge solving (see the ejs table) |
+| `extractor/twitch.py` | `internal/twitch/api.go` | GQL API, stream/VOD info |
+| `extractor/twitch.py` | `internal/twitch/hls.go` | HLS playlist parsing |
+| `extractor/twitch.py` | `internal/twitch/auth.go` | OAuth token handling |
+| `downloader/` | `internal/engine/downloader.go` | Segment download strategies |
+| `downloader/` | `internal/engine/manifest.go` | DASH manifest parsing |
 
 ### ejs → Moombox
 | ejs Component | Sidecar File | Fallback (Goja) | What It Covers |
 |---------------|-------------|----------------|----------------|
-| Cipher algorithm | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/extractor.go` | Regex extraction of solver candidates from player.js |
-| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/solver.go` | Compiles full player.js in Goja VM, 10-slot LRU cache (`solverCacheSize`) |
-| Transform functions | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/decrypt.go` | Decrypts signature and n-parameter |
+| Cipher algorithm | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/extractor.go` | Regex extraction of solver candidates from player.js |
+| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/solver.go` | Compiles full player.js in Goja VM, 10-slot LRU cache (`solverCacheSize`) |
+| Transform functions | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/decrypt.go` | Decrypts signature and n-parameter |
 
 The sidecar runs ejs in V8 (Node.js). The `internal/cipher/` goja implementation is the fallback path when `use_sidecar = false` or the sidecar process is down. Vendored source pinned to commit SHA in `bgutil-sidecar/vendor/ejs/VERSION`.
 
 ### BgUtils → Moombox
 | BgUtils Component | Sidecar | Fallback (Goja) | What It Covers |
 |--------------------|---------|----------------|----------------|
-| Challenge handling | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/challenge.go` | Challenge descrambling |
-| BotGuard runtime | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/botguard.go` | Goja VM execution |
-| Token minting | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/webpo_minter.go` | PO token generation |
+| Challenge handling | `bgutils-js` npm dep in `bgutil-sidecar/` | `internal/bgutils/challenge.go` | Challenge descrambling |
+| BotGuard runtime | `bgutils-js` npm dep in `bgutil-sidecar/` | `internal/bgutils/botguard.go` | Goja VM execution |
+| Token minting | `bgutils-js` npm dep in `bgutil-sidecar/` | `internal/bgutils/webpo_minter.go` | PO token generation |
 
 The sidecar uses `bgutils-js` (the consumable npm package from LuanRT/BgUtils) running in Node.js. The `internal/bgutils/` goja implementation is the fallback. npm pin in `bgutil-sidecar/package.json`.
 
@@ -79,16 +84,18 @@ bash references/update-all.sh        # Summary of new commits per repo
 bash references/update-all.sh --diff  # File-level diffs (limited to 500 lines per repo)
 ```
 
-The script's "new commits" are only those since the local clone's last pull. If a run pulled without reviewing, they will not match the ledger's range, so always list from the ledger SHA:
+The script's "new commits" are only those since the local clone's last pull; if a run pulled without reviewing, they will not match the ledger's range. Its "since last review" line counts the commits after the ledger SHA and prints the command that lists them. Review that range, and run the command yourself when the line says the SHA was not found:
 
 ```bash
 git -C references/yt-dlp log --oneline <last-reviewed-sha>..HEAD
 ```
 
+A repo the script marks FETCH FAILED or PULL FAILED was not updated (offline, a diverged clone, a dirty tree); fix that before reading its range.
+
 **No `references/` (cloud session, fresh machine):** clone the repos you need with `git clone --filter=blob:none <url>` from the ledger's table into a scratch directory (never into the repo), then run the same `log <sha>..HEAD`.
 
 ### Step 2: Triage yt-dlp Changes
-Focus on: `yt_dlp/extractor/youtube.py`, `yt_dlp/extractor/twitch.py`, `yt_dlp/networking/`, `yt_dlp/utils/`, `yt_dlp/downloader/`
+Focus on: `yt_dlp/extractor/youtube/` (a package: `_video.py`, `_base.py`, `pot/`, `jsc/`), `yt_dlp/extractor/twitch.py`, `yt_dlp/networking/`, `yt_dlp/utils/`, `yt_dlp/downloader/`
 
 **Priority:** Auth/cookie changes > format selection > extraction logic > download strategies
 
@@ -129,12 +136,12 @@ Commit the ledger in the same commit as the port when there is one, or in a `doc
 - **Python → Go**: Translate dict comprehensions, regex groups, dynamic typing to idiomatic Go with proper error handling
 - **Python regex**: Go `regexp` doesn't support lookahead/lookbehind — rewrite patterns
 - **Goja VM constraints**: No WebAssembly, no native crypto — shimmed via `internal/goja/` (minimal DOM, TextEncoder, timers)
-- **VM memory**: BotGuard and cipher VMs hold multi-MB JavaScript runtimes. Auto-evict when idle. Cipher caps the LRU at 10 VMs (`solverCacheSize`, `internal/cipher/solver.go`) — ~30-50 MB each, so ~500 MB worst case. It was 3 until 2026-04; multi-channel monitoring routinely holds 4+ active player URLs and the smaller cap caused constant re-compiles.
+- **VM memory**: BotGuard and cipher VMs hold multi-MB JavaScript runtimes. A BotGuard minter is cleaned up when its token's TTL runs out (`internal/bgutils/pot_provider.go`). The cipher cache has no idle eviction (evaluated and declined): only the LRU cap bounds it. Cipher caps the LRU at 10 VMs (`solverCacheSize`, `internal/cipher/solver.go`) — ~30-50 MB each, so ~500 MB worst case. It was 3 until 2026-04; multi-channel monitoring routinely holds 4+ active player URLs and the smaller cap caused constant re-compiles.
 - **No CGo**: All solutions must be pure Go
 
 ## Common Mistakes
 
-- Trusting `update-all.sh`'s "new commits" as the review range instead of the ledger's *Last reviewed* SHA
+- Trusting `update-all.sh`'s "new commits" (the pull delta) as the review range instead of the range from the ledger's *Last reviewed* SHA, which its "since last review" line reports
 - Finishing a review without updating `docs/spec/upstream-ports.md`, or moving a SHA past a relevant commit without listing it under *Open upstream items*
 
 - Porting yt-dlp cipher changes without checking ejs — ejs is often more current for cipher/n-challenge

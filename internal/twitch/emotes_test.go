@@ -34,6 +34,9 @@ func seedEmoteCache(er *EmoteResolver, key string, data *TwitchEmoteData) {
 // installEmoteFetchStub points the package HTTP client at one canned reply for
 // every provider. status 0 means "the transport itself fails", i.e. all three
 // providers are down. It returns the request counter.
+// The counter counts the per-channel requests only: a Resolve also fetches the
+// providers' global sets (emotes_global.go), which the tests in
+// emotes_global_test.go count for themselves.
 //
 // The swap is why no test in this file may call t.Parallel: twitchHTTPClient is
 // shared with every other test in the package.
@@ -43,7 +46,9 @@ func installEmoteFetchStub(t *testing.T, status int, body string) *atomic.Int64 
 	prev := twitchHTTPClient
 	t.Cleanup(func() { twitchHTTPClient = prev })
 	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
+		if !isGlobalEmoteURL(req.URL.String()) {
+			calls.Add(1)
+		}
 		if status == 0 {
 			return nil, fmt.Errorf("emote provider unreachable")
 		}
@@ -64,9 +69,13 @@ func TestEmoteResolverCacheHit(t *testing.T) {
 	seedEmoteCache(er, "testchannel", &TwitchEmoteData{
 		BTTV: []EmoteInfo{{ID: "1", Code: "test", URL: "https://example.com"}},
 	})
-	// No HTTP stub installed: a fetch here would hit the real network, which is
-	// itself the assertion that the cache was used.
+	// Every request fails, so only the cache can answer; the global sets, which
+	// a Resolve also asks for, fail too and add nothing.
+	calls := installEmoteFetchStub(t, 0, "")
 	result := er.Resolve(context.Background(), "ignored", "TestChannel")
+	if n := calls.Load(); n != 0 {
+		t.Errorf("a cached channel made %d per-channel requests, want 0", n)
+	}
 	if result == nil {
 		t.Fatal("expected cached result")
 	}
@@ -138,8 +147,7 @@ func TestEmoteResolverClear(t *testing.T) {
 //
 // Mutants: caching unconditionally (the second Resolve makes no requests and
 // returns non-nil); returning a non-nil empty set on total failure (the
-// per-downloader cache in resolveEmotesCached latches THAT instead, which is
-// the same bug one layer up).
+// chat file is then given an empty emotes block as if it were an answer).
 func TestEmoteResolverDoesNotCacheATotalFailure(t *testing.T) {
 	er := NewEmoteResolver(&testLogger{})
 	calls := installEmoteFetchStub(t, 0, "")
@@ -209,7 +217,12 @@ func TestEmoteResolverCachesWhenOnlyOneProviderAnswers(t *testing.T) {
 	prev := twitchHTTPClient
 	t.Cleanup(func() { twitchHTTPClient = prev })
 	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
+		if !isGlobalEmoteURL(req.URL.String()) {
+			calls.Add(1)
+		}
+		if isGlobalEmoteURL(req.URL.String()) {
+			return nil, fmt.Errorf("emote provider unreachable")
+		}
 		if !strings.HasPrefix(req.URL.String(), constants.TwitchEmoteAPIs.BTTVChannel) {
 			// FFZ and 7TV: the transport itself fails, which is the one thing
 			// fetchFFZ/fetch7TV report as "did not answer" (a 200 with no
@@ -349,5 +362,105 @@ func TestEmoteResolverKeepsA5xxANonAnswer(t *testing.T) {
 	if n := calls.Load(); n != 6 {
 		t.Errorf("the second Resolve brought the total to %d requests, want 6 — a total "+
 			"failure must not be cached", n)
+	}
+}
+
+// A provider that fails while the others answer is not cached as "no emotes"
+// for the TTL: the answers are served, and once the retry floor has passed the
+// channel is fetched again and the provider's emotes arrive.
+func TestEmoteResolverRetriesAFailedProviderAfterTheFloor(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	bodies := allEmoteBodies()
+	delete(bodies, api.SevenTVUser)
+	routes := installEmoteRoutes(t, bodies)
+
+	got := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || emoteCodes(got.BTTV) == "" {
+		t.Fatalf("Resolve with 7TV down = %+v, want the providers that answered", got)
+	}
+
+	routes.set(api.SevenTVUser, `{"emote_set":{"emotes":[{"id":"c7","name":"chan7TV","data":{"host":{"url":"//cdn.7tv.app/emote/c7","files":[{"name":"2x.webp"}]}}}]}}`)
+	now = now.Add(globalEmoteRetryFloor - time.Second)
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := routes.count(api.SevenTVUser); n != 0 {
+		t.Fatalf("inside the retry floor 7TV was asked %d more times, want 0", n)
+	}
+
+	now = now.Add(time.Minute)
+	got = er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || !strings.Contains(emoteCodes(got.SevenTV), "chan7TV") {
+		t.Errorf("after the retry floor Resolve = %+v, want 7TV's channel emote", got)
+	}
+	// All three answered, so the entry is back on the full TTL.
+	now = now.Add(globalEmoteRetryFloor + time.Minute)
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := routes.count(api.SevenTVUser); n != 1 {
+		t.Errorf("a complete entry was refetched after the floor: 7TV asked %d times, want 1", n)
+	}
+}
+
+// A refresh in which one provider fails keeps that provider's cached list
+// beside the other providers' new answers.
+func TestEmoteResolverRefreshKeepsAFailedProvidersList(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	seedEmoteCache(er, "chan-1", &TwitchEmoteData{
+		BTTV:    []EmoteInfo{{ID: "old", Code: "oldBTTV"}},
+		SevenTV: []EmoteInfo{{ID: "k7", Code: "kept7TV"}},
+	})
+	bodies := allEmoteBodies()
+	delete(bodies, api.SevenTVUser)
+	installEmoteRoutes(t, bodies)
+
+	now = now.Add(emoteCacheTTL + time.Minute)
+	got := er.Resolve(context.Background(), "chan-1", "chan-1")
+	if got == nil || !strings.HasPrefix(emoteCodes(got.SevenTV), "kept7TV") {
+		t.Errorf("SevenTV after a refresh 7TV failed = %+v, want the cached list kept", got)
+	}
+	if got == nil || !strings.HasPrefix(emoteCodes(got.BTTV), "catJAM") {
+		t.Errorf("BTTV after the refresh = %+v, want BTTV's new answer", got)
+	}
+}
+
+// A fetch cut short by the caller's own ctx starts no retry floor: the next
+// resolve asks the providers again at once.
+func TestEmoteResolverCallerGoneStartsNoRetryFloor(t *testing.T) {
+	er := NewEmoteResolver(&testLogger{})
+	now := time.Now()
+	er.now = func() time.Time { return now }
+	api := constants.TwitchEmoteAPIs
+	ctx, cancel := context.WithCancel(context.Background())
+	prev := twitchHTTPClient
+	t.Cleanup(func() { twitchHTTPClient = prev })
+	var sevenTVCalls atomic.Int64
+	twitchHTTPClient = &http.Client{Transport: probeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		url := req.URL.String()
+		switch {
+		case isGlobalEmoteURL(url):
+			return nil, fmt.Errorf("emote provider unreachable")
+		case strings.HasPrefix(url, api.SevenTVUser):
+			// The caller goes away while 7TV is still being asked.
+			sevenTVCalls.Add(1)
+			cancel()
+			return nil, req.Context().Err()
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    req,
+		}, nil
+	})}
+
+	er.Resolve(ctx, "chan-1", "chan-1")
+	er.Resolve(context.Background(), "chan-1", "chan-1")
+	if n := sevenTVCalls.Load(); n != 2 {
+		t.Errorf("7TV was asked %d times over two resolves, want 2: the first ended with "+
+			"the caller's ctx, which is not a provider failure", n)
 	}
 }

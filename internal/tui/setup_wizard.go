@@ -2123,3 +2123,21 @@ func (m *SetupWizardModel) cookieStepFooter(escLabel string, contentW int) strin
 	gap := max(1, contentW-ansi.StringWidth(left)-ansi.StringWidth(right))
 	return DimStyle.Render(left) + strings.Repeat(" ", gap) + DimStyle.Render(right)
 }
+
+// wheelMovesChannel reports whether a wheel notch in direction dir (-1 up,
+// 1 down) has a row to move the channel list's cursor to: the wizard is on
+// the channel list of either flow, with no edit, delete confirm or save in
+// the way. Every other wizard screen is a form or a three-row menu, and the
+// wheel does nothing there.
+func (m *SetupWizardModel) wheelMovesChannel(dir int) bool {
+	if !m.visible || m.saving || m.channelMode == "edit" || m.channelDeleteConf {
+		return false
+	}
+	onList := m.mode == setupModeSimple && m.simpleStage == setupSimpleChannels ||
+		m.mode == setupModeAdvanced && m.advancedForm == nil && m.advancedFormDone && m.advancedCookieDone
+	if !onList {
+		return false
+	}
+	next := m.channelIndex + dir
+	return next >= 0 && next < len(m.channels)
+}

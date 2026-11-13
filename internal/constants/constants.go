@@ -429,18 +429,23 @@ var TwitchGQLHashes = struct {
 
 // TwitchEmoteAPIs contains third-party emote API endpoints.
 //
-// Only the per-channel endpoints are referenced today; global-emote
-// endpoints were removed because they had no callers (audit-finding #44).
-// Re-add BTTVGlobal/FFZGlobal/SevenTVGlobal if global emote merging is
-// ever wired into emotes.go.
+// The per-channel endpoints take a Twitch channel ID as a further path
+// segment; the global ones are fetched as they are (internal/twitch/emotes.go
+// and emotes_global.go).
 var TwitchEmoteAPIs = struct {
-	BTTVChannel string
-	FFZChannel  string
-	SevenTVUser string
+	BTTVChannel   string
+	FFZChannel    string
+	SevenTVUser   string
+	BTTVGlobal    string
+	FFZGlobal     string
+	SevenTVGlobal string
 }{
-	BTTVChannel: "https://api.betterttv.net/3/cached/users/twitch",
-	FFZChannel:  "https://api.frankerfacez.com/v1/room/id",
-	SevenTVUser: "https://7tv.io/v3/users/twitch",
+	BTTVGlobal:    "https://api.betterttv.net/3/cached/emotes/global",
+	FFZGlobal:     "https://api.frankerfacez.com/v1/set/global",
+	SevenTVGlobal: "https://7tv.io/v3/emote-sets/global",
+	BTTVChannel:   "https://api.betterttv.net/3/cached/users/twitch",
+	FFZChannel:    "https://api.frankerfacez.com/v1/room/id",
+	SevenTVUser:   "https://7tv.io/v3/users/twitch",
 }
 
 // =============================================================================

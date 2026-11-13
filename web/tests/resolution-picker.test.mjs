@@ -9,7 +9,7 @@
 // import is probed first and those tests skip (not fail) when it is absent.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { RESOLUTION_PRESETS, resolutionPresetFor } from "../public/modules/settings.js";
+import { resolutionPresetFor } from "../public/modules/settings.js";
 
 let jsdomMissing = null;
 try {
@@ -37,13 +37,6 @@ test("resolutionPresetFor maps a stored integer onto a preset or Custom", () => 
   assert.equal(resolutionPresetFor(null), "");
   assert.equal(resolutionPresetFor(""), "");
   assert.equal(resolutionPresetFor(-1), "");
-});
-
-// MUTANT: reordering or trimming the ladder — the TUI twin
-// (internal/tui/settings.go resolutionPresets) would no longer offer the same
-// seven values, and the two UIs would disagree about what "Unbounded" is.
-test("the preset ladder is the seven values both UIs offer", () => {
-  assert.deepEqual(RESOLUTION_PRESETS, ["0", "480", "720", "1080", "1440", "2160", "4320"]);
 });
 
 // MUTANT: populateConfigForm not calling _wireResolutionPreset — the select

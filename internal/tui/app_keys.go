@@ -57,6 +57,24 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
+	// The size guard, after the Ctrl+C hoist so the wizard's cookie-slot
+	// release above still runs (owner ruling R-C6). Below the compact floor
+	// the screen is a notice and every other key is ignored: a chord typed
+	// blind once cancelled a recording. An overlay open in a terminal smaller
+	// than it needs is kept under a notice (overlayDrawFor), and only Esc
+	// reaches it, where the notice says it does (heldEscFor): never an Esc
+	// that would quit, or raise or answer a prompt that is not on screen. An
+	// overlay drawn bare is on screen and takes its keys as usual, below.
+	if a.layoutMode() == layoutTooSmall {
+		return a, nil
+	}
+	if o := a.activeOverlay(); o != nil && a.overlayDrawFor(o) == drawHeld {
+		if key != keyEsc || a.heldEscFor(o) == heldEscOff {
+			return a, nil
+		}
+		return o.key(a, msg, key)
+	}
+
 	if o := a.activeOverlay(); o != nil {
 		return o.key(a, msg, key)
 	}
@@ -141,6 +159,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "m":
 		a.seenChordHint = true
+		// The action menu is an overlay itself.
+		if a.refuseOverlay("action menu") {
+			return a, nil
+		}
 		a.actionMenu.SetSize(a.width, a.height)
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
@@ -150,17 +172,34 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "`":
 		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
-	case keyTab:
-		a.cycleFocus(1)
-		return a, nil
-	case keyShiftTab:
-		a.cycleFocus(-1)
+	case keyTab, keyShiftTab:
+		// The compact layout has the one panel: no focus to move.
+		if a.layoutMode() == layoutNormal {
+			delta := 1
+			if key == keyShiftTab {
+				delta = -1
+			}
+			a.cycleFocus(delta)
+		}
 		return a, nil
 	case keySpace:
 		// Space: toggle batch selection on focused task (only when task panel focused)
 		if a.focusedPanel == PanelTasks {
 			if job := a.taskList.SelectedJob(); job != nil {
 				a.taskList.ToggleSelection(job.ID)
+			}
+		}
+		return a, nil
+	case keyCtrlA:
+		// Ctrl+A: select every row the Tasks list shows (owner ruling R2-T1).
+		// It never clears: Esc is the one way out of a selection. An armed
+		// chord never gets here (handleChord answers any other key as an
+		// invalid chord), so a confirm that named its count cannot grow.
+		if a.focusedPanel == PanelTasks {
+			if n := a.taskList.SelectAllShown(); n > 0 {
+				a.setFeedback("Selected " + jobCount(n) + " · Esc clears")
+			} else {
+				a.setFeedback("No tasks to select")
 			}
 		}
 		return a, nil
@@ -269,6 +308,18 @@ func (a *App) cancelChord() {
 	a.clearFeedback()
 }
 
+// setPrefixHint writes the hint of a prefix that has just been armed. Where
+// everything under the prefix opens an overlay the layout cannot draw, the
+// hint is the size refusal, in the refusal's colour.
+func (a *App) setPrefixHint(prefix string) {
+	hint, refused := a.chordHint(prefix)
+	if refused || (prefix == "q" && a.jobVerb.busy) {
+		a.setFeedbackWithSeverity(hint, severityWarning)
+		return
+	}
+	a.setFeedback(hint)
+}
+
 // handleChord processes the chord state machine. Returns (model, cmd, handled).
 func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	now := time.Now()
@@ -327,7 +378,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	case "a", "r", "o", "e", "q":
 		a.seenChordHint = true
 		a.chord = chordState{prefix: key, prefixTime: now}
-		a.setFeedback(a.chordFeedback(key))
+		a.setPrefixHint(key)
 		return a, nil, true
 	}
 
@@ -351,6 +402,23 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	}
 	if item == nil {
 		return a, nil, false
+	}
+
+	// Refused before any job check or confirm: in a terminal smaller than
+	// its overlay needs, the answer to a chord that opens one is the same
+	// whatever is selected (dispatchAction holds the same guard for every
+	// other route).
+	if item.Opens != "" && a.refuseOverlay(item.Opens) {
+		return a, nil, true
+	}
+
+	// A Reinitialize is refused while a Resume or Reinitialize is running
+	// (dispatchAction). Said here, before the confirm is armed: the confirm
+	// line walks the staging directory to say what the reset deletes, and
+	// answering it would only earn the refusal.
+	if chord == "A I" && a.jobVerbBusy() {
+		a.disarmChord()
+		return a, nil, true
 	}
 
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
@@ -406,8 +474,8 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	if item.NeedsConfirm {
 		a.chord.action = key
 		a.chord.actionTime = time.Now()
-		a.setFeedback(fmt.Sprintf("Press %s to confirm %s (3s)",
-			strings.ToUpper(key), strings.ToLower(item.HintLabel)))
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s%s (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel), confirmDetail(item, nil)))
 		return a, nil, true
 	}
 

@@ -81,6 +81,14 @@ const (
 	// render as "never configured", which sends the operator to set cookies up
 	// again instead of to the permission that is actually broken.
 	CookieStatusFileUnreadable
+	// CookieStatusChecking: the first cookie auth check of the process has not
+	// answered yet (cookies.AuthStatus.Unchecked; owner ruling R-H2). The TUI
+	// starts while that check runs and seeds this state before its first frame
+	// (App.SetCookieStatus), so this is the badge's first state. Nothing
+	// is known, so the badge shows neither the no-cookies colour nor the
+	// re-login prompt. Appended like the two above: CookieStatusNone stays
+	// the zero value.
+	CookieStatusChecking
 )
 
 // StatusBarModel renders the bottom status bar.
@@ -126,7 +134,7 @@ type StatusBarModel struct {
 	// sidecarDown indicates that the BotGuard sidecar is not running. An
 	// alert, not a status: while it is down, signature-ciphered formats
 	// cannot be resolved at all (sig has no goja fallback) and a PO token
-	// mint fails at once.
+	// mint fails, once the restart grace is spent.
 	sidecarDown bool
 	// counts is the job tally, recomputed once per SetJobs instead of once
 	// per frame. metricTiers used to call tallyJobs() on every render — one
@@ -620,6 +628,16 @@ func cookieUnknownLabel(code string, t barTier) string {
 	return code + ": Unknown"
 }
 
+// cookieCheckingLabel words the badge of a platform whose first cookie check
+// has not answered yet. Abbreviates at tierTight like its siblings, to the
+// code plus an ellipsis, which no other badge carries.
+func cookieCheckingLabel(code string, t barTier) string {
+	if t >= tierTight {
+		return code + "…"
+	}
+	return code + ": checking…"
+}
+
 // cookieFileErrorLabel is cookieUnknownLabel's sibling for the unreadable-file
 // state. Abbreviates at tierTight like the others, to the code plus a "?" —
 // not to "YT!", which belongs to the re-login prompt whose remedy is a browser
@@ -677,12 +695,12 @@ func cookieFileErrorLabel(code string, t barTier) string {
 // stays binary, matching them, rather than inventing a third answer here.
 //
 // One site deliberately decides the empty case the OTHER way and is not a
-// counter-example to the above: worker.go:1072 is choosing which platform to
-// drive a refresh AGAINST, where guessing wrong does work on the wrong
-// credentials. Attributing a badge and dispatching a refresh carry different
-// costs for the same unknown, so they are allowed to differ — but a survey
-// that listed only the agreeing sites would have read as more settled than it
-// is.
+// counter-example to the above: attemptCookieRefresh (worker_failure.go) is
+// choosing which platform to drive a refresh AGAINST, where guessing wrong
+// does work on the wrong credentials. Attributing a badge and dispatching a
+// refresh carry different costs for the same unknown, so they are allowed to
+// differ — but a survey that listed only the agreeing sites would have read
+// as more settled than it is.
 //
 // This deliberately does NOT filter on ParkReason, and the distinction is
 // worth stating because the badge is coarser than the status it reads. Coarser
@@ -690,8 +708,9 @@ func cookieFileErrorLabel(code string, t barTier) string {
 // dead credentials or membership", and that is a tidier split than the code:
 //
 //   - ParkReasonMembership: the request WAS signed in and YouTube refused
-//     anyway. worker.go:1058 logs "the credentials are alive and the account
-//     simply lacks access". The remedy is cookies from a DIFFERENT account.
+//     anyway. attemptCookieRefresh (worker_failure.go) logs "the credentials
+//     are alive and the account simply lacks access". The remedy is cookies
+//     from a DIFFERENT account.
 //   - ParkReasonAuth: usually dead credentials — but not only. The worker
 //     (parkReasonForError) files twitch.ErrSubscriberOnly here ON PURPOSE: it is
 //     Usher's 403 to a session not shown to be signed in, and a refusal whose
@@ -730,6 +749,7 @@ func (m *StatusBarModel) parkedCookieJobs() (yt, tw bool) {
 // CookieBadgePrecedence, which the dashboard's COOKIE_BADGE_PRECEDENCE
 // (web/public/modules/utils.js) must equal.
 const (
+	badgeChecking       = "checking"
 	badgeRelogin        = "relogin"
 	badgeFileUnreadable = "fileUnreadable"
 	badgeParked         = "parked"
@@ -741,12 +761,13 @@ const (
 
 // CookieBadgePrecedence is the cookie badge's one written precedence (owner
 // ruling R-D4): Relogin > FileUnreadable > Parked/Rejected > Unknown > None >
-// OK. renderCookieStatus draws the first state on it that holds
+// OK, with Checking ahead of them all (owner ruling R-H2: until the first
+// check of the process answers, nothing else is shown). renderCookieStatus draws the first state on it that holds
 // (cookieBadgeState), and the dashboard's cookieIndicatorState walks the same
 // list (COOKIE_BADGE_PRECEDENCE, compared by cmd/moombox's parity test). The
 // check's own state comes from cmd/moombox cookieBadgeFor — authenticated
 // first, so FileUnreadable, None, Unknown and Rejected never hold beside OK.
-var CookieBadgePrecedence = []string{badgeRelogin, badgeFileUnreadable, badgeParked, badgeRejected, badgeUnknown, badgeNone, badgeOK}
+var CookieBadgePrecedence = []string{badgeChecking, badgeRelogin, badgeFileUnreadable, badgeParked, badgeRejected, badgeUnknown, badgeNone, badgeOK}
 
 // cookieBadgeState is the first state of CookieBadgePrecedence that holds for
 // a platform whose check reads check and which has a job parked in COOKIES?
@@ -755,6 +776,8 @@ func cookieBadgeState(check CookieStatus, parked bool) string {
 	for _, s := range CookieBadgePrecedence {
 		var holds bool
 		switch s {
+		case badgeChecking:
+			holds = check == CookieStatusChecking
 		case badgeRelogin:
 			holds = check == CookieStatusRelogin
 		case badgeFileUnreadable:
@@ -839,6 +862,12 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// dashboard's cookieIndicatorState follows too.
 	if m.ytActive {
 		switch cookieBadgeState(m.ytCookie, ytRejected) {
+		case badgeChecking:
+			// Not actionable, so it goes with the healthy states at
+			// tierEssential. Dim: no colour may suggest a verdict.
+			if healthy {
+				parts = append(parts, DimStyle.Render(cookieCheckingLabel("YT", t)))
+			}
 		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("YT!"))
@@ -889,6 +918,11 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 	// and gets the neutral dim indicator, unlike YouTube's yellow warning.
 	if m.twActive {
 		switch cookieBadgeState(m.twCookie, twRejected) {
+		case badgeChecking:
+			// Same arm as YouTube's; the two ladders stay the same shape.
+			if healthy {
+				parts = append(parts, DimStyle.Render(cookieCheckingLabel("TW", t)))
+			}
 		case badgeRelogin:
 			if t >= tierTight {
 				parts = append(parts, statusBarRedStyle.Render("TW!"))
@@ -947,4 +981,12 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 		return ""
 	}
 	return strings.Join(parts, " ") + " "
+}
+
+// alerts is the bar's warnings alone, in their shortest form: offline, the
+// sidecar down, a disk warning or hold, and the cookie badges that ask for
+// something. "" while everything is healthy. The compact layout's status
+// line shows these (App.compactStatusLine).
+func (m *StatusBarModel) alerts() string {
+	return m.renderMetrics(tierEssential, m.counts) + m.renderCookieStatus(tierEssential, m.counts)
 }

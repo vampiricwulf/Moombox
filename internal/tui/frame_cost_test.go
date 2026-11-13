@@ -138,20 +138,24 @@ func BenchmarkProgressFrameAtLogCap(b *testing.B) {
 // 20,623 allocations because all four panels re-rendered unconditionally;
 // with the CORE-2 caches it was 100, of which the status bar — then the one
 // panel with no cache, because it tallied every job on every frame — was 70.
-// Arc C gave the status bar the same key-comparison cache, and the frame is
-// now 30 (≈146,600 B): four key comparisons and two lipgloss joins.
+// Arc C gave the status bar the same key-comparison cache, and the frame was
+// then 30 allocations but still ≈146,600 B and ~0.5 ms: the two lipgloss
+// joins of the four cached panels, which measure the width of every line.
+// The count could not see that cost; the bytes could. The composed frame is
+// now memoised too (frameComposer, frame_compose.go), and an unchanged frame
+// is five key comparisons: 0 allocations, 0 bytes.
 //
-// The budget is 2x the measured number. The measurement is exactly 30 with no
-// variance at all — across repeated runs and across terminal/colour
-// environments — so the headroom is for a Go or lipgloss release that
-// allocates differently, not for drift in this code. 4x was too loose to be
-// a pin: a partial regression (one panel re-rendering a cheap part of itself)
-// would have passed silently, and the cheapest un-cached panel here costs
-// thousands, so nothing legitimate lives between 60 and 120.
+// The measurement is exactly 0 with no variance, so the headroom is for a Go
+// release that heap-allocates a key, not for drift in this code. Nothing
+// legitimate lives between these budgets and the cheapest regression: the
+// joins alone are 30 allocations and 146 KB, an un-cached panel thousands.
 //
-// Asserted on allocations, not nanoseconds: allocation counts are
-// deterministic across machines and CI runners, wall time is not.
-const maxCachedFrameAllocs = 60
+// Asserted on allocations and bytes, not nanoseconds: both are deterministic
+// across machines and CI runners, wall time is not.
+const (
+	maxCachedFrameAllocs = 8
+	maxCachedFrameBytes  = 4096
+)
 
 // maxCachedLogPanelAllocs bounds the log panel ALONE on an unchanged frame.
 // Returning the memo allocates nothing at all (measured 0); the headroom is
@@ -225,9 +229,12 @@ func steadyStateAllocs(t *testing.T, body func()) (allocs, bytes uint64) {
 //
 // Mutant: deleting the cache lookup at the top of TaskListModel.View(), or
 // JobDetailsModel.View(), or LogViewerModel.View() — the whole-frame budget
-// fails by more than an order of magnitude. Measured on this fixture: 100
-// allocations cached, 8,304 with the task list's cache gone, 6,527 with the
-// details panel's, 5,993 with the log panel's.
+// fails by more than an order of magnitude. Measured on this fixture, before
+// the frame memo: 100 allocations cached, 8,304 with the task list's cache
+// gone, 6,527 with the details panel's, 5,993 with the log panel's.
+// Mutant: deleting the frame-memo lookup in App.View() — the frame is 1
+// allocation but ~32 KB (the frame rebuilt from remembered measurements),
+// and the bytes budget fails where the count alone would pass.
 // Mutant: deleting the cache lookup in LogViewerModel.View() specifically —
 // the log-panel budget fails as well, naming the panel (5,892).
 func TestFrameCostAtLogCap(t *testing.T) {
@@ -240,6 +247,10 @@ func TestFrameCostAtLogCap(t *testing.T) {
 	if frameAllocs > maxCachedFrameAllocs {
 		t.Errorf("a no-change frame allocates %d times, budget %d — a panel render cache is not being consulted",
 			frameAllocs, maxCachedFrameAllocs)
+	}
+	if frameBytes > maxCachedFrameBytes {
+		t.Errorf("a no-change frame allocates %d bytes, budget %d — View() is joining the panels again "+
+			"instead of returning the frame it remembered (frameComposer)", frameBytes, maxCachedFrameBytes)
 	}
 
 	// The same fixture, not a second one: a.View() above has already
@@ -258,7 +269,7 @@ func TestFrameCostAtLogCap(t *testing.T) {
 	//
 	// Mutant: delete the key comparison at the top of StatusBarModel.View() —
 	// this budget fails at 70 and NAMES the panel, where the whole-frame
-	// budget only says a frame got dearer (it fails too, at 30+70, but a
+	// budget only says a frame got dearer (it fails too, at 70, but a
 	// future panel added to the frame could absorb that margin; this one
 	// cannot be absorbed).
 	barAllocs, barBytes := steadyStateAllocs(t, func() { a.statusBar.View() })

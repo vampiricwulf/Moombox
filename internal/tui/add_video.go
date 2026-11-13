@@ -211,6 +211,9 @@ type AddVideoModel struct {
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
+	// heldInput is the input as it was when the terminal left the normal
+	// layout (bareHeldInput). SetSize is its one writer and reader.
+	heldInput bareHeldInput
 
 	// Loading spinner
 	spinner spinner.Model
@@ -242,8 +245,15 @@ func (m *AddVideoModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *AddVideoModel) SetSize(w, h int) {
+	was := layoutModeFor(m.width, m.height)
 	m.width = w
 	m.height = h
+	// The bare form draws the input from a copy. Only a value written while
+	// the terminal was small is laid out again for the normal form, which
+	// itself only sets a width.
+	if m.heldInput.resized(&m.textInput, was, layoutModeFor(w, h)) {
+		m.bareLeave()
+	}
 }
 
 func (m *AddVideoModel) reset() {
@@ -502,6 +512,27 @@ func (m *AddVideoModel) Submitting(videoID string) bool {
 	return m.visible && m.submitting && m.videoID == videoID
 }
 
+// FailSubmit ends the in-flight submit for videoID as refused: the dialog
+// stays on the step it submitted from, with everything typed and picked, and
+// shows reason as its error. Enter submits again. It reports whether this
+// dialog was the one waiting (Submitting); for any other result it changes
+// nothing. The dialog's own transition — the App only delivers the message.
+func (m *AddVideoModel) FailSubmit(videoID, reason string) bool {
+	if !m.Submitting(videoID) {
+		return false
+	}
+	m.submitting = false
+	if reason == "" {
+		reason = "Failed to add job"
+	}
+	m.errorMsg = reason
+	if m.step == AddStepURL {
+		// startSubmit blurred the input; the URL is the thing to correct.
+		m.textInput.Focus()
+	}
+	return true
+}
+
 // UpdateComponents routes tea.Msg to embedded textinput/spinner/table and syncs.
 func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {
@@ -519,6 +550,10 @@ func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	// Route table events during format selection. A table still on Auto
 	// spends the first navigation key showing its cursor (startPicking).
 	if !m.loading && m.formats != nil && (m.step == AddStepVideoFormat || m.step == AddStepAudioFormat) && m.startPicking(msg) {
+		return tea.Batch(cmds...)
+	}
+	// The bare form pages by the rows it draws (add_video_bare.go).
+	if m.barePage(msg) {
 		return tea.Batch(cmds...)
 	}
 	if !m.loading && m.formats != nil {
@@ -840,6 +875,9 @@ func (m *AddVideoModel) handleConfirmStep(key string) (string, string) {
 // startSubmit enters the in-flight state a submit holds until its result.
 func (m *AddVideoModel) startSubmit() {
 	m.submitting = true
+	// A refusal of the last submit is not this one's: it must not sit
+	// beside the spinner. FailSubmit sets it again if this one is refused.
+	m.errorMsg = ""
 	m.spinner = newSpinner()
 	m.textInput.Blur()
 }
@@ -880,6 +918,9 @@ func (m *AddVideoModel) GetPlatform() string { return m.platform }
 func (m *AddVideoModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := max(min(80, m.width-4), 30) // match TS: min(width, 80)
@@ -1224,8 +1265,9 @@ func extractMediaID(input string) (string, string) {
 		return twitch.VodJobID(input[1:]), "twitch"
 	}
 
-	// Try YouTube
-	vid := extractYouTubeVideoID(input)
+	// Try YouTube: the one parser every add path uses (utils.ExtractVideoID,
+	// tested against internal/utils/testdata/youtube_urls.json).
+	vid := utils.ExtractVideoID(input)
 	if vid != "" {
 		return vid, "youtube"
 	}
@@ -1237,40 +1279,6 @@ func extractMediaID(input string) (string, string) {
 	}
 
 	return "", ""
-}
-
-// extractYouTubeVideoID extracts video ID from various YouTube URL formats or validates a raw 11-char ID.
-// Supports: youtube.com/watch?v=, youtu.be/, /live/, /shorts/, /embed/, /v/
-func extractYouTubeVideoID(input string) string {
-	input = strings.TrimSpace(input)
-
-	// Direct 11-character ID
-	if len(input) == 11 && isVideoIDChar(input) {
-		return input
-	}
-
-	// v= parameter (most common)
-	if _, after, ok := strings.Cut(input, "v="); ok {
-		vid, _, _ := strings.Cut(after, "&")
-		vid = strings.TrimRight(vid, "/")
-		if len(vid) == 11 && isVideoIDChar(vid) {
-			return vid
-		}
-	}
-
-	// Path-based patterns: youtu.be/, /live/, /shorts/, /embed/, /v/
-	pathPatterns := []string{"youtu.be/", "/live/", "/shorts/", "/embed/", "/v/"}
-	for _, pat := range pathPatterns {
-		if _, after, ok := strings.Cut(input, pat); ok {
-			vid, _, _ := strings.Cut(after, "?")
-			vid = strings.TrimRight(vid, "/")
-			if len(vid) == 11 && isVideoIDChar(vid) {
-				return vid
-			}
-		}
-	}
-
-	return ""
 }
 
 // extractTwitchTarget extracts a Twitch channel, VOD, clip or listing from a
@@ -1300,15 +1308,6 @@ func extractTwitchTarget(input string) (string, string) {
 		return strings.TrimSpace(input), "twitch_listing"
 	}
 	return "", "twitch_clips"
-}
-
-func isVideoIDChar(s string) bool {
-	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
 }
 
 func isNumeric(s string) bool {
@@ -1386,4 +1385,11 @@ func parseTimeToSeconds(s string) (float64, error) {
 		return float64(hours)*3600 + float64(mins)*60 + secs, nil
 	}
 	return 0, fmt.Errorf("invalid time format")
+}
+
+// wheelMovesFormat reports whether the dialog is on a format table the wheel
+// can move through: one of the two format steps, with the formats loaded.
+func (m *AddVideoModel) wheelMovesFormat() bool {
+	return m.visible && !m.loading && !m.submitting && m.formats != nil &&
+		(m.step == AddStepVideoFormat || m.step == AddStepAudioFormat)
 }

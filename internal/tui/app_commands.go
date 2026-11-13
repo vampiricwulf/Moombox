@@ -154,25 +154,25 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Failed to connect to server", Err: true}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 409 {
-			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists"}
+			return addVideoResultMsg{VideoID: input, Feedback: "Job already exists", Warn: true}
 		}
 		if resp.StatusCode >= 400 {
 			var errResp struct {
 				Error string `json:"error"`
 			}
 			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
-				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
+				return addVideoResultMsg{VideoID: input, Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode), Err: true}
 			}
 			msg := errResp.Error
 			if msg == "" {
 				msg = fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)
 			}
-			return addVideoResultMsg{VideoID: input, Feedback: msg}
+			return addVideoResultMsg{VideoID: input, Feedback: msg, Err: true}
 		}
 
 		label := "Added to queue"
@@ -204,7 +204,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			}
 		}
 		return addVideoResultMsg{VideoID: input, Feedback: label}
-	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text} })
+	}, func(text string) tea.Msg { return addVideoResultMsg{VideoID: input, Feedback: text, Err: true} })
 }
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.
@@ -719,9 +719,14 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 	}, func(text string) tea.Msg { return channelResolvedMsg{Input: input, Err: errors.New(text)} })
 }
 
-// openBrowser launches the default browser for the given URL using the
+// openBrowser is how the TUI opens a URL in the operator's browser. It is a
+// variable so the package's tests replace it (openbrowser_stub_test.go): a
+// test that presses O W, O S or O G must never open a real browser window.
+var openBrowser = launchBrowser
+
+// launchBrowser launches the default browser for the given URL using the
 // platform-appropriate opener (mirrors OnOpenFolder in cmd/moombox/tui_wiring.go).
-func openBrowser(url string) {
+func launchBrowser(url string) {
 	// Platform-split (openbrowser_windows.go / openbrowser_other.go):
 	// Windows needs explorer.exe with a forced-quoted command line so the
 	// browser escapes the launcher's Job Object AND query-string URLs

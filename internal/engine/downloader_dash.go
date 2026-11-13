@@ -48,8 +48,10 @@ const (
 	// the ErrQualityLost → refresh cycle (audit reports/worker.md F11).
 	postBytes403CipherThreshold = 5
 
-	// genericRetryDelay is the fixed delay used between retries for
-	// non-HTTP-status errors (timeouts, network failures).
+	// genericRetryDelay is the base delay between tries of a fetch that got
+	// no usable answer where nothing else bounds it (delays.genericRetry: the
+	// direct downloader's backoff). The DASH loop no longer uses it: a
+	// transport failure there goes through handleHTTPError.
 	genericRetryDelay = 2 * time.Second
 	// firstSegmentHuntDelay is the short delay between advancing past a
 	// 403/410 while hunting for the first valid segment.
@@ -60,6 +62,12 @@ const (
 	// transientFailureRetryDelay is used when behind head but not stuck on
 	// a single segment — treated as a quick transient.
 	transientFailureRetryDelay = 1 * time.Second
+
+	// segmentRetryUnitDelay is the step of fetchSegmentWithRetry's linear
+	// ladder: a transient failure (5xx, timeout, empty body) on attempt n
+	// waits n+1 of these before the next try — 5, 10, 15, 20 s at the
+	// default MaxSegmentRetries.
+	segmentRetryUnitDelay = 5 * time.Second
 	// interruptionStallRetryDelay paces the retry loop while
 	// stallForPossibleResume is deferring a budget-expired finalize. A
 	// resume-detection latency of 5s is negligible against the multi-minute
@@ -97,6 +105,51 @@ const (
 	forbiddenRefreshAttempts = 5
 )
 
+// dashRetryState is runDashLoop's per-segment retry state: the counters the
+// loop and its error handlers share. It is a local of the loop, never stored
+// and never read from another goroutine. The fields are named, so a handler
+// cannot be handed two of them in the wrong order.
+type dashRetryState struct {
+	// consecutiveGoneErrors counts 403/410 answers in a row (handleGoneError).
+	consecutiveGoneErrors int
+	// Same-segment retry tracking with exponential backoff: when the same
+	// sequence keeps failing we ramp the delay so we don't hammer the CDN.
+	// sameSegRetries counts the failures on lastRetrySeq.
+	sameSegRetries int
+	lastRetrySeq   int
+	// sameHeadRetryDelay is the at-edge (and 429) backoff step. It restarts
+	// when the head moves past lastConfirmedHead.
+	sameHeadRetryDelay int
+	lastConfirmedHead  int
+}
+
+// newDashRetryState returns the state a loop starts with: no failures, and
+// no sequence or head seen yet.
+func newDashRetryState() *dashRetryState {
+	return &dashRetryState{lastRetrySeq: -1, lastConfirmedHead: -1}
+}
+
+// onSegmentWritten is the reset a landed segment earns: the gone streak, the
+// at-edge backoff and the same-segment retries all start over.
+func (rs *dashRetryState) onSegmentWritten() {
+	rs.consecutiveGoneErrors = 0
+	rs.sameHeadRetryDelay = 0
+	rs.sameSegRetries = 0
+}
+
+// onSkip is the reset after refuseSegment skipped a sequence in place: the
+// next sequence starts with a fresh gone streak and fresh same-segment
+// retries.
+func (rs *dashRetryState) onSkip() {
+	rs.consecutiveGoneErrors, rs.sameSegRetries = 0, 0
+}
+
+// onCatchUpProgress is the reset parallel catch-up earns when it advanced:
+// the gone streak is broken.
+func (rs *dashRetryState) onCatchUpProgress() {
+	rs.consecutiveGoneErrors = 0
+}
+
 // runDashLoop is the main DASH download loop.
 func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// Save resume state on exit; only clear on clean stream completion
@@ -126,7 +179,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 	}()
 
-	consecutiveGoneErrors := 0
+	// Per-segment retry state: see dashRetryState.
+	rs := newDashRetryState()
+	// Measurement only: see dashEdgeStats. Logged once, at Debug, on exit.
+	edge := &dashEdgeStats{}
+	defer func() { edge.logOnExit(d.logger) }()
 	// "Started" means bytes are in the output file — including bytes restored
 	// by resume. The first-segment hunt in handleGoneError must stay disabled
 	// once data exists (it advances currentSeq past 403s, which would skip
@@ -135,19 +192,25 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	segsSinceResume := 0
 	d.lastSegTime.StoreNow() // Initialize to avoid premature MaxTimeout
 
-	// Same-segment retry tracking with exponential backoff: when the same
-	// sequence keeps failing we ramp the delay so we don't hammer the CDN.
-	sameSegRetries := 0
-	lastRetrySeq := -1
-	sameHeadRetryDelay := 0
-	lastConfirmedHead := -1
-
 	// The refused-segment rule's memory (refuseSegment): the sequence the
 	// sequential fetch last failed on, and how many credential refreshes had
 	// been installed when it first did. A later 403 on the same sequence with
 	// that count moved on is the "failed again after fresh credentials" the
 	// rule waits for.
 	stuckSeq, stuckRenewals := -1, int64(0)
+	// catchUpStuckSeq is the sequence a catch-up round stopped at without
+	// writing anything, once the file holds data; -1 when there is none.
+	// Catch-up is not entered again while currentSeq is still that sequence:
+	// the sequential path below owns the segment, with its own retries,
+	// credential refresh, status check, rebuild and refused-segment rule, and
+	// catch-up resumes at the first sequence past it. Re-entered on every
+	// iteration, each round ran the stuck segment's whole retry ladder again
+	// while the other workers fetched the segments after it, which could not
+	// be written past the hole and were dropped when the round returned: with
+	// the default 12 workers, tens of segments downloaded and discarded per
+	// round, for as long as the segment kept failing. It also slowed the
+	// handlers: they count one failure per sequential fetch, so one per round.
+	catchUpStuckSeq := -1
 	// afterSkip runs once refuseSegment has skipped a sequence in place. The
 	// next sequence starts with fresh per-segment retry state, and — as
 	// moonarchive sets `last_seq_auth_expiry = cur_seq` after a skip, "to
@@ -158,7 +221,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// served (refuseSegment), so a refusal of everything stops the walk.
 	afterSkip := func() {
 		stuckSeq, stuckRenewals = int(d.currentSeq.Load()), d.credentialRenewals.Load()-1
-		consecutiveGoneErrors, sameSegRetries = 0, 0
+		rs.onSkip()
 	}
 
 	// Backoff-sleep cap for at-edge retries (fixed). The operator knob is now
@@ -198,7 +261,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		head := int(d.headSeq.Load())
 		if head > 0 {
 			segsBehind := head - curSeq
-			if segsBehind >= stayBehindSegments+CatchupThreshold {
+			if segsBehind >= stayBehindSegments+CatchupThreshold && curSeq != catchUpStuckSeq {
 				preCatchupSeq := curSeq
 				nextSeq, err := d.runParallelCatchUp(ctx)
 				if err != nil {
@@ -215,7 +278,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				// later burst re-verifies with the API instead of finalizing
 				// a still-live stream on a stale verdict.
 				if nextSeq > preCatchupSeq {
-					consecutiveGoneErrors = 0
+					rs.onCatchUpProgress()
 					d.streamEndVerified = false
 					// Per-episode reset: this progress proves any interruption
 					// stall in progress has resolved. Without this, a SECOND,
@@ -251,12 +314,31 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				}
 				// Still far behind AND zero progress -- fall through to
 				// sequential download to break the stuck head segment.
+				// With data in the file the sequential path keeps the segment
+				// until it moves on (catchUpStuckSeq). Before the first byte
+				// the old alternation stands: the first-segment hunt's budget
+				// is a count of sequential tries, and catch-up's behind-head
+				// refresh between them is part of how a refused start recovers.
+				if hasStartedDownloading {
+					catchUpStuckSeq = curSeqNow
+				}
 			}
 		}
 
 		// Download single segment
 		segURL := d.buildSegmentURL(int(d.currentSeq.Load()))
+		fetchStart := time.Now()
 		data, statusCode, err := d.fetchSegment(ctx, segURL)
+
+		// Count a failed fetch at or past the known head (dashEdgeStats). The
+		// head is read after the fetch, as the handlers read it: the failed
+		// answer itself may have carried a newer one. A fetch the loop's own
+		// cancellation cut short is not an answer and is left out.
+		if (err != nil || statusCode >= 400 || len(data) == 0) && ctx.Err() == nil {
+			if head := int(d.headSeq.Load()); head > 0 && int(d.currentSeq.Load()) >= head {
+				edge.noteFailure(statusCode, time.Since(fetchStart))
+			}
+		}
 
 		if err != nil || statusCode >= 400 {
 			// moonarchive's rule for a segment YouTube keeps refusing
@@ -280,8 +362,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				// again only after the next fresh credentials.
 				stuckRenewals = d.credentialRenewals.Load()
 			}
-			herr := d.handleDashError(ctx, statusCode, err, &consecutiveGoneErrors, hasStartedDownloading,
-				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap)
+			herr := d.handleDashError(ctx, statusCode, err, rs, hasStartedDownloading, delayCap)
 			if cont, ret := dispatch(herr, afterSkip); !cont {
 				return ret
 			}
@@ -310,8 +391,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		if len(data) == 0 {
 			d.logger.Debug("[Downloader] segment answered with an empty body — retrying it",
 				"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load())
-			herr := d.handleHTTPError(ctx, hasStartedDownloading, &sameSegRetries, &lastRetrySeq,
-				&sameHeadRetryDelay, &lastConfirmedHead, delayCap)
+			herr := d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 			if cont, ret := dispatch(herr, afterSkip); !cont {
 				return ret
 			}
@@ -335,9 +415,8 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime.StoreNow()
 		d.firstMediaWritten(writeSeq)
-		consecutiveGoneErrors = 0
-		sameHeadRetryDelay = 0
-		sameSegRetries = 0
+		rs.onSegmentWritten()
+		edge.segmentsWritten++
 		hasStartedDownloading = true
 		// Re-arm end verification: a landed segment proves the burst that
 		// latched the verdict (if any) was transient.
@@ -375,10 +454,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 //   - errStreamDone: clean exit (stream ended or gave up)
 //   - other error: stop with that error (ErrQualityLost, etc.)
 func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int, fetchErr error,
-	consecutiveGoneErrors *int, hasStartedDownloading bool,
-	sameSegRetries *int, lastRetrySeq *int,
-	sameHeadRetryDelay *int, lastConfirmedHead *int,
-	delayCap int) error {
+	rs *dashRetryState, hasStartedDownloading bool, delayCap int) error {
 
 	if statusCode == 403 || statusCode == 410 {
 		// 403 fire cases (only on 403; 410 = stream ended, not cipher):
@@ -395,7 +471,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 		// fire per downloader instance.
 		if statusCode == 403 {
 			hasBytes := d.bytesWritten.Load() > 0
-			fireCipher := !hasBytes || *consecutiveGoneErrors >= postBytes403CipherThreshold
+			fireCipher := !hasBytes || rs.consecutiveGoneErrors >= postBytes403CipherThreshold
 			// Audit engine.md #25: gate the cipher fire on body inspection.
 			// A 403 whose body indicates PO-token rejection or bot detection
 			// is NOT a cipher problem, and reinitialising the solver wastes
@@ -418,20 +494,27 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 				}
 			}
 		}
-		return d.handleGoneError(ctx, statusCode, consecutiveGoneErrors, hasStartedDownloading)
+		return d.handleGoneError(ctx, statusCode, &rs.consecutiveGoneErrors, hasStartedDownloading)
 	}
 
 	if statusCode == 429 {
-		return d.handleRateLimitError(ctx, sameHeadRetryDelay, delayCap)
+		return d.handleRateLimitError(ctx, &rs.sameHeadRetryDelay, delayCap)
 	}
 
 	if statusCode >= 400 {
-		return d.handleHTTPError(ctx, hasStartedDownloading, sameSegRetries, lastRetrySeq,
-			sameHeadRetryDelay, lastConfirmedHead, delayCap)
+		return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 	}
 
-	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
-	*consecutiveGoneErrors = 0
+	// No complete HTTP answer: a dial, TLS or DNS failure, a reset, a stalled
+	// or cut-off body.
+	rs.consecutiveGoneErrors = 0
+	// A fetch the loop's own cancel cut short (operator Cancel, shutdown) is
+	// also a status-0 error, and it is not an edge failure: no retry count, no
+	// head probe, no stream-status check on a dead context and no finalize.
+	// The loop top returns the cancel.
+	if ctx.Err() != nil || d.isCancelled() {
+		return nil
+	}
 	if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 		// Same shape as the HTTP siblings above (handleGoneError,
 		// handleHTTPError): a transport error during an outage used to sit
@@ -449,9 +532,20 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 		d.noteOfflineRecovery()
 		return nil
 	}
-	d.emitActivity(ActivityRetrying)
-	utils.Sleep(ctx, d.delays.genericRetry)
-	return nil
+	// Online, a transport failure is bounded exactly like a 5xx (owner ruling
+	// R2-E1): the same retry count, stream-status check, hand-back for a
+	// rebuild on a fresh player response and MaxTimeout finalize, with no
+	// budget of its own. It used to sleep genericRetryDelay and return, for as
+	// long as the failure lasted: one googlevideo edge that stopped answering
+	// while the device stayed online (a single failing host does not take the
+	// connectivity monitor offline) left the job retrying with no status
+	// check, no rebuild and no finalize, where the same edge answering 503 got
+	// all three. A failed fetch reads no X-Head-Seqnum, so a finalize behind
+	// the head after such a spell does not call that head current
+	// (HeadCurrentAtFinalize).
+	d.logger.Debug("[Downloader] segment fetch got no complete answer — handled like a server error",
+		"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load(), "error", fetchErr)
+	return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
 }
 
 // non403CipherMarkers lists lower-cased substrings that mean the 403
@@ -732,12 +826,28 @@ func (d *SegmentDownloader) behindHeadTailPending() bool {
 // manifest-free restart that sets DiscardStaged, sets the recording aside
 // as <file>.restart-<ts> and starts over from sq=0 — correct, but a whole
 // re-download instead of a tail.
+//
+// The line says which of two things it saw. A stop within
+// EndOfStreamHeadMargin of the head is the shape an ended broadcast has (the
+// reported head runs past the last segment YouTube serves), and is logged at
+// Info: whether that recording is complete is the worker's verdict, which
+// also knows whether the stream is confirmed over and whether anything
+// interrupted the capture (worker.incompleteTail, owner ruling R-T1). The
+// engine decides nothing by it: the latch and the kept sidecar are the same
+// either way. A stop further back is the Warn it always was.
 func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 	head := int(d.headSeq.Load())
 	cur := int(d.currentSeq.Load())
 	if head > 0 && cur < head {
+		last := cur - 1
+		if WithinEndOfStreamMargin(last, head) {
+			d.logger.Info("[Downloader] finalizing short of the reported head, within the end-of-stream margin — the segments past the last one written stayed unavailable for the whole retry budget; the worker decides whether the recording is complete",
+				"lastSeq", last, "currentSeq", cur, "headSeq", head, "shortOfHead", head-last, "margin", EndOfStreamHeadMargin,
+				"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
+			return true
+		}
 		d.logger.Warn("[Downloader] finalizing with unfetched tail — segments below head stayed unavailable",
-			"currentSeq", cur, "headSeq", head, "missing", head-cur,
+			"lastSeq", last, "currentSeq", cur, "headSeq", head, "missing", head-cur,
 			"gapSinceLastSegment", d.lastSegTime.Since().Round(time.Second))
 		return true
 	}
@@ -751,6 +861,8 @@ func (d *SegmentDownloader) warnIfFinalizingBehindHead() bool {
 // warning and the worker-visible flag can never drift apart.
 func (d *SegmentDownloader) finalizeBehindHead() bool {
 	if d.warnIfFinalizingBehindHead() {
+		read := d.lastHeadRead.Load()
+		d.headCurrentAtFinalize.Store(!read.IsZero() && read.After(d.lastSegTime.Load()) && time.Since(read) <= d.delays.headFreshWindow)
 		d.finalizedBehindHead.Store(true)
 		return true
 	}
@@ -917,7 +1029,7 @@ func (d *SegmentDownloader) newPartInitEvicted(ctx context.Context) bool {
 }
 
 // unservedSegmentPersistence is how long a segment that only FAILS — a 5xx,
-// an empty body — must have kept failing since the live loop's first rebuild
+// an empty body, a fetch with no HTTP answer — must have kept failing since the live loop's first rebuild
 // at it before a rebuild-exhausted downloader gives it up
 // (handBackForRebuild). A 403 or a 410 is a refusal and is given up at the
 // cap; a server error says the server failed, not that the segment is
@@ -933,8 +1045,8 @@ const unservedSegmentPersistence = 10 * time.Minute
 // sequence the caller has already rebuilt at as many times as it will
 // (NoteRebuildsExhausted), the refused-segment rule takes the segment
 // instead: each of those rebuilds was a credential refresh, and the segment
-// failed again after every one. That is the path for a 410 or a 5xx, which
-// no in-loop refresh answers (the 403 rule in runDashLoop never sees them).
+// failed again after every one. That is the path for a 410, a 5xx, an empty body or a fetch with
+// no HTTP answer, which no in-loop refresh answers (the 403 rule in runDashLoop never sees them).
 // refused is the handler's verdict on the answer: a 403 or a 410 is taken
 // at once, anything else only once it has persisted for
 // unservedSegmentPersistence.
@@ -972,16 +1084,14 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 }
 
 func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownloading bool,
-	sameSegRetries *int, lastRetrySeq *int,
-	sameHeadRetryDelay *int, lastConfirmedHead *int,
-	delayCap int) error {
+	rs *dashRetryState, delayCap int) error {
 
 	curSeq := int(d.currentSeq.Load())
-	if curSeq == *lastRetrySeq {
-		*sameSegRetries++
+	if curSeq == rs.lastRetrySeq {
+		rs.sameSegRetries++
 	} else {
-		*sameSegRetries = 1
-		*lastRetrySeq = curSeq
+		rs.sameSegRetries = 1
+		rs.lastRetrySeq = curSeq
 	}
 
 	// Re-probe head, but honor the same HeadProbeInterval throttle the main
@@ -999,9 +1109,18 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		d.lastHeadProbeTime.StoreNow()
 	}
 
+	// A cancel (operator Cancel, shutdown) that landed during the head probe
+	// above is not a stream failure. Leave it to the loop top, which returns
+	// the cancel: no stream-status check on a dead context and no finalize.
+	// The probe can hold this handler for its whole 10 s timeout when the
+	// edge is not answering, so the window is wide.
+	if ctx.Err() != nil || d.isCancelled() {
+		return nil
+	}
+
 	head := int(d.headSeq.Load())
 	behindHead := head > 0 && curSeq < head
-	stuckOnSegment := *sameSegRetries >= MaxSegmentRetries
+	stuckOnSegment := rs.sameSegRetries >= MaxSegmentRetries
 
 	if behindHead && !stuckOnSegment {
 		// Transient failure while behind head -- retry with small delay. Surface
@@ -1015,14 +1134,14 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// At/past live edge or stuck -- backoff with status checks
 
 	// Reset backoff if head moved
-	if head > 0 && head != *lastConfirmedHead {
-		*lastConfirmedHead = head
-		*sameHeadRetryDelay = 0
+	if head > 0 && head != rs.lastConfirmedHead {
+		rs.lastConfirmedHead = head
+		rs.sameHeadRetryDelay = 0
 	}
 
-	*sameHeadRetryDelay++
-	if *sameHeadRetryDelay > delayCap {
-		*sameHeadRetryDelay = delayCap
+	rs.sameHeadRetryDelay++
+	if rs.sameHeadRetryDelay > delayCap {
+		rs.sameHeadRetryDelay = delayCap
 	}
 
 	// Time-based stream-status verification. A live segment is ~1s of media
@@ -1048,7 +1167,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			d.lastSegTime.StoreNow()
 			d.noteOfflineRecovery()
 			d.lastStreamStatusCheck.StoreNow()
-			*sameHeadRetryDelay = 0
+			rs.sameHeadRetryDelay = 0
 			return nil
 		}
 		d.lastStreamStatusCheck.StoreNow()
@@ -1111,7 +1230,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 			}
 			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
 			d.noteOfflineRecovery()
-			*sameHeadRetryDelay = 0
+			rs.sameHeadRetryDelay = 0
 			return nil
 		}
 		// Interruption spec Tier 1/2: same deferral as handleGoneError's
@@ -1135,6 +1254,6 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		return d.finish(finishMaxTimeout)
 	}
 
-	utils.Sleep(ctx, time.Duration(*sameHeadRetryDelay)*d.delays.atEdgeBackoffUnit)
+	utils.Sleep(ctx, time.Duration(rs.sameHeadRetryDelay)*d.delays.atEdgeBackoffUnit)
 	return nil // Continue loop
 }

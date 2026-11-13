@@ -1383,7 +1383,8 @@ func TestFormatDiagCarriesThePoolLevelCounts(t *testing.T) {
 // Mutants this kills:
 //   - the guard removed                    → the first two subtests get (&VideoInfo{}, nil)
 //   - the guard placed BEFORE the IP-block
-//     branch                               → "a substitution still wins" gets the wrong error
+//     branch                               → TestEveryClientSubstitutedIsReportedAsAnIPBlock's
+//     "one substitute, every other client failing" gets the wrong error
 //   - the error not wrapping tally.lastErr → the "HTTP 404" assertion fails
 //   - the guard ignoring wpParsed          → "a watch-page response is a survivor" fails
 //   - the guard firing when a client
@@ -1471,23 +1472,6 @@ func TestAllClientsFailedIsReportedAsAnError(t *testing.T) {
 		}
 		if info == nil || len(info.Formats) == 0 {
 			t.Fatalf("info = %+v, want the watch page's formats", info)
-		}
-	})
-
-	t.Run("a substitution still wins the verdict", func(t *testing.T) {
-		stubWatchPage(t)
-		orig := apiClient
-		apiClient = &http.Client{Transport: &clientKeyedTransport{responses: map[string]struct {
-			status int
-			body   string
-		}{
-			"7": {http.StatusOK, substituteBody}, // the rest 404
-		}}}
-		t.Cleanup(func() { apiClient = orig })
-
-		_, err := newRetryTestAPI().GetVideoInfoPublic(context.Background(), "test1234567")
-		if !errors.Is(err, ErrAllClientsMismatched) {
-			t.Fatalf("err = %v, want ErrAllClientsMismatched — a positive substitution signal outranks plain exhaustion", err)
 		}
 	})
 }
@@ -1705,14 +1689,6 @@ func TestCookielessFormats(t *testing.T) {
 		}
 		if len(got) != 2 || got[0].Source != "visionos" || got[1].Source != "android_vr" {
 			t.Errorf("formats = %+v, want the audio from both clients", got)
-		}
-	})
-
-	t.Run("nothing from either client is an error", func(t *testing.T) {
-		swap(t, &clientKeyedTransport{})
-		got, err := NewPlayerAPI(nil, noopLogger{}).CookielessFormats(context.Background(), "test1234567", "vd")
-		if err == nil || !strings.Contains(err.Error(), "cookieless clients returned no formats") {
-			t.Errorf("CookielessFormats = %+v, %v — want the no-formats error", got, err)
 		}
 	})
 

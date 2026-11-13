@@ -39,7 +39,9 @@ func HistoryRoutes(r chi.Router, deps *HistoryRoutesDeps) {
 		jsonResponse(rw, entries)
 	})
 
-	// DELETE /api/history/orphaned — remove the given history video IDs
+	// DELETE /api/history/orphaned — remove the given history video IDs. Only
+	// rows that are still orphaned go: DeleteHistoryEntries leaves the row of
+	// a video that has a job.
 	r.Delete("/api/history/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			VideoIDs []string `json:"videoIds"`
@@ -61,11 +63,13 @@ func HistoryRoutes(r chi.Router, deps *HistoryRoutesDeps) {
 		}
 		deps.Logger.Info("removed orphaned history entries", "count", n)
 
-		// Report which of the requested IDs are now gone. The delete is
-		// all-or-nothing per batch, so on success every requested ID is deleted;
-		// mirror the files endpoint's {deleted, errors} envelope for the UI.
+		// The files endpoint's {deleted, errors} envelope, for the UI:
+		// `deleted` echoes the requested IDs. `removed` is the number of rows
+		// that actually went, which is lower when an ID had no history row or
+		// its video has a job.
 		jsonResponse(rw, map[string]any{
 			"deleted": body.VideoIDs,
+			"removed": n,
 			"errors":  []map[string]string{},
 		})
 	})

@@ -16,6 +16,25 @@ import (
 
 // --- Channel sub-editor ---
 
+// SetFailingChannels replaces the failing-channel set the channel list tags
+// its rows from.
+func (m *SettingsModel) SetFailingChannels(f FailingChannels) { m.failing = f }
+
+// channelFailingTag is the channel list's tag for a failing channel.
+const channelFailingTag = " (failing)"
+
+// channelFailing reports whether the list flags this channel, and its newest
+// check error. The rule is monitor.ChannelFailing, applied in cmd/moombox;
+// this only looks the channel up. A disabled channel is not monitored, so a
+// row the editor has just disabled is not flagged.
+func (m *SettingsModel) channelFailing(ch config.ChannelConfig) (lastErr string, failing bool) {
+	if !ch.IsEnabled() {
+		return "", false
+	}
+	lastErr, failing = m.failing[FailingChannelKey(ch.GetPlatform(), ch.ID)]
+	return lastErr, failing
+}
+
 func (m *SettingsModel) visibleChannelFields() []channelFieldDef {
 	return filterChannelFieldsByPlatform(channelFields, m.channelEditValues)
 }
@@ -178,6 +197,10 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
 			return m.beginChannelRemoval()
 		}
+	case "shift+up":
+		m.moveSelectedChannel(-1)
+	case "shift+down":
+		m.moveSelectedChannel(1)
 	case keyTab:
 		m.switchSection((m.sectionIndex + 1) % len(sections))
 		m.updateTextInputForField()
@@ -310,6 +333,56 @@ func (m *SettingsModel) saveCurrentChannel() {
 	m.structDirty = true
 	m.status = saveIdle
 	m.channelMode = "list"
+}
+
+// moveSelectedChannel swaps the selected channel with its neighbour one row
+// up (delta -1) or down (delta 1) and keeps the cursor on it (owner ruling
+// R-C3). At the end of the list it does nothing. Like an add or a removal
+// it is a structural edit: it is saved by Save, and asked about on Esc.
+func (m *SettingsModel) moveSelectedChannel(delta int) {
+	i, j := m.channelIndex, m.channelIndex+delta
+	if i < 0 || i >= len(m.channels) || j < 0 || j >= len(m.channels) {
+		return
+	}
+	m.channels[i], m.channels[j] = m.channels[j], m.channels[i]
+	m.channelIndex = j
+	m.channelsReordered = true
+	m.dirty = true
+	m.structDirty = true
+	m.status = saveIdle
+}
+
+// applyChannelOrder puts the channels the editor holds into the editor's
+// order, in a copy of live, the list as it stands at save time after
+// mergeChannelEdits. Only the editor's channels move, and only among the
+// places they already occupy: a channel the dashboard added while the
+// overlay was open stays where it is. changed is false, and live is
+// returned as is, when the list is already in that order. Matching is by
+// channel ID, as mergeChannelEdits matches.
+func applyChannelOrder(live, edited []config.ChannelConfig) ([]config.ChannelConfig, bool) {
+	key := func(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
+	rank := make(map[string]int, len(edited))
+	for i, ch := range edited {
+		rank[key(ch.ID)] = i
+	}
+	var slots []int
+	var held []config.ChannelConfig
+	for i, ch := range live {
+		if _, ok := rank[key(ch.ID)]; ok {
+			slots = append(slots, i)
+			held = append(held, ch)
+		}
+	}
+	byRank := func(a, b config.ChannelConfig) int { return rank[key(a.ID)] - rank[key(b.ID)] }
+	if slices.IsSortedFunc(held, byRank) {
+		return live, false
+	}
+	slices.SortStableFunc(held, byRank)
+	out := slices.Clone(live)
+	for n, i := range slots {
+		out[i] = held[n]
+	}
+	return out, true
 }
 
 // mergeChannelEdits applies the Settings editor's own channel changes to

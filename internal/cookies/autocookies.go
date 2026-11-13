@@ -355,6 +355,26 @@ type AutoCookieService struct {
 	//     downgrade, which is gated on refreshPlatforms() having found one).
 	//     Left in place with this note rather than deleted, because "I could not
 	//     find a route" is not "there is none".
+	//   - ImportCookies — SETS at its unreadable-file, mkdir, write and jar-load
+	//     exits and through a rollback that did not land (setFileError: each is
+	//     a state of cookies.txt, not of the refresh mechanism), and RETRACTS at
+	//     its success tail, by kind (retractLastErrorLocked): a file-kind
+	//     message once it has written and loaded the file and a platform it
+	//     installed verified, and a credential-kind message once every platform
+	//     that message names has. It never retracts a mechanism-kind message: a
+	//     pasted file says nothing about whether the browser refresh works.
+	//     Without this a container, which has no browser pass and no setup,
+	//     kept the line until restart beside an Authenticated badge (R2-C3).
+	//   - ClearCredentialError, called on the auth-recovered edge beside
+	//     ClearManualRelogin — RETRACTS a credential-kind message for the
+	//     platform the background re-check found authenticated again. Nothing
+	//     else.
+	//
+	// Every message carries a kind (lastErrorKind). The refresh's "cookies are
+	// gone" and "auth verification failed — manual re-login required" messages
+	// are credential-kind and name their platforms; the import's exits and a
+	// failed rollback are file-kind; everything else is mechanism-kind, which
+	// only a renewed browser pass or StartSetup clears.
 	//
 	// cleanup() / cleanupLocked() MUST NOT clear it, and that is the rule this
 	// audit exists for. cleanup runs on every setup exit path INCLUDING the
@@ -370,9 +390,17 @@ type AutoCookieService struct {
 	// Pinned by TestCleanupAfterAFailedSetupKeepsLastError and
 	// TestFinishSetupRecordsTheFailureItReturns.
 	lastError *string
+	// lastErrorKind and lastErrorPlatforms describe lastError and are written
+	// only with it, by setLastErrorLocked and clearLastErrorLocked.
+	lastErrorKind      lastErrorKind
+	lastErrorPlatforms map[string]bool
 
 	needsRelogin   AutoCookieReloginRequired
 	targetPlatform string // "youtube" or "twitch"
+
+	// reloginAnnounced is needsRelogin (youtube, twitch) as OnReloginChange
+	// last heard of it; see announceRelogin.
+	reloginAnnounced [2]bool
 
 	// suppliedThisRun is the set of platforms whose cookies the operator put
 	// in the cookie file during this process: a browser login
@@ -477,7 +505,19 @@ type AutoCookieService struct {
 	//
 	// It is NOT called for a pass that outlived its goroutine's context — a
 	// shutdown, or Stop — see notePassCompleted.
-	OnPassCompleted func(ctx context.Context)
+	//
+	// result is that pass's result. The pass claimed the one refresh slot, so
+	// a job that failed while it ran was told a refresh is in flight and left
+	// parked (worker.CookieRefreshInFlight); the hook resumes the jobs parked
+	// on each platform the pass verified, as every other cookie-writing
+	// gesture does (owner ruling R2-C2).
+	OnPassCompleted func(ctx context.Context, result RefreshResult)
+
+	// OnReloginChange is called after a platform's re-login flag was raised
+	// or lowered, with no lock held. It carries nothing: a listener reads
+	// ReloginStatus. cmd/moombox uses it to tell open dashboards to re-read
+	// their status. Set once, before the service is used; it must not block.
+	OnReloginChange func()
 
 	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
 	// path as a fallback when the CDP refresh launch fails. Off by
@@ -784,6 +824,7 @@ func (s *AutoCookieService) refreshBrowser(policy browserGatePolicy) *DetectedBr
 // FinishSetupDetailed, by RefreshCookiesDetailed's accepted arm and by
 // ImportCookies — the gesture this flag is asking the operator to perform.
 func (s *AutoCookieService) FlagManualRelogin(platform string) {
+	defer s.announceRelogin()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// A switch rather than a bare map write: the map's two keys are the wire
@@ -804,6 +845,7 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 // healed. The flag stayed up, and both dashboards rank it above
 // "Authenticated", so they showed "Re-login required" until a restart.
 func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
+	defer s.announceRelogin()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch platform {
@@ -813,6 +855,22 @@ func (s *AutoCookieService) ClearManualRelogin(platform string) bool {
 		return was
 	}
 	return false
+}
+
+// announceRelogin calls OnReloginChange when the re-login flags differ from
+// the ones it last announced. Every writer of needsRelogin calls it after
+// releasing mu, so the writes themselves stay plain map assignments and a
+// write that changed nothing announces nothing.
+func (s *AutoCookieService) announceRelogin() {
+	s.mu.Lock()
+	now := [2]bool{s.needsRelogin["youtube"], s.needsRelogin["twitch"]}
+	changed := now != s.reloginAnnounced
+	s.reloginAnnounced = now
+	fn := s.OnReloginChange
+	s.mu.Unlock()
+	if changed && fn != nil {
+		fn()
+	}
 }
 
 // Stop stops the auto-cookie service, permanently for this service's

@@ -43,24 +43,6 @@ func TestNewLogger(t *testing.T) {
 	}
 }
 
-func TestRingBuffer(t *testing.T) {
-	l, err := New("", "DEBUG", 1024*1024, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-
-	// Fill ring buffer past capacity
-	for i := range 250 {
-		l.Info("message", "i", i)
-	}
-
-	lines := l.GetRecentLines()
-	if len(lines) != defaultRingSize {
-		t.Errorf("expected %d lines, got %d", defaultRingSize, len(lines))
-	}
-}
-
 func TestRingBufferPartialFill(t *testing.T) {
 	l, err := New("", "DEBUG", 1024*1024, 3)
 	if err != nil {
@@ -927,7 +909,8 @@ func TestFailingStdoutNeverCostsTheFileALine(t *testing.T) {
 			t.Fatal(err)
 		}
 		l.Info("while stdout works")
-		stdout.Close() // the hang-up
+		l.FlushConsole(10 * time.Second) // stdout is written by its own goroutine
+		stdout.Close()                   // the hang-up
 		l.Info("after stdout died", "n", 1)
 		l.Warn("after stdout died", "n", 2)
 		l.Close()

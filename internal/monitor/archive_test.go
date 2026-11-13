@@ -302,6 +302,30 @@ func TestArchive_OrphanedHistoryClearRejobsInWindowOnly(t *testing.T) {
 	}
 }
 
+// TestArchive_ExistingJobRowGatesVodWithoutHistory: an in-window vod row whose
+// job exists (Finished) but whose history row does not (a manual add writes
+// none; the operator can clear history) is treated as already processed. No
+// refresh probe is spent on it and nothing is announced: the job insert would
+// only be refused as a duplicate, every cycle.
+func TestArchive_ExistingJobRowGatesVodWithoutHistory(t *testing.T) {
+	db := newTestDB(t)
+	now := fixedNow()
+	seedRow(t, db, "UC1", "jIn", now.Add(-24*time.Hour), "day", "rss", "vod")
+	addFinishedJob(t, db, "jIn") // job row, NO history row
+
+	var order []string
+	fm := newTestFeedMonitor(t, db, withRSS(rssWith()), withMembership(membWith()),
+		withProbe(probeReturningTrueAges(now, map[string]int{"jIn": 1}, &order)), withNow(now))
+	found := recordVideoFound(fm)
+	fm.runCycleForTest(t, "UC1")
+	if len(order) != 0 {
+		t.Fatalf("probed %v: a row with a job row must not cost a refresh probe", order)
+	}
+	if len(*found) != 0 {
+		t.Fatalf("found = %v, want none: the job already exists", *found)
+	}
+}
+
 // TestArchive_CookieLapseLongerThanWindow covers §7/§9's lapse-outlasts-the-
 // window case: a members upcoming stream written assumed/unknown before a
 // cookie lapse must remain in scope through a lapse LONGER than the window

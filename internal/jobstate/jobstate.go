@@ -1,8 +1,9 @@
 // Package jobstate derives the sub-states a job's persisted row implies but
 // does not name: the automatic action the Twitch monitor will take for an
 // Error row (PendingAutoAction), the progress line of a job that is waiting
-// rather than delivering (WaitLine, IsWaitLine), and why a Queued backlog row
-// is not being admitted (AdmissionHolds.For). Each is derived, never
+// rather than delivering (WaitLine, IsWaitLine), why a Queued backlog row is
+// not being admitted (AdmissionHolds.For), and how many automatic cookie
+// retries a job parked in COOKIES? has used (AdmissionHolds.CookieRetryFor). Each is derived, never
 // persisted (audit rule 5: "a sub-state that changes what the operator should
 // do is derived, never persisted, and shown in both UIs").
 //

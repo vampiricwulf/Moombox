@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { cookieRetry, cookieRetryText, canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -23,9 +23,18 @@ export function stampFactsStatus(job) {
   return job;
 }
 
+/** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
+const JOB_LOG_POLL_MS = 1000;
+// How long one poll may stay unanswered before it is given up.
+const JOB_LOG_POLL_DEADLINE_MS = 10000;
+
 export class JobDetailsController {
   constructor(app) {
     this.app = app;
+    // The Job Log's re-read timer; set only while the dialog is open.
+    this._jobLogsTimer = null;
+    // The job whose lines the Job Log box holds (null: none, "Loading logs...").
+    this._logsShownFor = null;
   }
 
   /** Wire up the details dialog: action buttons, dismissal cleanup, delegated clicks. */
@@ -71,6 +80,8 @@ export class JobDetailsController {
       // callback, the dialog is already re-opening for a new job. Don't clear.
       const dlg = document.getElementById("details-dialog");
       if (dlg.open) return;
+      this._stopJobLogPolling();
+      this._logsShownFor = null;
       this.app.selectedJobId = null;
       // Clear content to stop YouTube/Twitch iframe embeds from running in background
       const content = document.getElementById("job-details-content");
@@ -169,8 +180,11 @@ export class JobDetailsController {
     // A fresh open asks for the facts itself; the per-status refetch
     // (_refreshFactsOnStatusChange) starts over for it.
     this._factsAskedFor = null;
+    // A fresh open starts its Job Log over, on the newest line.
+    this._logsShownFor = null;
     this.renderJobDetails(job);
     this.loadJobLogs(job.id);
+    this._startJobLogPolling();
     document.getElementById("details-dialog").show();
     this._fetchStagingFields(job.id);
   }
@@ -179,7 +193,8 @@ export class JobDetailsController {
    * Fetch the enriched job (GET /api/jobs/{id}) to seed hasStaging/hasSegments.
    * Every payload that populates this.app.jobs (WS initial_state/jobs_update/
    * job_update, /api/jobs/archived) is a DB row WITHOUT these computed
-   * fields — but hasStaging, which a terminal row carries (worker.ListJob) —
+   * fields — but hasStaging, which a row Resume can be offered on carries
+   * (worker.ListJob) —
    * so the Resume/Mux buttons in the details dialog would never appear
    * without this. _preserveStagingFields keeps them alive across
    * subsequent WS updates. Failures are silent — buttons just stay hidden.
@@ -197,6 +212,7 @@ export class JobDetailsController {
       const job = this.app.jobs.find((j) => j.id === jobId) ||
         this.app.archivedJobs.find((j) => j.id === jobId);
       if (!job) return true;
+      const cardShape = this.app._cardShape(job);
       job.hasStaging = enriched.hasStaging;
       job.hasSegments = enriched.hasSegments;
       job.asides = Array.isArray(enriched.asides) ? enriched.asides : [];
@@ -207,17 +223,25 @@ export class JobDetailsController {
       // null, not absent, for a job with none, so _preserveStagingFields
       // does not carry an earlier answer over it.
       job.gapFill = enriched.gapFill || null;
+      // The kept recording the archive was not made from
+      // (worker.ScanUnusedRoot): null, not absent, for the same reason.
+      job.unusedRootRecording = enriched.unusedRootRecording || null;
+      // The archives a Reinitialize set aside (worker.ScanSetAsideArchives).
+      job.setAsideArchives = Array.isArray(enriched.setAsideArchives) ? enriched.setAsideArchives : [];
       // The status the facts above were computed under (the server's, from
       // the same answer): a status change after it makes them stale.
       job.factsStatus = enriched.status;
+      // The row shows Resume only over known staging: redraw the card if the
+      // answer changed that, instead of leaving it to the next list rebuild.
+      this.app._reshapeJobCard(job, cardShape);
       // Re-evaluate button visibility if the dialog is still on this job
       if (this.app.selectedJobId === jobId && document.getElementById("details-dialog").open) {
         const content = document.getElementById("job-details-content");
         if (content) this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
         // A drawn section the answer no longer supports (a Reinitialize
         // deleted the asides) needs the rebuild as much as a new one does.
-        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section");
-        if (job.asides.length > 0 || job.muxGaps.length > 0 || shown) {
+        const shown = !!content?.querySelector("#details-asides-section, #details-mux-gaps-section, #details-unused-recording-section, #details-set-aside-archives-section");
+        if (job.asides.length > 0 || job.muxGaps.length > 0 || job.unusedRootRecording || job.setAsideArchives.length > 0 || shown) {
           // The sections are part of the rendered body, not static elements,
           // so they can only appear on a rebuild. Rare by construction: only a
           // job that restarted mid-stream has asides at all, and only one
@@ -472,6 +496,15 @@ export class JobDetailsController {
       autoDiv.hidden = !autoText;
     }
 
+    // The automatic cookie retries a parked job has used (owner ruling
+    // R2-C1), from the holds snapshot; setAdmissionHolds redraws it.
+    const retryDiv = content.querySelector(".details-cookie-retry");
+    if (retryDiv) {
+      const retryText = cookieRetryText(cookieRetry(this.app.admissionHolds, job));
+      if (retryDiv.textContent !== retryText) retryDiv.textContent = retryText;
+      retryDiv.hidden = !retryText;
+    }
+
     // A trim added or deleted elsewhere (the other UI, a trim that finished
     // on the server) arrives as a job_update whose trims list moved; the
     // section is redrawn only then, never on a progress tick.
@@ -637,6 +670,10 @@ export class JobDetailsController {
 
   renderJobDetails(job) {
     const content = document.getElementById("job-details-content");
+    // A rebuild of the job already shown (a status change, the watch pill, a
+    // new section) replaces the Job Log box: its lines and scroll position
+    // are carried into the new one.
+    const keptLog = this._keptJobLog(job.id);
     const statusClass = job.status.toLowerCase().replace("?", "");
 
     // Show segment counts for Live/Downloading/Muxing/Finished status.
@@ -663,6 +700,18 @@ export class JobDetailsController {
           <span class="details-value" data-field="segments">${this.app.escapeHtml(segDisplayValue)}</span>
         </div>`;
     }
+
+    // A live capture being muxed: its line is the mux readout ("Muxing 42%",
+    // owner ruling R-D1), which the VOD arm below shows in its own Progress
+    // row and the TUI's details pane shows for every Muxing row. A status
+    // change rebuilds the dialog, so the row comes and goes with Muxing;
+    // updateJobDetails patches its text. Empty outside Muxing, so no other
+    // row's markup changes.
+    const muxProgressRow = job.status === "Muxing" ? `
+          <div class="details-row">
+            <span class="details-label">Progress:</span>
+            <span class="details-value" data-field="progress">${this.app.escapeHtml(this.app.formatProgress(job))}</span>
+          </div>` : "";
 
     const isTwitch = job.platform === "twitch";
     // The Twitch login for the embed, from the url alone: a row with no url
@@ -786,7 +835,7 @@ export class JobDetailsController {
             <span class="details-label">Type:</span>
             <span class="details-value">Live</span>
           </div>
-          ${segmentInfo}
+          ${segmentInfo}${muxProgressRow}
           `
           }
           <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">
@@ -955,6 +1004,38 @@ export class JobDetailsController {
           <div class="details-row"><span class="details-label"></span><span class="details-value" style="color: var(--sl-color-neutral-600); font-size: 0.9em;">A mux could not carry these staged recordings whole — it left a damaged fragment's unreadable bytes out of a repaired copy, or could not check the copy against the recording's own fragments — so staging keeps the originals, with no age limit, until the job is deleted.</span></div>
           ${rows}
         </div>`;
+      })()}${(() => {
+        // A recording the staging root still holds that the archive was not
+        // made from (worker.ScanUnusedRoot, GET /api/jobs/{id}'s
+        // unusedRootRecording, owner ruling R-E1). It keeps the job's staging
+        // with no age limit and can be the longer copy; this names the file
+        // so the operator can take or delete it knowingly. No whitespace of
+        // its own, as the section above.
+        const kept = job.unusedRootRecording;
+        // The server answers for Finished rows only, so a value carried over
+        // from before the row left Finished (a reinitialize) is stale until
+        // the next fetch replaces it.
+        if (!kept || !kept.path || job.status !== "Finished") return "";
+        return `<div class="details-section" id="details-unused-recording-section">
+          <strong>Kept Recording:</strong>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording">${this.app.escapeHtml(unusedRecordingText(kept))}</span></div>
+          <div class="details-row"><span class="details-label"></span><span class="details-value" data-field="unused-recording-path" style="color: var(--sl-color-neutral-600); font-size: 0.9em; word-break: break-all;">${this.app.escapeHtml(kept.path)}</span></div>
+        </div>`;
+      })()}${(() => {
+        // The files set aside for this job (the archive a Reinitialize
+        // renamed aside, a file a finalize found at the name it writes),
+        // still beside where the job writes (worker.ScanSetAsideArchives, GET
+        // /api/jobs/{id}'s setAsideArchives, owner ruling R2-W1b). Moombox
+        // never replaces or deletes them and Files does not offer them while
+        // the job exists, so this is where the operator learns their names.
+        // No button: there is nothing to recover, the file is whole.
+        const archives = Array.isArray(job.setAsideArchives) ? job.setAsideArchives : [];
+        if (archives.length === 0) return "";
+        const rows = archives.map((a) => `<div class="details-row"><span class="details-label"></span><span class="details-value" data-field="set-aside-archive" title="${this.app.escapeHtml(a.path || "")}">${this.app.escapeHtml(setAsideArchiveText(a))}</span></div>`).join("");
+        return `<div class="details-section" id="details-set-aside-archives-section">
+          <strong>Set-aside Archives (${archives.length}):</strong>
+          ${rows}
+        </div>`;
       })()}
 
       ${
@@ -968,6 +1049,7 @@ export class JobDetailsController {
       }
 
       <div class="details-auto-action"${pendingAutoAction(job) ? "" : " hidden"}>${this.app.escapeHtml(pendingAutoActionText(pendingAutoAction(job)))}</div>
+      <div class="details-cookie-retry"${cookieRetry(this.app.admissionHolds, job).count ? "" : " hidden"}>${this.app.escapeHtml(cookieRetryText(cookieRetry(this.app.admissionHolds, job)))}</div>
 
       ${(() => {
         const hasResolution = job.videoWidth && job.videoHeight;
@@ -1060,16 +1142,98 @@ export class JobDetailsController {
         <div class="details-logs" id="job-logs-content">Loading logs...</div>
       </div>
     `;
+    this._restoreJobLog(keptLog);
 
     // Update button visibility
     this.updateDetailsButtons(job);
   }
 
-  async loadJobLogs(jobId) {
+  /**
+   * Re-read the open job's log every second (owner ruling R2-D2), the
+   * cadence of the TUI's O L overlay. Without it the lines were those of the
+   * click: a job that stays Live or Downloading for hours looked calm while
+   * it retried. Runs only while the dialog is open; a hidden browser tab
+   * skips the request.
+   */
+  _startJobLogPolling() {
+    this._stopJobLogPolling();
+    this._jobLogsTimer = setInterval(() => {
+      const jobId = this.app.selectedJobId;
+      if (!jobId) {
+        this._stopJobLogPolling();
+        return;
+      }
+      // One read at a time: a slow answer is waited for, not stacked on.
+      if (document.hidden || this._jobLogsAbort) return;
+      this.loadJobLogs(jobId, { poll: true });
+    }, JOB_LOG_POLL_MS);
+  }
+
+  _stopJobLogPolling() {
+    if (this._jobLogsTimer !== null) {
+      clearInterval(this._jobLogsTimer);
+      this._jobLogsTimer = null;
+    }
+  }
+
+  /**
+   * The Job Log as it is on screen, when it shows this job's lines: what a
+   * rebuild of the dialog body must put back (_restoreJobLog). Null when the
+   * box holds another job's lines or none yet.
+   */
+  _keptJobLog(jobId) {
+    if (this._logsShownFor !== jobId) return null;
+    const el = document.getElementById("job-logs-content");
+    if (!el) return null;
+    const top = el.scrollTop;
+    return { text: el.textContent, top, atBottom: top + el.clientHeight >= el.scrollHeight - 4 };
+  }
+
+  _restoreJobLog(kept) {
+    if (!kept) return;
+    const el = document.getElementById("job-logs-content");
+    if (!el) return;
+    el.textContent = kept.text;
+    el.scrollTop = kept.atBottom ? el.scrollHeight : kept.top;
+  }
+
+  /**
+   * Write a re-read's answer into the Job Log. Nothing is written when the text
+   * is unchanged, or while the operator has text selected in it (replacing
+   * the text would drop the selection; the next poll writes). The view
+   * follows the newest line only when it was already at the bottom, and
+   * otherwise stays where the operator scrolled it.
+   */
+  _writePolledJobLogs(logsEl, text) {
+    if (logsEl.textContent === text) return;
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0 && logsEl.contains(sel.getRangeAt(0).commonAncestorContainer)) return;
+    const top = logsEl.scrollTop;
+    const atBottom = top + logsEl.clientHeight >= logsEl.scrollHeight - 4;
+    logsEl.textContent = text;
+    logsEl.scrollTop = atBottom ? logsEl.scrollHeight : top;
+  }
+
+  /**
+   * Read the job's log into the dialog. The first answer for a job opens the
+   * view on the newest line, as the TUI's O L overlay does; every later one
+   * (the every-second `poll`, or the read after a rebuild) goes through
+   * _writePolledJobLogs, which keeps the operator's place. A failed read
+   * leaves lines already shown. Every read is given up after
+   * JOB_LOG_POLL_DEADLINE_MS, the first one and a rebuild's as well as a
+   * poll's, so that one request that never answers cannot stop the re-read.
+   */
+  async loadJobLogs(jobId, { poll = false } = {}) {
     // Abort any in-flight log fetch (e.g. user switched to a different job)
     if (this._jobLogsAbort) this._jobLogsAbort.abort();
     const abort = new AbortController();
     this._jobLogsAbort = abort;
+    // The interval skips its tick while a read is in flight, and fetch has no
+    // timeout of its own: free the slot here, so the next tick asks again.
+    const deadline = setTimeout(() => {
+      abort.abort();
+      if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
+    }, JOB_LOG_POLL_DEADLINE_MS);
 
     try {
       const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: abort.signal });
@@ -1085,15 +1249,27 @@ export class JobDetailsController {
       if (this.app.selectedJobId !== jobId || abort.signal.aborted) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
-        logsEl.textContent =
-          Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
+        const text = Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
+        if (this._logsShownFor === jobId) {
+          this._writePolledJobLogs(logsEl, text);
+        } else {
+          logsEl.textContent = text;
+          logsEl.scrollTop = logsEl.scrollHeight;
+          this._logsShownFor = jobId;
+        }
       }
     } catch (e) {
       if (e.name === "AbortError") return; // Superseded by a new fetch
+      if (poll) return; // the lines already shown stay; the next poll asks again
       console.error("Failed to load job logs:", e);
       if (this.app.selectedJobId !== jobId) return;
+      if (this._logsShownFor === jobId) return; // a rebuild's read: the carried lines stay
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
+    } finally {
+      clearTimeout(deadline);
+      // Not in flight any more, unless a newer read has taken its place.
+      if (this._jobLogsAbort === abort) this._jobLogsAbort = null;
     }
   }
 
@@ -1147,7 +1323,7 @@ export class JobDetailsController {
   }
 
   /**
-   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps
+   * Preserve computed hasStaging/hasSegments/asides/keptChatSidecar/unmuxedParts/muxGaps/unusedRootRecording/setAsideArchives
    * (and factsStatus, the status they were fetched under)
    * fields from oldJobs onto newJobs.
    * WebSocket bulk updates deliver raw DB objects without these enriched fields;
@@ -1179,6 +1355,12 @@ export class JobDetailsController {
       }
       if (job.gapFill === undefined && old.gapFill !== undefined) {
         job.gapFill = old.gapFill;
+      }
+      if (job.unusedRootRecording === undefined && old.unusedRootRecording !== undefined) {
+        job.unusedRootRecording = old.unusedRootRecording;
+      }
+      if (job.setAsideArchives === undefined && old.setAsideArchives !== undefined) {
+        job.setAsideArchives = old.setAsideArchives;
       }
       if (job.factsStatus === undefined && old.factsStatus !== undefined) {
         job.factsStatus = old.factsStatus;

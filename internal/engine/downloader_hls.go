@@ -145,6 +145,9 @@ const (
 	// truncate-for-resume) and re-fetches those segments — still far
 	// tighter than the DASH loop's every-50-segments cadence
 	// (ResumeSeqInterval, ~100 s of footage).
+	// The floor is checked after every segment write as well as at the end of
+	// each playlist pass, so a pass longer than it (the backlog of a VOD that
+	// is still recording) is saved while it runs.
 	hlsResumeSaveInterval = 15 * time.Second
 )
 
@@ -249,6 +252,10 @@ func (d *SegmentDownloader) consultStreamEnd(ctx context.Context) endVerdict {
 	return d.consultEnd(ctx, d.opts.CheckStreamStatus)
 }
 
+// errEmptySegmentBody is the live HLS loop's name for a 2xx answer with no
+// body, which it treats as a failed fetch of that segment.
+var errEmptySegmentBody = errors.New("segment answered with an empty body")
+
 // runHlsLoop is the main HLS download loop.
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
@@ -281,6 +288,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// (see the constant). Zero means "never saved", which always passes the
 	// floor, so the first advance still writes immediately.
 	var lastResumeSave time.Time
+	// loopStart stands in for lastResumeSave in the mid-pass save (after each
+	// segment write, below) until the first save has happened: a pass shorter
+	// than the floor still saves once, at its end, as it always did.
+	loopStart := time.Now()
 	// consecutiveStuckSkips bounds termination when EVERY segment fails
 	// (expired auth, dead variant): each skip costs ~12s of retries, and an
 	// ended stream with a long listed backlog would otherwise grind through
@@ -613,6 +624,17 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 
 			segData, segStatus, segErr := d.fetchSegment(ctx, seg.URL)
+			// A 2xx that carried no body is not a segment: it is a failed fetch
+			// of this sequence and takes the same branch as one (retried after a
+			// playlist refresh, then the stuck-segment split or skip). Written
+			// as a segment it advanced currentSeq with nothing in the file — no
+			// gap row, no part split, and a coverage entry for footage the part
+			// does not hold. Tested here, ahead of ensureHlsInit, so an empty
+			// body never counts as a media fetch. The DASH loop and
+			// fetchSegmentWithRetry read it the same way.
+			if segErr == nil && len(segData) == 0 {
+				segErr = errEmptySegmentBody
+			}
 			if segErr != nil {
 				// HLS 403s commonly indicate cipher rotation or POT expiry.
 				// Fire OnCipherFailure once per downloader so the strategy can
@@ -806,6 +828,26 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					Seq:   hlsSeq,
 					Bytes: d.bytesWritten.Load(),
 				})
+			}
+
+			// The per-iteration save below, reachable inside a long pass and
+			// under the same floor. A live window is a few segments and never
+			// gets here with the floor elapsed, but a Twitch VOD that is still
+			// recording has no ENDLIST, so it takes this loop and its first
+			// playlist lists the whole broadcast so far: hours of segments
+			// written before that save. A crash in that pass left staged media
+			// with no sidecar, which Start refuses (ErrStagedMediaPresent), and
+			// the job could only start over. The write and currentSeq.Add
+			// above are both done, so the sidecar's position and byte count
+			// agree.
+			since := lastResumeSave
+			if since.IsZero() {
+				since = loopStart
+			}
+			if time.Since(since) >= d.delays.hlsResumeSave {
+				d.saveResume()
+				lastSavedSeq = int(d.currentSeq.Load())
+				lastResumeSave = time.Now()
 			}
 		}
 

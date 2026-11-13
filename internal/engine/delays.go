@@ -24,7 +24,8 @@ type delays struct {
 	singleGoneRetry        time.Duration // singleGoneRetryDelay — one 410/404 while behind head
 	interruptionStallRetry time.Duration // interruptionStallRetryDelay — the may-resume stall arm
 	transientFailureRetry  time.Duration // transientFailureRetryDelay — 5xx/timeouts at the edge
-	genericRetry           time.Duration // genericRetryDelay — manifest / unknown-status retries
+	segmentRetryUnit       time.Duration // segmentRetryUnitDelay — fetchSegmentWithRetry's linear ladder counts in it (5, 10, 15, 20 s)
+	genericRetry           time.Duration // genericRetryDelay — the direct download's size-probe backoff
 	hlsPlaylistRetry       time.Duration // hlsPlaylistRetryDelay — playlist fetch or parse failed
 	hlsStuckRetry          time.Duration // hlsStuckRetryDelay — a segment or the init keeps failing
 	connectivityPoll       time.Duration // connectivityPollInterval — waitForConnectivity's ticker
@@ -32,6 +33,7 @@ type delays struct {
 	hlsReloadUnit          time.Duration // the second hlsReloadDelay scales playlist durations by
 	hlsResumeSave          time.Duration // hlsResumeSaveInterval — live-loop resume sidecar floor
 	fetchHardCeiling       time.Duration // segmentHardCeiling — one segment/chunk fetch's absolute lifetime
+	headFreshWindow        time.Duration // headFreshWindow — how recent the last head read must be at a behind-head finalize
 }
 
 // SetFastDelaysForTests divides every retry and backoff wait by scale. It
@@ -60,6 +62,7 @@ func (d *SegmentDownloader) SetFastDelaysForTests(scale int) {
 		singleGoneRetry:        p.singleGoneRetry / n,
 		interruptionStallRetry: p.interruptionStallRetry / n,
 		transientFailureRetry:  p.transientFailureRetry / n,
+		segmentRetryUnit:       p.segmentRetryUnit / n,
 		genericRetry:           p.genericRetry / n,
 		hlsPlaylistRetry:       p.hlsPlaylistRetry / n,
 		hlsStuckRetry:          p.hlsStuckRetry / n,
@@ -68,6 +71,7 @@ func (d *SegmentDownloader) SetFastDelaysForTests(scale int) {
 		hlsReloadUnit:          p.hlsReloadUnit / n,
 		hlsResumeSave:          p.hlsResumeSave / n,
 		fetchHardCeiling:       p.fetchHardCeiling / n,
+		headFreshWindow:        p.headFreshWindow / n,
 	}
 }
 
@@ -77,6 +81,7 @@ func defaultDelays() delays {
 		singleGoneRetry:        singleGoneRetryDelay,
 		interruptionStallRetry: interruptionStallRetryDelay,
 		transientFailureRetry:  transientFailureRetryDelay,
+		segmentRetryUnit:       segmentRetryUnitDelay,
 		genericRetry:           genericRetryDelay,
 		hlsPlaylistRetry:       hlsPlaylistRetryDelay,
 		hlsStuckRetry:          hlsStuckRetryDelay,
@@ -85,5 +90,6 @@ func defaultDelays() delays {
 		hlsReloadUnit:          time.Second,
 		hlsResumeSave:          hlsResumeSaveInterval,
 		fetchHardCeiling:       segmentHardCeiling,
+		headFreshWindow:        headFreshWindow,
 	}
 }

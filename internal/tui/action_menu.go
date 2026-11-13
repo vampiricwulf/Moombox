@@ -47,8 +47,19 @@ type ActionMenuItem struct {
 	// "deletes 2 set-aside recordings, …" (owner decision PR-M1) — on the
 	// chord's confirm and on the menu's second-Enter footer alike. It may
 	// read the disk: it runs once, when the confirm is armed, never when
-	// the menu opens (CORE-9).
+	// the menu opens (CORE-9). A chord that takes no job is asked with nil
+	// ids: R P's says how many downloads the restart interrupts.
 	ConfirmDetail func(jobIDs []string) string
+
+	// Opens names the overlay this action puts on screen, by its
+	// overlayRegistry name ("" for an action that opens none). It is the one
+	// statement of "does this action open an overlay": in a terminal
+	// smaller than that overlay needs, the action is refused
+	// (App.refusedForSize, owner ruling R-C5 as amended) and the bare
+	// action menu dims it (sizeRefusal).
+	// TestEveryChordOpensWhatItSaysItOpens runs every chord and compares
+	// the overlay that opened with this field.
+	Opens string
 }
 
 // menuActionItem is a list.Item for the main action menu.
@@ -165,6 +176,12 @@ type ActionMenuModel struct {
 
 	// Confirm prompt (for R P etc.)
 	confirmLabel string
+
+	// bareRefused says the bare form did not arm a confirm, because what the
+	// action deletes does not fit the page whole (action_menu_bare.go). Only
+	// that it was refused is kept: the line shown, and the size it names,
+	// are worked out on every draw (bareRefusal). The next key clears it.
+	bareRefused bool
 }
 
 // NewActionMenuModel creates a new action menu.
@@ -207,6 +224,7 @@ func (m *ActionMenuModel) Open(items []ActionMenuItem) {
 	m.filtered = nil
 	m.jobConfirm = false
 	m.confirmLabel = ""
+	m.bareRefused = false
 
 	// Build list items with category headers
 	var listItems []list.Item
@@ -271,6 +289,10 @@ func (m *ActionMenuModel) SetSize(w, h int) {
 }
 
 func (m *ActionMenuModel) updateListSizes() {
+	if m.bare() {
+		m.bareSetSize()
+		return
+	}
 	boxW := max(min(m.width-8, 60), 30)
 	contentW := boxW - 2
 	ch := m.contentHeight()
@@ -369,7 +391,20 @@ func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
 // HandleKey processes a key press and returns an action string.
 // Returns "" for internal navigation, "close" to dismiss, or an action chord
 // like "A A" or "A D:jobID123".
+// pickerJob is the job under the job picker's cursor, as the picker holds it
+// (the row from when the action was chosen), or nil outside the picker.
+func (m *ActionMenuModel) pickerJob() *database.Job {
+	if !m.visible || m.mode != menuJobSelect {
+		return nil
+	}
+	if ji, ok := m.jobList.SelectedItem().(menuJobItem); ok {
+		return ji.job
+	}
+	return nil
+}
+
 func (m *ActionMenuModel) HandleKey(key string) string {
+	m.bareRefused = false
 	switch m.mode {
 	case menuMain:
 		return m.handleMainKey(key)
@@ -382,6 +417,9 @@ func (m *ActionMenuModel) HandleKey(key string) string {
 }
 
 func (m *ActionMenuModel) handleMainKey(key string) string {
+	if m.bare() && m.bareMainKey(key) {
+		return ""
+	}
 	switch key {
 	case keyEsc, "m", "M":
 		m.Close()
@@ -405,6 +443,11 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 	case keyEnter:
 		item := m.selectedAction()
 		if item == nil {
+			return ""
+		}
+		if m.sizeRefusal(item) != "" {
+			// Its overlay needs a larger terminal: the row is dimmed and
+			// says so, and the menu stays (never in the normal layout).
 			return ""
 		}
 		if item.NeedsJob {
@@ -441,6 +484,10 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 		}
 		if item.NeedsConfirm {
 			m.confirmLabel = item.Label
+			m.confirmDetail = ""
+			if item.ConfirmDetail != nil {
+				m.confirmDetail = item.ConfirmDetail(nil)
+			}
 			m.pendingAction = item.Chord
 			m.mode = menuConfirm
 			return ""
@@ -489,6 +536,9 @@ func (m *ActionMenuModel) handleJobSelectKey(key string) string {
 			return ""
 		}
 		if m.jobConfirm {
+			if m.bareRefuseConfirm() {
+				return "" // armed in a larger terminal, and no longer shown whole
+			}
 			action := m.pendingAction + ":" + ji.job.ID
 			m.Close()
 			return action
@@ -498,6 +548,8 @@ func (m *ActionMenuModel) handleJobSelectKey(key string) string {
 		if m.pendingDetail != nil {
 			m.confirmDetail = m.pendingDetail([]string{ji.job.ID})
 		}
+		// The bare form arms only a confirm it can show whole (R-C11).
+		m.bareRefuseConfirm()
 		return ""
 	}
 	return ""
@@ -550,6 +602,10 @@ func (m *ActionMenuModel) overlayGeometry() (int, int, int, int) {
 // Mouse only changes selection — never triggers actions (Enter required).
 func (m *ActionMenuModel) HandleMouse(msg tea.MouseMsg) {
 	if !m.visible {
+		return
+	}
+	if m.bare() {
+		m.bareMouse(msg)
 		return
 	}
 
@@ -617,6 +673,9 @@ func (m *ActionMenuModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.bare() {
+		return m.bareView()
+	}
 
 	boxW := max(min(m.width-8, 60), 30)
 	contentW := boxW - 2
@@ -675,6 +734,15 @@ func (m *ActionMenuModel) renderConfirm(boxW int) string {
 	var lines []string
 	lines = append(lines, "")
 	lines = append(lines, "  "+prompt)
+	// What the action costs (R P: the downloads a restart interrupts),
+	// wrapped whole between the question and the keys.
+	if m.confirmDetail != "" {
+		detail := bareWrap(m.confirmDetail, max(boxW-6, 1), len(m.confirmDetail)+1)
+		for _, row := range detail {
+			lines = append(lines, "  "+YellowStyle.Render(row))
+		}
+		ch += len(detail)
+	}
 	lines = append(lines, "  "+hint)
 	for len(lines) < ch+2 {
 		lines = append(lines, "")

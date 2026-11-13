@@ -43,4 +43,10 @@ func TestNetworkWaitRendersAsWait(t *testing.T) {
 			t.Errorf("%s: progress slot = %q (wait %v), want %q (wait %v)", tc.name, text, wait, tc.wantText, tc.wantWait)
 		}
 	}
+	// An off-queue mux queueing for a download slot (owner ruling R2-W5): the
+	// Muxing row reads as a wait, not as the download's finished percent.
+	job := &database.Job{ID: "mux-wait", Status: database.StatusMuxing, Percent: 100, Progress: "Waiting for a download slot to mux... (3m)"}
+	if text, wait := m.progressCellText(job); text != "⋯ wait " || !wait {
+		t.Errorf("a Muxing row waiting for a slot: progress slot = %q (wait %v), want the wait tag", text, wait)
+	}
 }

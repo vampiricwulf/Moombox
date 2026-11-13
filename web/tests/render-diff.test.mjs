@@ -236,7 +236,7 @@ const jobAt = (id, title, channelName = "Chan") => ({ ...downloadingJob(), id, t
  * rebuild.
  */
 const stateAfter = (h) => ({
-  channels: [...h.app.filterBar._tasksChannels],
+  channels: h.app.filterBar.channels("jobs"),
   focusedJobIndex: h.app.focusedJobIndex,
   activeIndicator: h.el("active-indicator").textContent,
 });
@@ -361,8 +361,8 @@ test("a newly discovered job is spliced in, not re-rendered over the whole list"
 // "beforeend") — the markup no longer matches the rebuild.
 // MUTANT: drop the leading-indentation shuffle — the cards are right but the
 // serialized list differs from a rebuild by one indentation run.
-// MUTANT: delete `this.filterBar.refreshChannels(...)` — the newcomer's channel
-// is missing from the filter dropdown until the next full render.
+// (The filter dropdown reads its channels from this.jobs when it opens, so the
+// newcomer's channel needs no refresh here; `channels` below pins that.)
 // MUTANT: delete `if (this.focusedJobIndex >= index) this.focusedJobIndex += 1`
 // — after a splice ABOVE the focused row the index points one row off, so the
 // next j/k move jumps.
@@ -370,7 +370,7 @@ test("a newly discovered job is spliced in, not re-rendered over the whole list"
 // "▶ N" goes stale on discovery.
 test("the spliced list is byte-identical to a full renderJobs() rebuild", { skip }, async () => {
   const existing = [jobAt("a", "AAA"), jobAt("b", "BBB"), jobAt("c", "CCC")];
-  // A channel of its own, so refreshChannels has something to be wrong about.
+  // A channel of its own, so the channel list has something to be wrong about.
   const cases = [
     ["head", jobAt("aa", "AA0", "Newcomer Ch")],
     ["middle", jobAt("bb", "BBZ", "Newcomer Ch")],

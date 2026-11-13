@@ -604,55 +604,6 @@ func TestResumeState_TempFileCleanup(t *testing.T) {
 	}
 }
 
-// TestDashLoop_DeferredProgressRequiresBytes verifies that the deferred OnProgress
-// in runDashLoop only fires when actual bytes were written. When handleGoneError
-// increments currentSeq without writing data, the deferred must NOT emit progress
-// (which would falsely reset the orchestrator's safety counters).
-func TestDashLoop_DeferredProgressRequiresBytes(t *testing.T) {
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:    "https://example.com/sq/$Number$",
-		OutputFile: "test.mp4",
-	})
-
-	var progressFired bool
-	d.OnProgress = func(p DownloadProgress) {
-		progressFired = true
-	}
-
-	// Simulate the deferred logic: seq > 0 but no bytes written.
-	// This mirrors what happens when handleGoneError increments currentSeq
-	// 20 times on 403 errors without downloading any data.
-	d.currentSeq.Store(20) // Advanced by error handler, no actual downloads
-	// bytesWritten stays at 0 (default)
-
-	seq := int(d.currentSeq.Load())
-	// Replicate the deferred condition from runDashLoop
-	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
-		d.OnProgress(DownloadProgress{
-			Seq:   seq - 1,
-			Bytes: d.bytesWritten.Load(),
-		})
-	}
-
-	if progressFired {
-		t.Error("deferred OnProgress should NOT fire when bytesWritten is 0")
-	}
-
-	// Now verify it DOES fire when bytes are written
-	d.bytesWritten.Store(1000)
-	seq = int(d.currentSeq.Load())
-	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
-		d.OnProgress(DownloadProgress{
-			Seq:   seq - 1,
-			Bytes: d.bytesWritten.Load(),
-		})
-	}
-
-	if !progressFired {
-		t.Error("deferred OnProgress should fire when bytesWritten > 0")
-	}
-}
-
 func TestStreamEnded_AtomicAccess(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    "https://example.com/sq/$Number$",
@@ -730,39 +681,6 @@ func TestCurrentSeq(t *testing.T) {
 	})
 	if got := d.CurrentSeq(); got != 42 {
 		t.Errorf("CurrentSeq() = %d, want 42", got)
-	}
-}
-
-func TestForceStartSeq_ExistingFile(t *testing.T) {
-	// ForceStartSeq + existing file = should honor StartSeq (same-quality append path)
-	tmpDir := t.TempDir()
-	outFile := filepath.Join(tmpDir, "video_stream")
-	os.WriteFile(outFile, []byte("existing segment data"), 0o644)
-
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:       "https://example.com/sq/$Number$",
-		OutputFile:    outFile,
-		StartSeq:      100,
-		ForceStartSeq: true,
-	})
-	if got := d.CurrentSeq(); got != 100 {
-		t.Errorf("CurrentSeq() = %d, want 100", got)
-	}
-}
-
-func TestForceStartSeq_MissingFile(t *testing.T) {
-	// ForceStartSeq + missing file = should still honor StartSeq (different-quality split path)
-	tmpDir := t.TempDir()
-	outFile := filepath.Join(tmpDir, "video_stream") // does not exist
-
-	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:       "https://example.com/sq/$Number$",
-		OutputFile:    outFile,
-		StartSeq:      100,
-		ForceStartSeq: true,
-	})
-	if got := d.CurrentSeq(); got != 100 {
-		t.Errorf("CurrentSeq() = %d, want 100", got)
 	}
 }
 

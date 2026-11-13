@@ -43,8 +43,8 @@ export const JOBS = {
     watched: true, incompleteTail: true,
   },
   // Long enough to hit formatProgressHtml's 50-char truncation.
-  // Terminal rows carry the server's hasStaging (worker.ListJob, owner
-  // decision PE-5); true keeps their row icon Resume.
+  // Resumable YouTube rows carry the server's hasStaging (worker.ListJob,
+  // owner decision PE-5); true keeps their row icon Resume.
   Error: {
     ...BASE, status: "Error", hasStaging: true,
     error: 'download failed after 3 attempts: unexpected <status> 403 from the CDN & no fallback',

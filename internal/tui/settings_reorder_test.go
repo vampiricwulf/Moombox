@@ -129,18 +129,3 @@ func TestReorderValidatorAcceptsZeroAndRefusesGarbage(t *testing.T) {
 		})
 	}
 }
-
-// TestReorderKeysAreNotRestartRequired: both are re-applied on save through
-// runState.applyReorderBudget, so warning about a restart would be a lie —
-// and TestRestartRequiredListsAgree would then demand the same lie from the
-// dashboard.
-//
-// MUTANT: add either key to restartRequiredKeys — this fails, and
-// TestRestartRequiredListsAgree fails too (the Web list has neither).
-func TestReorderKeysAreNotRestartRequired(t *testing.T) {
-	for _, key := range []string{"reorder_buffer_mb", "reorder_budget_mb"} {
-		if restartRequiredKeys[key] {
-			t.Errorf("%s is marked restart-required, but cmd/moombox re-applies it on every save", key)
-		}
-	}
-}

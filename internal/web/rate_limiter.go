@@ -61,8 +61,9 @@ type RateLimiter struct {
 // cleanup loop. Caller must invoke Close() when done to stop the
 // goroutine.
 //
-// For ctx-aware lifecycle (cleanup goroutine exits when ctx cancels),
-// use NewRateLimiterCtx instead. Audit reports/web.md Q-19.
+// Every production limiter is built here and closed at shutdown.
+// NewRateLimiterCtx is the optional ctx-tied variant; only tests use it
+// today.
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	rl := newRateLimiterStruct(limit, window)
 	go rl.cleanupLoop()
@@ -71,8 +72,8 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 
 // NewRateLimiterCtx creates a rate limiter whose cleanup goroutine is
 // tied to the parent ctx — when ctx cancels, the cleanup loop exits
-// without needing an explicit Close() call. Useful for tests and for
-// services that already own a long-lived ctx.
+// without needing an explicit Close() call. Only tests call it today (a
+// test's t.Context() ends the loop); production uses NewRateLimiter.
 func NewRateLimiterCtx(ctx context.Context, limit int, window time.Duration) *RateLimiter {
 	rl := newRateLimiterStruct(limit, window)
 	go rl.cleanupLoop()

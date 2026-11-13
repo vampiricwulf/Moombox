@@ -38,6 +38,7 @@ func TestOutageAtBootIsReportedOnRestore(t *testing.T) {
 
 	m := connectivity.NewMonitorWithInterval(nil, 100*time.Millisecond)
 	m.SetProbeTargets([]string{addr})
+	m.SetProbeFallbackTargets(nil) // loopback only: a test never dials the platform hosts
 	m.Start(t.Context())
 	defer m.Stop()
 	if m.IsOnline() {

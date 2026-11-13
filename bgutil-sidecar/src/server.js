@@ -111,10 +111,18 @@ const HOMEPAGE_FETCH_TIMEOUT_MS = 8_000;
 // Ceiling on the homepage body we will buffer. The real page measured
 // ~875 KB decompressed on 2026-08-24, so 4 MB is ~4x headroom. Every body
 // read on the Go side is capped (10 MB player, 50 MB watch page, 20 MB
-// BotGuard, 1 MB challenge); this keeps the sidecar to the same rule so a
-// misbehaving or hostile edge response cannot balloon the heap of a process
-// that runs for weeks.
+// BotGuard, 1 MB challenge); the sidecar keeps to the same rule for all four
+// bodies it reads (readCapped), so a misbehaving or hostile edge response
+// cannot balloon the heap of a process that runs for weeks.
 const HOMEPAGE_MAX_BYTES = 4 << 20;
+
+// The other three bodies this file reads, at the Go side's own figures for
+// the same responses: 20 MB for the BotGuard interpreter script
+// (internal/bgutils/botguard.go), 1 MB for the /att/get challenge
+// (challenge.go) and for GenerateIT (webpo_client.go).
+const INTERPRETER_MAX_BYTES = 20 << 20;
+const ATT_GET_MAX_BYTES = 1 << 20;
+const GENERATE_IT_MAX_BYTES = 1 << 20;
 
 // readCapped buffers a response body, aborting past `limit` bytes rather
 // than growing without bound.
@@ -253,7 +261,10 @@ function assertGoogleHost(rawUrl) {
 // executed (proven against live local servers, 2026-08-15). Refusing 3xx
 // outright is safer than re-gating response.url: YouTube serves the
 // interpreter directly, so a redirect here is already anomalous.
-async function fetchInterpreterScript(interpUrl, deadline) {
+//
+// Exported for the body-cap test only. It does NOT gate the host: the one
+// production caller passes assertGoogleHost's result.
+export async function fetchInterpreterScript(interpUrl, deadline) {
     const resp = await fetch(interpUrl, {
         headers: { "User-Agent": USER_AGENT },
         redirect: "manual",
@@ -267,7 +278,7 @@ async function fetchInterpreterScript(interpUrl, deadline) {
     if (!resp.ok) {
         throw new Error(`interpreter fetch HTTP ${resp.status}`);
     }
-    return resp.text();
+    return readCapped(resp, INTERPRETER_MAX_BYTES, "interpreter");
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +392,68 @@ export async function fetchHomepageChallenge(deadline) {
     return { challenge, ytObj };
 }
 
+// fetchAttChallenge fetches a BotGuard challenge from /att/get, the last
+// source in the chain. Its body is read under ATT_GET_MAX_BYTES. Exported
+// for the body-cap test.
+//
+// Header keys below are deliberately lowercase to match getHeaders()'s own
+// casing (content-type, user-agent) and OVERWRITE those entries rather than
+// duplicate them: native fetch's Headers treats case-varied keys as the SAME
+// header and joins their values with ", " (verified against Node's undici),
+// so a differently-cased "Content-Type" here would silently corrupt the
+// request into "application/json+protobuf, application/json". getHeaders()
+// also contributes x-goog-api-key / x-user-agent, matching upstream
+// session_manager.ts's /att/get call.
+export async function fetchAttChallenge(deadline) {
+    const attResp = await fetch(ATT_GET_URL, {
+        method: "POST",
+        // No redirects: this response is treated as TRUSTED (its inline
+        // interpreterJavascript is executed without an origin check), so
+        // it must come from the constant URL above and nowhere a redirect
+        // could point.
+        redirect: "manual",
+        headers: {
+            ...getHeaders(),
+            "content-type": "application/json",
+            "user-agent": USER_AGENT,
+        },
+        body: JSON.stringify({
+            context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
+            engagementType: "ENGAGEMENT_TYPE_UNBOUND",
+        }),
+        signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
+    });
+    if (!attResp.ok) {
+        throw new Error(`att/get HTTP ${attResp.status}`);
+    }
+    const attBody = JSON.parse(await readCapped(attResp, ATT_GET_MAX_BYTES, "att/get"));
+    const challenge = attBody && attBody.bgChallenge;
+    if (!challenge) {
+        throw new Error("att/get response missing bgChallenge");
+    }
+    return challenge;
+}
+
+// fetchIntegrityToken posts a BotGuard snapshot to GenerateIT and returns
+// the parsed response array. Its body is read under GENERATE_IT_MAX_BYTES.
+// Exported for the body-cap test.
+export async function fetchIntegrityToken(botguardResponse, deadline) {
+    const itResp = await fetch(buildURL("GenerateIT"), {
+        method: "POST",
+        // Fixed Google endpoint; refuse redirects so a hijacked hop can never
+        // observe the BotGuard snapshot we post or answer for the integrity
+        // token. Consistent with the other two fetches in this file.
+        redirect: "manual",
+        headers: getHeaders(),
+        body: JSON.stringify([REQUEST_KEY, botguardResponse]),
+        signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
+    });
+    if (!itResp.ok) {
+        throw new Error(`GenerateIT HTTP ${itResp.status}`);
+    }
+    return JSON.parse(await readCapped(itResp, GENERATE_IT_MAX_BYTES, "GenerateIT"));
+}
+
 // ---------------------------------------------------------------------------
 // Core: full BotGuard fetch + interpreter + minter mint flow. Mirrors the
 // upstream session_manager.generateTokenMinter pattern, but stripped of
@@ -411,41 +484,7 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
     if (!challenge) {
         minterSource = "att_get";
         // 1. Fetch the BotGuard challenge from YouTube's /att/get endpoint.
-        // Header keys below are deliberately lowercase to match getHeaders()'s
-        // own casing (content-type, user-agent) and OVERWRITE those entries
-        // rather than duplicate them: native fetch's Headers treats
-        // case-varied keys as the SAME header and joins their values with
-        // ", " (verified against Node's undici), so a differently-cased
-        // "Content-Type" here would silently corrupt the request into
-        // "application/json+protobuf, application/json". getHeaders() also
-        // contributes x-goog-api-key / x-user-agent, matching upstream
-        // session_manager.ts's /att/get call.
-        const attResp = await fetch(ATT_GET_URL, {
-            method: "POST",
-            // No redirects: this response is treated as TRUSTED (its inline
-            // interpreterJavascript is executed without an origin check), so
-            // it must come from the constant URL above and nowhere a redirect
-            // could point.
-            redirect: "manual",
-            headers: {
-                ...getHeaders(),
-                "content-type": "application/json",
-                "user-agent": USER_AGENT,
-            },
-            body: JSON.stringify({
-                context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
-                engagementType: "ENGAGEMENT_TYPE_UNBOUND",
-            }),
-            signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
-        });
-        if (!attResp.ok) {
-            throw new Error(`att/get HTTP ${attResp.status}`);
-        }
-        const attBody = await attResp.json();
-        challenge = attBody && attBody.bgChallenge;
-        if (!challenge) {
-            throw new Error("att/get response missing bgChallenge");
-        }
+        challenge = await fetchAttChallenge(deadline);
     }
 
     // 2. Resolve the interpreter JS. bgutils-js types interpreterJavascript
@@ -525,25 +564,12 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
     const botguardResponse = await bgClient.snapshot({ webPoSignalOutput });
 
     // 5. POST the snapshot to GenerateIT to receive an integrity token.
-    const itResp = await fetch(buildURL("GenerateIT"), {
-        method: "POST",
-        // Fixed Google endpoint; refuse redirects so a hijacked hop can never
-        // observe the BotGuard snapshot we post or answer for the integrity
-        // token. Consistent with the other two fetches in this file.
-        redirect: "manual",
-        headers: getHeaders(),
-        body: JSON.stringify([REQUEST_KEY, botguardResponse]),
-        signal: budgetSignal(deadline, FETCH_TIMEOUT_MS),
-    });
-    if (!itResp.ok) {
-        throw new Error(`GenerateIT HTTP ${itResp.status}`);
-    }
     const [
         integrityToken,
         estimatedTtlSecs,
         mintRefreshThreshold,
         websafeFallbackToken,
-    ] = await itResp.json();
+    ] = await fetchIntegrityToken(botguardResponse, deadline);
     if (!integrityToken) {
         throw new Error(
             `GenerateIT empty integrityToken (websafeFallback=${!!websafeFallbackToken})`,

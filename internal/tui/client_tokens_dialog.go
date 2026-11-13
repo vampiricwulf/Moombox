@@ -35,6 +35,10 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	if !ok {
 		return
 	}
+	if d.dialog != nil && d.dialog.bare() {
+		d.dialog.bareRenderItem(w, m, index, ci.token)
+		return
+	}
 	ct := ci.token
 
 	prefix := "  "
@@ -157,6 +161,10 @@ func (m *ClientTokensDialogModel) IsVisible() bool {
 func (m *ClientTokensDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	if m.bare() {
+		m.list.SetSize(w, m.bareListRows())
+		return
+	}
 	boxW := max(min(80, w-4), 40)
 	boxH := max(min(24, h-4), 10)
 	listH := max(boxH-6, 1)
@@ -287,6 +295,9 @@ func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cm
 func (m *ClientTokensDialogModel) View() string {
 	if !m.visible {
 		return ""
+	}
+	if m.bare() {
+		return m.bareView()
 	}
 
 	boxW := max(min(80, m.width-4), 40)

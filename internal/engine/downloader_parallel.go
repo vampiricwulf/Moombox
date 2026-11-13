@@ -631,9 +631,17 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// confuse the muxer. By returning nextSeq pointing at the gap, the DASH
 	// main loop will re-fetch the missing segments sequentially with the
 	// full retry logic in handleDashError rather than the one-shot
-	// fetchSegmentWithRetry used by catch-up workers. We still report the
-	// gap range so callers can track what's about to be retried.
+	// fetchSegmentWithRetry used by catch-up workers.
 	// (Audit reports/engine.md Finding 4.)
+	//
+	// The stop is logged and never reported through OnGap: nothing is missing
+	// yet. The DASH loop, the only caller, then writes those sequences, closes
+	// the part at one (refuseSegment, whose split records its own gap row),
+	// skips one in place with its own OnGap, or finalizes behind the head. A
+	// gap reported here became a "segment gap" warning and a persisted gap row
+	// on the job — one per catch-up round at a stuck segment — for a recording
+	// that had no hole, and the job details could not tell those rows from
+	// real ones.
 	//
 	// The bound is what was actually CLAIMED, not the live target: claims
 	// are contiguous, so every sequence below claimedUpTo was attempted and
@@ -641,14 +649,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// never handed to a worker and are simply future work. Every claim
 	// flushed means nextSeq == claimedUpTo and no gap fires.
 	//
-	// Nor does a cancel (Cancel() for a quality switch, or ctx): it abandons
-	// every in-flight claim through markFailed, and the successor downloader
-	// or the resume starts at nextSeq and fetches them like any other. A gap
-	// reported here became a "segment gap" warning and a persisted gap row on
-	// the job for segments nobody found missing.
+	// A cancel (Cancel() for a quality switch, or ctx) is not logged as a stop
+	// at a gap either: it abandons every in-flight claim through markFailed,
+	// and the successor downloader or the resume starts at nextSeq and fetches
+	// them like any other.
 	claimedUpTo := rb.claimedUpTo()
 	if nextSeq < claimedUpTo && !d.isCancelled() && ctx.Err() == nil {
-		// Find how far the gap extends so the gap event covers the whole
+		// Find how far the gap extends so the log line covers the whole
 		// contiguous missing range up to the next buffered segment (or the
 		// end of the claimed span if the tail is all missing).
 		gapEnd := nextSeq
@@ -657,9 +664,6 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				break
 			}
 			gapEnd++
-		}
-		if d.OnGap != nil {
-			d.OnGap(DownloadGap{From: nextSeq, To: gapEnd - 1})
 		}
 		d.logger.Info("[Downloader] Parallel catch-up stopping at gap; main loop will re-fetch",
 			"gapFrom", nextSeq, "gapTo", gapEnd-1)

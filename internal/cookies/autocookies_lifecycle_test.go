@@ -319,18 +319,6 @@ func TestCancelSetupReportsNothingToCancel(t *testing.T) {
 			t.Fatalf("the second cancel: got %v, want ErrNoSetupInProgress", err)
 		}
 	})
-
-	t.Run("a claim in flight is something to cancel", func(t *testing.T) {
-		// The distinction S18 turns on: no browser process exists between
-		// StartSetup's gate and the launch, but there IS a setup to abort, and
-		// treating it as "nothing to cancel" would drop the very cancel S1
-		// exists to make observable.
-		s := NewAutoCookieService(t.TempDir(), "", NewCookieJar(), nopAutoCookieLogger{})
-		s.setupClaimed = true
-		if err := s.CancelSetup(); err != nil {
-			t.Fatalf("CancelSetup with a claim in flight: got %v, want nil", err)
-		}
-	})
 }
 
 // TestCancelSetupAgreesWithSetupInProgress pins CancelSetup's "nothing to

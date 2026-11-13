@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -57,7 +58,9 @@ type Server struct {
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	actualPort  atomic.Int32     // Actual bound port after Start (may differ from cfg if probed)
 	tlsActive   atomic.Bool      // whether Start's listener serves HTTPS (set with actualPort)
-	draining    atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
+	bound       chan struct{}    // closed once Start's listener is bound; see Bound
+	boundOnce   sync.Once
+	draining    atomic.Bool // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -94,6 +97,7 @@ func NewServer(store *config.Store, logger interface {
 		router:        r,
 		ws:            NewWebSocketHub(logger),
 		internalToken: token,
+		bound:         make(chan struct{}),
 		logger:        logger,
 	}
 
@@ -132,8 +136,52 @@ func NewServer(store *config.Store, logger interface {
 	r.Use(CSRFMiddleware(store, token, logger))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
+	r.MethodNotAllowed(s.methodNotAllowed)
 
 	return s
+}
+
+// apiError writes the {"error": msg} JSON body every route handler answers a
+// refusal with.
+func apiError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// isAPIPath reports whether p is under the REST prefix.
+func isAPIPath(p string) bool {
+	return strings.HasPrefix(p, "/api/")
+}
+
+// allowProbeMethods are the methods methodNotAllowed asks the router about,
+// in the order the Allow header lists them.
+var allowProbeMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+}
+
+// methodNotAllowed answers a request whose path is registered but not for
+// its method: 405 with the Allow header chi's own handler sets (a custom
+// handler replaces that one, so the methods are asked of the router here)
+// and, under /api/, the same {"error": ...} JSON body the handlers answer
+// with, where chi's default sent no body at all. Other paths keep the empty
+// body.
+func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePath != "" {
+		path = rctx.RoutePath
+	}
+	for _, m := range allowProbeMethods {
+		if s.router.Match(chi.NewRouteContext(), m, path) {
+			w.Header().Add("Allow", m)
+		}
+	}
+	if isAPIPath(r.URL.Path) {
+		apiError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
 // InternalToken returns the secret token that same-process clients (TUI) must
@@ -149,10 +197,10 @@ func (s *Server) SetCommit(c string) {
 
 // ActualPort returns the port the listener actually bound, or 0 when the bind
 // has not completed. 0 is the PENDING sentinel, not a port: every caller
-// (cmd/moombox/main.go's startup banner and its 500 ms readiness select,
+// (cmd/moombox/main.go's startup banner and its Update Applied notice,
 // routes_wiring.go's plugin-port lookup) tests `> 0` and falls back to the
 // configured port until it turns positive. Start writes it from its own
-// goroutine while main.go reads it across that select window, so it is atomic
+// goroutine while main.go reads it from another, so it is atomic
 // rather than a plain int (sweep T4-35). int32 is deliberate: a TCP port never
 // exceeds 65535.
 func (s *Server) ActualPort() int { return int(s.actualPort.Load()) }
@@ -166,6 +214,22 @@ func (s *Server) TLSActive() bool { return s.tlsActive.Load() }
 
 // setActualPort records the bound port. Called once, by Start.
 func (s *Server) setActualPort(port int) { s.actualPort.Store(int32(port)) }
+
+// Bound is closed once Start's listener is bound and ActualPort and TLSActive
+// are set. It is never closed when Start returns an error before binding, so
+// a caller waiting for the bind selects on this and on Start's result: one of
+// the two always answers. A Server not made by NewServer has a nil channel,
+// which never answers.
+func (s *Server) Bound() <-chan struct{} { return s.bound }
+
+// markBound closes Bound. Called by Start, after setActualPort.
+func (s *Server) markBound() {
+	s.boundOnce.Do(func() {
+		if s.bound != nil {
+			close(s.bound)
+		}
+	})
+}
 
 // SetAuth sets the auth service for authentication middleware.
 func (s *Server) SetAuth(auth *AuthService) {
@@ -199,7 +263,15 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Unauthenticated paths (login page and the two files it loads, auth
-		// endpoints, POT read-only, favicon).
+		// endpoints, the plugin's /ping, favicon).
+		//
+		// /minter_cache is NOT here. It is LoopbackOnly, and a direct
+		// loopback caller (the yt-dlp plugin) is waived above before this
+		// list is read, so the entry only ever applied to a non-local
+		// client. Behind a reverse proxy on the same host the gate sees the
+		// proxy's loopback address, and the entry let a remote visitor read
+		// the PO token cache keys with no login. It now needs a session
+		// there, as every other loopback-gated route does.
 		//
 		// /boot-theme.js and /login.js are here because this middleware answers
 		// every OTHER path with login.html itself: without them the browser
@@ -209,7 +281,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		p := r.URL.Path
 		if p == "/api/auth/login" ||
 			p == "/api/auth/status" ||
-			p == "/ping" || p == "/minter_cache" ||
+			p == "/ping" ||
 			p == "/favicon.svg" || p == "/login.html" ||
 			p == "/boot-theme.js" || p == "/login.js" {
 			next.ServeHTTP(w, r)
@@ -304,8 +376,14 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 	s.loginHTML, _ = fs.ReadFile(staticFS, "login.html")
 
 	s.router.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		// Don't serve SPA for API or WebSocket paths
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
+		// Don't serve SPA for API or WebSocket paths. An unknown API path
+		// answers the JSON error body every handler does, not net/http's
+		// plain-text one.
+		if isAPIPath(r.URL.Path) {
+			apiError(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/ws" {
 			http.NotFound(w, r)
 			return
 		}
@@ -459,13 +537,14 @@ func interceptUpgrades(store *config.Store, router http.Handler, wsHandler http.
 
 // serverHandler is the http.Server's handler: the router, with WebSocket
 // upgrades taken ahead of it (interceptUpgrades) when a handler for them is
-// installed, all of it inside outermostRecovery.
+// installed, under bodyReadDeadline (a stalled request body is cut at
+// bodyReadTimeout), all of it inside outermostRecovery.
 func (s *Server) serverHandler() http.Handler {
 	var handler http.Handler = s.router
 	if s.wsHandler != nil {
 		handler = interceptUpgrades(s.configStore, s.router, s.wsHandler)
 	}
-	return outermostRecovery(s.logger, handler)
+	return outermostRecovery(s.logger, bodyReadDeadline(bodyReadTimeout, handler))
 }
 
 // Start begins listening for HTTP connections.
@@ -492,8 +571,10 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.serverHandler(),
 		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
 		WriteTimeout:      0,                // Disable for WebSocket and video streaming
-		IdleTimeout:       120 * time.Second,
-		ErrorLog:          log.New(io.Discard, "", 0), // Suppress HTTP server errors from stdout/stderr (routed through app logger via middleware)
+		// No ReadTimeout either (it would cut long handlers and streams): a
+		// request body is bounded per request by bodyReadDeadline instead.
+		IdleTimeout: 120 * time.Second,
+		ErrorLog:    log.New(io.Discard, "", 0), // Suppress HTTP server errors from stdout/stderr (routed through app logger via middleware)
 	}
 
 	// Configure TLS if enabled
@@ -569,6 +650,7 @@ func (s *Server) Start(ctx context.Context) error {
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	s.tlsActive.Store(tlsConfig != nil)
 	s.setActualPort(actualPort)
+	s.markBound()
 	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	// Mirrors the host switch above: all three of these bind 0.0.0.0.

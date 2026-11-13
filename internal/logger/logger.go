@@ -2,6 +2,7 @@
 package logger
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -31,7 +32,10 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 
 // lineSinks fans each formatted line out to moombox.log first and stdout
 // second, and no sink's failure keeps the line from another. The file goes
-// first so the line is on disk before stdout is touched at all.
+// first so the line is on disk before stdout is touched at all. The file is
+// written on the calling goroutine; stdout is only queued there and written
+// by the console queue's own goroutine (consoleQueue), so a console that has
+// stopped taking output delays nothing but its own lines.
 //
 // io.MultiWriter once did this job with stdout first, and it returns at the
 // first writer's error: a stdout that fails every write for the rest of the
@@ -86,6 +90,17 @@ type Logger struct {
 
 	// Toggleable stdout writer (disabled during TUI)
 	stdout *switchableWriter
+	// console queues the stdout lines and writes them on its own goroutine,
+	// through stdout above. See consoleQueue.
+	console *consoleQueue
+	// handlerOpts are the file / stdout handler's options, kept so the
+	// logger's own notes about the console are rendered in the same shape.
+	handlerOpts *slog.HandlerOptions
+	// consoleCloseWait is consoleCloseFlush; a field so a test of the bound
+	// does not wait the real one.
+	consoleCloseWait time.Duration
+	// closeFlushLimit, when set, caps consoleCloseWait (LimitCloseFlush).
+	closeFlushLimit atomic.Pointer[time.Duration]
 	// stderrGate mirrors stdout suppression for the logger's own
 	// diagnostics (rotation failures, slow-subscriber drops): while the
 	// TUI owns the terminal, a raw stderr write scribbles over the
@@ -268,7 +283,9 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 	l.stdout.enabled.Store(true)
 	l.stderrGate = &switchableWriter{w: os.Stderr}
 	l.stderrGate.enabled.Store(true)
-	sinks := lineSinks{stdout: l.stdout}
+	l.consoleCloseWait = consoleCloseFlush
+	l.console = &consoleQueue{out: l.stdout, limit: consoleQueueLines}
+	sinks := lineSinks{stdout: consoleSink{l: l}}
 	if l.file != nil {
 		sinks.file = l
 	}
@@ -295,6 +312,7 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 			return a
 		},
 	}
+	l.handlerOpts = opts
 	l.handler = slog.NewTextHandler(sinks, opts)
 	// Route the process-global slog default through the FULL pipeline (level
 	// gate, file, ring buffer, subscribers, TUI-safe stderr gating) via the
@@ -854,7 +872,13 @@ func (l *Logger) SetLevel(level string) bool {
 // SuppressStdout disables stdout logging (and reroutes the logger's own
 // stderr diagnostics into the ring buffer). Call this when the TUI starts
 // so raw log writes don't corrupt BubbleTea's alternate screen.
+//
+// The lines already queued for the console are given consoleSuppressFlush to
+// print first, so what was logged before the TUI starts is on the terminal
+// before the TUI takes it. Whatever is still queued after that is discarded
+// when its turn comes, not written over the TUI.
 func (l *Logger) SuppressStdout() {
+	l.console.flush(consoleSuppressFlush)
 	l.stdout.enabled.Store(false)
 	if l.stderrGate != nil {
 		l.stderrGate.enabled.Store(false)
@@ -867,6 +891,50 @@ func (l *Logger) RestoreStdout() {
 	if l.stderrGate != nil {
 		l.stderrGate.enabled.Store(true)
 	}
+}
+
+// FlushConsole waits until every line logged so far has been written to
+// stdout, for at most timeout, and reports whether it was. Stdout is written
+// by its own goroutine (consoleQueue), so code that prints to the console
+// directly, or exits without Close, calls this first to keep its output after
+// the log lines that came before it. moombox.log needs no flush: it is written
+// before the log call returns.
+func (l *Logger) FlushConsole(timeout time.Duration) bool {
+	return l.console.flush(timeout)
+}
+
+// LimitCloseFlush caps how long Close waits for the queued console lines to
+// print, for an exit that has less time than consoleCloseFlush to spare: a
+// Windows console that is being closed ends the process on its own clock, and
+// it is the console most likely to have stopped taking output. Zero means
+// Close does not wait for the console at all. moombox.log is unaffected: it
+// is written before each log call returns.
+func (l *Logger) LimitCloseFlush(d time.Duration) {
+	l.closeFlushLimit.Store(&d)
+}
+
+// fileShapeLine renders msg as a WARN line in the file / stdout shape.
+func (l *Logger) fileShapeLine(msg string) []byte {
+	var buf bytes.Buffer
+	rec := slog.NewRecord(l.now(), slog.LevelWarn, msg, 0)
+	_ = slog.NewTextHandler(&buf, l.handlerOpts).Handle(context.Background(), rec)
+	return buf.Bytes()
+}
+
+// consoleNote records that the console stopped or resumed taking lines, in
+// moombox.log, the ring buffer and the subscribers: everywhere except the
+// console, whose own copy the queue places. It runs inside the file / stdout
+// handler's lock (consoleSink.Write), so it must not go through log(), which
+// would take that lock again.
+func (l *Logger) consoleNote(msg string) {
+	if l.closed.Load() {
+		return
+	}
+	if l.filePath != "" {
+		_, _ = l.Write(l.fileShapeLine(msg))
+	}
+	line := formatLogLine(l.now(), slog.LevelWarn, msg)
+	l.broadcast(line, l.addToRingBuffer(line))
 }
 
 // diagf emits a logger-internal diagnostic. On a normal console it goes to
@@ -888,9 +956,19 @@ func (l *Logger) diagf(format string, args ...any) {
 	l.broadcast(line, l.addToRingBuffer(line))
 }
 
-// Close flushes and closes the logger.
+// Close flushes and closes the logger. The lines still queued for the
+// console get consoleCloseFlush to print, so the last lines before a quit
+// are on the console when the process exits (and ahead of anything the
+// launcher prints after it); a console that is not taking output cannot hold
+// the exit for longer than that, or than LimitCloseFlush's bound when one was
+// set.
 func (l *Logger) Close() {
 	l.closed.Store(true)
+	wait := l.consoleCloseWait
+	if limit := l.closeFlushLimit.Load(); limit != nil && *limit < wait {
+		wait = *limit
+	}
+	l.console.flush(wait)
 	l.fileMu.Lock()
 	defer l.fileMu.Unlock()
 

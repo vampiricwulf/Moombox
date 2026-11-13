@@ -24,8 +24,10 @@ import (
 // the whole selection rather than the eligible jobs (the Finished one is
 // asked about).
 func TestReinitializeIsConfirmGatedAndNamesWhatItDeletes(t *testing.T) {
+	// Resume and Reinitialize run as a command (tui-5): the key's command is
+	// run and its answer delivered, as the program would.
 	press := func(app *App, r rune) {
-		app.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+		pressApply(app, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	app := NewApp()
 	var reinit []string

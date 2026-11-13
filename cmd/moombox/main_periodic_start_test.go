@@ -114,8 +114,12 @@ func rootIdent(expr ast.Expr) string {
 // os.ReadDir, a helper called profileExists. What all of those share is that
 // they are calls to something other than the config, so that is the rule —
 // the start condition must be answerable from configuration alone.
+//
+// The call lives in startCookieSequence (cookie_startup.go) since the cookie
+// startup sequence moved onto its own goroutine; its gate reads the
+// cookieStartup values run() copied out of the config under the store lock.
 func TestPeriodicRefreshStartsOnTheFlagAloneAndProbesNothing(t *testing.T) {
-	gates := gateChain(t, "main.go", "StartPeriodicRefresh")
+	gates := gateChain(t, "cookie_startup.go", "StartPeriodicRefresh")
 	if len(gates) == 0 {
 		t.Fatal("StartPeriodicRefresh is called unconditionally. cookies.auto_enabled IS the " +
 			"headless-browser refresh timer: with no gate at all, an install that switched the " +
@@ -168,8 +172,11 @@ func TestPeriodicRefreshStartsOnTheFlagAloneAndProbesNothing(t *testing.T) {
 // which owns every condition including the one that makes it safe: no cookies
 // to lose. A condition re-stated at this call site is a second copy of a rule
 // that already exists, and the two drift.
+//
+// The call lives in startCookieSequence (cookie_startup.go). The ctx checks
+// around it there are early returns, not conditions it sits under.
 func TestProfileSeedIsWiredWithoutTheFlag(t *testing.T) {
-	gates := gateChain(t, "main.go", "StartProfileSeed")
+	gates := gateChain(t, "cookie_startup.go", "StartProfileSeed")
 
 	for _, g := range gates {
 		if readsAutoEnabled(g) {
@@ -180,7 +187,7 @@ func TestProfileSeedIsWiredWithoutTheFlag(t *testing.T) {
 		}
 	}
 	if len(gates) > 0 {
-		t.Errorf("StartProfileSeed is called under %d condition(s) in main.go. Every condition it "+
+		t.Errorf("StartProfileSeed is called under %d condition(s) in cookie_startup.go. Every condition it "+
 			"needs already lives in decideStartupSeed — profile configured, no browser, an "+
 			"importable profile, and nothing on disk to lose — and a second copy here is what "+
 			"drifts from the first", len(gates))

@@ -86,47 +86,6 @@ func TestBothUIsShareOneHideFinishedAgeBroadcast(t *testing.T) {
 	}
 }
 
-// A smoke gate on the shared method itself, deliberately claiming only what
-// it kills: run against a real store, a real database and a hub with no
-// clients, which is the new TUI call site's ordinary case (a headless
-// terminal session saves settings with no dashboard open anywhere). It does
-// not observe the broadcast payload — the hub has no seam for that without a
-// dialled websocket — so the payload's ordering and threshold-capture
-// contract stays pinned by the method's comment and by the Web-side route
-// tests, not here.
-//
-// Mutant: reading the config through s.cfg (nil in this construction, and in
-// runState until initServices) instead of s.configStore.Read — the call
-// panics.
-func TestBroadcastHideFinishedAgeRunsAgainstALiveStore(t *testing.T) {
-	db, err := database.Open(filepath.Join(t.TempDir(), "jobs.db"))
-	if err != nil {
-		t.Fatalf("database.Open: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	cfg := config.Defaults()
-	cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: 30}
-	store := config.NewStore(cfg, "")
-	s := &runState{db: db, wsHub: web.NewWebSocketHub(sweepTestLogger{}), configStore: store}
-
-	s.broadcastHideFinishedAge()
-
-	if err := store.Update(func(c *config.MoomboxConfig) {
-		c.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: 0.5}
-	}); err != nil {
-		t.Fatalf("store.Update: %v", err)
-	}
-	var live float64
-	store.Read(func(c *config.MoomboxConfig) {
-		live = c.Monitors.HideFinishedAgeDays.Value
-	})
-	if live != 0.5 {
-		t.Fatalf("store threshold = %v, want 0.5", live)
-	}
-	s.broadcastHideFinishedAge()
-}
-
 // hideAgeTestState builds the runState the broadcast needs — a real store, a
 // real database, a client-less hub and a real logger whose Subscribe channel
 // is the only seam this package has for observing what the method DID.

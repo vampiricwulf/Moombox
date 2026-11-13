@@ -582,6 +582,22 @@ sl-badge.status.cookies::part(base) {
     display: contents;
 }
 
+/* The Archived panel's one-line notices: a failed load with Retry, the
+   first load, and "Showing N of M" with Show more. */
+.archived-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sl-spacing-small);
+    padding: var(--sl-spacing-medium);
+    color: var(--sl-color-neutral-700);
+    font-size: var(--sl-font-size-small);
+}
+
+#archived-fetch-error sl-icon {
+    color: var(--sl-color-danger-600);
+}
+
 #archived-empty-state {
     display: flex;
     flex-direction: column;
@@ -916,7 +932,8 @@ sl-badge.status.cookies::part(base) {
     word-break: break-word;
 }
 
-.details-auto-action {
+.details-auto-action,
+.details-cookie-retry {
     color: var(--sl-color-primary-800);
     background-color: var(--sl-color-primary-100);
     padding: var(--sl-spacing-small);
@@ -924,7 +941,8 @@ sl-badge.status.cookies::part(base) {
     margin-top: var(--sl-spacing-x-small);
 }
 
-.details-auto-action[hidden] {
+.details-auto-action[hidden],
+.details-cookie-retry[hidden] {
     display: none;
 }
 
@@ -1172,6 +1190,38 @@ sl-dialog::part(footer) {
     display: contents;
 }
 
+/* The "live updates cannot connect" notice takes the skeleton's place while
+   it shows (app.js _syncWsNotice); the id+class also outranks the phone
+   layout's #jobs-skeleton rule below. */
+#jobs-skeleton.ws-refused {
+    display: none;
+}
+
+#jobs-ws-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sl-spacing-small);
+    margin: var(--sl-spacing-small) 0;
+    padding: var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-neutral-300);
+    border-top: 3px solid var(--sl-color-warning-600);
+    border-radius: var(--sl-border-radius-medium);
+    background: var(--sl-panel-background-color);
+    color: var(--sl-color-neutral-800);
+    font-size: var(--sl-font-size-small);
+    line-height: var(--sl-line-height-normal);
+}
+
+#jobs-ws-notice[hidden] {
+    display: none;
+}
+
+#jobs-ws-notice > sl-icon {
+    flex: none;
+    font-size: var(--sl-font-size-large);
+    color: var(--sl-color-warning-600);
+}
+
 .skeleton-row {
     display: grid;
     grid-template-columns: subgrid;
@@ -1312,6 +1362,19 @@ sl-progress-bar {
     font-size: var(--sl-font-size-small);
     color: var(--sl-color-neutral-600);
     margin-top: var(--sl-spacing-x-small);
+}
+
+/* A failing channel's flag and its newest check error (owner ruling R-H1).
+   Empty for a healthy channel, and then takes no room. */
+.channel-health:empty {
+    display: none;
+}
+
+.channel-health {
+    margin-top: var(--sl-spacing-x-small);
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-danger-700);
+    overflow-wrap: anywhere;
 }
 
 /* The channel switch's label is screen-reader-only text (it names the
@@ -1481,6 +1544,14 @@ sl-progress-bar {
 .indicator-warn  { color: var(--sl-color-warning-600); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
 .indicator-error { color: var(--sl-color-danger-700); background: color-mix(in srgb, var(--sl-color-danger-600) 10%, transparent); }
 .indicator-off   { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
+/* The first cookie check of the server process has not answered yet. The
+   dashed outline is what tells this pill from .indicator-off (Twitch's
+   "Anonymous") without motion; the pill's text also reads "YT…" / "TW…".
+   The pulse moves the tint only, never the text, so the text keeps its
+   contrast, and it stops under prefers-reduced-motion. */
+.indicator-checking { color: var(--sl-color-neutral-700); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); outline: 1px dashed currentColor; outline-offset: -1px; animation: indicator-checking-pulse 1.2s ease-in-out infinite; }
+@keyframes indicator-checking-pulse { 50% { background-color: color-mix(in srgb, var(--sl-color-neutral-500) 24%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .indicator-checking { animation: none; } }
 
 #btn-refresh-cookies { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #btn-refresh-cookies::part(base) { padding: 0; min-height: auto; min-width: auto; }
@@ -1981,6 +2052,11 @@ sl-progress-bar {
 .chat-msg-tag-edited:focus-visible {
     outline: var(--sl-focus-ring);
     outline-offset: 1px;
+}
+
+/* A Twitch /me message: the text in italics, after the name with no colon. */
+.chat-msg-action {
+    font-style: italic;
 }
 
 .chat-msg-author {
@@ -2984,7 +3060,22 @@ sl-progress-bar {
     height: 2px;
     background-color: currentColor;
     opacity: 0.3;
-    animation: toastCountdown 3s linear forwards;
+    /* How long the toast stays: showToast sets --toast-duration from
+       toastDuration (utils.js). A toast that stays until closed has no bar. */
+    animation: toastCountdown var(--toast-duration, 3s) linear forwards;
+}
+
+/* An error toast asked for again while it is still up (showToast). */
+.toast-alert.toast-again::part(base) {
+    animation: toastAgain 0.3s ease-out;
+}
+
+@keyframes toastAgain {
+    50% { transform: scale(1.03); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .toast-alert.toast-again::part(base) { animation: none; }
 }
 
 /* Empty state enhancements */
@@ -3037,7 +3128,9 @@ sl-progress-bar {
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:active,
 .job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:focus-visible { color: var(--sl-color-success-600); }
 
-/* Keyboard focus indicator */
+/* Keyboard focus indicator. A focused row is the highlighted row (app.js
+   _highlightRow), so the two selectors draw one outline. */
+.video-item:focus-visible,
 .video-item[data-focused] {
     outline: 2px solid var(--sl-color-primary-500);
     outline-offset: -2px;
@@ -3397,6 +3490,16 @@ html.sl-theme-light .log-debug {
 #stats-content {
     padding: var(--sl-spacing-medium);
     max-width: 960px;
+}
+
+/* The Stats tab could not be read; the cards below keep their last values. */
+.stats-error {
+    margin-bottom: var(--sl-spacing-medium);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    border: 1px solid var(--sl-color-danger-300);
+    border-radius: var(--sl-border-radius-medium);
+    color: var(--sl-color-danger-800);
+    background-color: var(--sl-color-danger-100);
 }
 
 .stats-section {

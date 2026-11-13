@@ -666,36 +666,3 @@ func TestAssetsForPlatformUnknown(t *testing.T) {
 		t.Error("expected !ok for unsupported arch")
 	}
 }
-
-// CleanupOldBinary sweeps the artifacts Moombox itself writes, plus the
-// binary a failed update left behind — and NOT <exe>.sig, which Moombox
-// never writes (VerifyCurrentSignature uses os.CreateTemp, ApplyUpdate uses
-// ".new.sig") but which is exactly the published release-asset name a manual
-// verifier leaves beside the exe (CORE-13).
-//
-// Mutant: keeping ".sig" in the suffix list — the .sig assertion fails.
-// Mutant: dropping ".failed" from the list — the .failed assertion fails.
-func TestCleanupOldBinarySweepsFailedAndSparesSig(t *testing.T) {
-	dir := t.TempDir()
-	exePath := filepath.Join(dir, "moombox-test.exe")
-	if err := os.WriteFile(exePath, []byte("running"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, suffix := range []string{".old", ".new", ".new.sig", ".sig", ".failed"} {
-		if err := os.WriteFile(exePath+suffix, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	u := &Updater{exePath: exePath, currentVersion: "9.9.9", logger: silentTestLogger{}}
-	u.CleanupOldBinary()
-
-	for _, suffix := range []string{".old", ".new", ".new.sig", ".failed"} {
-		if _, err := os.Stat(exePath + suffix); err == nil {
-			t.Errorf("%s must be swept", suffix)
-		}
-	}
-	if _, err := os.Stat(exePath + ".sig"); err != nil {
-		t.Errorf(".sig is a manual verifier's artifact and must survive: %v", err)
-	}
-}

@@ -153,14 +153,16 @@ func (s *Service) FetchChapters(ctx context.Context, videoID, description string
 		"User-Agent":      constants.UserAgents.Web,
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "en-US,en;q=0.5",
+		// The consent and language cookies every page read sends: without
+		// SOCS an EU, EEA or UK address gets the consent page, which holds no
+		// chapter markers.
+		"Cookie": s.Auth.PageCookieHeader(),
 	}
-	if ck := s.GetCookieHeader(); ck != "" {
-		headers["Cookie"] = ck
-	}
-	if body, err := fetchYouTubePage(ctx, "watch page", watchPageURL(videoID), chapterPageTimeout, headers, utils.MaxFetchBodySize); err == nil {
-		if out := ChaptersFromWatchPage(body, durationMs); len(out) > 0 {
-			return out
-		}
+	body, err := fetchYouTubePage(ctx, "watch page", watchPageURL(videoID), chapterPageTimeout, headers, utils.MaxFetchBodySize)
+	if err != nil {
+		s.logger.Debug("[YouTube] Chapter page not read; using the description's timestamps", "videoId", videoID, "error", err)
+	} else if out := ChaptersFromWatchPage(body, durationMs); len(out) > 0 {
+		return out
 	}
 	return utils.ChaptersFromDescription(description, durationMs)
 }

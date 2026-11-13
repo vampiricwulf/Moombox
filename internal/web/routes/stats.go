@@ -28,10 +28,16 @@ var SharedDiskStatus atomic.Pointer[DiskStatus]
 
 // ComputeWarnLevel returns "ok", "warn", or "critical" for a given usage percent.
 func ComputeWarnLevel(usedPct float64, cfg *config.MoomboxConfig) string {
-	if cfg.Disk.AtCritical(usedPct) {
+	return DiskWarnLevel(usedPct, cfg.Disk)
+}
+
+// DiskWarnLevel is ComputeWarnLevel for a caller holding the thresholds
+// alone — the disk alerts' reading of a staging volume.
+func DiskWarnLevel(usedPct float64, thresholds config.DiskConfig) string {
+	if thresholds.AtCritical(usedPct) {
 		return "critical"
 	}
-	if cfg.Disk.WarnPercent > 0 && usedPct >= float64(cfg.Disk.WarnPercent) {
+	if thresholds.WarnPercent > 0 && usedPct >= float64(thresholds.WarnPercent) {
 		return "warn"
 	}
 	return "ok"
@@ -81,9 +87,13 @@ type StatsRouteDeps struct {
 // StatsRoutes registers the /api/stats endpoint.
 func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
 	r.Get("/api/stats", func(rw http.ResponseWriter, req *http.Request) {
-		var js *database.JobStats
-		if got, err := deps.DB.GetJobStats(); err == nil {
-			js = got
+		// A failed query answers an error, never a snapshot of zeros: all-zero
+		// totals with a 200 read as an emptied archive. The TUI's Statistics
+		// overlay shows the same failure (cmd/moombox/tui_wiring.go).
+		js, err := deps.DB.GetJobStats()
+		if err != nil {
+			jsonError(rw, "Could not read statistics: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 		snap := stats.Build(js, SharedDiskStatus.Load().Stats())
 		warn := snap.Disk.WarnLevel

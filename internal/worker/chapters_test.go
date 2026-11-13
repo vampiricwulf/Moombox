@@ -201,14 +201,6 @@ func TestStageTwitchChapters(t *testing.T) {
 	}
 }
 
-// TestYouTubeChaptersSeamIsTheService pins the production value of the
-// YouTube chapter seam.
-func TestYouTubeChaptersSeamIsTheService(t *testing.T) {
-	if reflect.ValueOf(youtubeChapters).Pointer() != reflect.ValueOf(fetchYouTubeChapters).Pointer() {
-		t.Fatal("youtubeChapters is not fetchYouTubeChapters")
-	}
-}
-
 // twitchTestJobCtx is a JobContext for the chapter staging tests.
 func twitchTestJobCtx(dir string, isVod bool, streamStart string) *JobContext {
 	return &JobContext{StagingDir: dir, Job: &database.Job{

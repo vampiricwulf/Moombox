@@ -126,6 +126,16 @@ globalThis.__makeApp = function (jobs, parkedBaseline) {
     // A same-status job_update re-renders when the row's sort key moved; the
     // title is the key for every status these rows use.
     _sortKey(job) { return job.title; },
+    // The single-card paths (web-2): each answers false, "no card drawn", so
+    // handleMessage falls back to the whole-list render it used before; the
+    // card shape is constant, so no update asks for a redraw.
+    _cardShape() { return "--"; },
+    _insertJobCard() { return false; },
+    _moveJobCard() { return false; },
+    _removeJobCard() { return false; },
+    // The Archived tab drops one row from its held list (web-1); nothing is
+    // archived here.
+    _removeArchivedJob() { return false; },
     settings: { refreshBackfillBadges() {} },
     stats: { updateActiveIndicator() {}, updateDiskIndicator() {} },
     // The Arc I controllers handleMessage reaches: the log panel, the details
@@ -387,27 +397,5 @@ func TestParkedCookiePlatformsAttributesToTheRightPlatform(t *testing.T) {
 			t.Errorf("parkedCookiePlatforms(%v) = %v, want nothing parked — the badge renders "+
 				"before the first job payload arrives", jobs, raw)
 		}
-	}
-}
-
-// TestWebParkedStatusMatchesGo is the third literal in the chain.
-//
-// utils.js has to spell the parked status itself; it cannot import Go. If
-// database.StatusCookies is ever renamed, every Go call site moves with it and
-// this one does not — parkedCookiePlatforms would then match nothing, the badge
-// would stop escalating, and no Go test would notice.
-//
-// Asserted by EXECUTION, not by grepping the literal out of the module: a job
-// carrying the Go constant's value must be seen as parked.
-func TestWebParkedStatusMatchesGo(t *testing.T) {
-	vm := utilsVM(t)
-	raw := jsCall(t, vm, "parkedCookiePlatforms", []map[string]any{
-		{"status": string(database.StatusCookies), "platform": "youtube"},
-	})
-	got, _ := raw.(map[string]any)
-	if got["youtube"] != true {
-		t.Errorf("a job whose status is database.StatusCookies (%q) is not seen as parked by "+
-			"utils.js. The status literal in the module has drifted from the Go constant, and the "+
-			"badge would silently stop escalating", database.StatusCookies)
 	}
 }

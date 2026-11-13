@@ -126,8 +126,12 @@ func (m *TrimDialogModel) IsVisible() bool {
 
 // SetSize updates the dialog dimensions.
 func (m *TrimDialogModel) SetSize(w, h int) {
+	wasBare := m.bare()
 	m.width = w
 	m.height = h
+	if wasBare || m.bare() {
+		m.bareSetSize()
+	}
 }
 
 // SetJobMetadata provides job metadata for display.
@@ -442,6 +446,9 @@ func (m *TrimDialogModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.bare() {
+		return m.bareView()
+	}
 
 	boxW := max(min(60, m.width-4), 30)
 	boxH := max(min(18, m.height-4), 8)
@@ -616,4 +623,15 @@ func (m *TrimDialogModel) renderDeleteMode(w, _ int) string {
 	lines = append(lines, DimStyle.Render("↑↓: Navigate | Enter: Delete | M/Esc: Create mode"))
 
 	return strings.Join(lines, "\n")
+}
+
+// wheelMovesTrim reports whether a wheel notch in direction dir (-1 up, 1
+// down) has a row to move the delete list's cursor to. The arrow keys wrap
+// at the ends of that list; the wheel stops there.
+func (m *TrimDialogModel) wheelMovesTrim(dir int) bool {
+	if !m.visible || m.mode != TrimModeDelete || m.loading {
+		return false
+	}
+	next := m.selectedTrimIdx + dir
+	return next >= 0 && next < len(m.trims)
 }
