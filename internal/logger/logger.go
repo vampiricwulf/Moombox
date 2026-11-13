@@ -99,6 +99,8 @@ type Logger struct {
 	// consoleCloseWait is consoleCloseFlush; a field so a test of the bound
 	// does not wait the real one.
 	consoleCloseWait time.Duration
+	// closeFlushLimit, when set, caps consoleCloseWait (LimitCloseFlush).
+	closeFlushLimit atomic.Pointer[time.Duration]
 	// stderrGate mirrors stdout suppression for the logger's own
 	// diagnostics (rotation failures, slow-subscriber drops): while the
 	// TUI owns the terminal, a raw stderr write scribbles over the
@@ -901,6 +903,16 @@ func (l *Logger) FlushConsole(timeout time.Duration) bool {
 	return l.console.flush(timeout)
 }
 
+// LimitCloseFlush caps how long Close waits for the queued console lines to
+// print, for an exit that has less time than consoleCloseFlush to spare: a
+// Windows console that is being closed ends the process on its own clock, and
+// it is the console most likely to have stopped taking output. Zero means
+// Close does not wait for the console at all. moombox.log is unaffected: it
+// is written before each log call returns.
+func (l *Logger) LimitCloseFlush(d time.Duration) {
+	l.closeFlushLimit.Store(&d)
+}
+
 // fileShapeLine renders msg as a WARN line in the file / stdout shape.
 func (l *Logger) fileShapeLine(msg string) []byte {
 	var buf bytes.Buffer
@@ -948,10 +960,15 @@ func (l *Logger) diagf(format string, args ...any) {
 // console get consoleCloseFlush to print, so the last lines before a quit
 // are on the console when the process exits (and ahead of anything the
 // launcher prints after it); a console that is not taking output cannot hold
-// the exit for longer than that.
+// the exit for longer than that, or than LimitCloseFlush's bound when one was
+// set.
 func (l *Logger) Close() {
 	l.closed.Store(true)
-	l.console.flush(l.consoleCloseWait)
+	wait := l.consoleCloseWait
+	if limit := l.closeFlushLimit.Load(); limit != nil && *limit < wait {
+		wait = *limit
+	}
+	l.console.flush(wait)
 	l.fileMu.Lock()
 	defer l.fileMu.Unlock()
 

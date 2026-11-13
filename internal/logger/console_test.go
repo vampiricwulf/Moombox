@@ -252,3 +252,41 @@ func TestSuppressStdoutPrintsWhatWasLoggedBeforeIt(t *testing.T) {
 		t.Errorf("the console got %q, want only the line logged before the suppression", got)
 	}
 }
+
+// TestLimitCloseFlushCapsTheWaitForAStalledConsole: an exit with less time to
+// spare than Close's usual wait (a Windows console being closed) caps it, so
+// a console that has stopped taking output costs that exit only the cap. The
+// file still has every line.
+//
+// Mutant: Close ignores the limit: it waits out consoleCloseWait, a minute
+// here.
+func TestLimitCloseFlushCapsTheWaitForAStalledConsole(t *testing.T) {
+	for _, limit := range []time.Duration{0, 20 * time.Millisecond} {
+		logPath := filepath.Join(t.TempDir(), "moombox.log")
+		l, err := New(logPath, "INFO", 1<<20, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		console := newStalledConsole()
+		t.Cleanup(func() { close(console.release) })
+		l.stdout.w = console
+		l.consoleCloseWait = time.Minute
+
+		l.Info("the last line before the console closed")
+		l.LimitCloseFlush(limit)
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			l.Close()
+		}()
+		waitClosed(t, closed, "Close to give up on the stalled console within the limit")
+
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "the last line before the console closed") {
+			t.Errorf("limit %v: moombox.log lacks the last line:\n%s", limit, data)
+		}
+	}
+}

@@ -70,9 +70,22 @@ func (s *runState) stopOnSignal(sig os.Signal) {
 // the ordinary backstop does. The clock starts when the signal arrives, not
 // when shutdown() does: the TUI is torn down in between.
 //
+// The second left after the budget is for that close: the limiters, the
+// database's final checkpoint and the log. The logger's Close normally gives a
+// console up to a second to print its queued lines (logger.consoleCloseFlush),
+// and a console that is being closed is the one most likely to have stopped
+// taking output, so on this path that wait is capped: consoleEndLogFlush for a
+// stop that finishes inside the budget, none at all once the budget has run
+// out (Logger.LimitCloseFlush). moombox.log has every line either way.
+//
 // Only those three events hurry a stop (owner ruling R2-X4). Ctrl+C, Quit from
 // either UI, a restart and every stop on Linux keep forceExitAfter.
 const consoleEndBudget = 4 * time.Second
+
+// consoleEndLogFlush is how long the logger's Close waits for the console
+// once Windows is ending the process and the shutdown finished inside
+// consoleEndBudget.
+const consoleEndLogFlush = 250 * time.Millisecond
 
 // consoleEnd records that Windows is ending the process, and when it said so.
 // Its zero value is ready to use.

@@ -96,8 +96,14 @@ func (s *runState) shutdown() bool {
 		s.consoleEnd.exitWhenConsoleEnds(shutdownDone,
 			func() {
 				s.log.Info("Windows is closing the console, logging off or shutting down: cancelling muxes and saving now")
+				// A stop that finishes inside the budget waits only briefly
+				// for a console that may already have stopped taking output.
+				s.log.LimitCloseFlush(consoleEndLogFlush)
 			},
 			func() {
+				// Out of time: the log is closed without waiting for the
+				// console at all. moombox.log already has every line.
+				s.log.LimitCloseFlush(0)
 				forceExitNow(func() {
 					s.log.Warn("Out of the time Windows allows a closing console: closing the database and the log and exiting")
 				})
