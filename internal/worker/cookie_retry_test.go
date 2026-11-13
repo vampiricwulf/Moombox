@@ -161,6 +161,33 @@ func TestCookieRetryBudgetResets(t *testing.T) {
 		}
 	})
 
+	// Mutants: forgetCookieRetries dropped from ResumeJob — the resume subtest
+	// fails; dropped from reinitializeNow — the reinitialize one does.
+	for _, verb := range []string{"resume", "reinitialize"} {
+		t.Run("a "+verb, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			t.Cleanup(w.Stop)
+			id := "verb_" + verb
+			addSchedJob(t, db, nil, id, database.StatusCookies, 0)
+			spend(w, id)
+			var err error
+			if verb == "resume" {
+				err = w.ResumeJob(id)
+			} else {
+				err = w.ReinitializeJob(id)
+			}
+			if err != nil {
+				t.Fatalf("%s = %v", verb, err)
+			}
+			if got, _ := db.GetJob(id); got == nil || got.Status == database.StatusCookies {
+				t.Fatalf("the %s did not apply: %+v", verb, got)
+			}
+			if !w.CookieRetryLeft(id) {
+				t.Errorf("the count outlived the operator's %s", verb)
+			}
+		})
+	}
+
 	t.Run("a delete", func(t *testing.T) {
 		w, db := testWorkerSetup(t)
 		t.Cleanup(w.Stop)
@@ -195,7 +222,7 @@ func TestRefreshInFlightIsNotCalledAFailedRefresh(t *testing.T) {
 
 	cookieRetryLap(t, w, id)
 
-	if _, logged := log.field("the job stays parked — a cookie refresh is already running, and the job is resumed if it ends with working cookies", "jobID"); !logged {
+	if _, logged := log.field("the job stays parked — a cookie refresh, import or setup is already running, and the job is resumed if it ends with working cookies", "jobID"); !logged {
 		t.Error("the in-flight line was not logged")
 	}
 	for _, line := range log.lines() {
