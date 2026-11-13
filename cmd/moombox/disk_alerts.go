@@ -180,6 +180,17 @@ func (d *diskAlerts) heldOpen(ds *routes.DiskStatus) bool {
 	return false
 }
 
+// diskLevelRank orders the warn levels: ok, warn, critical.
+func diskLevelRank(level string) int {
+	switch level {
+	case "critical":
+		return 2
+	case "warn":
+		return 1
+	}
+	return 0
+}
+
 // diskVolume is one directory's reading as the alerts name it.
 type diskVolume struct {
 	status  *routes.DiskStatus
@@ -208,13 +219,14 @@ func (v diskVolume) field() notifications.Field {
 // directory's, judged by the thresholds setThresholds recorded. nil when
 // both are on one volume — the output reading then says everything — and
 // when the staging volume cannot be read: the output reading is judged
-// alone, and the failure is logged once per streak.
+// alone (an open alert that named the staging volume stays open meanwhile,
+// see onVolumes), and the failure is logged once per streak.
 func (d *diskAlerts) readStaging(outputDir, stagingDir string) *routes.DiskStatus {
 	ds, err := disk.OtherVolume(outputDir, stagingDir, d.sameVolume, d.diskSpace)
 	if err != nil {
 		if !d.stagingReadFailing {
 			d.stagingReadFailing = true
-			d.log.Warn("[Disk] could not read the staging directory's volume; low-disk alerts watch the output directory alone until it answers",
+			d.log.Warn("[Disk] could not read the staging directory's volume; low-disk alerts watch the output directory alone until it answers, and an alert already open for the staging drive stays open",
 				"stagingDir", stagingDir, "err", err)
 		}
 		return nil
@@ -241,6 +253,14 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 // backlog admission gate takes (worker's readGateDisk) — and the alert names
 // its directory; a tie is the output directory's. There is one alert at a
 // time, never one per volume.
+//
+// An open alert that named the staging volume is not closed or stepped down
+// while that volume cannot be read (readStaging failed: drive unplugged, share
+// offline): the output reading says nothing about it, and "Disk Space
+// Recovered" for a drive nobody saw recover was wrong. The output volume can
+// still raise or repeat the alert in its own name; the incident stays the
+// staging volume's too until that volume answers again or is no longer a
+// separate one.
 //
 // A reading can close TWO incidents at once: monitoring that had been reported
 // as failing, and a space warning that was open before it failed. Both closes
@@ -272,6 +292,11 @@ func (d *diskAlerts) onVolumes(out *routes.DiskStatus, outputDir string, staging
 		}
 	}
 
+	stagingUnseen := d.lastStaging && staging == nil && d.stagingReadFailing
+	if stagingUnseen && diskLevelRank(out.WarnLevel) < diskLevelRank(d.lastLevel) {
+		return
+	}
+
 	// Just below the open alert's threshold: still the same incident. Neither
 	// a step down nor a recovery is announced until usage clears the margin.
 	if d.heldOpen(ds) {
@@ -299,7 +324,7 @@ func (d *diskAlerts) onVolumes(out *routes.DiskStatus, outputDir string, staging
 		)
 		d.lastNotify = now
 		d.lastLevel = ds.WarnLevel
-		d.lastStaging = worst.staging
+		d.lastStaging = worst.staging || stagingUnseen
 		return
 	}
 

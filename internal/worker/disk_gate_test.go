@@ -506,3 +506,55 @@ func TestWorkerHoldsBacklogOnAFullStagingVolume(t *testing.T) {
 		t.Errorf("status = %s once staging had room, want Upcoming", row.Status)
 	}
 }
+
+// TestWorkerKeepsTheBacklogHeldWhenAFullStagingVolumeGoesOffline: a staging
+// volume that closed the gate and then cannot be read (drive unplugged, share
+// offline) is not known to have room. The output volume's reading, with space
+// to spare, does not reopen admission into a directory that is absent or
+// still full; the first staging reading that answers clear does. A staging
+// volume whose last reading was clear changes nothing when it stops
+// answering: the output reading decides alone, as before.
+//
+// Mutant: readGateDisk returns the output reading untouched on a staging read
+// error — the backlog VOD is admitted while staging is offline.
+func TestWorkerKeepsTheBacklogHeldWhenAFullStagingVolumeGoesOffline(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	stg := filepath.Join(t.TempDir(), "scratch")
+	w.cfg.Paths.StagingDirectory = stg
+	w.cfg.Disk.CriticalPercent = 95
+	stagingUsed := 99.0
+	var stagingErr error
+	w.diskSpace = func(path string) (*disk.DiskSpace, error) {
+		if path == stg {
+			if stagingErr != nil {
+				return nil, stagingErr
+			}
+			return &disk.DiskSpace{Free: 1 << 30, Total: 100 << 30, UsedPct: stagingUsed}, nil
+		}
+		return &disk.DiskSpace{Free: 50 << 30, Total: 100 << 30, UsedPct: 50}, nil
+	}
+	w.sameVolume = func(a, b string) bool { return false }
+	w.scheduler.resolveSlots = func(string) int { return 1 }
+	queueBacklog(t, db, "UC_off", "off_a")
+
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with the staging volume at 99%%, want Queued", row.Status)
+	}
+	stagingErr = errors.New("the device is not ready")
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusQueued {
+		t.Fatalf("status = %s with the full staging volume offline, want Queued: nothing says it has room", row.Status)
+	}
+	stagingErr, stagingUsed = nil, 40
+	w.scheduler.sweep()
+	if row, _ := db.GetJob("off_a"); row.Status != database.StatusUpcoming {
+		t.Fatalf("status = %s once staging answered with room, want Upcoming", row.Status)
+	}
+
+	// Last staging reading clear, then offline: the output reading decides.
+	stagingErr = errors.New("the device is not ready")
+	if r, err := w.readGateDisk(); err != nil || r.critical || !r.clear {
+		t.Errorf("staging offline after a clear reading: critical=%v clear=%v err=%v, want the output reading, clear", r.critical, r.clear, err)
+	}
+}

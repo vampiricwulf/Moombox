@@ -420,6 +420,11 @@ type DownloadWorker struct {
 	// sameVolume replaces disk.SameVolume in readGateDisk when set — a test
 	// seam putting staging on a volume of its own. nil in production.
 	sameVolume func(a, b string) bool
+	// stagingNotClear is readGateDisk's memory of the staging volume's last
+	// reading: true while it was at the critical threshold or inside its
+	// recovery margin. While it is, a staging read that fails cannot reopen
+	// the backlog disk gate.
+	stagingNotClear atomic.Bool
 
 	// CookieFileInUse returns the cookie file the running services read and
 	// write (the jar's path). cookies.cookie_file is restart-required, so after

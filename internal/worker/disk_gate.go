@@ -75,7 +75,12 @@ func (w *DownloadWorker) readOutputVolume() (diskReading, string, config.DiskCon
 // a backlog to admit, and once per sweep while the gate is closed.
 //
 // A staging volume that cannot be read is left out, and the output reading
-// decides alone. A job or channel output directory on a third volume is not
+// decides alone, with one exception: when the staging volume's last reading
+// was not clear of the threshold (it closed the gate, or sat inside the
+// margin), the output reading may still close the gate but does not reopen
+// it. A staging drive that was full and then went offline is not known to
+// have room, and reopening sent the backlog into a directory that was absent
+// or still full. The first staging reading that answers decides again. A job or channel output directory on a third volume is not
 // read here, as it is not by the alerts.
 //
 // Read fresh rather than from the dashboard's last reading: that one is up to
@@ -87,9 +92,17 @@ func (w *DownloadWorker) readGateDisk() (diskReading, error) {
 		return out, err
 	}
 	ds, err := disk.OtherVolume(out.dir, stagingDir, w.sameVolume, w.diskSpace)
-	if err != nil || ds == nil {
+	if err != nil {
+		if w.stagingNotClear.Load() {
+			out.clear = false
+		}
 		return out, nil
 	}
+	if ds == nil { // staging is on the output volume
+		w.stagingNotClear.Store(false)
+		return out, nil
+	}
+	w.stagingNotClear.Store(!thresholds.ClearOfCritical(ds.UsedPct))
 	if _, isStaging := disk.Worse(&disk.DiskSpace{UsedPct: out.usedPct}, ds); isStaging {
 		return judgeDisk(stagingDir, ds, thresholds), nil
 	}
