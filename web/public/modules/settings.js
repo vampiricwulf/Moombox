@@ -732,6 +732,10 @@ export class SettingsController {
     if (preferHdrSwitch) {
       preferHdrSwitch.checked = config.downloader?.prefer_hdr !== false;
     }
+    const keepAwakeSwitch = document.getElementById("cfg-keep-awake");
+    if (keepAwakeSwitch) {
+      keepAwakeSwitch.checked = config.downloader?.keep_awake !== false;
+    }
     this.app.setInputValue("cfg-maximum-timeout", config.downloader?.maximum_timeout);
     this.app.setInputValue("cfg-interruption-timeout", config.downloader?.interruption_timeout);
     this.app.setInputValue("cfg-incomplete-staging-expiry", config.downloader?.incomplete_staging_expiry_days);
@@ -995,6 +999,7 @@ export class SettingsController {
       "downloader.download_chat": checked("cfg-download-chat", true),
       "downloader.prefer_60fps": checked("cfg-prefer-60fps", true),
       "downloader.prefer_hdr": checked("cfg-prefer-hdr", true),
+      "downloader.keep_awake": checked("cfg-keep-awake", true),
       "downloader.maximum_timeout": num("cfg-maximum-timeout"),
       "downloader.interruption_timeout": num("cfg-interruption-timeout"),
       "downloader.incomplete_staging_expiry_days": num("cfg-incomplete-staging-expiry"),

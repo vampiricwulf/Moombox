@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
@@ -44,6 +45,16 @@ type diskAlerts struct {
 	// yet closed, which is what makes the all-clear conditional.
 	lastNotify time.Time
 	lastLevel  string
+	// lastStaging says the open space alert named the staging directory's
+	// volume, so its "Disk Space Recovered" reports that volume too.
+	lastStaging bool
+
+	// stagingReadFailing is a streak of failed staging-volume readings
+	// (readStaging), warned about once. sameVolume and diskSpace replace
+	// disk.SameVolume and disk.GetDiskSpace there when set — test seams.
+	stagingReadFailing bool
+	sameVolume         func(a, b string) bool
+	diskSpace          func(path string) (*disk.DiskSpace, error)
 
 	// thresholds are the configured warn/critical percentages, refreshed
 	// before every reading (setThresholds), that an open alert's recovery
@@ -88,6 +99,7 @@ func (d *diskAlerts) restoreFrom(st *openAlerts) {
 	}
 	if open.Level == "warn" || open.Level == "critical" {
 		d.lastLevel, d.lastNotify = open.Level, open.NotifiedAt
+		d.lastStaging = open.Staging
 	}
 	if open.MonitoringFailed {
 		d.readFailing = true
@@ -130,6 +142,7 @@ func (d *diskAlerts) persist() {
 		st := openDiskAlert{MonitoringFailed: d.readFailNotified}
 		if d.lastLevel != "" {
 			st.Level, st.NotifiedAt = d.lastLevel, d.lastNotify
+			st.Staging = d.lastStaging
 		}
 		doc.setDisk(st)
 	})
@@ -167,14 +180,104 @@ func (d *diskAlerts) heldOpen(ds *routes.DiskStatus) bool {
 	return false
 }
 
-// onReading feeds one successful disk reading in.
+// diskLevelRank orders the warn levels: ok, warn, critical.
+func diskLevelRank(level string) int {
+	switch level {
+	case "critical":
+		return 2
+	case "warn":
+		return 1
+	}
+	return 0
+}
+
+// diskVolume is one directory's reading as the alerts name it.
+type diskVolume struct {
+	status  *routes.DiskStatus
+	dir     string
+	staging bool
+}
+
+// drive is how an alert's text names the volume.
+func (v diskVolume) drive() string {
+	if v.staging {
+		return "staging drive"
+	}
+	return "output drive"
+}
+
+// field names the directory an operator can act on.
+func (v diskVolume) field() notifications.Field {
+	name := "Output Directory"
+	if v.staging {
+		name = "Staging Directory"
+	}
+	return notifications.Field{Name: name, Value: absOutputDir(v.dir)}
+}
+
+// readStaging reads the staging directory's volume when it is not the output
+// directory's, judged by the thresholds setThresholds recorded. nil when
+// both are on one volume — the output reading then says everything — and
+// when the staging volume cannot be read: the output reading is judged
+// alone (an open alert that named the staging volume stays open meanwhile,
+// see onVolumes), and the failure is logged once per streak.
+func (d *diskAlerts) readStaging(outputDir, stagingDir string) *routes.DiskStatus {
+	ds, err := disk.OtherVolume(outputDir, stagingDir, d.sameVolume, d.diskSpace)
+	if err != nil {
+		if !d.stagingReadFailing {
+			d.stagingReadFailing = true
+			d.log.Warn("[Disk] could not read the staging directory's volume; low-disk alerts watch the output directory alone until it answers, and an alert already open for the staging drive stays open",
+				"stagingDir", stagingDir, "err", err)
+		}
+		return nil
+	}
+	d.stagingReadFailing = false
+	if ds == nil {
+		return nil
+	}
+	return &routes.DiskStatus{
+		Free: ds.Free, Total: ds.Total, UsedPct: ds.UsedPct,
+		WarnLevel: routes.DiskWarnLevel(ds.UsedPct, d.thresholds),
+	}
+}
+
+// onReading feeds one successful reading of the output directory's volume
+// in, with no staging volume beside it.
+func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time.Time) {
+	d.onVolumes(ds, outputDir, nil, "", now)
+}
+
+// onVolumes feeds one successful disk reading in: the output directory's
+// volume and, when the staging directory is on another one (readStaging),
+// that volume's. The fuller of the two is the one judged — the reading the
+// backlog admission gate takes (worker's readGateDisk) — and the alert names
+// its directory; a tie is the output directory's. There is one alert at a
+// time, never one per volume.
+//
+// An open alert that named the staging volume is not closed or stepped down
+// while that volume cannot be read (readStaging failed: drive unplugged, share
+// offline): the output reading says nothing about it, and "Disk Space
+// Recovered" for a drive nobody saw recover was wrong. The output volume can
+// still raise or repeat the alert in its own name; the incident stays the
+// staging volume's too until that volume answers again or is no longer a
+// separate one.
 //
 // A reading can close TWO incidents at once: monitoring that had been reported
 // as failing, and a space warning that was open before it failed. Both closes
 // are sent, in that order — they are separate incidents with separate alerts,
 // and collapsing them would leave one of the two alerts hanging.
-func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time.Time) {
+func (d *diskAlerts) onVolumes(out *routes.DiskStatus, outputDir string, staging *routes.DiskStatus, stagingDir string, now time.Time) {
 	defer d.persist()
+	outVol := diskVolume{status: out, dir: outputDir}
+	worst := outVol
+	var stagingVol *diskVolume
+	if staging != nil {
+		stagingVol = &diskVolume{status: staging, dir: stagingDir, staging: true}
+		if staging.UsedPct > out.UsedPct {
+			worst = *stagingVol
+		}
+	}
+	ds := worst.status
 	if d.readFailing {
 		d.readFailing = false
 		d.readFailCount = 0
@@ -187,6 +290,11 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 				notifications.SendOptions{Event: "disk_ok"},
 			)
 		}
+	}
+
+	stagingUnseen := d.lastStaging && staging == nil && d.stagingReadFailing
+	if stagingUnseen && diskLevelRank(out.WarnLevel) < diskLevelRank(d.lastLevel) {
+		return
 	}
 
 	// Just below the open alert's threshold: still the same incident. Neither
@@ -209,13 +317,14 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 		}
 		d.notify.Send(
 			fmt.Sprintf("Disk Space %s", level),
-			fmt.Sprintf("%.1f%% used — %.1f GB free on output drive", ds.UsedPct, freeGB),
+			fmt.Sprintf("%.1f%% used — %.1f GB free on %s", ds.UsedPct, freeGB, worst.drive()),
 			ntype,
-			[]notifications.Field{{Name: "Output Directory", Value: absOutputDir(outputDir)}},
+			[]notifications.Field{worst.field()},
 			notifications.SendOptions{Event: event},
 		)
 		d.lastNotify = now
 		d.lastLevel = ds.WarnLevel
+		d.lastStaging = worst.staging || stagingUnseen
 		return
 	}
 
@@ -227,14 +336,33 @@ func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time
 	if d.lastLevel == "" {
 		return
 	}
-	d.lastLevel = ""
-	freeGB := float64(ds.Free) / (1024 * 1024 * 1024)
+	// The recovery reports the volume the alert named. Both are clear by
+	// now; the fuller one is not the news.
+	recovered := outVol
+	if d.lastStaging && stagingVol != nil {
+		recovered = *stagingVol
+	}
+	d.lastLevel, d.lastStaging = "", false
+	freeGB := float64(recovered.status.Free) / (1024 * 1024 * 1024)
 	d.notify.Send("Disk Space Recovered",
-		fmt.Sprintf("%.1f%% used — %.1f GB free on output drive", ds.UsedPct, freeGB),
+		fmt.Sprintf("%.1f%% used — %.1f GB free on %s", recovered.status.UsedPct, freeGB, recovered.drive()),
 		notifications.TypeSuccess,
-		[]notifications.Field{{Name: "Output Directory", Value: absOutputDir(outputDir)}},
+		[]notifications.Field{recovered.field()},
 		notifications.SendOptions{Event: "disk_ok"},
 	)
+}
+
+// onBootReading feeds the boot-time reading in: ds is what the boot check
+// stored, nil when it failed. A failed boot reading is the streak's first
+// failure like any other — skipped, it left "Disk Monitoring Failed" for the
+// ticker's second check, about twelve minutes in, on a volume absent from
+// the start.
+func (d *diskAlerts) onBootReading(ds *routes.DiskStatus, outputDir, stagingDir string, now time.Time) {
+	if ds == nil {
+		d.onReadFailure(outputDir)
+		return
+	}
+	d.onVolumes(ds, outputDir, d.readStaging(outputDir, stagingDir), stagingDir, now)
 }
 
 // onReadFailure feeds one failed disk reading in (volume offline, I/O error).

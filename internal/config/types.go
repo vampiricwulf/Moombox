@@ -38,9 +38,10 @@ type MoomboxConfig struct {
 	// to flush them to disk so they show up in the user's config.toml.
 	// Excluded from TOML and JSON marshalling (in-memory signal only).
 	NeedsAutoPersist bool `toml:"-" json:"-"`
-	// NormalizedOnLoad lists what loadFromFile's Normalize replaced with a
-	// default — values the file held that Validate rejects. Boot logs each
-	// one: the next save writes the default over the operator's value, and
+	// NormalizedOnLoad lists what loadFromFile's Normalize corrected — values
+	// the file held that Validate rejects, most replaced with a default, a
+	// channel platform respelt or its channel disabled. Boot logs each one:
+	// the next save writes the correction over the operator's value, and
 	// without the log nothing said so.
 	NormalizedOnLoad []string `toml:"-" json:"-"`
 	// IgnoredOnLoad lists the retired keys (retiredKeys) the file still
@@ -243,6 +244,13 @@ type DownloaderConfig struct {
 	// restart-required. No migration: a config file without the key decodes
 	// over Defaults(), so it reads as true.
 	PreferHDR bool `toml:"prefer_hdr" json:"prefer_hdr"`
+	// KeepAwake asks Windows not to go to sleep on its idle timer while a
+	// capture or a mux is running, and lets it sleep again as soon as none
+	// is (SetThreadExecutionState with ES_SYSTEM_REQUIRED; the screen may
+	// still turn off). Default true: a capture makes no keyboard or mouse
+	// input, so a PC whose power plan allows sleep suspended Moombox
+	// mid-recording. Hot-reloadable. No effect on Linux (owner ruling R2-X5).
+	KeepAwake bool `toml:"keep_awake" json:"keep_awake"`
 	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
 	// retrying — checking every 30s whether the stream has ended — before
 	// force-finalizing the recording, even if YouTube still reports the stream

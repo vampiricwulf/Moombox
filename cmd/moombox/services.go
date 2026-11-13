@@ -622,7 +622,7 @@ func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 	s.prevCrash = s.captureCrashOutput(cfg.Paths.LogFilePath)
 	logConfigSource(log, cfg, s.configPath)
 	for _, issue := range cfg.NormalizedOnLoad {
-		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
+		log.Warn("Config value corrected on load — the next save writes the correction to the file", slog.String("issue", issue))
 	}
 	for _, key := range cfg.IgnoredOnLoad {
 		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))
@@ -687,6 +687,12 @@ func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 // launcher this is the environment failing deterministically, so a
 // first-post-update boot that lands here is never rolled back as a broken
 // release (CORE-23).
+// consoleBannerFlush bounds the wait for queued log lines to reach the console
+// before something is printed to it directly: long enough for any console
+// that is taking output, short enough that one that is not delays a headless
+// start or exit by no more than this.
+const consoleBannerFlush = time.Second
+
 func (s *runState) initServices(logLevelOverride string) error {
 	if !s.useTUI {
 		fmt.Println("Loading configuration...")
@@ -702,6 +708,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 3. Open database
 	// =========================================================================
 	if !s.useTUI {
+		// Log lines reach the console through the logger's queue; let the
+		// ones before this banner print first.
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Initializing database...")
 	}
 	// The record `moombox add` finds this database by (daemon_record.go): at
@@ -741,6 +750,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 4. Load cookies
 	// =========================================================================
 	if !s.useTUI {
+		log.FlushConsole(consoleBannerFlush)
 		fmt.Println("Starting services...")
 	}
 	jar := cookies.NewCookieJar()
@@ -1082,6 +1092,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// why nothing downstream — not DownloaderOptions, not the strategies —
 	// carries the value. Warns here if the saved pair is incoherent.
 	s.applyReorderBudget(cfg.Downloader)
+
+	// downloader.keep_awake: while a capture or mux is running, ask Windows
+	// not to sleep on its idle timer. Started before the worker resumes the
+	// rows a previous run left Downloading or Muxing; re-applied on every
+	// config save from either UI (applyKeepAwake).
+	s.startKeepAwake(cfg.Downloader.KeepAwake)
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
@@ -1704,6 +1720,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		feedMon.CheckNow()
 		decapiMon.CheckNow()
 		twitchMon.CheckNow()
+		// The Twitch VOD backlog too: a save that turns twitch_vod_backlog on
+		// is listed now, not at the next hourly tick. It spaces kicked cycles
+		// itself (twitchBacklogKickGap).
+		if s.twitchBacklog != nil {
+			s.twitchBacklog.CheckNow()
+		}
 	}
 
 	// Restart dispatcher — used by setup/update/API/TUI to unwind the run()

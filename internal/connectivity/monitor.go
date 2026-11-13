@@ -38,7 +38,16 @@ type Monitor struct {
 	pollInterval time.Duration
 	passive      *PassiveTracker
 	probeTargets []string // reachability-probe targets; nil → defaultProbeTargets
-	logger       logger
+	// fallbackTargets join the probe's race late (see probeFallbackTargets).
+	fallbackTargets []string
+	// fallbackStreak counts consecutive probes only a fallback host answered;
+	// offlineExplained is set once the long-offline Warn of this outage is
+	// logged. Both are touched by the probe's callers only (Start, then the
+	// poll goroutine) and by transition; atomic because transition can run on
+	// any goroutine.
+	fallbackStreak   atomic.Int32
+	offlineExplained atomic.Bool
+	logger           logger
 }
 
 type logger interface {
@@ -78,7 +87,12 @@ func NewMonitorWithInterval(log logger, interval time.Duration) *Monitor {
 	// Default probe: a real multi-target TCP reachability check (shared across
 	// platforms). Reads m.probeTargets dynamically so SetProbeTargets can
 	// override it during init. Injectable for tests via newTestMonitor.
-	m.checkFn = func() bool { return reachabilityProbe(context.Background(), m.probeTargets) }
+	m.fallbackTargets = append([]string(nil), probeFallbackTargets...)
+	m.checkFn = func() bool {
+		online, viaFallback := reachabilityProbe(context.Background(), m.probeTargets, m.fallbackTargets)
+		m.noteProbe(online, viaFallback)
+		return online
+	}
 	m.online.Store(true)
 	return m
 }
@@ -141,6 +155,53 @@ func (m *Monitor) IsOnline() bool {
 // the poll goroutine. An empty/nil slice falls back to defaultProbeTargets.
 func (m *Monitor) SetProbeTargets(targets []string) {
 	m.probeTargets = targets
+}
+
+// SetProbeFallbackTargets replaces the hosts that join the probe's race when
+// no configured target has connected in time (default: the YouTube and Twitch
+// hosts, probeFallbackTargets). An empty list turns the fallback off. Like
+// SetProbeTargets: call before Start().
+func (m *Monitor) SetProbeFallbackTargets(targets []string) {
+	m.fallbackTargets = targets
+}
+
+// fallbackWarnAfter is how many probes in a row must pass through a fallback
+// host alone before the Warn: one such probe can be a slow moment on the
+// configured targets, two in a row five seconds apart is a blocked list.
+const fallbackWarnAfter = 2
+
+// offlineExplainAfter is how long the monitor stays offline before it says,
+// once per outage, what it is dialling: every monitor is paused meanwhile and
+// "Internet connectivity lost" alone does not tell an operator whose browser
+// works where to look.
+const offlineExplainAfter = 5 * time.Minute
+
+// noteProbe keeps the fallback streak and logs its two edges: one Warn when
+// only a fallback host has answered fallbackWarnAfter probes in a row, and
+// one Info when a configured target answers again after that Warn. A failed
+// probe leaves the streak alone, so an outage in the middle of a blocked
+// stretch does not repeat the Warn.
+func (m *Monitor) noteProbe(online, viaFallback bool) {
+	if !online {
+		return
+	}
+	if viaFallback {
+		if m.fallbackStreak.Add(1) == fallbackWarnAfter && m.logger != nil {
+			m.logger.Warn("None of the connectivity probe targets answered, but YouTube or Twitch did, so Moombox is treating the network as online. If this is logged at every start, a firewall is probably blocking the targets: check connectivity.probe_targets",
+				"probe_targets", m.effectiveProbeTargets())
+		}
+		return
+	}
+	if m.fallbackStreak.Swap(0) >= fallbackWarnAfter && m.logger != nil {
+		m.logger.Info("The connectivity probe targets answer again")
+	}
+}
+
+func (m *Monitor) effectiveProbeTargets() []string {
+	if len(m.probeTargets) == 0 {
+		return defaultProbeTargets
+	}
+	return m.probeTargets
 }
 
 // OnStateChange registers a callback invoked whenever connectivity transitions
@@ -258,6 +319,10 @@ func (m *Monitor) poll() {
 		if polls := m.offlinePolls.Add(1); wasOnline && polls >= 2 {
 			m.transition(false)
 		}
+		if m.OfflineFor() >= offlineExplainAfter && m.offlineExplained.CompareAndSwap(false, true) && m.logger != nil {
+			m.logger.Warn("Still offline: no connectivity probe target and neither YouTube nor Twitch has answered for several minutes, so channel checks, the backlog and notifications are paused. If the internet works on this machine, check connectivity.probe_targets and any firewall rule for Moombox",
+				"probe_targets", m.effectiveProbeTargets(), "offline_for", m.OfflineFor().Round(time.Second).String())
+		}
 	}
 }
 
@@ -271,6 +336,7 @@ func (m *Monitor) transition(online bool) {
 	if online {
 		m.offlinePolls.Store(0)
 		m.offlineAt.Store(nil)
+		m.offlineExplained.Store(false)
 	} else {
 		at := time.Now()
 		m.offlineAt.Store(&at)

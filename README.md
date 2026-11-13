@@ -126,6 +126,8 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 2. Place it in a directory of your choice
 3. Run `Moombox.exe`
 
+While a capture or a mux is running, Moombox asks Windows not to go to sleep on its idle timer (the screen may still turn off), and lets it sleep again as soon as none is. A PC that is already asleep is not woken: one that should catch streams unattended needs a power plan that keeps it on. Turn this off with `downloader.keep_awake = false` or in Settings.
+
 ### Linux (x64)
 
 ```bash
@@ -494,6 +496,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.download_chat` | `true` | No | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | No | Prefer 60fps when same resolution available |
 | `downloader.prefer_hdr` | `true` | No | YouTube: prefer HDR over SDR at the same resolution and fps |
+| `downloader.keep_awake` | `true` | No | Windows: no idle sleep while a capture or mux is running (the screen may still turn off); no effect on Linux |
 | `downloader.num_parallel_downloads` | `10` | No | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | No | Output path template |
 | `feed_check_interval` | `10` | No | Minutes between RSS feed checks (also accepts `"10m"`) |
@@ -879,7 +882,7 @@ behaviour.
 Upcoming -> Live -> Downloading -> Muxing -> Finished
 ```
 
-A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
+A backlog VOD (found by a channel's history scan, or a Twitch channel's past broadcasts or a pasted Twitch listing) and a Twitch clip wait in `Queued` until the channel's archive slots admit them to `Upcoming`; YouTube live, upcoming and newly published videos never wait there. After YouTube rate-limits the session, no YouTube row is admitted for an hour (Twitch rows still are), and a rate-limited backlog VOD goes back to `Queued` for that hour. Nothing is admitted once the output drive — or the staging drive, if you keep staging on a different one — reaches its critical disk threshold (`disk_critical_percent`, default 95%) until usage is 2 points below it — the backlog resumes within a minute of that much space being freed.
 
 Special states: `Error`, `Cancelled`, `COOKIES?` (credentials needed — cookies expired or missing, a sign-in wall, or a membership the account does not hold; resumes on its own once the credentials check out, or for a membership refusal once the cookie file carries a different account)
 

@@ -420,9 +420,17 @@ type DownloadWorker struct {
 	processStreamFn  func(ctx context.Context, job *database.Job) (*StreamProcessResult, error)
 	refreshVodInfoFn func(ctx context.Context, job *database.Job) (*youtube.VideoInfo, error)
 
-	// diskSpace replaces disk.GetDiskSpace in readOutputDisk when set — a
+	// diskSpace replaces disk.GetDiskSpace in readOutputDisk and readGateDisk when set — a
 	// test seam standing in a volume of any fullness. nil in production.
 	diskSpace func(path string) (*disk.DiskSpace, error)
+	// sameVolume replaces disk.SameVolume in readGateDisk when set — a test
+	// seam putting staging on a volume of its own. nil in production.
+	sameVolume func(a, b string) bool
+	// stagingNotClear is readGateDisk's memory of the staging volume's last
+	// reading: true while it was at the critical threshold or inside its
+	// recovery margin. While it is, a staging read that fails cannot reopen
+	// the backlog disk gate.
+	stagingNotClear atomic.Bool
 
 	// CookieFileInUse returns the cookie file the running services read and
 	// write (the jar's path). cookies.cookie_file is restart-required, so after
@@ -558,7 +566,7 @@ func NewDownloadWorker(
 	// The scheduler reads the disk through the worker, which holds the
 	// config: the output directory and the critical threshold both follow a
 	// Settings save without a restart.
-	sched.readDisk = w.readOutputDisk
+	sched.readDisk = w.readGateDisk
 	// And skips a backlog row whose staging an off-queue operation holds (a
 	// set-aside recovery accepts a Queued row): admitting it starts a run
 	// that writes the staging FFmpeg is reading. The claim's release wakes
@@ -2355,6 +2363,21 @@ const StopBudget = inFlightWait + muxCancelGrace
 // (owner decision O-E) — their rows stay Muxing and the restarted child
 // re-muxes them from the staging that is deliberately left in place.
 func (w *DownloadWorker) Stop() {
+	w.StopHurried(nil)
+}
+
+// HurriedStopBudget is the longest StopHurried takes once its hurry channel
+// has closed: the grace after mux cancellation.
+const HurriedStopBudget = muxCancelGrace
+
+// StopHurried is Stop for a caller that may run out of time while it waits:
+// when hurry closes, the in-flight wait ends there and the muxes are cancelled
+// at once, with the same grace after it. Windows gives a console process about
+// 5 seconds after a console close, a logoff or a system shutdown, less than
+// the in-flight wait alone, so a mux still running was killed with the process
+// instead of cancelled (cmd/moombox, consoleEndBudget). A nil hurry never
+// closes: that is Stop.
+func (w *DownloadWorker) StopHurried(hurry <-chan struct{}) {
 	w.logger.Info("download worker stopping")
 	if w.streamProc != nil {
 		w.streamProc.Stop()
@@ -2374,6 +2397,7 @@ func (w *DownloadWorker) Stop() {
 	select {
 	case <-done:
 		w.logger.Info("download worker: all in-flight jobs finished")
+		return
 	case <-time.After(inFlightWait):
 		// Owner decision O-E: the jobs still running at this point are almost
 		// always draining a mux. Exiting now would end them by killing FFmpeg
@@ -2381,15 +2405,17 @@ func (w *DownloadWorker) Stop() {
 		// end here instead, each removing its temporary file. Their rows stay
 		// Muxing and are re-muxed on restart.
 		w.logger.Warn("download worker: timed out waiting for in-flight jobs; cancelling in-flight muxes")
-		if w.orchestrator != nil {
-			w.orchestrator.CancelMuxes()
-		}
-		select {
-		case <-done:
-			w.logger.Info("download worker: in-flight jobs finished after mux cancellation")
-		case <-time.After(muxCancelGrace):
-			w.logger.Warn("download worker: in-flight jobs still running after mux cancellation")
-		}
+	case <-hurry:
+		w.logger.Warn("download worker: no time to wait for in-flight jobs; cancelling in-flight muxes")
+	}
+	if w.orchestrator != nil {
+		w.orchestrator.CancelMuxes()
+	}
+	select {
+	case <-done:
+		w.logger.Info("download worker: in-flight jobs finished after mux cancellation")
+	case <-time.After(muxCancelGrace):
+		w.logger.Warn("download worker: in-flight jobs still running after mux cancellation")
 	}
 }
 

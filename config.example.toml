@@ -198,6 +198,13 @@
 # tone-map HDR. Dolby Vision ranks last either way.
 # prefer_hdr = true
 
+# Windows: while a capture or a mux is running, ask Windows not to go to sleep
+# on its idle timer, and let it sleep again as soon as none is. The screen may
+# still turn off. A capture makes no keyboard or mouse input, so without this
+# a PC whose power plan allows sleep suspends Moombox in the middle of a
+# recording. Applies without a restart. No effect on Linux.
+# keep_awake = true
+
 # YouTube livestreams: how long (seconds) to keep retrying — re-checking stream
 # status every 30s — before assuming the stream has finished even if YouTube
 # still reports it live. The clock resets whenever a segment arrives. Minimum 30;
@@ -386,14 +393,18 @@
 # [disk]
 # disk_warn_percent = 90                     # Warning alert when the output disk is this full (1-99).
 # disk_critical_percent = 95                 # Critical alert at this usage; must be above the warning.
+#                                             With staging_directory on a different drive, the alerts and the
+#                                             backlog hold go by the fuller of the two drives.
 
 # ─── Updates ────────────────────────────────────────────────────────────────
 # [updates]
-# auto_check_updates = true                  # Check GitHub for a new version on startup and every 24 hours.
+# auto_check_updates = true                  # Check GitHub for a new version on startup and every 24 hours (a failed check is retried after 15 minutes and after an hour).
 
 # ─── Connectivity ───────────────────────────────────────────────────────────
 # [connectivity]
 # probe_targets = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]  # host:port TCP targets raced to detect internet reachability (requires restart)
+                                                                 # When none answers within a second, www.youtube.com and gql.twitch.tv are tried too,
+                                                                 # so a firewall that blocks these targets does not put Moombox offline.
 
 # ─── Webhook Notifications ──────────────────────────────────────────────────
 # Send Discord webhook notifications for stream events. Discord only —
@@ -440,7 +451,9 @@
 # [[channels]]
 # id = "channelname"                         # Twitch login name (required)
 # name = "Channel Name"                      # Display name (optional)
-# platform = "twitch"                        # Required for Twitch channels
+# platform = "twitch"                        # Required for Twitch channels. "youtube" or "twitch"; any other value
+                                             # disables the channel (a Warn at startup names it, and the next save writes
+                                             # enabled = false): correct the platform and set enabled = true.
 # quality_preference = "best"                # Quality cap for this channel (optional, see below)
 # twitch_gap_fill_ad_breaks = false          # Also fill skipped ad breaks from the archive VOD (default: false)
 # twitch_vod_backlog = false                 # Queue the channel's past VODs, highlights and uploads (default: false)

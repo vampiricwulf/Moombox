@@ -107,7 +107,7 @@ func firstCall(calls []wiringCall, recv, name string) token.Pos {
 // s.openAlerts, or move the state load below
 // s.wireMonitorCallbacks(), or SetUnrecoveredPlatforms below
 // startCookieSequence, or the disk alerter's restoreFrom below its boot
-// onReading, or the sidecar's below SubscribeHealth.
+// onBootReading, or the sidecar's below SubscribeHealth.
 func TestEveryAlerterIsSeededBeforeItCanObserve(t *testing.T) {
 	run, fset := callsInFunc(t, "main.go", "run")
 	before := func(calls []wiringCall, what string, aRecv, aName, bRecv, bName string) {
@@ -127,7 +127,7 @@ func TestEveryAlerterIsSeededBeforeItCanObserve(t *testing.T) {
 	before(run, "state load before the sidecar", "", "loadOpenAlerts", "s", "wireSidecarAlerts")
 	before(run, "monitors seeded before they start", "s", "wireMonitorCallbacks", "feedMon", "Start")
 	before(run, "auth", "cookieRefresh", "SetUnrecoveredPlatforms", "", "startCookieSequence")
-	before(run, "disk", "diskAlerter", "restoreFrom", "diskAlerter", "onReading")
+	before(run, "disk", "diskAlerter", "restoreFrom", "diskAlerter", "onBootReading")
 	if !seededFromState(run, "restoreFrom") {
 		t.Error("run(): the disk alerter is not seeded from s.openAlerts")
 	}

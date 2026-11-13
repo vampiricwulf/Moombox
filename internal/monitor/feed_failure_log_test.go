@@ -2,8 +2,9 @@ package monitor
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -38,7 +39,7 @@ func TestFeed_FailureWarnsOncePerStreak(t *testing.T) {
 	fm := newTestFeedMonitor(t, db,
 		withRSS(func(ctx context.Context, ch *config.ChannelConfig) ([]byte, error) {
 			if fail {
-				return nil, errors.New("feed http 404")
+				return nil, feedStatusError(404)
 			}
 			return rssXML(), nil
 		}),
@@ -74,5 +75,36 @@ func TestFeed_FailureWarnsOncePerStreak(t *testing.T) {
 	}
 	if !slices.Equal(log.lines, want) {
 		t.Errorf("feed-check log lines = %q, want %q", log.lines, want)
+	}
+}
+
+// A feed 404 says in plain words that YouTube's feed does this when it is
+// busy, that it usually clears by itself and that the channel is still
+// checked (owner ruling R2-M3). The same text is the health entry's LastError,
+// which both Settings channel lists and the Channel Not Responding alert show.
+// The TUI list shows the first 48 cells of it, so "YouTube is busy" has to sit
+// inside them. Every other status keeps its bare text.
+func TestFeed_404SaysYouTubeIsBusy(t *testing.T) {
+	msg := feedStatusError(404).Error()
+	for _, want := range []string{"feed http 404", "YouTube is busy", "usually clears by itself", "the channel is still checked"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("404 text %q does not say %q", msg, want)
+		}
+	}
+	if end := strings.Index(msg, "YouTube is busy") + len("YouTube is busy"); end > 47 {
+		t.Errorf("\"YouTube is busy\" ends at cell %d of %q: the TUI's 48-cell cut hides it", end, msg)
+	}
+	for _, status := range []int{403, 429, 500, 503} {
+		if got, want := feedStatusError(status).Error(), fmt.Sprintf("feed http %d", status); got != want {
+			t.Errorf("status %d reads %q, want %q", status, got, want)
+		}
+	}
+
+	shrinkFeedStagger(t)
+	fm := newTestFeedMonitor(t, newTestDB(t), withRSS(rss404()), withProbe(stubProbeErrored()))
+	setChannels(fm, chYT("UC1"))
+	fm.doCheck(context.Background())
+	if got := fm.health.snapshot()[0].LastError; !strings.Contains(got, feedBusy404Note) {
+		t.Errorf("LastError = %q, want it to carry the 404 note", got)
 	}
 }

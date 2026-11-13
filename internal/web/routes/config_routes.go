@@ -78,13 +78,18 @@ type ConfigRoutesCallbacks struct {
 	// on an auth transition.
 	OnActivePlatformsChange func()
 	// OnDiskSettingsChange is called when disk.disk_warn_percent,
-	// disk.disk_critical_percent or paths.output_directory changes, so the
+	// disk.disk_critical_percent, paths.output_directory or
+	// paths.staging_directory changes, so the
 	// disk gauge and alerts take a reading against the new settings now
 	// rather than at the next ~6-minute check.
 	OnDiskSettingsChange func()
 	// OnSegmentWorkersChange is called with the new downloader.segment_workers
 	// when it changes, for the high-value warning boot logs.
 	OnSegmentWorkersChange func(n int)
+	// OnKeepAwakeChange is called with the new downloader.keep_awake when it
+	// changes, so a hold in place is released, or one that is due is taken,
+	// without a restart.
+	OnKeepAwakeChange func(on bool)
 	// OnNotificationsChange is called when the notifications list changes,
 	// so the notification manager can hot-reload its targets (previously
 	// edits silently required a restart nothing prompted for).
@@ -111,14 +116,17 @@ type ConfigRoutesCallbacks struct {
 	ResolveRateLimit *web.RateLimiter
 }
 
-// diskSettings is the comparable form of what the disk gauge reads.
+// diskSettings is the comparable form of what the disk gauge and the disk
+// alerts read; the alerts also read the staging directory when it is on
+// another volume.
 type diskSettings struct {
 	warn, critical int
 	outputDir      string
+	stagingDir     string
 }
 
 func diskSettingsOf(cfg *config.MoomboxConfig) diskSettings {
-	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory}
+	return diskSettings{warn: cfg.Disk.WarnPercent, critical: cfg.Disk.CriticalPercent, outputDir: cfg.Paths.OutputDirectory, stagingDir: cfg.Paths.EffectiveStagingDir()}
 }
 
 // monitorIntervals is the comparable form of the three monitor check
@@ -615,7 +623,7 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 	// Channels — audit R-4: PUT /config accepts a channels[] replace, and
 	// POST /api/config/channels is the other writer. Validate each entry here
 	// so a bulk replace can't smuggle in empty IDs, duplicates, or unknown
-	// platforms (the platform rule is validChannelPlatform, shared with POST).
+	// platforms (the platform rule is config.ValidChannelPlatform, shared with POST and config.Validate).
 	if chs, ok := updates["channels"].([]any); ok {
 		// The decode gate, ahead of the per-field rules. applyConfigUpdates
 		// decodes this array through the same helper and assigns nothing when
@@ -655,8 +663,15 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				continue
 			}
 			seen[id] = true
-			if v, ok := obj["platform"].(string); ok && !validChannelPlatform(v) {
-				errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
+			// config.Validate's rule: an unknown platform is refused on an
+			// enabled channel only. A hand-edited file's unknown platform is
+			// loaded as a disabled channel that keeps its string (owner
+			// ruling R2-M2), and the settings form sends every channel back,
+			// so refusing that entry would 400 every later save.
+			if v, ok := obj["platform"].(string); ok && !config.ValidChannelPlatform(v) {
+				if enabled, isBool := obj["enabled"].(bool); !isBool || enabled {
+					errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
+				}
 			}
 		}
 	}
@@ -994,6 +1009,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["prefer_hdr"].(bool); ok {
 			cfg.Downloader.PreferHDR = v
 		}
+		if v, ok := dl["keep_awake"].(bool); ok {
+			cfg.Downloader.KeepAwake = v
+		}
 		if v, ok := dl["maximum_timeout"].(float64); ok {
 			cfg.Downloader.MaximumTimeout = int(v)
 		}
@@ -1275,6 +1293,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldYTActive, oldTWActive := config.GetActivePlatforms(cfg)
 		oldDisk := diskSettingsOf(cfg)
 		oldSegWorkers := cfg.Downloader.SegmentWorkers
+		oldKeepAwake := cfg.Downloader.KeepAwake
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1343,6 +1362,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newYTActive, newTWActive := config.GetActivePlatforms(cfg)
 		newDisk := diskSettingsOf(cfg)
 		newSegWorkers := cfg.Downloader.SegmentWorkers
+		newKeepAwake := cfg.Downloader.KeepAwake
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1377,6 +1397,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if newSegWorkers != oldSegWorkers && callbacks.OnSegmentWorkersChange != nil {
 				callbacks.OnSegmentWorkersChange(newSegWorkers)
+			}
+			if newKeepAwake != oldKeepAwake && callbacks.OnKeepAwakeChange != nil {
+				callbacks.OnKeepAwakeChange(newKeepAwake)
 			}
 			// The targets, when this save changed them — not on the mere
 			// presence of notification_edits: the reload flushes every

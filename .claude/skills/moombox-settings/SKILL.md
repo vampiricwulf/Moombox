@@ -52,7 +52,7 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 - The field is drawn below 60x20 too, by the bare form (`internal/tui/settings_bare.go`), from the same `fieldDef`: nothing to add there, but keep its label distinct from its section's other labels in their first twenty cells (`TestBareSettingsLabelsStayDistinct`), and write its `help` so the first 30 cells say what matters, since that is all a 30x6 terminal shows of it
 
 ### 8. Hot-Reload (if runtime-changeable)
-Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
+Ten callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
 - `OnLogLevelChange(level)` → `log.SetLevel()`
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
@@ -62,6 +62,7 @@ Nine callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
 - `OnFfmpegPathChange(path)` → `applyFfmpegPath` (`cmd/moombox/hot_reload.go`): `SetFfmpegPath` on the trim service and the download worker
 - `OnReorderBudgetChange(downloaderCfg)` → `runState.applyReorderBudget`
+- `OnKeepAwakeChange(on)` → `runState.applyKeepAwake` (`downloader.keep_awake`, Windows only: the TUI save calls the same method; a Windows-only setting says "Windows only" in its Web label and "(Windows)" in its TUI label, and its help says it has no effect on Linux)
 
 `applyReorderBudget` (`cmd/moombox/hot_reload.go`) is the model for a process-wide value: ONE method reached from all three entry points — `initServices` at boot, this PUT callback, and the TUI's `OnSaveConfig` hot-reload block — so the number never travels through `engine.DownloaderOptions` or the worker's per-job call sites.
 

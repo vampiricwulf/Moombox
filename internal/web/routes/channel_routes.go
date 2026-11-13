@@ -36,7 +36,7 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		// platform that is not "twitch" as YouTube, so an unknown one was
 		// accepted here, polled as a YouTube channel, and then made every
 		// later full-form save 400 on a field the operator never touched.
-		if !validChannelPlatform(channel.Platform) {
+		if !config.ValidChannelPlatform(channel.Platform) {
 			jsonError(rw, "platform must be youtube or twitch", http.StatusBadRequest)
 			return
 		}
@@ -302,17 +302,6 @@ func applyResolvedChannel(ch *config.ChannelConfig, resolved *utils.ResolvedChan
 	if resolved.Platform != "" {
 		ch.Platform = resolved.Platform
 	}
-}
-
-// validChannelPlatform reports whether p is a channel platform the monitors
-// know. Empty means YouTube. Shared by POST /api/config/channels and
-// PUT /api/config's channels[] check so the two writers cannot disagree.
-func validChannelPlatform(p string) bool {
-	switch p {
-	case "", "youtube", "twitch":
-		return true
-	}
-	return false
 }
 
 // pathParam returns the named chi URL parameter DECODED. chi matches routes

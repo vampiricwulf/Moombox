@@ -219,6 +219,7 @@ func Defaults() *MoomboxConfig {
 			DownloadChat:                true,
 			Prefer60fps:                 true,
 			PreferHDR:                   true,
+			KeepAwake:                   true,
 			MaximumTimeout:              600,
 			InterruptionTimeout:         FlexDuration{Value: 120}, // minutes
 			IncompleteStagingExpiryDays: FlexDuration{Value: 7},   // days
@@ -692,6 +693,27 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+// ValidChannelPlatform reports whether p is a channel platform the monitors
+// know, spelt as they compare it. Empty means YouTube. The one rule for
+// config.Validate, POST /api/config/channels and PUT /api/config's channels[]
+// check, so the file and the two web writers cannot disagree.
+func ValidChannelPlatform(p string) bool {
+	switch p {
+	case "", "youtube", "twitch":
+		return true
+	}
+	return false
+}
+
+// channelLabel names a channel in a validation message: its name, or its ID
+// when it has none.
+func channelLabel(ch *ChannelConfig) string {
+	if ch.Name != "" {
+		return ch.Name
+	}
+	return ch.ID
 }
 
 // Validate reports configuration issues without mutating cfg. Returns a
@@ -1211,12 +1233,38 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 				ch.ArchiveSlots = nil
 			}
 		}
+		// channels[].platform (owner ruling R2-M2). The monitors compare the
+		// string exactly, so a hand-written "Twitch" was polled as a YouTube
+		// channel, never by the Twitch monitor, and the block below then
+		// cleared its Twitch switches. A spelling that is right once trimmed
+		// and lower-cased is rewritten. Any other value is refused only while
+		// the channel is enabled, and Normalize disables that channel: its
+		// line, its platform string and its switches stay in the file, and the
+		// next save writes enabled = false beside them, so the message says to
+		// set enabled = true as well as correct the spelling. A disabled channel
+		// with an unknown platform is not reported, so Normalize leaves nothing
+		// Validate still refuses.
+		platform := strings.ToLower(strings.TrimSpace(ch.Platform))
+		knownPlatform := ValidChannelPlatform(platform)
+		if knownPlatform && platform != ch.Platform {
+			fail("channels[%d].platform %q must be written %q (channel %q)", i, ch.Platform, platform, channelLabel(ch))
+			if !reportOnly {
+				ch.Platform = platform
+			}
+		}
+		if !knownPlatform && ch.IsEnabled() {
+			fail("channels[%d].platform %q must be youtube or twitch: channel %q is loaded disabled; correct the platform and set enabled = true", i, ch.Platform, channelLabel(ch))
+			if !reportOnly {
+				off := false
+				ch.Enabled = &off
+			}
+		}
 		// The three Twitch-only switches (owner decision PR-I3): each acts
 		// only through the Twitch monitor or the Twitch gap-fill, so on any
 		// other channel it would sit in the file doing nothing while the
 		// settings list showed it on. The TUI's channel form already forces
 		// all three off off Twitch; the file and the API are refused alike.
-		if ch.GetPlatform() != "twitch" {
+		if knownPlatform && platform != "twitch" {
 			if ch.TwitchArchiveClips {
 				fail("channels[%d].twitch_archive_clips applies to Twitch channels only", i)
 				if !reportOnly {

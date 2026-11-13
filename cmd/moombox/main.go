@@ -584,7 +584,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}
 
 	// Auto-update check: initial check + daily ticker, plus a check within a
-	// minute of the toggle turning on (runUpdateCheckLoop). The goroutine runs
+	// minute of the toggle turning on (runUpdateCheckLoop). A failed check is
+	// tried again after 15 minutes and then an hour, and a check due while the
+	// connectivity monitor reports offline waits for it to report online (at
+	// most updateCheckOfflineGrace). The goroutine runs
 	// whenever the updater exists and re-reads auto_check_updates every time
 	// — previously the flag was consulted once at boot, so disabling checks
 	// (the dismiss route / settings toggle) couldn't stop an armed ticker
@@ -606,9 +609,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			// One notification per pending version, not one per tick —
 			// state lives here because this goroutine is the only caller.
 			var lastNotifiedTag string
-			runUpdateCheckLoop(ctx, checkEnabled, func() {
-				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
-			}, updateCheckTiming{initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute})
+			runUpdateCheckLoop(ctx, checkEnabled, func() bool {
+				return checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
+			}, updateCheckTiming{
+				initialDelay: 5 * time.Second, period: 24 * time.Hour, poll: time.Minute,
+				retry: updateCheckRetry, online: s.connMon.IsOnline, offlineGrace: updateCheckOfflineGrace,
+			})
 		}()
 	}
 
@@ -634,27 +640,34 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// The boot-time reading (UpdateDiskStatus above) goes through the
 		// alert decision too: the ticker's first disk check is three ticks
 		// away, so a volume already full at boot was not announced for six
-		// minutes while recordings kept writing to it.
-		if ds := routes.SharedDiskStatus.Load(); ds != nil {
-			var bootOutputDir string
+		// minutes while recordings kept writing to it. A boot reading that
+		// FAILED (nothing stored: the output volume absent at start) counts
+		// as the first failed reading, so "Disk Monitoring Failed" goes out
+		// on the ticker's first check rather than its second.
+		{
+			var bootOutputDir, bootStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				bootOutputDir = c.Paths.OutputDirectory
+				bootStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
-			diskAlerter.onReading(ds, bootOutputDir, time.Now())
+			diskAlerter.onBootReading(routes.SharedDiskStatus.Load(), bootOutputDir, bootStagingDir, time.Now())
 		}
 		// checkDisk takes a reading, publishes it to both UIs and runs the
-		// alert decision. The ticker calls it every third tick; a save that
+		// alert decision. The gauge and the frame are the output directory's
+		// volume; the alerts also judge the staging directory's when it is
+		// on another volume, and act on the fuller of the two. The ticker calls it every third tick; a save that
 		// changes the thresholds or the output directory asks for one at once
 		// (requestDiskRecheck), so the gauge and the alerts do not keep the
 		// old settings for up to six minutes.
 		checkDisk := func() {
-			var diskOutputDir string
+			var diskOutputDir, diskStagingDir string
 			var warnPct, critPct int
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				diskOutputDir = c.Paths.OutputDirectory
+				diskStagingDir = c.Paths.EffectiveStagingDir()
 				warnPct, critPct = c.Disk.WarnPercent, c.Disk.CriticalPercent
 			})
 			diskAlerter.setThresholds(warnPct, critPct)
@@ -679,7 +692,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// cooldown, the level escalation, and the all-clear
 				// that closes them — lives in diskAlerts, where it
 				// can be tested.
-				diskAlerter.onReading(ds, diskOutputDir, time.Now())
+				diskAlerter.onVolumes(ds, diskOutputDir,
+					diskAlerter.readStaging(diskOutputDir, diskStagingDir), diskStagingDir, time.Now())
 			} else {
 				// GetDiskSpace failed (volume offline, I/O error): the
 				// dashboard disk gauge and low-disk notifications are
@@ -761,6 +775,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				}
 
 				log.Debug(line)
+
+				// While downloader.keep_awake is on, the hold is checked against
+				// the jobs' statuses in both directions: taken when a capture or
+				// mux is running and none is held, released when none is running
+				// (one GetAllJobs per tick, Windows only).
+				if s.keepAwake != nil {
+					s.keepAwake.reconcile()
+				}
 
 				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
 				// interval — close enough to the 5-min target while reusing the

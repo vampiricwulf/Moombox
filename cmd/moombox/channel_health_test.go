@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -106,5 +107,75 @@ func TestOneYouTubeOutageIsOneIncident(t *testing.T) {
 	feedHealthy("UC_dead")
 	if got := len(rec.ByEvent("channel_healthy")); got != 1 {
 		t.Errorf("closes = %d, want exactly 1 for the one alert", got)
+	}
+}
+
+type warnRecorder struct {
+	nopLogger
+	warns []string
+}
+
+func (l *warnRecorder) Warn(msg string, _ ...any) { l.warns = append(l.warns, msg) }
+
+// TestChannelNotRespondingWordsAFeed404AsYouTubeBeingBusy pins owner ruling
+// R2-M3 for the alert: a feed 404 is common while YouTube is busy, so the
+// alert and the Warn beside it say that, as the Last Error field already
+// does, and do not call the channel renamed, banned or misconfigured. Every
+// other cause keeps its wording.
+//
+// Mutants: channelUnhealthyText without the 404 branch (the 404 alert says
+// "banned"); the branch taken for every error (the 503 alert loses "banned").
+func TestChannelNotRespondingWordsAFeed404AsYouTubeBeingBusy(t *testing.T) {
+	feed404 := ""
+	for _, h := range []string{"feed http 404: common when YouTube is busy, usually clears by itself; the channel is still checked"} {
+		if !monitor.IsFeedBusy404(h) {
+			t.Fatalf("IsFeedBusy404(%q) = false: the feed's 404 text moved", h)
+		}
+		feed404 = h
+	}
+	for _, other := range []string{"feed http 503", "feed http 404", "decapi 404", ""} {
+		if monitor.IsFeedBusy404(other) {
+			t.Errorf("IsFeedBusy404(%q) = true", other)
+		}
+	}
+
+	for _, tc := range []struct {
+		name, lastErr string
+		want, wantNot []string
+	}{
+		{"feed 404", feed404,
+			[]string{"answered 404 for 20 checks", "busy", "usually clears by itself", "still checked", "check the channel ID"},
+			[]string{"banned", "misconfigured", "being missed"}},
+		{"another status", "feed http 503",
+			[]string{"failed 20 consecutive monitor checks", "renamed, banned, or misconfigured"},
+			[]string{"busy"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := notificationtest.New()
+			log := &warnRecorder{}
+			unhealthy, _ := channelHealthNotifiers(rec, log, "youtube", newChannelIncidents())
+			unhealthy("UC_x", 20, tc.lastErr)
+			calls := rec.ByEvent("channel_unhealthy")
+			if len(calls) != 1 || calls[0].Title != "Channel Not Responding" {
+				t.Fatalf("alerts = %+v, want one Channel Not Responding", calls)
+			}
+			desc := calls[0].Description
+			for _, w := range tc.want {
+				if !strings.Contains(desc, w) {
+					t.Errorf("description lacks %q:\n%s", w, desc)
+				}
+			}
+			for _, w := range tc.wantNot {
+				if strings.Contains(desc, w) {
+					t.Errorf("description says %q:\n%s", w, desc)
+				}
+			}
+			if len(log.warns) != 1 {
+				t.Fatalf("Warn lines = %v, want one", log.warns)
+			}
+			if busy := strings.Contains(log.warns[0], "busy"); busy != (tc.name == "feed 404") {
+				t.Errorf("Warn %q: says busy = %v", log.warns[0], busy)
+			}
+		})
 	}
 }
