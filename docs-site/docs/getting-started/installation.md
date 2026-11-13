@@ -37,7 +37,10 @@ installs it (see [Updating](updating.md)).
   combine (mux) them into the finished file, to trim, and to read chapters and
   audio details (through `ffprobe`, which it looks for next to `ffmpeg`).
   Without FFmpeg, recordings stop at the muxing step. Install a full build that
-  includes `ffprobe`.
+  includes `ffprobe`. Version 4.0 or newer is recommended: when Moombox checks
+  an older FFmpeg it warns "FFmpeg 3.x is outdated — version 4.0+ is
+  recommended for reliable muxing". Builds whose version it cannot read (git
+  snapshots and some custom builds) are accepted without a warning.
 - **Disk space** for the staging directory (segments being downloaded) and the
   output directory (finished archives). A live stream is fully staged before
   it is muxed, so plan for roughly twice the size of your largest recording
@@ -134,8 +137,8 @@ browser at the same time. Continue with [First run](first-run.md).
     sudo zypper install ffmpeg
     ```
 
-On Linux, Moombox does not install FFmpeg for you. Its **FFmpeg Not Found**
-screen shows the install command for your distribution (read from
+On Linux, Moombox does not install FFmpeg for you. The dashboard's
+**FFmpeg Not Found** screen shows the install command for your distribution (read from
 `/etc/os-release`) with a **Copy command** button and an
 **I've installed FFmpeg, recheck** button.
 
@@ -152,8 +155,10 @@ setting. You can set it in any of these places:
 - Settings → Paths in the dashboard or the terminal UI.
 
 The file must be named `ffmpeg` (or `ffmpeg.exe`); any other name is refused.
-A pair of surrounding quotes, such as Windows Explorer's "Copy as path" adds,
-is removed for you. `ffprobe` is expected in the same folder.
+On the **FFmpeg Not Found** screen a pair of surrounding quotes, such as
+Windows Explorer's "Copy as path" adds, is removed for you; in the wizard and
+in Settings a quoted path is refused, so type it without quotes. `ffprobe` is
+expected in the same folder.
 
 ## Where Moombox keeps its files
 
@@ -177,8 +182,7 @@ executable.
 
 Two locations are outside that folder:
 
-- The BotGuard helper's runtime is unpacked once (about 36 MB) into your user
-  cache folder: `%LOCALAPPDATA%\Moombox\sidecar` on Windows,
+- The BotGuard helper's runtime is unpacked once into your user cache folder: `%LOCALAPPDATA%\Moombox\sidecar` on Windows,
   `~/.cache/Moombox/sidecar` on Linux (or under `$XDG_CACHE_HOME`).
 - The single-instance lock lives in `%LOCALAPPDATA%\moombox` on Windows and
   `~/.local/share/moombox` on Linux. See
@@ -192,7 +196,8 @@ used is decided by the search described in
 ## Running in the background on Linux
 
 Moombox does not ship a service unit, but it runs well under systemd. Run it
-headless (no terminal UI) and give it a fixed working directory:
+headless (no terminal UI), give it a fixed working directory, and let it bind
+the dashboard's default port:
 
 ```ini title="/etc/systemd/system/moombox.service"
 [Unit]
@@ -204,6 +209,9 @@ After=network-online.target
 User=moombox
 WorkingDirectory=/srv/moombox
 ExecStart=/srv/moombox/moombox -no-tui
+# Lets an ordinary user bind the default port 774 (ports below 1024 are
+# privileged). Drop this line if you set network.port to 1024 or above.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 # Moombox needs up to about 15 seconds to save in-progress downloads.
 TimeoutStopSec=60
@@ -217,6 +225,13 @@ Things to know:
 - Moombox already supervises itself: restarts requested from the dashboard,
   after a settings change or after an update happen inside the process systemd
   started, so systemd sees one long-running service.
+- The default dashboard port, 774, is below 1024. On most Linux systems an
+  ordinary user may not bind such ports, so without
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` Moombox fails on 774 and on the
+  ten ports after it, and the log reports "port 774 (and nearby ports) already
+  in use" even though nothing else is using them. Either keep that line or
+  set [`network.port`](../configuration/network.md#networkport) to 1024 or
+  above before you start the service.
 - A startup failure (a configuration it cannot read, a port it cannot bind)
   exits with code 3. `Restart=on-failure` will retry it; fix the cause shown
   in `journalctl -u moombox`.

@@ -189,9 +189,11 @@ terms = { stream = "(?i)(karaoke|singing|歌枠)", collab = "(?i)collab" }
 ```
 
 The dashboard and the TUI edit only one pattern. The dashboard shows and
-edits the table's `stream` entry and keeps the others; the TUI shows a table
-as an empty field, and typing a pattern there replaces the whole table with
-that one pattern. Leaving the field untouched keeps the table as it is.
+edits the table's `stream` entry and keeps the others; a table without a
+`stream` entry shows as an empty field there. The TUI shows any table as an
+empty field. In both, typing a pattern into an empty field replaces the
+whole table with that one pattern, and leaving the field untouched keeps the
+table as it is.
 
 ```toml
 [[channels]]
@@ -330,7 +332,7 @@ Edge cases:
 
 - The folder is copied onto each job when the job is created. Changing it
   does not move existing files or redirect jobs that already exist.
-- Relative paths are relative to the folder Moombox runs in.
+- A relative path is resolved against Moombox's working directory.
 - The disk-space alerts and the backlog's disk gate measure the **global**
   output directory's volume only, not a per-channel folder on another drive.
 - In Docker, use a path inside a mounted volume, or the files stay inside the
@@ -358,7 +360,10 @@ The quality to record for this channel, on both YouTube and Twitch.
   has no rendition at that height, Moombox takes the next lower one, and if
   there is none lower, the best available. A `60` suffix prefers 60 fps at
   that height.
-- `audio_only` records only the audio.
+- `audio_only` records only the audio. A YouTube stream served only as
+  HLS has no audio-only variant, so Moombox records its lowest-bandwidth
+  variant instead and logs a warning; a Twitch stream without an audio-only
+  variant falls back to the lowest listed one.
 
 Edge cases:
 
@@ -451,10 +456,10 @@ twitch_vod_backlog = true
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `false` | `true` or `false` | Next hourly clip sweep | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
+| `false` | `true` or `false` | Next Twitch live check (a channel not yet listed since Moombox started is listed then; after that, hourly) | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
 
-Archive the channel's new clips. Once an hour Moombox lists the channel's
-clips and queues each one it has no job for yet as a `Queued` backlog job,
+Archive the channel's new clips. Once an hour, as part of the Twitch live
+check, Moombox lists the channel's clips and queues each one it has no job for yet as a `Queued` backlog job,
 paced by [archive slots](#channelsarchive_slots).
 
 - The first listing after Moombox starts reaches back one week. Later ones

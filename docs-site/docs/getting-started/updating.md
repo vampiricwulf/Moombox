@@ -29,7 +29,9 @@ When a newer release exists:
 - **Terminal UI:** the feedback line says
   `Update available: vX.Y.Z — R N for notes, R U to install`, and the Details
   panel shows `⬆ Update!` beside the version.
-- **Webhooks:** an `update_available` notification is sent, once per release.
+- **Webhooks:** an **Update Available** notification (event
+  `update_available`) is sent once per release while Moombox keeps running;
+  after a restart the next automatic check announces it again.
   See [Notifications](../guide/notifications.md).
 
 To check by hand at any time: **Check Now** under Settings → Updates in the
@@ -88,12 +90,16 @@ minute) can be lost, Twitch especially. Updating between streams is safest.
 4. The running binary is kept as `<binary>.old`, and the new one takes its
    name. On Linux the swap is a single rename, so the file name always holds
    a working binary. On Windows there is a split second in which the name is
-   empty while the running program is moved aside.
+   empty while the running program is moved aside, and during the restart the
+   launcher renames `<binary>.old` to `<binary>~` (the file it is still
+   running from).
 5. Moombox shuts down gracefully (saving in-progress downloads) and its
    launcher starts the new binary. The dashboard shows
    **Update applied. Restarting...** and reconnects.
-6. Once the new version has opened the database and started the web server,
-   it deletes `<binary>.old`. On the first start of the new version an
+6. Once the new version has started successfully, it deletes the leftover
+   files (`<binary>.old`, and any `.new` or `.failed`). On Windows,
+   `<binary>~` is removed once the launcher that runs from it has exited. On
+   the first start of the new version an
    **Update Applied** notification reports the old and new version and
    whether the dashboard came back.
 
@@ -118,12 +124,12 @@ The launcher watches the first start after an update.
 - **The new version reports a startup error** (a configuration it cannot
   load, a port it cannot bind, a database it refuses): that is your
   environment, not the release, so there is no rollback. Moombox stops and
-  prints that the previous binary is still at `<binary>.old`. Fix the cause
-  and start Moombox again.
+  prints where the previous binary still is (`<binary>.old` on Linux,
+  `<binary>~` on Windows). Fix the cause and start Moombox again.
 - **The rollback itself fails:** the launcher leaves the previous binary where
   it is, writes the recovery steps into `<binary>.update-failed` and prints
-  them. Recovery is one rename: put the `.old` file back under the normal
-  name.
+  them. Recovery is one rename: put the previous binary (the path the
+  marker names) back under the normal name.
 
 A `<binary>.update-broken` marker means both placing the new binary and
 restoring the old name failed during the swap. Moombox refuses further

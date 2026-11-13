@@ -41,8 +41,8 @@ without Git information shows `unknown`.
 
 ??? note "More about `-log-level`"
     The override applies to the logger only. Saving an unrelated setting
-    keeps it; choosing a log level explicitly in Settings (dashboard or
-    terminal UI) replaces it for the rest of the run. The level you normally
+    keeps it; changing the log level in Settings (dashboard or terminal UI)
+    replaces it for the rest of the run. The level you normally
     want is [`logs.log_level`](../configuration/paths-and-logs.md#logslog_level).
 
 ## Terminal UI or headless
@@ -145,12 +145,15 @@ your configuration, otherwise `best`.
 
 Output and results:
 
-- `Added <id> to queue.`, `Added Twitch VOD <id> to queue.`, or
-  `Queued N Twitch VOD(s); M already queued.` — success. For a single video,
-  channel, VOD or clip a **Job Added** notification is sent to your webhooks,
-  as when you add from the dashboard.
-- `Job already exists for video: <id>` — nothing to do (exit code 0).
-- Anything else is an error on standard error, with exit code 1.
+- `Added <id> to queue.` (YouTube), `Added Twitch channel|VOD|clip <id> to queue.`,
+  or `Queued N Twitch VOD(s); M already queued.` — success. For a single
+  video, channel, VOD or clip a **Job Added** notification is sent to your
+  webhooks, as when you add from the dashboard. A listing sends none.
+- `Job already exists for video: <id>` (YouTube) or `Job already exists: <id>`
+  (Twitch) — nothing to do (exit code 0).
+- Errors (an input that is not a video or channel, no configuration, the
+  wrong database, a Twitch listing that cannot be read or is empty) are
+  printed on standard error, with exit code 1.
 
 ### Which database it writes to
 
@@ -182,10 +185,11 @@ In Docker, run it inside the container:
 | `MOOMBOX_PPROF` | `1` starts Go's profiling endpoints on `localhost:6060`. See [Profiling](#profiling). |
 | `MOOMBOX_CONFIG` | Docker image only: the configuration path the entrypoint seeds and passes as `-config` (default `/data/config.toml`). The binary itself does not read it. |
 | `TZ` | Time zone for file names built from `${start_date}` / `${start_time}` and for log timestamps. Mostly useful in Docker, where the default is UTC. |
-| `GOMEMLIMIT` | Go's memory limit, honoured at startup. [`memory.go_soft_limit_mb`](../configuration/disk-memory-connectivity.md#memorygo_soft_limit_mb) overrides it while set; clearing that setting restores this value. |
+| `GOMEMLIMIT` | Go's memory limit. [`memory.go_soft_limit_mb`](../configuration/disk-memory-connectivity.md#memorygo_soft_limit_mb) (256 MB by default) replaces it whenever that setting is above 0; setting it to 0 falls back to this value, or to no limit when the variable is unset. |
 | `HOME` (Linux), `LOCALAPPDATA` (Windows) | Where the single-instance lock lives (`~/.local/share/moombox`, `%LOCALAPPDATA%\moombox`). With `HOME` unset on Linux, `/tmp` is used. |
 | `XDG_CACHE_HOME` (Linux), `LOCALAPPDATA` (Windows) | Where the BotGuard helper's runtime is unpacked (`…/Moombox/sidecar`). |
 | `XDG_CONFIG_HOME` (Linux) | Used only to locate yt-dlp's plugin folder for the [yt-dlp plugin](../guide/ytdlp-plugin.md). |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | Outbound proxy for Moombox's web traffic: YouTube and Twitch requests and downloads, update checks against GitHub, Discord notifications. `HTTPS_PROXY` covers `https://` addresses, `HTTP_PROXY` plain `http://` ones, and `NO_PROXY` lists hosts that go direct. Lowercase spellings work too; `ALL_PROXY` is not read. The BotGuard helper uses the same HTTPS proxy, except a `socks5://` one, which it cannot use (it then connects directly and the log says so); behind a TLS-intercepting proxy also set `NODE_EXTRA_CA_CERTS`. See [BotGuard settings](../configuration/updates-bgutils-twitch.md). The [connectivity probe](../configuration/disk-memory-connectivity.md#connectivityprobe_targets) does not use the proxy. |
 
 Variables beginning with `_MOOMBOX_` (such as `_MOOMBOX_CHILD`) are how the
 launcher talks to the program it starts. Do not set them yourself.
@@ -208,14 +212,17 @@ The launcher also supervises the program:
 
 - **Crash recovery.** If the program dies abnormally after running for at
   least 60 seconds, the launcher restarts it after 1 s, then 2, 4, 8 and
-  16 s for consecutive crashes. After five crashes in a row without a
-  healthy 60-second run it gives up:
-  `moombox crashed N times in a row (last exit code X) — giving up; check the logs`.
+  16 s for consecutive crashes, printing
+  `moombox exited abnormally (code X) — restarting in 1s (attempt 1/5)`.
+  After five such restarts, a sixth crash in a row without a healthy
+  60-second run in between makes it give up:
+  `moombox crashed 6 times in a row (last exit code X) — giving up; check the logs`.
   Each recovery logs the previous exit code and any crash output, and sends a
   **Recovered From Crash** notification.
 - **Fail fast.** A fresh start that dies within 60 seconds is not restarted:
   something about the setup is wrong and retrying would only repeat it.
-- **Startup errors** (exit code 3) are never restarted.
+- **Startup errors** (exit code 3) are never restarted, and neither is an
+  exit with code 130 or 143 (an interrupt or terminate signal).
 - **Update rollback.** The first start after an update is watched; see
   [Updating → If the new version fails to start](../getting-started/updating.md#if-the-new-version-fails-to-start).
 - **Tied lifetimes.** If the launcher is killed outright, the program and its
@@ -226,14 +233,18 @@ The launcher also supervises the program:
 
 ## One instance per user
 
-Only one Moombox can run per user account at a time. A second start prints:
+Only one Moombox can run per user account at a time. On Linux a second start
+prints:
 
 ```text
 another moombox instance is already running, or the last one is still shutting down (lock held on /home/you/.local/share/moombox/moombox.lock)
 If you believe this is in error (the previous instance crashed), wait a few seconds and try again.
 ```
 
-and exits with code 1. The lock is held by the operating system and released
+and exits with code 1. On Windows the first line reads
+`another moombox instance is already running in this session` or
+`another moombox instance is already running (cross-session lock held)`.
+The lock is held by the operating system and released
 when the process ends, so a crash never leaves a stale lock behind.
 
 - On **Linux** it is a lock on `~/.local/share/moombox/moombox.lock`.
@@ -291,7 +302,7 @@ restarting.
 | `1` | Another instance is running, the program could not be started, or `add` failed. |
 | `2` | Unknown command or invalid flag. |
 | `3` | Startup error: the configuration, database or web port is unusable. Not restarted by the launcher; fix the cause. |
-| `129`, `130`, `143` | Stopped by `SIGHUP`, `SIGINT` or `SIGTERM` before the program was running (Linux). |
+| `129`, `130`, `143` | Stopped by a hangup (`SIGHUP`, Linux only), an interrupt (++ctrl+c++) or a terminate signal while the launcher had no program running (before the first start, or between restarts). |
 
 When the program itself exits, the launcher exits with the program's code;
 after giving up on repeated crashes, with the last crash's code. The internal

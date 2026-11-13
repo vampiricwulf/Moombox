@@ -47,7 +47,9 @@ terminal UI, and the only thing it asks you to install is FFmpeg.
     ---
 
     Live job list with filters, job details and logs, settings, imports,
-    orphaned-file cleanup and statistics, from any browser on your network.
+    orphaned-file cleanup and statistics, in your browser. It listens on this
+    machine only until you allow LAN or external access
+    ([Network settings](configuration/network.md)).
 
     → [Web dashboard](guide/web-dashboard.md)
 

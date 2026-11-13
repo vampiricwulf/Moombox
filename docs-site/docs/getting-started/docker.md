@@ -27,6 +27,7 @@ appears under `./data` next to the compose file.
 | `latest` | The newest stable release. Pre-releases never move it. |
 | `X.Y.Z` (for example `2.9.8`) | One exact release. |
 | `X.Y` (for example `2.9`) | The newest patch release of that minor version. |
+| `edge` | A build of the `main` branch, pushed by hand for testing image changes. Not a release. |
 
 Pin `X.Y.Z` if you want to choose when to upgrade. The image's binary reports
 the same version as the release (`docker compose exec moombox moombox --version`).
@@ -166,7 +167,7 @@ container):
 | `/data/staging/` | Downloads in progress. |
 | `/data/cookies.txt` | Your cookie file. |
 | `/data/browser-profile/` | Optional Firefox profile to import cookies from. |
-| `/data/.cache/` | The BotGuard helper's runtime, unpacked once (about 36 MB) and reused across container recreations. |
+| `/data/.cache/Moombox/sidecar/` | The BotGuard helper's runtime, unpacked once and reused across container recreations. |
 
 To keep finished downloads on a bigger disk, add a second mount over the
 output directory:

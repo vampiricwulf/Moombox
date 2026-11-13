@@ -48,9 +48,9 @@ the global ones.
 
 === "First-run wizard"
 
-    Both setup wizards (dashboard and terminal UI) have a **Monitor
-    Channels** step that adds channels the same way. You can skip it and add
-    channels later.
+    Both setup wizards have a channels step (**Monitor Channels** in the
+    dashboard's wizard, **Channels** in the terminal UI's) that adds channels
+    the same way. You can skip it and add channels later.
 
 === "config.toml"
 
@@ -170,8 +170,11 @@ Removing a channel always asks what to do with its jobs.
 What each choice does:
 
 - **Pending jobs** are the channel's `Queued`, `Upcoming` and `COOKIES?`
-  jobs. Deleting them also clears their history entries, so the videos can
-  be archived again if you re-add the channel.
+  jobs that Moombox created itself; jobs you added by hand are never
+  counted as pending. For a Twitch channel, only the clips and VODs its
+  clip sweep and VOD backlog queued are pending. Deleting them also clears
+  their history entries, so the videos can be archived again if you re-add
+  the channel.
 - A parked job whose staging folder still holds recorded footage is
   **always kept**, whichever you choose, and the prompt names it. You can
   still resume or mux it later.
@@ -247,6 +250,18 @@ checks the channel's [filter](#filtering-by-title). Then:
 | Already has an active job, or is already in the processing history | Skipped. |
 | Members-only and you are not signed in or not a member | Skipped; re-checked later. |
 
+!!! note "Past content waits until Moombox can see the channel"
+    For a newly added YouTube channel, finished streams and uploads are not
+    archived until Moombox has either read the channel's RSS feed
+    successfully once or finished its feed-history backfill. Until then,
+    with **Also archive uploads & premieres** on, the backlog simply does
+    not appear yet; it shows up on the first cycle after a good feed read
+    (usually the first one) or once the backfill completes. Upcoming and
+    live streams are never held back by this. If Moombox cannot read this
+    state from its database, it skips past content for that cycle, logs
+    `established-gate read failed; past content skipped this cycle`, and
+    tries again on the next cycle.
+
 A stream that YouTube shows as ended only on weak signals is double-checked
 before Moombox treats it as over; if that cannot be confirmed, the video is
 checked again after 1 hour, 6 hours, then daily, so a stream that turns out
@@ -277,9 +292,9 @@ More on Twitch captures, gap-fill and clips: [Twitch](twitch.md).
 
 ### Checking now
 
-The dashboard header shows when each monitor runs next ("Feed … · DECAPI …
-· Twitch …", shortened to "F · D · T" on narrow screens). Click it to check
-all monitors now. In the terminal UI the chord is ++r++ ++m++ (**Check
+The status bar at the bottom of the dashboard shows when each monitor runs
+next ("Feed … · DECAPI … · Twitch …", shortened to "F … · D … · T …" on
+narrow screens). Click it to check all monitors now. In the terminal UI the chord is ++r++ ++m++ (**Check
 Monitors Now**). The dashboard accepts one forced check every 30 seconds; a
 click inside that window says "Just checked — try again in Ns".
 

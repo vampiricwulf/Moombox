@@ -152,7 +152,10 @@ finish; if one cannot be created, the wizard says which and why.
 | **Hide Finished After (days)** | `30` | 0 – 365 | Finished jobs older than this move to the Archived tab; 0 moves them at once. |
 | **Archive Window (days)** | `3` | 1 – 3650 | How far back a channel's past videos are archived. Upcoming and live streams are always covered. |
 | **Archive Slots** | `3` | 1 – 100 | Backlog downloads per channel at once. New content never waits for a slot. |
-| **Feed Check Interval (minutes)** | `10` | 1 – 1440 | How often channel feeds are checked. Fractions such as `2.5` are accepted. |
+| **Feed Check Interval (minutes)** | `10` | 1 – 1440 | How often channel feeds are checked. |
+
+The terminal wizard accepts fractions for the feed check interval and for
+Hide Finished After (for example `2.5` minutes or `0.5` days).
 
 ### 5. Download
 
@@ -192,7 +195,7 @@ and keys.
 |---|---|
 | Mode choice | ++up++ / ++down++ to choose, ++enter++ to continue. |
 | Cookie step | ++up++ / ++down++ between **YouTube**, **Twitch** and **Skip / Next**; ++enter++ to start. While a browser is open: ++enter++ when you have signed in, ++esc++ to cancel. ++esc++ on the list goes back. |
-| Channel list | ++a++ add, ++enter++ edit, ++d++ delete, ++tab++ finish setup, ++esc++ back. |
+| Channel list | ++a++ add, ++enter++ edit, ++d++ then ++d++ again to delete, ++tab++ finish setup, ++esc++ back. |
 | Channel editor | ++up++ / ++down++ (or ++tab++) between fields, ++left++ / ++right++ to cycle a choice, ++enter++ to save, ++esc++ to cancel. |
 | Advanced form | Fill in each group as prompted. Press ++esc++ twice to abandon it and return to the mode choice. |
 
