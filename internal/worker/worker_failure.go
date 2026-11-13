@@ -409,8 +409,9 @@ const (
 	// on is the way out.
 	CookieRefreshOff
 	// CookieRefreshInFlight: the refresh did not run because the refresh slot
-	// was held — another job's refresh, the operator's, or an import is
-	// running. Nothing judged the cookies; the job stays parked and is resumed
+	// was held — another job's refresh, the operator's, the periodic refresh,
+	// an import or the boot profile import is running — or a cookie setup was
+	// in progress. Nothing judged the cookies; the job stays parked and is resumed
 	// with the other parked jobs if that pass ends with the platform verified.
 	CookieRefreshInFlight
 )
@@ -498,14 +499,15 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 		return
 	}
 	if outcome == CookieRefreshInFlight {
-		// Another job's refresh, the operator's, the periodic one, or an import holds the one
-		// refresh slot, and the callback's line says so. This used to be
+		// Another job's refresh, the operator's, the periodic one, or an import
+		// holds the one refresh slot, or a cookie setup is in progress, and the
+		// callback's line says so. This used to be
 		// answered NotRestored, so the advice below ("the cookie file has to
 		// be replaced by hand") was logged for cookies a refresh was repairing
 		// at that moment. If that pass ends with the platform verified, its
 		// sweep resumes this job with the rest (cmd/moombox
 		// resumeAfterCookieGesture).
-		w.logger.Info("the job stays parked — a cookie refresh is already running, and the job is resumed if it ends with working cookies",
+		w.logger.Info("the job stays parked — a cookie refresh, import or setup is already running, and the job is resumed if it ends with working cookies",
 			"jobID", job.ID,
 			"videoID", job.VideoID,
 			"platform", job.Platform)
