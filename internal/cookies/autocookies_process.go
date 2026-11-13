@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -347,10 +348,113 @@ func (s *AutoCookieService) adoptSetupJobLocked(job *processJob) {
 	s.setupJob = job
 }
 
+// lastErrorKind says what a recorded lastError is about, which decides what
+// may retract it. See the write policy on the lastError field.
+type lastErrorKind uint8
+
+const (
+	// lastErrorMechanism is a report about the refresh mechanism or a setup
+	// attempt: no browser, a held or empty profile, a profile that is signed
+	// out, a check that could not be completed. Only a renewed browser pass or
+	// a new setup attempt retracts it. The zero value, so a message recorded
+	// without a kind is never retracted early.
+	lastErrorMechanism lastErrorKind = iota
+	// lastErrorFile is a report that cookies.txt could not be read, written or
+	// loaded, or that a rollback left it holding rejected rows. An import
+	// that wrote the file, loaded it and verified a platform has disproved it.
+	lastErrorFile
+	// lastErrorCredential is a report that the named platforms' credentials
+	// were rejected or are gone from the file. Each platform is retracted by
+	// that platform verifying: a verified import, or an auth recovery.
+	lastErrorCredential
+)
+
+// setError records a mechanism-kind message.
 func (s *AutoCookieService) setError(msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.setLastErrorLocked(msg, lastErrorMechanism)
+}
+
+// setFileError records a message about cookies.txt itself.
+func (s *AutoCookieService) setFileError(msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setLastErrorLocked(msg, lastErrorFile)
+}
+
+// setCredentialError records a message about the credentials of the named
+// platforms ("YouTube"/"Twitch" in any case).
+func (s *AutoCookieService) setCredentialError(msg string, platforms ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setLastErrorLocked(msg, lastErrorCredential, platforms...)
+}
+
+// setLastErrorLocked is the one place a message and its kind are stored, so
+// the two cannot drift. Caller must hold s.mu.
+func (s *AutoCookieService) setLastErrorLocked(msg string, kind lastErrorKind, platforms ...string) {
 	s.lastError = &msg
+	s.lastErrorKind = kind
+	s.lastErrorPlatforms = nil
+	if kind == lastErrorCredential {
+		s.lastErrorPlatforms = make(map[string]bool, len(platforms))
+		for _, p := range platforms {
+			s.lastErrorPlatforms[strings.ToLower(p)] = true
+		}
+	}
+}
+
+// clearLastErrorLocked drops the message and its kind. Caller must hold s.mu.
+func (s *AutoCookieService) clearLastErrorLocked() {
+	s.lastError = nil
+	s.lastErrorKind = lastErrorMechanism
+	s.lastErrorPlatforms = nil
+}
+
+// retractLastErrorLocked clears a recorded message that the caller has just
+// disproved, and reports whether it did. verified are the lowercase platforms
+// whose credentials the caller saw verify; fileProven says the caller wrote
+// and loaded cookies.txt itself. A mechanism-kind message is never retracted
+// here. A credential-kind message goes only once every platform it names has
+// verified, so "YouTube + Twitch ... failed" outlives a Twitch-only repair.
+// Caller must hold s.mu.
+func (s *AutoCookieService) retractLastErrorLocked(verified []string, fileProven bool) bool {
+	if s.lastError == nil {
+		return false
+	}
+	switch s.lastErrorKind {
+	case lastErrorFile:
+		if !fileProven {
+			return false
+		}
+	case lastErrorCredential:
+		for _, p := range verified {
+			delete(s.lastErrorPlatforms, p)
+		}
+		if len(s.lastErrorPlatforms) > 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	s.clearLastErrorLocked()
+	return true
+}
+
+// ClearCredentialError retracts a credential-kind "Last cookie error" for a
+// platform whose authentication has come back, and reports whether the line
+// was cleared. For the recovery no cookie pass of this service sees: the
+// background re-check finding the platform authenticated again. Messages
+// about the refresh mechanism or the cookie file stay.
+func (s *AutoCookieService) ClearCredentialError(platform string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch platform {
+	case "youtube", "twitch":
+		return s.retractLastErrorLocked([]string{platform}, false)
+	}
+	return false
 }
 
 // isWindows returns true when running on Windows.

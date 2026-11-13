@@ -164,6 +164,18 @@ func jobCookieRefreshOutcome(log interface {
 		log.Warn(msg, slog.String("platform", platform), cause)
 		return outcome
 	}
+	if result.InFlight {
+		// The refresh slot was held (another pass or an import is running) or
+		// a cookie setup is in progress.
+		// This was reported as a declined pass and answered NotRestored, and
+		// the worker followed it with the advice to replace the cookie file
+		// while a refresh was repairing it. The job waits for that pass,
+		// whose sweep resumes it if the platform verifies
+		// (resumeAfterCookieGesture).
+		log.Info("automatic cookie refresh not started — a refresh, import or setup is already running; the job waits for its result",
+			slog.String("platform", platform))
+		return worker.CookieRefreshInFlight
+	}
 	report := cookieRefreshReportFor(platform, result)
 	if report.msg != "" {
 		log.Warn(report.msg,
@@ -297,19 +309,19 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // context (see AutoCookieService.OnPassCompleted), and the body has to run its
 // re-check under it: that is what lets the shutdown's cancel end the re-check's
 // round trips, and AutoCookieService.Stop's join cover them.
-func postRefreshRecheckHook(recheck func(ctx context.Context), log interface {
+func postRefreshRecheckHook(recheck func(ctx context.Context, result cookies.RefreshResult), log interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}) func(ctx context.Context) {
-	return func(ctx context.Context) {
+}) func(ctx context.Context, result cookies.RefreshResult) {
+	return func(ctx context.Context, result cookies.RefreshResult) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("panic in the post-refresh cookie re-check", "panic", fmt.Sprint(r))
 			}
 		}()
-		recheck(ctx)
+		recheck(ctx, result)
 	}
 }
 
@@ -1475,8 +1487,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// signal outlived the 2-second wait and rewrote cookies.txt after the
 	// shutdown had moved on. A re-check cut short is inconclusive, so a
 	// shutdown flags no auth loss.
-	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func(ctx context.Context) {
+	autoCookieSvc.OnPassCompleted = postRefreshRecheckHook(func(ctx context.Context, result cookies.RefreshResult) {
 		recheckAfterCookieWrite(ctx, s.checkNowFn(), log, "an automatic cookie refresh")
+		s.resumeAfterAutomaticPass(ctx, result)
 	}, log)
 
 	// cookies.dpapi_fallback, read LIVE like AcquisitionMode and
@@ -1590,6 +1603,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		defer func() {
 			if result.Ran {
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), log, "the job-triggered cookie refresh", "platform", platform)
+				// Then every other job parked on a platform this pass verified
+				// (owner ruling R2-C2): the ones that parked while it ran, and
+				// the ones a skipped or unconfirmed pass left behind. The
+				// asking job is usually among them; the worker hands on a row
+				// the sweep resumed first (attemptCookieRefresh).
+				s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "a job's cookie refresh")
 			}
 		}()
 

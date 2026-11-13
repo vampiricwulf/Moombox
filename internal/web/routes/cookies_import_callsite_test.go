@@ -12,7 +12,8 @@ import (
 // Arc 10 R4: refresh's status block is the ONLY place the Twitch credential
 // fingerprint is compared, the auth mark cleared and OnCredentialsChanged
 // fired, and that block runs only inside a refresh pass — so every gesture that
-// can put new credentials on disk has to reach CheckNow, or the repair waits on
+// can put new credentials on disk has to reach a re-check (CheckNowAfterWrite,
+// which is CheckNow plus one retry after a pass in flight), or the repair waits on
 // the 30-minute ticker. This endpoint is the newest such gesture and the one
 // built specifically for the deployment with no other repair path.
 //
@@ -70,7 +71,7 @@ func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 		}
 		if lit, ok := d.Call.Fun.(*ast.FuncLit); ok {
 			ast.Inspect(lit, func(inner ast.Node) bool {
-				if sel, ok := inner.(*ast.SelectorExpr); ok && sel.Sel.Name == "CheckNow" {
+				if sel, ok := inner.(*ast.SelectorExpr); ok && sel.Sel.Name == "CheckNowAfterWrite" {
 					deferred = lit
 					return false
 				}
@@ -108,7 +109,7 @@ func TestCookieImportHandlerEndsInADetachedFlushedRecheck(t *testing.T) {
 				(sel.Sel.Name == "Background" || sel.Sel.Name == "WithoutCancel") {
 				buildsOwnContext = true
 			}
-			if sel.Sel.Name == "CheckNow" && len(v.Args) == 1 {
+			if sel.Sel.Name == "CheckNowAfterWrite" && len(v.Args) == 1 {
 				// And the argument is an identifier rather than a call, so what
 				// is handed over is the context built above rather than
 				// req.Context() inline.

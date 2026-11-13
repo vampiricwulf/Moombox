@@ -116,7 +116,7 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		return ErrSetupCancelled
 	}
 	s.setupBrowser = browser
-	s.lastError = nil
+	s.clearLastErrorLocked()
 	s.browserExited = false
 	// Reset with browserExited, which it only has meaning alongside. The reap
 	// or a cleanup has already zeroed it on every path that reaches here; the

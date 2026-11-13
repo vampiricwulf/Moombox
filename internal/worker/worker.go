@@ -401,6 +401,12 @@ type DownloadWorker struct {
 	// (endBacklogStreak). Lazily allocated.
 	backlogRetryMu sync.Mutex
 	backlogRetries map[string]int
+	// cookieRetries is each job's automatic cookie retries inside the window
+	// (cookie_retry.go, owner ruling R2-C1). In memory: a restart resets every
+	// budget. cookieRetryClock replaces time.Now in tests. Lazily allocated.
+	cookieRetryMu    sync.Mutex
+	cookieRetries    map[string]cookieRetryState
+	cookieRetryClock func() time.Time
 	// rateLimitSpells is when each job's spell of rate-limit refusals began,
 	// which rateLimitCap is measured from; captcha is the session's captcha
 	// spell, shared with streamProc (rate_limit.go).
@@ -590,6 +596,10 @@ func NewDownloadWorker(
 		db.OnJobDeleted(func(ev *database.JobDeleted) { w.endBacklogStreak(ev.JobID) })
 		db.OnJobsChange(w.endStreaksGoneFrom)
 		db.OnJobAdded(func(ev *database.JobAdded) { w.endBacklogStreak(ev.Job.ID) })
+		// The automatic cookie retry count goes the same three ways.
+		db.OnJobDeleted(func(ev *database.JobDeleted) { w.forgetCookieRetries(ev.JobID) })
+		db.OnJobsChange(w.forgetCookieRetriesGoneFrom)
+		db.OnJobAdded(func(ev *database.JobAdded) { w.forgetCookieRetries(ev.Job.ID) })
 	}
 	return w
 }
@@ -814,6 +824,7 @@ func (w *DownloadWorker) CancelJob(jobID string) (cancelled, flagged bool, err e
 	}
 	flagged = w.queue.Cancel(jobID)
 	w.endBacklogStreak(jobID)
+	w.forgetCookieRetries(jobID) // and a fresh automatic cookie retry budget
 	return true, flagged || muxRunWillNotify, nil
 }
 
@@ -1413,6 +1424,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		// day is counted from it (noteAnswered).
 		rateLimitSince = time.Time{}
 		w.noteAnswered(job)
+		// And the run is past the playability check, so whatever parked the
+		// job in COOKIES? before no longer does: its automatic cookie retries
+		// start from none (owner ruling R2-C1).
+		w.forgetCookieRetries(job.ID)
 
 		// Check cancellation between stream processing and download
 		if ctx.Err() != nil {

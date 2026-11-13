@@ -248,7 +248,13 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	written.Status, written.Error, written.ParkReason = status, errMsg, reason
 	retryLikely := jobstate.TwitchAutoRetryPending(&written)
 	nonActionable := errors.Is(err, ErrNonActionable)
-	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely)
+	// - An auth park that follows an automatic cookie retry (owner ruling
+	//   R2-C1): "Authentication Required" was sent when the job first parked,
+	//   and each lap of the retry budget parks it again on the same refusal.
+	//   One embed for the spell; the count is forgotten when a run passes the
+	//   playability check, so a later park of its own is announced.
+	repeatAuthPark := status == database.StatusCookies && reason == database.ParkReasonAuth && w.cookieRetryCount(job.ID) > 0
+	suppressNotification := nonActionable || (job.AutoRetryCount > 0 && retryLikely) || repeatAuthPark
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
@@ -411,6 +417,12 @@ const (
 	// The job stays parked; replacing the cookie file or turning the refresh
 	// on is the way out.
 	CookieRefreshOff
+	// CookieRefreshInFlight: the refresh did not run because the refresh slot
+	// was held — another job's refresh, the operator's, the periodic refresh,
+	// an import or the boot profile import is running — or a cookie setup was
+	// in progress. Nothing judged the cookies; the job stays parked and is resumed
+	// with the other parked jobs if that pass ends with the platform verified.
+	CookieRefreshInFlight
 )
 
 // attemptCookieRefresh runs (or deliberately declines to run) the automatic
@@ -456,6 +468,13 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 			"fix", "supply cookies from the account that holds the channel membership")
 		return
 	}
+	// The budget (owner ruling R2-C1), ahead of the wiring check so it holds
+	// with the automatic refresh off too: an import or a setup resumes parked
+	// jobs as a refresh does, and counts the same.
+	if !w.CookieRetryLeft(job.ID) {
+		w.parkWithCookieRetriesSpent(job, redact.MediaText(err.Error()))
+		return
+	}
 	if w.OnCookieRefreshNeeded == nil {
 		// Not wired (no auto-cookie service constructed). Debug rather than
 		// Warn: this is a build/wiring fact, not something the operator did.
@@ -486,6 +505,21 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 			"jobID", job.ID,
 			"videoID", job.VideoID,
 			"next", "it waits for a refresh that can run (the skip line above names what holds the profile) or a replaced cookie file, and resumes once the cookies work")
+		return
+	}
+	if outcome == CookieRefreshInFlight {
+		// Another job's refresh, the operator's, the periodic one, or an import
+		// holds the one refresh slot, or a cookie setup is in progress, and the
+		// callback's line says so. This used to be
+		// answered NotRestored, so the advice below ("the cookie file has to
+		// be replaced by hand") was logged for cookies a refresh was repairing
+		// at that moment. If that pass ends with the platform verified, its
+		// sweep resumes this job with the rest (cmd/moombox
+		// resumeAfterCookieGesture).
+		w.logger.Info("the job stays parked — a cookie refresh, import or setup is already running, and the job is resumed if it ends with working cookies",
+			"jobID", job.ID,
+			"videoID", job.VideoID,
+			"platform", job.Platform)
 		return
 	}
 	if outcome == CookieRefreshRestored {
@@ -525,6 +559,11 @@ func (w *DownloadWorker) attemptCookieRefresh(job *database.Job, err error) {
 				return
 			}
 			status = now
+		} else {
+			// One automatic cookie retry used (owner ruling R2-C1). Only for
+			// the resume this write made: a sweep that resumed the row first
+			// counted its own.
+			w.NoteCookieRetry(job.ID)
 		}
 		// This runs inside the parked run's own tail, which is still
 		// registered: an Enqueue now would be dropped as a duplicate (and the

@@ -80,14 +80,20 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(*AutoCookieService)
+		// inFlight: the decline says a pass is running (RefreshResult.InFlight),
+		// which a job that asked for the refresh waits for: the held slot and a
+		// setup in progress.
+		inFlight bool
 	}{
 		{
-			name:  "setup in progress",
-			setup: func(s *AutoCookieService) { s.setupClaimed = true },
+			name:     "setup in progress",
+			setup:    func(s *AutoCookieService) { s.setupClaimed = true },
+			inFlight: true,
 		},
 		{
-			name:  "a refresh is already running",
-			setup: func(s *AutoCookieService) { s.refresh.claim(refreshHolderRefresh) },
+			name:     "a refresh is already running",
+			setup:    func(s *AutoCookieService) { s.refresh.claim(refreshHolderRefresh) },
+			inFlight: true,
 		},
 		{
 			// A browser IS installed (so this is the browser path, not an
@@ -119,6 +125,9 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 			}
 			if result.AnyVerified() {
 				t.Error("a declined pass must not report the legacy bool as true")
+			}
+			if result.InFlight != tc.inFlight {
+				t.Errorf("InFlight = %v, want %v", result.InFlight, tc.inFlight)
 			}
 		})
 	}

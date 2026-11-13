@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
+import { cookieRetry, cookieRetryText, COOKIE_RETRY_WINDOW_MS, formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -1988,7 +1988,8 @@ export class MoomboxApp {
     // backlog holds thousands of Queued rows.
     const queued = new Map();
     for (const job of this.jobs) {
-      if (job.status === "Queued") queued.set(job.id, job);
+      // And each COOKIES? row, whose line carries its cookie retry count.
+      if (job.status === "Queued" || job.status === "COOKIES?") queued.set(job.id, job);
     }
     const cards = queued.size ? document.querySelectorAll("#jobs-container .video-item") : [];
     for (const card of cards) {
@@ -2006,7 +2007,7 @@ export class MoomboxApp {
     // An open dialog on a Queued job reads the holds too (its progress row),
     // as the TUI's details pane does; its own job_update may be far off.
     const open = this.selectedJobId ? this.jobs.find((j) => j.id === this.selectedJobId) : null;
-    if (open?.status === "Queued") this.details.updateJobDetails(open);
+    if (open?.status === "Queued" || open?.status === "COOKIES?") this.details.updateJobDetails(open);
     this._armHoldExpiry();
   }
 
@@ -2023,6 +2024,12 @@ export class MoomboxApp {
     };
     consider(holds.rateLimitedUntil);
     for (const h of Object.values(holds.jobs || {})) consider(h?.until);
+    // A cookie retry count stands for a day after its last retry, and goes
+    // with no frame to say so.
+    for (const r of Object.values(holds.cookieRetries || {})) {
+      const end = Date.parse(r?.last) + COOKIE_RETRY_WINDOW_MS;
+      if (end > now && end < next) next = end;
+    }
     if (next === Infinity) return;
     // +1 ms: a hold holds while now < until, so the redraw lands just past
     // it. Capped at setTimeout's 2^31-1 ms limit; an early fire re-arms.
@@ -3440,6 +3447,11 @@ export class MoomboxApp {
       if (job.parkReason === "membership") {
         return "Not a member — needs member account";
       }
+      // A job its automatic cookie retries have resumed says how many it has
+      // used (owner ruling R2-C1; the TUI's "⟳ 2/3" tag and Cookies line).
+      // With none left the cookies are not what it needs.
+      const retry = cookieRetryText(cookieRetry(this.admissionHolds, job));
+      if (retry) return retry;
       return "Needs cookie refresh";
     }
 

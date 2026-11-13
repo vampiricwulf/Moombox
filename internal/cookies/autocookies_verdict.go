@@ -115,9 +115,16 @@ type RefreshResult struct {
 	// Ran is false when the pass declined before doing any work at all —
 	// setup in progress, a refresh already in flight, nothing to refresh.
 	// Both verdicts are RefreshUnknown whenever this is false.
-	Ran     bool
-	YouTube RefreshVerdict
-	Twitch  RefreshVerdict
+	Ran bool
+	// InFlight is true for a decline made because something else was writing
+	// the cookies when this pass was asked for: the refresh slot was held
+	// (another pass, or an import), or a cookie setup was in progress. Ran is
+	// false with it. A job that asked for the refresh waits for
+	// that pass's result instead of being told its refresh failed
+	// (worker.CookieRefreshInFlight).
+	InFlight bool
+	YouTube  RefreshVerdict
+	Twitch   RefreshVerdict
 
 	// Renewed reports whether THIS pass produced the credentials it verified,
 	// as opposed to finding the previous ones still alive — the independent

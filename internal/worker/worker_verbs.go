@@ -65,6 +65,8 @@ func (w *DownloadWorker) ResumeJob(jobID string) error {
 		}
 		// A fresh backlog retry budget too, whatever ended the last run.
 		w.endBacklogStreak(jobID)
+		// And a fresh automatic cookie retry budget (owner ruling R2-C1).
+		w.forgetCookieRetries(jobID)
 		w.enqueueHeld(jobID)
 	})
 }
@@ -399,6 +401,8 @@ func (w *DownloadWorker) reinitializeNow(jobID string, seen database.JobStatus) 
 	}
 	// The backlog retry budget is in memory, not a column: a fresh one too.
 	w.endBacklogStreak(jobID)
+	// The automatic cookie retry budget as well (owner ruling R2-C1).
+	w.forgetCookieRetries(jobID)
 	w.enqueueHeld(jobID)
 }
 

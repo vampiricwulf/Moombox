@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { cookieRetry, cookieRetryText, canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -494,6 +494,15 @@ export class JobDetailsController {
       const autoText = pendingAutoActionText(pendingAutoAction(job));
       if (autoDiv.textContent !== autoText) autoDiv.textContent = autoText;
       autoDiv.hidden = !autoText;
+    }
+
+    // The automatic cookie retries a parked job has used (owner ruling
+    // R2-C1), from the holds snapshot; setAdmissionHolds redraws it.
+    const retryDiv = content.querySelector(".details-cookie-retry");
+    if (retryDiv) {
+      const retryText = cookieRetryText(cookieRetry(this.app.admissionHolds, job));
+      if (retryDiv.textContent !== retryText) retryDiv.textContent = retryText;
+      retryDiv.hidden = !retryText;
     }
 
     // A trim added or deleted elsewhere (the other UI, a trim that finished
@@ -1040,6 +1049,7 @@ export class JobDetailsController {
       }
 
       <div class="details-auto-action"${pendingAutoAction(job) ? "" : " hidden"}>${this.app.escapeHtml(pendingAutoActionText(pendingAutoAction(job)))}</div>
+      <div class="details-cookie-retry"${cookieRetry(this.app.admissionHolds, job).count ? "" : " hidden"}>${this.app.escapeHtml(cookieRetryText(cookieRetry(this.app.admissionHolds, job)))}</div>
 
       ${(() => {
         const hasResolution = job.videoWidth && job.videoHeight;

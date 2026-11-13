@@ -11,7 +11,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
-// The compact row's figure for a Downloading, Muxing, Queued or Error row is
+// The compact row's figure for a Downloading, Muxing, Queued, Error or COOKIES? row is
 // the normal row's progress cell, reformatted and nothing else: one rule
 // (progressCell), two drawings.
 func TestCompactFigureIsTheProgressCell(t *testing.T) {
@@ -19,9 +19,11 @@ func TestCompactFigureIsTheProgressCell(t *testing.T) {
 	m := NewTaskListModel()
 	m.setCompact(true)
 	m.SetSize(40, 4)
-	m.SetAdmissionHolds(jobstate.AdmissionHolds{Offline: true})
+	m.SetAdmissionHolds(jobstate.AdmissionHolds{Offline: true,
+		CookieRetries: map[string]jobstate.CookieRetry{"parked": {Count: 2, Of: 3, Last: now.Add(-time.Hour)}}})
 
 	jobs := []*database.Job{
+		{ID: "parked", Platform: "youtube", Status: database.StatusCookies, ParkReason: database.ParkReasonAuth},
 		{ID: "wait", Status: database.StatusDownloading, Percent: 50, Progress: jobstate.WaitLine("verifying the stream ended", "")},
 		{ID: "pct", Status: database.StatusDownloading, Percent: 7},
 		{ID: "full", Status: database.StatusMuxing, Percent: 100},

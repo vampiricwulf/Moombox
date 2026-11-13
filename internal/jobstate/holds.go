@@ -65,6 +65,11 @@ type AdmissionHolds struct {
 	// (absent on the wire) when none stands.
 	RateLimitedUntil time.Time              `json:"rateLimitedUntil,omitzero"`
 	Jobs             map[string]BacklogHold `json:"jobs,omitempty"`
+	// CookieRetries is each job's automatic cookie retries (owner ruling
+	// R2-C1), by job id: the worker's in-memory count, carried here because
+	// this snapshot is what already reaches both UIs. Read through
+	// CookieRetryFor. It holds no admission.
+	CookieRetries map[string]CookieRetry `json:"cookieRetries,omitempty"`
 }
 
 // QueuedHold is why one Queued row is not being admitted at a moment.

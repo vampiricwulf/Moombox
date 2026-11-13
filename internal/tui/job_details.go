@@ -408,10 +408,11 @@ type GapFillView struct {
 }
 
 // SetAdmissionHolds stores the scheduler's hold snapshot and, when the job
-// shown is Queued, rebuilds its rows so its Queue line follows it.
+// shown is Queued or parked in COOKIES?, rebuilds its rows so its Queue or
+// Cookies line follows it.
 func (m *JobDetailsModel) SetAdmissionHolds(h jobstate.AdmissionHolds) {
 	m.holds = h
-	if m.job != nil && m.job.Status == database.StatusQueued {
+	if m.job != nil && (m.job.Status == database.StatusQueued || m.job.Status == database.StatusCookies) {
 		m.buildRows()
 		m.updateViewportContent()
 	}
@@ -707,6 +708,12 @@ func (m *JobDetailsModel) buildRows() {
 		// (utils.js queuedHoldText).
 		if j.Status == database.StatusQueued {
 			m.addField("Queue", m.holds.For(j, time.Now()).Text())
+		}
+		// A job parked on its credentials says how many automatic cookie
+		// retries it has used, and when none is left (owner ruling R2-C1), in
+		// the dashboard's words (utils.js cookieRetryText).
+		if text := m.holds.CookieRetryFor(j, time.Now()).Text(); text != "" {
+			m.addField("Cookies", text)
 		}
 		if percent > 0 {
 			m.rows = append(m.rows, detailRow{
