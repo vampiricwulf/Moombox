@@ -47,11 +47,10 @@ import (
 // weekly vulnerability scan fails when this is behind a v24 security release
 // (-check-security, security.go).
 //
-// Last bumped: 2026-10-29 — v24.22.2, the latest v24 LTS (Krypton), on top
-// of the v24.22.1 security release: its bundled undici 7.30.1 closes the
-// advisories the sidecar's fetch() layer was in range for under v24.20.0's
-// 7.29.0 (npm audit cannot see that copy), and it carries OpenSSL 3.5.9.
-const nodeVersion = "v24.22.2"
+// Last bumped: 2026-11-12 — v24.22.3, the v24 LTS (Krypton) security release
+// of 2026-11-10 that -check-security reported against v24.22.2. The release
+// index lists it with OpenSSL 3.5.9, as v24.22.2 had.
+const nodeVersion = "v24.22.3"
 
 // nodeTarget describes one platform's Node release artifact.
 type nodeTarget struct {
@@ -72,19 +71,19 @@ func nodeTargets() []nodeTarget {
 			goos: "windows", goarch: "amd64",
 			archiveType: "zip", binaryName: "node.exe",
 			embedName: "node-windows-amd64.gz", urlInfix: "win-x64",
-			expectedSHA: "ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2",
+			expectedSHA: "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f",
 		},
 		{
 			goos: "linux", goarch: "amd64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-amd64.gz", urlInfix: "linux-x64",
-			expectedSHA: "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75",
+			expectedSHA: "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb",
 		},
 		{
 			goos: "linux", goarch: "arm64",
 			archiveType: "tar.xz", binaryName: "node",
 			embedName: "node-linux-arm64.gz", urlInfix: "linux-arm64",
-			expectedSHA: "eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8",
+			expectedSHA: "6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c",
 		},
 	}
 }
@@ -305,7 +304,7 @@ func extractFromTarXz(xzBytes []byte, binaryName string) ([]byte, error) {
 			return nil, fmt.Errorf("tar header: %w", err)
 		}
 		// Linux Node tarballs put node at bin/node under a versioned dir,
-		// e.g. node-v24.22.2-linux-x64/bin/node
+		// e.g. node-v24.22.3-linux-x64/bin/node
 		if filepath.Base(hdr.Name) == binaryName && strings.Contains(hdr.Name, "/bin/") {
 			data, err := io.ReadAll(tr)
 			if err != nil {
