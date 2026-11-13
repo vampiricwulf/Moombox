@@ -169,11 +169,16 @@ type WebSocketHub struct {
 // queue needs to know about it when it has to drop one.
 type wsFrame struct {
 	data []byte
-	// restated is set for a job_progress frame only: the job's next tick
-	// carries every column it does, so a client that never saw this one is
-	// one tick stale and then whole again. Losing any other frame loses
-	// state nothing later repeats, and arms a resync (see enqueue).
+	// restated is set for a job_progress frame only: a later tick OF THE SAME
+	// JOB carries every column it does, so once one is queued behind it (or
+	// is the frame arriving) a client that never saw this one has lost
+	// nothing. Until then it is the client's only copy of that job's
+	// progress, and losing it arms a resync like any other loss (see
+	// wsQueue.push).
 	restated bool
+	// job is the job a restated frame is a tick of. Ticks whose payload does
+	// not say (no JobVersion) share the empty name.
+	job string
 	// snapshot is set for a full initial_state frame queued as a resync:
 	// it restates the frames it displaces (see enqueue) and its write gets
 	// snapshotWriteTimeout.
@@ -214,11 +219,12 @@ type wsPushResult uint8
 const (
 	// wsPushQueued: there was room. Nothing was lost.
 	wsPushQueued wsPushResult = iota
-	// wsPushLostRestated: the queue was full and a restated frame was given
-	// up for it, one a later frame repeats in full.
+	// wsPushLostRestated: the queue was full and a tick was given up for it
+	// that a newer tick of the same job, queued or arriving, repeats in
+	// full. The client loses nothing.
 	wsPushLostRestated
-	// wsPushLostState: the queue was full, held no restated frame, and its
-	// oldest frame was evicted: state nothing later repeats.
+	// wsPushLostState: the queue was full, held no such tick, and a frame
+	// nothing queued repeats was given up.
 	wsPushLostState
 	// wsPushClosed: the client is gone and the frame was not queued.
 	wsPushClosed
@@ -227,12 +233,22 @@ const (
 // push appends one frame. On a full queue exactly one frame is given up, the
 // same number as when the queue was a channel, chosen in this order:
 //
-//  1. the oldest queued restated frame (a job_progress tick);
-//  2. the incoming frame itself, when it is restated and none is queued;
-//  3. the oldest queued frame.
+//  1. the oldest queued tick that a newer tick of the same job follows, in
+//     the queue or as the incoming frame;
+//  2. the incoming frame itself, when it is a tick;
+//  3. the oldest queued tick;
+//  4. the oldest queued frame.
+//
+// Only the first loses nothing (wsPushLostRestated). The others give up a
+// frame nothing queued repeats (wsPushLostState), a tick before anything else
+// because the snapshot that loss arms carries every column of a tick and not
+// every other frame (queueOrDrop). A tick is never given up as "restated by
+// the job's next tick" on the strength of a tick that has not come: a job
+// that stalls or waits may not write again for minutes, and the tab would
+// show its progress as of the overflow until it did.
 //
 // The frames that stay keep their order exactly, and the incoming frame, when
-// it is queued, is last. Only the third case loses anything.
+// it is queued, is last.
 func (q *wsQueue) push(msg wsFrame) wsPushResult {
 	q.mu.Lock()
 	if q.closed {
@@ -243,9 +259,21 @@ func (q *wsQueue) push(msg wsFrame) wsPushResult {
 	if len(q.frames) < q.limit {
 		q.frames = append(q.frames, msg)
 	} else {
-		victim := -1
+		result = wsPushLostState
+		victim, oldestTick := -1, -1
 		for i := range q.frames {
-			if q.frames[i].restated {
+			if !q.frames[i].restated {
+				continue
+			}
+			if oldestTick < 0 {
+				oldestTick = i
+			}
+			job := q.frames[i].job
+			followed := msg.restated && msg.job == job
+			for j := i + 1; j < len(q.frames) && !followed; j++ {
+				followed = q.frames[j].restated && q.frames[j].job == job
+			}
+			if followed {
 				victim = i
 				break
 			}
@@ -255,9 +283,11 @@ func (q *wsQueue) push(msg wsFrame) wsPushResult {
 			result = wsPushLostRestated
 		case msg.restated:
 			q.mu.Unlock()
-			return wsPushLostRestated
+			return wsPushLostState
+		case oldestTick >= 0:
+			victim = oldestTick
 		default:
-			victim, result = 0, wsPushLostState
+			victim = 0
 		}
 		copy(q.frames[victim:], q.frames[victim+1:])
 		q.frames[len(q.frames)-1] = msg
@@ -586,8 +616,8 @@ const wsLagLogInterval = 30 * time.Second
 
 // wsResyncMinInterval bounds how often ONE client may be handed a full
 // initial-state snapshot in place of an incremental frame. A client that
-// never drains drops — and so re-arms — on every frame that is not a
-// job_progress tick (see enqueue), and a snapshot costs
+// never drains drops — and so re-arms — on every frame but a tick that
+// replaces its own job's older one (see enqueue), and a snapshot costs
 // a GetAllJobs plus a whole-state marshal; without this bound a single slow
 // tab would provoke one of those per broadcast, i.e. tens per second while a
 // download is running. One second is far below any human-visible ghost-row
@@ -668,7 +698,7 @@ func (hub *WebSocketHub) logDropTotal(client *wsClient) {
 // Not re-arming breaks the PER-FRAME loop; it does not bound that Error line on
 // its own. A client that is permanently behind re-arms from the other
 // direction — enqueue's eviction sets needsResync on every drop of a frame
-// nothing restates (every one but job_progress), independently
+// nothing restates (every one but a tick with a newer one behind it), independently
 // of anything decided here — so the flag comes straight back and the next
 // frame tries the build again. wsResyncMinInterval is what turns that into at
 // most one failed build, and so one Error line, per second per client. The two
@@ -741,23 +771,28 @@ func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg wsFrame) bool {
 // drop whichever it is.
 //
 // A lost frame arms a resync only when nothing restates it. A job_progress
-// frame (wsFrame.restated) is restated by the job's next tick, so giving one
-// up is counted and nothing more. It used to arm like any other: progress
+// frame (wsFrame.restated) is restated by a newer tick of the same job, so
+// giving one up for a newer one that is queued or arriving is counted and
+// nothing more. It used to arm like any other: progress
 // frames arrive ~60 times a second per active job, the write loop sends one
 // frame at a time, and so any client whose snapshot took longer to write than
 // 16 ticks take to arrive (about a quarter of a second) overflowed during the
 // snapshot's own write, armed the next snapshot, and was sent megabytes back
 // to back for as long as a download ran.
 //
-// And a restated frame is the one given up whenever there is one, queued or
-// incoming. While the queue was a channel it could only lose its head, so a
+// And such a tick is the one given up whenever there is one, wherever it
+// sits. While the queue was a channel it could only lose its head, so a
 // log line or job_update queued during a slow snapshot write was pushed out by
 // the progress ticks behind it, and that loss armed the next snapshot: the
-// same loop, at one snapshot per wsResyncMinInterval. Now the ticks displace
-// each other and the frames nothing restates stay, in order. A resync arms
-// only when a full queue holds no restated frame and a frame that is not
-// restated arrives: wsWriteQueueSize frames nothing restates are waiting and
-// one more came, so one of them really is lost.
+// same loop, at one snapshot per wsResyncMinInterval. Now a job's ticks
+// displace each other and the frames nothing restates stay, in order. A
+// resync arms only when a full queue holds at most one tick per job, none of
+// the incoming frame's job, and so every frame in it and the one arriving are
+// each the only copy of something: one of them really is lost. That includes
+// a tick, which is not written off against a next tick that has not come: a
+// job that stalls may not write again for minutes. With one job downloading
+// that takes wsWriteQueueSize-1 frames nothing restates waiting at once; each
+// further job ticking takes one slot more.
 //
 // Returns false when the client is gone (its queue closed by detachClient).
 func (hub *WebSocketHub) enqueue(client *wsClient, msg wsFrame) bool {
@@ -1047,13 +1082,13 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 // broadcastMessage is Broadcast for a message already built — the one way a
 // frame carrying more than a type and a payload (a log line's Seq) goes out.
 func (hub *WebSocketHub) broadcastMessage(msg WSMessage) {
-	hub.broadcastFrame(msg, msg.Type == "job_progress")
+	hub.broadcastFrame(msg, msg.Type == "job_progress", "")
 }
 
 // broadcastFrame marshals a message once and queues it for every client.
-// restated says the frame is one a later frame is certain to repeat in full
-// (wsFrame.restated).
-func (hub *WebSocketHub) broadcastFrame(msg WSMessage, restated bool) {
+// restated says the frame is a tick of job, one that job's next tick repeats
+// in full (wsFrame.restated, wsFrame.job).
+func (hub *WebSocketHub) broadcastFrame(msg WSMessage, restated bool, job string) {
 	hub.mu.RLock()
 	n := len(hub.clients)
 	hub.mu.RUnlock()
@@ -1074,7 +1109,7 @@ func (hub *WebSocketHub) broadcastFrame(msg WSMessage, restated bool) {
 	hub.mu.RUnlock()
 
 	for _, client := range clients {
-		hub.queueOrDrop(client, wsFrame{data: msgBytes, restated: restated})
+		hub.queueOrDrop(client, wsFrame{data: msgBytes, restated: restated, job: job})
 	}
 }
 
@@ -1145,7 +1180,7 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 		}
 		hub.jobVersions[id] = version
 		hub.jobLastTick[id] = data
-		hub.Broadcast(msgType, data)
+		hub.broadcastFrame(WSMessage{Type: msgType, Payload: data}, msgType == "job_progress", id)
 		return
 	}
 	if rowVersion, sent := hub.jobRowVersions[id]; sent && version <= rowVersion {
@@ -1161,7 +1196,7 @@ func (hub *WebSocketHub) broadcastJobFrame(msgType string, data any) {
 		// one frame that puts back the columns the older row just took away,
 		// and a job that is stalled or waiting may not tick again for
 		// minutes. A client that loses it is resynced like any other loss.
-		hub.broadcastFrame(WSMessage{Type: "job_progress", Payload: tick}, false)
+		hub.broadcastFrame(WSMessage{Type: "job_progress", Payload: tick}, false, "")
 	}
 }
 

@@ -26,41 +26,59 @@ func queued(q *wsQueue) []string {
 	return out
 }
 
-// TestQueueOverflowGivesUpARestatedFrameFirst walks one four-slot queue
-// through every overflow there is. L frames are ones nothing restates, T
-// frames are progress ticks.
+// TestQueueOverflowGivesUpAFollowedTickFirst walks four-slot queues through
+// every overflow there is. L frames are ones nothing restates; A and B frames
+// are progress ticks of two jobs.
 //
-// Mutants: evict the head whatever it is (the channel's behaviour: step 1
-// loses L1); evict the NEWEST restated frame (step 1 keeps T1 over T2);
-// swap the victim with the tail instead of closing the gap (the order after
-// step 1 changes); evict an unrestated frame for an incoming tick (step 4).
-func TestQueueOverflowGivesUpARestatedFrameFirst(t *testing.T) {
-	q := newWSQueue(4)
+// Mutants: evict the head whatever it is (the channel's behaviour: the first
+// step loses L1); evict the oldest tick whatever its job (the second queue
+// loses B1, the only copy of B's progress, with A1 followed by A2); evict the
+// NEWEST followed tick; swap the victim with the tail instead of closing the
+// gap (the order changes); report a tick with no newer one as restated (the
+// results of the L3, L4 and B2 steps); queue the tick that finds no room over
+// a frame nothing restates (the B2 step).
+func TestQueueOverflowGivesUpAFollowedTickFirst(t *testing.T) {
 	frame := func(name string) wsFrame {
-		return wsFrame{data: []byte(name), restated: name[0] == 'T'}
+		return wsFrame{data: []byte(name), restated: name[0] != 'L', job: name[:1]}
 	}
-	for _, name := range []string{"L1", "T1", "L2", "T2"} {
-		if got := q.push(frame(name)); got != wsPushQueued {
-			t.Fatalf("push %s into a queue with room = %d, want queued", name, got)
-		}
-	}
-	steps := []struct {
+	type step struct {
 		push   string
 		result wsPushResult
 		want   []string
-	}{
-		{"T3", wsPushLostRestated, []string{"L1", "L2", "T2", "T3"}},
-		{"L3", wsPushLostRestated, []string{"L1", "L2", "T3", "L3"}},
-		{"L4", wsPushLostRestated, []string{"L1", "L2", "L3", "L4"}},
-		{"T4", wsPushLostRestated, []string{"L1", "L2", "L3", "L4"}},
-		{"L5", wsPushLostState, []string{"L2", "L3", "L4", "L5"}},
 	}
-	for i, step := range steps {
-		if got := q.push(frame(step.push)); got != step.result {
-			t.Errorf("step %d: push %s = %d, want %d", i, step.push, got, step.result)
+	for _, tc := range []struct {
+		start []string
+		steps []step
+	}{
+		{[]string{"L1", "A1", "L2", "B1"}, []step{
+			// A1 is followed by the incoming A2.
+			{"A2", wsPushLostRestated, []string{"L1", "L2", "B1", "A2"}},
+			// No tick is followed: the oldest goes, and it is a loss.
+			{"L3", wsPushLostState, []string{"L1", "L2", "A2", "L3"}},
+			{"A3", wsPushLostRestated, []string{"L1", "L2", "L3", "A3"}},
+			{"L4", wsPushLostState, []string{"L1", "L2", "L3", "L4"}},
+			// A tick that finds no tick to replace is refused, and is a loss.
+			{"B2", wsPushLostState, []string{"L1", "L2", "L3", "L4"}},
+			{"L5", wsPushLostState, []string{"L2", "L3", "L4", "L5"}},
+		}},
+		{[]string{"B1", "A1", "A2", "L1"}, []step{
+			// A1 is followed in the queue; B1, older, is B's only tick.
+			{"L2", wsPushLostRestated, []string{"B1", "A2", "L1", "L2"}},
+		}},
+	} {
+		q := newWSQueue(4)
+		for _, name := range tc.start {
+			if got := q.push(frame(name)); got != wsPushQueued {
+				t.Fatalf("push %s into a queue with room = %d, want queued", name, got)
+			}
 		}
-		if got := queued(q); !slices.Equal(got, step.want) {
-			t.Errorf("step %d: after %s the queue holds %v, want %v", i, step.push, got, step.want)
+		for _, s := range tc.steps {
+			if got := q.push(frame(s.push)); got != s.result {
+				t.Errorf("%v: push %s = %d, want %d", tc.start, s.push, got, s.result)
+			}
+			if got := queued(q); !slices.Equal(got, s.want) {
+				t.Errorf("%v: after %s the queue holds %v, want %v", tc.start, s.push, got, s.want)
+			}
 		}
 	}
 }
@@ -160,12 +178,17 @@ func TestASlowSnapshotWriteDoesNotArmTheNextSnapshot(t *testing.T) {
 	}
 }
 
-// TestOnlyALossNothingRestatesArmsAResync: with a full queue of frames
-// nothing restates, a tick is the frame given up and costs nothing more; one
-// more frame nothing restates pushes the oldest out, and that arms.
+// TestOnlyALossNothingRestatesArmsAResync, through the hub: on a full queue a
+// job's tick replaces that job's older tick and costs nothing more; the tick
+// of a job with none queued finds nothing to replace, is the frame given up,
+// and arms, because that job may not tick again for minutes (it used to be
+// written off against its next tick, and a job that stalled just then showed
+// its old progress until it wrote again); and one more frame nothing restates
+// arms too.
 //
-// Mutants: arm on every overflow (the tick arms); never arm, or let the tick
-// evict the job_deleted (the last check, or the queue's head).
+// Mutants: arm on every overflow (the first check); treat any tick as
+// restated by a tick still to come (the second); let a tick evict the
+// job_deleted (the queue's head); never arm (the last).
 func TestOnlyALossNothingRestatesArmsAResync(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 	client := attachTestClient(hub, wsWriteQueueSize)
@@ -173,21 +196,37 @@ func TestOnlyALossNothingRestatesArmsAResync(t *testing.T) {
 	client.lastResync.Store(time.Now().Add(time.Hour).UnixNano())
 
 	hub.BroadcastJobDeleted("gone")
-	for i := 1; i < wsWriteQueueSize; i++ {
+	for i := 2; i < wsWriteQueueSize; i++ {
 		hub.BroadcastLog("line", uint64(i))
 	}
-	hub.BroadcastJobProgress(progressTick{ID: "job", Percent: 1, version: 1})
-	if client.drops.Load() != 1 {
-		t.Fatalf("drops = %d, want 1: the refused tick is still counted", client.drops.Load())
-	}
-	if client.needsResync.Load() {
-		t.Error("a tick that found no room armed a resync; the next tick restates it")
-	}
-	if head := queued(client.writes)[0]; !strings.Contains(head, "job_deleted") {
-		t.Errorf("the queue's head is %s, want the job_deleted: a tick displaced it", head)
+	hub.BroadcastJobProgress(progressTick{ID: "ticking", Percent: 1, version: 1})
+	if client.drops.Load() != 0 {
+		t.Fatal("fixture: the queue overflowed while it was being filled")
 	}
 
-	hub.BroadcastLog("one too many", 99)
+	hub.BroadcastJobProgress(progressTick{ID: "ticking", Percent: 2, version: 2})
+	if client.drops.Load() != 1 {
+		t.Fatalf("drops = %d, want 1: the replaced tick is still counted", client.drops.Load())
+	}
+	if client.needsResync.Load() {
+		t.Error("a tick replaced by the same job's next tick armed a resync")
+	}
+
+	hub.BroadcastJobProgress(progressTick{ID: "stalling", Percent: 7, version: 1})
+	if !client.needsResync.Load() {
+		t.Error("the only tick of a job was given up and no resync was armed: if the job stalls now, the tab never learns its progress")
+	}
+	frames := queued(client.writes)
+	if !strings.Contains(frames[0], "job_deleted") {
+		t.Errorf("the queue's head is %s, want the job_deleted: a tick displaced it", frames[0])
+	}
+	if last := frames[len(frames)-1]; !strings.Contains(last, `"percent":2`) {
+		t.Errorf("the queue's tail is %s, want the ticking job's newest tick", last)
+	}
+
+	hub.BroadcastLog("one too many", 99) // gives up the ticking job's only tick
+	client.needsResync.Store(false)
+	hub.BroadcastLog("and another", 100) // pushes the job_deleted out
 	if !client.needsResync.Load() {
 		t.Error("the job_deleted was pushed out by a log line and no resync was armed")
 	}
@@ -226,44 +265,42 @@ func TestWritePumpStopsWhenItsClientIsDetached(t *testing.T) {
 	}
 }
 
-// TestABurstReachesAHealthyClientWholeAndInOrder: over a real socket, a burst
-// of ticks the queue has room for is delivered frame for frame with nothing
-// dropped, whatever the write loop's pace. Sixteen pushes take far less time
-// than one socket write, so most of the burst waits behind a single wake-up
-// token.
+// TestABurstReachesAHealthyClientWholeAndInOrder: a burst the queue has room
+// for is written frame for frame with nothing dropped. The whole burst is
+// queued before the write loop starts, so one wake-up token stands for all of
+// it, whatever the machine's pace.
 //
-// Mutants: writePump taking one frame per wake-up (the frames behind the
-// second token never arrive); push giving a frame up while there is room.
+// Mutants: writePump taking one frame per wake-up (the second frame never
+// arrives); push giving a frame up while there is room.
 func TestABurstReachesAHealthyClientWholeAndInOrder(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
-	hub.InitialState = func() map[string]any { return map[string]any{} }
-	srv := httptest.NewServer(http.HandlerFunc(hub.HandleUpgrade))
-	t.Cleanup(func() { srv.Close(); hub.Close() })
+	const burst = wsWriteQueueSize
+	drops := make(chan uint64, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		client := &wsClient{conn: conn, writes: newWSQueue(wsWriteQueueSize)}
+		client.ctx, client.cancel = context.WithCancel(r.Context())
+		defer client.cancel()
+		for i := 1; i <= burst; i++ {
+			hub.enqueue(client, wsFrame{data: fmt.Appendf(nil, `{"payload":%d}`, i), restated: true, job: "job"})
+		}
+		drops <- client.drops.Load()
+		hub.writePump(client) // until the test hangs up
+	}))
+	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.CloseNow()
-	if _, _, err := conn.Read(ctx); err != nil {
-		t.Fatalf("read initial_state: %v", err)
-	}
-	hub.mu.RLock()
-	var client *wsClient
-	for c := range hub.clients {
-		client = c
-	}
-	hub.mu.RUnlock()
-	if client == nil {
-		t.Fatal("fixture: no client registered")
-	}
-
-	const burst = wsWriteQueueSize
-	for i := 1; i <= burst; i++ {
-		hub.Broadcast("job_progress", i)
-	}
 	for want := 1; want <= burst; want++ {
 		_, raw, err := conn.Read(ctx)
 		if err != nil {
@@ -279,7 +316,7 @@ func TestABurstReachesAHealthyClientWholeAndInOrder(t *testing.T) {
 			t.Fatalf("frame %d carries tick %d", want, msg.Payload)
 		}
 	}
-	if n := client.drops.Load(); n != 0 {
-		t.Errorf("a client that kept up dropped %d frames", n)
+	if n := <-drops; n != 0 {
+		t.Errorf("a queue with room dropped %d frames", n)
 	}
 }
