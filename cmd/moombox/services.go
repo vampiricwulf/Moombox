@@ -610,7 +610,7 @@ func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 	s.prevCrash = s.captureCrashOutput(cfg.Paths.LogFilePath)
 	logConfigSource(log, cfg, s.configPath)
 	for _, issue := range cfg.NormalizedOnLoad {
-		log.Warn("Config value replaced by its default — the next save writes the default to the file", slog.String("issue", issue))
+		log.Warn("Config value corrected on load — the next save writes the correction to the file", slog.String("issue", issue))
 	}
 	for _, key := range cfg.IgnoredOnLoad {
 		log.Warn("Config key is no longer used and is ignored — the next save removes it from the file", slog.String("key", key))

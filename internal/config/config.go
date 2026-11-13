@@ -1239,9 +1239,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		// cleared its Twitch switches. A spelling that is right once trimmed
 		// and lower-cased is rewritten. Any other value is refused only while
 		// the channel is enabled, and Normalize disables that channel: its
-		// line, its platform string and its switches stay in the file until
-		// the operator corrects the spelling, and a disabled channel with an
-		// unknown platform is not reported, so Normalize leaves nothing
+		// line, its platform string and its switches stay in the file, and the
+		// next save writes enabled = false beside them, so the message says to
+		// set enabled = true as well as correct the spelling. A disabled channel
+		// with an unknown platform is not reported, so Normalize leaves nothing
 		// Validate still refuses.
 		platform := strings.ToLower(strings.TrimSpace(ch.Platform))
 		knownPlatform := ValidChannelPlatform(platform)
@@ -1252,7 +1253,7 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			}
 		}
 		if !knownPlatform && ch.IsEnabled() {
-			fail("channels[%d].platform %q must be youtube or twitch: channel %q is disabled until it is corrected", i, ch.Platform, channelLabel(ch))
+			fail("channels[%d].platform %q must be youtube or twitch: channel %q is loaded disabled; correct the platform and set enabled = true", i, ch.Platform, channelLabel(ch))
 			if !reportOnly {
 				off := false
 				ch.Enabled = &off

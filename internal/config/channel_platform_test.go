@@ -73,7 +73,7 @@ func TestNormalizeDisablesAChannelWithAnUnknownPlatform(t *testing.T) {
 		{ID: "UCabcdefghijklmnopqrstuv"},
 	}
 	got := validateMessages(cfg)
-	if want := `channels[0].platform "kick" must be youtube or twitch: channel "Somebody" is disabled until it is corrected`; !strings.Contains(got, want) {
+	if want := `channels[0].platform "kick" must be youtube or twitch: channel "Somebody" is loaded disabled; correct the platform and set enabled = true`; !strings.Contains(got, want) {
 		t.Fatalf("Validate missed %q; got:\n%s", want, got)
 	}
 	if strings.Contains(got, "applies to Twitch channels only") {
@@ -117,7 +117,7 @@ func TestLoadReportsChannelPlatformIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(cfg.NormalizedOnLoad, "\n")
-	for _, want := range []string{`"Twitch" must be written "twitch" (channel "Shroud")`, `platform "kick" must be youtube or twitch: channel "Somebody" is disabled`} {
+	for _, want := range []string{`"Twitch" must be written "twitch" (channel "Shroud")`, `platform "kick" must be youtube or twitch: channel "Somebody" is loaded disabled; correct the platform and set enabled = true`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("NormalizedOnLoad missed %q; got:\n%s", want, joined)
 		}
