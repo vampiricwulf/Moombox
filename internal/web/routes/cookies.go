@@ -717,9 +717,16 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// records the same fact in a comment rather than borrowing that. The
 		// refresh's OWN outcome comes from `result` via cookieRefreshOutcome and
 		// is unaffected; only cookieStatus/twitchAuthStatus can lag.
-		refreshSvc.CheckNowAfterWrite(req.Context())
+		//
+		// Only a pass that ran wrote anything. A declined one keeps the plain
+		// CheckNow, which returns at once behind a pass in flight: waiting out
+		// that pass (up to 45 s, then a pass of its own) would hold the request
+		// for a refresh that did nothing.
 		if result.Ran {
+			refreshSvc.CheckNowAfterWrite(req.Context())
 			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
+		} else {
+			refreshSvc.CheckNow(req.Context())
 		}
 		status := refreshSvc.GetStatus()
 

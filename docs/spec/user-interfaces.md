@@ -1156,7 +1156,7 @@ The reason strings answer the half `verification` cannot carry. Without them the
 | `ran` | Did the pass do any work at all? This splits the two very different events inside `"unknown"`. |
 | `mechanism` | WHICH cookie source ran: `"browser"`, `"profile-import"`, or `""` when the pass declined before it chose one. **Wording only** — the toast's subject, so an import stops rendering as a browser refresh. Additive: an older frontend ignores it, and a newer frontend against an older binary reads `undefined` and falls back to `cookies.acquisition`, the same value it used for the pre-flight toast. |
 
-plus `cookieStatus`, `twitchAuthStatus`, `autoCookieReloginRequired` and `activePlatforms`. The status block is re-read after the browser pass by `CheckNowAfterWrite`: a re-check that collides with a refresh already in flight, which read the cookie file *before* this pass rewrote it, waits for it (at most 45 s, never past the request) and runs once more. It can lag only when that retry did not run either. The refresh's own outcome comes from the five keys above and is unaffected.
+plus `cookieStatus`, `twitchAuthStatus`, `autoCookieReloginRequired` and `activePlatforms`. The status block is re-read after a browser pass that ran by `CheckNowAfterWrite` (a declined pass wrote nothing and keeps the plain `CheckNow`, which does not wait): a re-check that collides with a refresh already in flight, which read the cookie file *before* this pass rewrote it, waits for it (at most 45 s, never past the request) and runs once more. It can lag only when that retry did not run either. The refresh's own outcome comes from the five keys above and is unaffected.
 
 Its error arms are discriminated so the frontend can both branch and show something actionable:
 
