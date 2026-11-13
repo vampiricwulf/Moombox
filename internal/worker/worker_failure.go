@@ -296,7 +296,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				},
 			)
 		} else {
-			w.sendJobFailed(job, errMsg, false)
+			w.sendJobFailed(job, errMsg, jobstate.PendingAutoAction(&written), false)
 		}
 	} else if w.notifier != nil && nonActionable && status == database.StatusError {
 		// The failure report is suppressed, but an edit-mode target may hold
@@ -305,7 +305,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 		// closes it and posts nothing (notifications.SendOptions.EditOnly).
 		// The Twitch retry suppression is not this: the monitor restarts that
 		// job, and its next event goes on editing the same message.
-		w.sendJobFailed(job, errMsg, true)
+		w.sendJobFailed(job, errMsg, jobstate.PendingAutoAction(&written), true)
 	}
 
 	// Automatic cookie recovery. Deliberately OUTSIDE the notifier branch
@@ -322,7 +322,15 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 // sendJobFailed sends the "Job Failed" embed for job. editOnly marks the
 // non-actionable case: the report is suppressed and the send only closes an
 // open lifecycle message (notifications.SendOptions.EditOnly).
-func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnly bool) {
+//
+// next is the automatic action the row this failure wrote is waiting on
+// (jobstate.PendingAutoAction, asked of that row by setJobError: job is the
+// row as it was before the write). When there is one the embed says so in a
+// "Next" field, in the sentence both UIs show (AutoAction.Text): without it a
+// capture the monitor muxes by itself minutes later read, from a phone, as a
+// lost recording, and the natural answer to that, Reinitialize, deletes the
+// staging the mux would have archived.
+func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, next jobstate.AutoAction, editOnly bool) {
 	// The one row→facts mapper, so the only job send that is not a
 	// builder call still carries the identity every builder sets: the
 	// URL with its watch fallback, the author line, the platform and
@@ -363,6 +371,7 @@ func (w *DownloadWorker) sendJobFailed(job *database.Job, errMsg string, editOnl
 		AddInline("Staging", staging).
 		AddIf(job.AutoRetryCount > 0, "Automatic Retries",
 			fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+		AddIf(next != jobstate.AutoActionNone, "Next", next.Text()).
 		AddIf(asides > 0, "Set-aside recordings",
 			fmt.Sprintf("%d — Recover to mux them", asides)).
 		Build()

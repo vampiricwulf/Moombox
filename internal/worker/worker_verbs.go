@@ -780,13 +780,19 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 
 		if gapPlan != nil {
 			w.orchestrator.keepTwitchGapFillPlan(gapPlan)
-		} else if job.Platform == "twitch" && !job.IsVod {
+		} else if job.Platform == "twitch" && !job.IsVod && (prior == nil || prior.Status != database.StatusFinished) {
 			// A live capture that lacks nothing, as ExecuteTwitch's finalize
 			// treats one: a row an earlier archive of this job left (its
 			// fill's outcome, owner decision PR-R5 — a Retry or a
 			// Reinitialize re-recorded it since, and this Mux finalized the
 			// new recording) is about footage this archive does not have,
 			// and the job's details would go on showing it.
+			//
+			// Not for a Mux of a Finished job (a part its finalize could not
+			// mux): the archive is the same recording, twitchMuxGapFillPlan
+			// plans nothing for it, and the row its own finalize left — a
+			// plan still waiting for the VOD, whose spans were measured over
+			// every staged part, this one included — still describes it.
 			_ = w.db.DeleteGapFill(jobID)
 		}
 

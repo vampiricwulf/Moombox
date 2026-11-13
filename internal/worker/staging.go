@@ -19,6 +19,10 @@ import (
 // delete-staging, channel removal counting the row as footage — on a
 // directory holding nothing recoverable. It is metadata about a recording,
 // never a recording.
+//
+// Nor does a YouTube capture's start thumbnail (startThumbnailFile), for the
+// same reason: it is fetched as the capture starts, ahead of any media. The
+// one rule for both is isStagingMetadataFile.
 func HasStagingFiles(stagingBase, jobID string) bool {
 	dir := filepath.Join(stagingBase, jobID)
 	entries, err := os.ReadDir(dir)
@@ -26,7 +30,7 @@ func HasStagingFiles(stagingBase, jobID string) bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.Name() != displayAspectFile {
+		if !isStagingMetadataFile(e.Name()) {
 			return true
 		}
 	}
