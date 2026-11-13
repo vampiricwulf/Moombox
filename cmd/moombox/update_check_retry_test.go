@@ -111,6 +111,29 @@ func TestUpdateCheckIsMadeAnywayAfterTheOfflineGrace(t *testing.T) {
 	waitChecks(t, &checks, 1, "the check made after the grace")
 }
 
+// A retry timer left armed by an earlier failed check does not restart the
+// offline grace of a later check that is being held: the held check is made
+// when its own grace runs out. Here the boot check fails online (retry in
+// 1.5 s), the scheduled check at 1 s falls due offline (grace 0.8 s), and it
+// is made at 1.8 s.
+// Mutant: leave the retry armed while a check is held — it fires at 1.5 s,
+// starts the grace again, the tick at 2 s starts it once more, and the check
+// is not made before 2.8 s.
+func TestUpdateCheckHeldOfflineIsNotPushedBackByAnOlderRetry(t *testing.T) {
+	var checks atomic.Int32
+	start := time.Now()
+	startUpdateLoop(t, func() bool { checks.Add(1); return false }, updateCheckTiming{
+		initialDelay: time.Millisecond, period: time.Second, poll: 5 * time.Millisecond,
+		retry:        []time.Duration{1500 * time.Millisecond},
+		online:       func() bool { return checks.Load() == 0 },
+		offlineGrace: 800 * time.Millisecond,
+	})
+	waitChecks(t, &checks, 2, "the boot check and the held scheduled check")
+	if took := time.Since(start); took > 2400*time.Millisecond {
+		t.Errorf("the held check was made after %v, want about 1.8 s: an older retry restarted its grace", took)
+	}
+}
+
 // The check tells the loop apart a failure, which is retried, from an answer.
 func TestCheckAndBroadcastUpdateReportsAFailedCheck(t *testing.T) {
 	log, err := logger.New(filepath.Join(t.TempDir(), "update.log"), "error", 4096, 1)

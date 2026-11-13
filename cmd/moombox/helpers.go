@@ -225,6 +225,10 @@ func runUpdateCheckLoop(ctx context.Context, enabled func() bool, check func() b
 	// attempt makes the check that is due, or holds it while offline.
 	attempt := func() {
 		if t.online != nil && !t.online() && time.Since(heldSince) < t.offlineGrace {
+			// A retry still armed from an earlier failed check is dropped: the
+			// held check stands in for it, and its timer firing would start
+			// the grace again.
+			stopRetry()
 			held = true
 			return
 		}
