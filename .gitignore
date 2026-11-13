@@ -72,3 +72,6 @@ references/*/
 
 # Audit reports — local working notes + status tables (per RESUME.md Rule 5)
 reports/
+
+# GitHub Pages docs build output
+/docs-site/site/

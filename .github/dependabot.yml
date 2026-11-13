@@ -46,3 +46,9 @@ updates:
     directory: /
     schedule:
       interval: daily
+
+  - package-ecosystem: pip
+    directory: /docs-site
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2

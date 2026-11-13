@@ -128,6 +128,9 @@ All REST endpoints use `/api/` (no version). Route registration and frontend fet
 ### Panic recovery
 All goroutines MUST have inline `defer func() { if r := recover(); ... }()`. HTTP: `RecoveryMiddleware`, plus `outermostRecovery` around the whole server handler for what runs ahead of it. DB callbacks: `safeCallJobUpdate`/`safeCallJobsChange`.
 
+### Docs site (GitHub Pages)
+`docs-site/` is the user documentation site (MkDocs Material), published to GitHub Pages by `.github/workflows/docs-pages.yml` on pushes to main that touch it; pull requests build it with `mkdocs build --strict`. It is for operators, not developers — `SPEC.md` stays the developer reference. A change an operator would notice (a setting, a chord, a status, a dashboard control, a job action) updates the matching page in the same change. Every `config.toml` key has a heading under `docs-site/docs/configuration/`, enforced by `internal/docs/settings_reference_test.go`. Style and the settings-heading format: `docs-site/CONTRIBUTING-DOCS.md`.
+
 ### Web UI embedding
 Static assets in `web/public/`, embedded via `go:embed` in `web/embed.go`. Changes require `go build`.
 
