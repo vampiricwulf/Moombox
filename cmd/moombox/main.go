@@ -776,14 +776,17 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 				log.Debug(line)
 
-				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
-				// interval — close enough to the 5-min target while reusing the
-				// existing ticker).
-				// A keep-awake hold in place is checked against the jobs'
-				// statuses, in both directions.
+				// While downloader.keep_awake is on, the hold is checked against
+				// the jobs' statuses in both directions: taken when a capture or
+				// mux is running and none is held, released when none is running
+				// (one GetAllJobs per tick, Windows only).
 				if s.keepAwake != nil {
 					s.keepAwake.reconcile()
 				}
+
+				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
+				// interval — close enough to the 5-min target while reusing the
+				// existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
 					checkDisk()
