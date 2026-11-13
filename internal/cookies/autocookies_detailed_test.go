@@ -81,12 +81,14 @@ func TestRefreshDeclinePathsReportUnknown(t *testing.T) {
 		name  string
 		setup func(*AutoCookieService)
 		// inFlight: the decline says a pass is running (RefreshResult.InFlight),
-		// which a job that asked for the refresh waits for. The held slot only.
+		// which a job that asked for the refresh waits for: the held slot and a
+		// setup in progress.
 		inFlight bool
 	}{
 		{
-			name:  "setup in progress",
-			setup: func(s *AutoCookieService) { s.setupClaimed = true },
+			name:     "setup in progress",
+			setup:    func(s *AutoCookieService) { s.setupClaimed = true },
+			inFlight: true,
 		},
 		{
 			name:     "a refresh is already running",

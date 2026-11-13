@@ -116,9 +116,10 @@ type RefreshResult struct {
 	// setup in progress, a refresh already in flight, nothing to refresh.
 	// Both verdicts are RefreshUnknown whenever this is false.
 	Ran bool
-	// InFlight is true for the one decline made because the refresh slot was
-	// held: another pass, or an import, was running when this one was asked
-	// for. Ran is false with it. A job that asked for the refresh waits for
+	// InFlight is true for a decline made because something else was writing
+	// the cookies when this pass was asked for: the refresh slot was held
+	// (another pass, or an import), or a cookie setup was in progress. Ran is
+	// false with it. A job that asked for the refresh waits for
 	// that pass's result instead of being told its refresh failed
 	// (worker.CookieRefreshInFlight).
 	InFlight bool

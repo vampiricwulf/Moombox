@@ -165,13 +165,14 @@ func jobCookieRefreshOutcome(log interface {
 		return outcome
 	}
 	if result.InFlight {
-		// The refresh slot was held: another pass or an import is running.
+		// The refresh slot was held (another pass or an import is running) or
+		// a cookie setup is in progress.
 		// This was reported as a declined pass and answered NotRestored, and
 		// the worker followed it with the advice to replace the cookie file
 		// while a refresh was repairing it. The job waits for that pass,
 		// whose sweep resumes it if the platform verifies
 		// (resumeAfterCookieGesture).
-		log.Info("automatic cookie refresh not started — one is already running; the job waits for its result",
+		log.Info("automatic cookie refresh not started — a refresh, import or setup is already running; the job waits for its result",
 			slog.String("platform", platform))
 		return worker.CookieRefreshInFlight
 	}

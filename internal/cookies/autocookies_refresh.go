@@ -119,7 +119,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	if s.setupInProgressLocked() {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — setup in progress")
-		return refreshDeclined(), nil
+		// Like the held slot below, this decline says something is writing the
+		// cookies now: a job that asked for the refresh waits for the setup's
+		// result, whose finish resumes it if the platform verifies.
+		declined := refreshDeclined()
+		declined.InFlight = true
+		return declined, nil
 	}
 	if s.refresh.held() {
 		// Named, and at Info. Since owner decision O-D an IMPORT can hold this
@@ -132,8 +137,8 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		holder := s.refresh.holder.String()
 		s.mu.Unlock()
 		s.logger.Info("skipping cookie refresh — the refresh slot is held", "holder", holder)
-		// The one decline that says a pass is running: the job-triggered
-		// caller answers it "wait for that pass", not "failed" (InFlight).
+		// A decline that says a pass is running: the job-triggered caller
+		// answers it "wait for that pass", not "failed" (InFlight).
 		declined := refreshDeclined()
 		declined.InFlight = true
 		return declined, nil
