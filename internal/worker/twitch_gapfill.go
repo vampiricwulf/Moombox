@@ -26,13 +26,13 @@ import (
 // The worker looks at each plan on a backoff until the broadcast's archive VOD
 // is complete — listed, VideoMetadata no longer recording, its playlist ending
 // in #EXT-X-ENDLIST — or until gapFillWindow after the broadcast ended (follow-
-// up 4). It then cuts each span the capture lacks out of the VOD, on segment
-// boundaries, muxes it as a part of its own beside the archive, and re-finalizes
-// the job with the parts in time order (follow-up 1). The recorded footage is
-// never touched: a fill that fails anywhere removes what it wrote and leaves the
-// archive exactly as it was, and a VOD that never comes — deleted, never
-// published, subscriber-only without access — leaves it as recorded, with one
-// log line saying why.
+// up 4), with one last look past it (owner ruling R2-F1). It then cuts each
+// span the capture lacks out of the VOD, on segment boundaries, muxes it as a
+// part of its own beside the archive, and re-finalizes the job with the parts
+// in time order (follow-up 1). The recorded footage is never touched: a fill
+// that fails anywhere removes what it wrote and leaves the archive exactly as
+// it was, and a VOD that never comes — deleted, never published, subscriber-
+// only without access — leaves it as recorded, with one log line saying why.
 //
 // What the fill is doing is the job's to show (owner decision PR-R5): while a
 // plan waits, job details say "Gap-fill pending: N spans, until <time>", and
@@ -64,6 +64,18 @@ type twitchGapFillPlan struct {
 	// measured against the broadcast's span (gapFillDriftLimit, owner
 	// decision PR-R6).
 	EndKnown bool `json:"endKnown,omitempty"`
+	// CutFailures counts the looks that found the VOD complete and then failed
+	// to download or mux a span from it, or to record the parts on the job.
+	// They wait on gapFillCutBackoff, apart from Attempts: a failed download
+	// is no sign the VOD is far from ready.
+	CutFailures int `json:"cutFailures,omitempty"`
+	// cutFailed is fill's word to step that this look ended in such a failure.
+	cutFailed bool
+	// unreached is fill's word to step that this look ended at a Twitch
+	// request that failed outright (the VOD lookup, its metadata, its
+	// playlist), none of which is tried twice: the look may not have reached
+	// Twitch at all.
+	unreached bool
 	// Outcome is set once the fill is over: the row then records it for the
 	// job's details (TwitchGapFillStateOf) and is no longer a plan to run.
 	Outcome *gapFillOutcome `json:"outcome,omitempty"`
@@ -149,14 +161,35 @@ func gapFillBackoff(attempts int) time.Duration {
 	return min(d, 3*time.Hour)
 }
 
+// gapFillCutBackoff is the wait before the next look after the n-th (1-based)
+// look in which the VOD was complete and a span could not be downloaded or
+// muxed from it, or the parts not recorded: 10 min doubling, capped at one
+// hour. Such a failure is the network's or the disk's, not the VOD's, so it
+// does not climb gapFillBackoff toward its three hours.
+func gapFillCutBackoff(failures int) time.Duration {
+	d := gapFillFirstCheck
+	for i := 1; i < failures && d < time.Hour; i++ {
+		d *= 2
+	}
+	return min(d, time.Hour)
+}
+
 // gapFillPad widens each span on both sides before it is mapped onto the
 // VOD's segments: the live program date-times and the VOD's offset from the
 // broadcast's createdAt agree to within a second or so, and the owner's rule
 // is a small overlap over a hole (D17, timestamp mapping).
 const gapFillPad = time.Second
 
-// gapFillSegmentAttempts bounds the fetch of one VOD segment.
+// gapFillSegmentAttempts is how many refusals (refusedVodSegment) make a VOD
+// segment's answer lasting.
 const gapFillSegmentAttempts = 3
+
+// gapFillRetryPauses are the waits between the tries of one fetch of the
+// VOD's media playlist, an init map or a segment that failed in passing (a
+// transport error, a 5xx): a try for each, so four tries over about 14
+// seconds. Tried back to back, a two-second network blip spent every try at
+// once, and the look threw away every span it had already cut.
+var gapFillRetryPauses = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second}
 
 // gapFillDriftLimit is how far the archive VOD's length may differ from the
 // broadcast's span (createdAt to the end the capture saw) before the VOD's
@@ -234,6 +267,14 @@ type twitchGapFiller struct {
 	// archiveRewriting reports a chapter import holding the job's claim
 	// (production: DownloadWorker.chapterImportRunning); nil never is.
 	archiveRewriting func(jobID string) bool
+	// online reports the device online (production: the connectivity
+	// monitor's IsOnline, the reading the backlog scheduler admits on); nil
+	// always is. A look is not taken while offline, and one that failed as
+	// the device went offline is not counted.
+	online func() bool
+	// pause waits d between two tries of a fetch and reports false when ctx
+	// ended first; nil is the real wait (gapFillPause).
+	pause func(ctx context.Context, d time.Duration) bool
 }
 
 // newTwitchGapFiller is the production filler.
@@ -264,6 +305,9 @@ func (w *DownloadWorker) newTwitchGapFiller() *twitchGapFiller {
 		return err == nil && r.critical
 	}
 	f.archiveRewriting = w.chapterImportRunning
+	if w.conn != nil {
+		f.online = w.conn.IsOnline
+	}
 	return f
 }
 
@@ -352,9 +396,10 @@ func (f *twitchGapFiller) stepRecovered(ctx context.Context, row database.GapFil
 }
 
 // step takes one look at a plan: it fills the job, or reschedules the plan on
-// the backoff, or — past the deadline — settles it, keeping the archive as
-// recorded. A plan whose job is gone or no longer Finished is dropped. A
-// settled row is looked at only to drop it once its job is gone.
+// the backoff, or — when the look was the one past the deadline — settles it,
+// keeping the archive as recorded. A plan whose job is gone or no longer
+// Finished is dropped, except while the job is Muxing, when it is left for the
+// next sweep. A settled row is looked at only to drop it once its job is gone.
 //
 // Every line a look logs about the job reaches the job's own log (owner
 // decision PR-R5): the row is Finished, and a terminal job is not routed
@@ -379,6 +424,18 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		_ = saveTwitchGapFillPlan(f.db, &plan, now.Add(gapFillOutcomeRecheck))
 		return
 	}
+	if job != nil && job.Status == database.StatusMuxing {
+		// A mux is running on the job: the operator's Mux of a Finished
+		// archive for a part its finalize could not mux, which leaves the
+		// archive, and the plan that describes it, as they were (muxJob keeps
+		// the row, unless Moombox restarts during that mux: the boot's re-mux
+		// cannot tell this row from a re-run's and drops it), or a mux of a
+		// re-run, whose own end replaces or drops the row. Either way the row
+		// is that mux's to settle, not this look's to drop: it is left as it
+		// is, due, and the next sweep looks again.
+		f.logger.Debug("gap-fill: the job is being muxed; looking again at the next sweep", "jobID", plan.JobID)
+		return
+	}
 	if job == nil || job.Status != database.StatusFinished {
 		f.logger.Info("gap-fill: the job is gone or no longer finished; nothing filled", "jobID", plan.JobID)
 		_ = f.db.DeleteGapFill(plan.JobID)
@@ -391,32 +448,113 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		f.logger.Info("gap-fill: a chapter import is rewriting the archive; looking again at the next sweep", "jobID", plan.JobID)
 		return
 	}
+	// Past the deadline the plan gets one last look (owner ruling R2-F1)
+	// before it is settled: a plan that never managed to look inside its
+	// window (Moombox not running, offline, the volume full), or whose last
+	// look was hours before the window's end, is not written off unseen, and
+	// the look scheduled a second past the deadline (below) is a real one.
+	// After it the window is final.
+	deadline, _ := time.Parse(time.RFC3339, plan.Deadline)
+	lastLook := !deadline.IsZero() && now.After(deadline)
+	// The two waits below come before the job is tracked for logs: they
+	// repeat at every sweep for as long as an outage or a full volume lasts,
+	// and would fill the job's own log with one sentence.
+	if f.offline() {
+		// Every request of a look would fail, and the look would count
+		// toward the backoff: the plan is left as it is, due, and the next
+		// sweep looks again, as the backlog scheduler admits nothing offline.
+		// A last look held this way says why in the job's details, whose
+		// "until" is by then past.
+		f.logger.Debug("gap-fill: the device is offline; looking again at the next sweep", "jobID", plan.JobID)
+		if lastLook {
+			f.holdLastLook(&plan, row, gapFillOfflineReason)
+		}
+		return
+	}
+	if lastLook && f.diskCritical != nil && f.diskCritical() {
+		// fill asks nothing of Twitch while the output volume is critically
+		// full, and the last look is owed a real one: like the offline case,
+		// it waits, uncounted, for the volume to recover. The job's details
+		// say why meanwhile.
+		f.logger.Debug("gap-fill: the output volume is critically full; the last look waits for it", "jobID", plan.JobID)
+		f.holdLastLook(&plan, row, gapFillDiskFullReason)
+		return
+	}
 	f.db.TrackJobForLogs(job.ID)
 	defer restoreJobLogRouting(f.db, job.ID)
 
-	deadline, _ := time.Parse(time.RFC3339, plan.Deadline)
-	if !deadline.IsZero() && now.After(deadline) {
-		reason := plan.LastReason
+	plan.cutFailed, plan.unreached = false, false
+	out, reason := f.fill(ctx, &plan, job)
+	if out != nil {
+		// Settled even when ctx ended meanwhile: a "filled" outcome means the
+		// recovered parts are already committed to the job, and a plan left
+		// due would cut the same spans again at the next start, as duplicate
+		// parts. No outcome comes from a cancelled request (each of those
+		// returns none).
+		f.settleOrDrop(&plan, out, now)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if f.offline() {
+		// The look failed as the device went offline: the outage's failure,
+		// not the VOD's. Nothing is counted and the plan stays due.
+		f.logger.Debug("gap-fill: the device went offline during the look; looking again at the next sweep",
+			"jobID", plan.JobID, "reason", reason)
+		return
+	}
+	if lastLook && plan.unreached {
+		// A request failed outright, and the connectivity monitor needs a
+		// poll or two to read an outage that began seconds ago. The settle
+		// is for good, so the look waits once and asks again: a plan caught
+		// by the first seconds of an outage stays due.
+		pause := f.pause
+		if pause == nil {
+			pause = gapFillPause
+		}
+		var wait time.Duration
+		for _, d := range gapFillRetryPauses {
+			wait += d
+		}
+		if !pause(ctx, wait) {
+			return
+		}
+		if f.offline() {
+			f.logger.Debug("gap-fill: the device went offline during the look; looking again at the next sweep",
+				"jobID", plan.JobID, "reason", reason)
+			return
+		}
+	}
+	if lastLook {
+		if fresh, err := f.db.GetJob(plan.JobID); err == nil && fresh != nil && fresh.Status == database.StatusMuxing {
+			// A mux began on the job while this look ran (it is what refused
+			// the look's commit): the row is that mux's to keep or drop, as
+			// at the top of step, not this look's to settle for good. It is
+			// left due, and the look after the mux is the last one.
+			f.logger.Debug("gap-fill: the job began muxing during the last look; looking again at the next sweep",
+				"jobID", plan.JobID, "reason", reason)
+			return
+		}
 		if reason == "" {
 			reason = "no complete archive VOD was found"
 		}
-		reason += " within 24 hours of the broadcast's end"
+		reason += "; the 24-hour wait for the archive VOD is over"
 		f.logger.Info("gap-fill: keeping the archive as recorded — "+reason,
 			"jobID", plan.JobID, "spans", len(plan.Spans))
 		f.settleOrDrop(&plan, &gapFillOutcome{State: GapFillKept, Reason: reason}, now)
 		return
 	}
-	out, reason := f.fill(ctx, &plan, job)
-	if ctx.Err() != nil {
-		return
-	}
-	if out != nil {
-		f.settleOrDrop(&plan, out, now)
-		return
-	}
-	plan.Attempts++
 	plan.LastReason = reason
-	next := now.Add(gapFillBackoff(plan.Attempts))
+	var wait time.Duration
+	if plan.cutFailed {
+		plan.CutFailures++
+		wait = gapFillCutBackoff(plan.CutFailures)
+	} else {
+		plan.Attempts++
+		wait = gapFillBackoff(plan.Attempts)
+	}
+	next := now.Add(wait)
 	if !deadline.IsZero() && next.After(deadline) {
 		next = deadline.Add(time.Second)
 	}
@@ -426,6 +564,30 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		f.logger.Warn("gap-fill: could not reschedule the plan", "jobID", plan.JobID, "err", err)
 	}
 }
+
+// gapFillDiskFullReason is why a look asked nothing of Twitch: the output
+// volume is at disk_critical.
+const gapFillDiskFullReason = "the output volume is critically full"
+
+// gapFillOfflineReason is why a last look is waiting: the connectivity
+// monitor reads the device offline.
+const gapFillOfflineReason = "the device is offline"
+
+// holdLastLook records why the look past the deadline is waiting, once, with
+// the plan's next look where it was: the plan stays due and nothing is
+// counted.
+func (f *twitchGapFiller) holdLastLook(plan *twitchGapFillPlan, row database.GapFill, reason string) {
+	if plan.LastReason == reason {
+		return
+	}
+	plan.LastReason = reason
+	if next, err := time.Parse(time.RFC3339, row.NextCheckAt); err == nil {
+		_ = saveTwitchGapFillPlan(f.db, plan, next)
+	}
+}
+
+// offline reports the device offline by the filler's connectivity seam.
+func (f *twitchGapFiller) offline() bool { return f.online != nil && !f.online() }
 
 // settle records how plan ended on its row, which stops being a plan to run
 // and becomes the job's record of its fill (TwitchGapFillStateOf), looked at
@@ -564,20 +726,21 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 	// archive's volume — a late start of hours is tens of GB — so it waits,
 	// as the backlog does, while that volume is at disk_critical.
 	if f.diskCritical != nil && f.diskCritical() {
-		return nil, "the output volume is critically full"
+		return nil, gapFillDiskFullReason
 	}
 	if plan.VodID == "" {
 		end, _ := time.Parse(time.RFC3339, plan.EndedAt)
 		id, err := f.findVod(ctx, plan.Login, start, end)
 		if err != nil {
+			plan.unreached = true
 			return nil, fmt.Sprintf("the archive VOD lookup failed (%v)", err)
 		}
 		if id == "" {
 			// Nothing published within ArchiveVodStartTolerance of the
 			// broadcast's start is an archive: not listed yet, or gone. The
-			// plan is looked at again until its deadline, and the archive
-			// then kept as recorded with this reason (step); a later
-			// broadcast's archive is never taken in its place (PR-M3).
+			// plan is looked at again until its deadline and once past it, and
+			// the archive then kept as recorded with this reason (step); a
+			// later broadcast's archive is never taken in its place (PR-M3).
 			return nil, "no archive VOD published within 10 minutes of the broadcast's start is listed"
 		}
 		plan.VodID = id
@@ -587,6 +750,7 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 		if errors.Is(err, twitch.ErrSubscriberOnlyNotEntitled) {
 			return nil, "the archive VOD is subscriber-only and this login has no access"
 		}
+		plan.unreached = true
 		return nil, fmt.Sprintf("the archive VOD %s could not be read (%v)", plan.VodID, err)
 	}
 	if info.IsRecording {
@@ -597,6 +761,7 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 		if errors.Is(err, twitch.ErrSubscriberOnlyNotEntitled) {
 			return nil, "the archive VOD is subscriber-only and this login has no access"
 		}
+		plan.unreached = true
 		return nil, fmt.Sprintf("the archive VOD's playlist could not be read (%v)", err)
 	}
 	var pick *twitch.TwitchHLSVariant
@@ -612,7 +777,7 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 	if pick == nil {
 		return nil, "the archive VOD offers no rendition"
 	}
-	body, err := f.fetch(ctx, pick.URL)
+	body, err := f.fetchRetry(ctx, pick.URL)
 	if err != nil {
 		return nil, fmt.Sprintf("the archive VOD's media playlist could not be read (%v)", err)
 	}
@@ -694,6 +859,7 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 		}
 		if err != nil {
 			undo()
+			plan.cutFailed = true
 			return nil, fmt.Sprintf("a span could not be cut from the archive VOD (%v)", err)
 		}
 		part.span = sp
@@ -716,6 +882,8 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 	}
 	if err := f.commit(plan, job, pick, made); err != nil {
 		undo()
+		// Not the VOD's failure either: it was complete and every span cut.
+		plan.cutFailed = true
 		return nil, fmt.Sprintf("the recovered parts could not be recorded (%v)", err)
 	}
 	for _, p := range made {
@@ -733,18 +901,42 @@ func (f *twitchGapFiller) fill(ctx context.Context, plan *twitchGapFillPlan, job
 // roundTenth rounds x to a tenth, for the drift's log fields.
 func roundTenth(x float64) float64 { return math.Round(x*10) / 10 }
 
+// recoveredPartPath is the first "<base> - recovered<n>.mp4" in outDir, from
+// n = k, that no file holds. Only a Stat answering "not found" frees a name,
+// and only one that succeeds takes it: any other answer (access denied, a
+// network share that dropped) ends the search with that error, and the look
+// is rescheduled with it. The search is bounded (asideOutputCollisionLimit
+// names) and ends with ctx.
+func recoveredPartPath(ctx context.Context, outDir, base string, k int) (string, error) {
+	for n := k; n < k+asideOutputCollisionLimit; n++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		p := filepath.Join(outDir, fmt.Sprintf("%s - recovered%d.mp4", base, n))
+		_, err := gapFillStat(p)
+		if err == nil {
+			continue
+		}
+		if os.IsNotExist(err) {
+			return p, nil
+		}
+		return "", fmt.Errorf("the archive's directory could not be read: %w", err)
+	}
+	return "", fmt.Errorf("no free name for a recovered part in %d tries", asideOutputCollisionLimit)
+}
+
+// gapFillStat is os.Stat, replaced by recoveredPartPath's test.
+var gapFillStat = os.Stat
+
 // cutSpan fetches segs into one MPEG-TS beside the archive and muxes it into
 // the recovered part's MP4 (base + " - recovered<k>.mp4", the first k not
-// taken). The TS is removed either way; the MP4 only on failure.
+// taken, recoveredPartPath). The TS is removed either way; the MP4 only on
+// failure.
 func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment, outDir, base string, k int) (recoveredPart, error) {
 	var part recoveredPart
-	outPath := ""
-	for n := k; ; n++ {
-		p := filepath.Join(outDir, fmt.Sprintf("%s - recovered%d.mp4", base, n))
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			outPath = p
-			break
-		}
+	outPath, err := recoveredPartPath(ctx, outDir, base, k)
+	if err != nil {
+		return part, err
 	}
 	tsPath := outPath + ".gapfill.ts"
 	ts, err := os.Create(tsPath)
@@ -790,7 +982,7 @@ func (f *twitchGapFiller) cutSpan(ctx context.Context, segs []engine.HlsSegment,
 	if part.refused == len(segs) {
 		return part, errSpanRefused
 	}
-	if err := f.mux(ctx, tsPath, outPath); err != nil {
+	if err = f.mux(ctx, tsPath, outPath); err != nil {
 		_ = os.Remove(outPath)
 		return part, err
 	}
@@ -810,20 +1002,55 @@ func isMutedVodSegment(u string) bool {
 	return strings.HasSuffix(path, "-muted.ts") || strings.Contains(path, "-muted-")
 }
 
-// fetchRetry is fetch with up to gapFillSegmentAttempts tries.
+// fetchRetry is fetch, tried again after a failure. A failure in passing (a
+// transport error, a 5xx) is tried again after each of gapFillRetryPauses,
+// what the span has fetched so far kept meanwhile; a refusal
+// (refusedVodSegment) is tried again at once, and is the segment's lasting
+// answer once it has come gapFillSegmentAttempts times. The wait ends with
+// ctx.
 func (f *twitchGapFiller) fetchRetry(ctx context.Context, url string) ([]byte, error) {
-	var lastErr error
-	for range gapFillSegmentAttempts {
+	refusals, failures := 0, 0
+	for {
 		data, err := f.fetch(ctx, url)
 		if err == nil {
 			return data, nil
 		}
-		lastErr = err
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if refusedVodSegment(err) {
+			if refusals++; refusals >= gapFillSegmentAttempts {
+				return nil, err
+			}
+			continue
+		}
+		if failures >= len(gapFillRetryPauses) {
+			return nil, err
+		}
+		pause := f.pause
+		if pause == nil {
+			pause = gapFillPause
+		}
+		if !pause(ctx, gapFillRetryPauses[failures]) {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr
+			}
+			return nil, err
+		}
+		failures++
 	}
-	return nil, lastErr
+}
+
+// gapFillPause waits d, and reports false when ctx ended first.
+func gapFillPause(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // gapFillOutputLocation is where the recovered parts go — beside the archive:

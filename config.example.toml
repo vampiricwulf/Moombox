@@ -255,8 +255,9 @@
 #
 # auto_enabled itself governs exactly two things: a slow second refresh
 # that re-opens the profile below in a headless browser on a timer, and
-# one automatic browser attempt when authentication fails (with it off,
-# Moombox notifies you instead). The in-process refresh that keeps the
+# an automatic browser attempt when authentication fails (with it off,
+# Moombox notifies you instead; a job parked on its cookies is retried
+# this way up to 3 times). The in-process refresh that keeps the
 # YouTube session alive runs either way — it is gated on cookie_file
 # alone — and so does the manual import below. The timer starts or stops
 # on restart; the automatic attempt on an authentication failure follows

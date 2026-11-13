@@ -716,7 +716,7 @@ auto_enabled = true
 browser_profile_dir = "./browser-profile"
 ```
 
-`auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and one automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
+`auto_enabled` governs exactly two things: a slow second refresh that re-opens that profile in a headless browser on a timer, and an automatic browser attempt when authentication fails (with it off, Moombox notifies you instead). A job parked on its cookies is retried this way up to 3 times; after that it stays parked, and its error says the cookies are not the cause, until you resume it, or until a cookie refresh, import or setup verifies the platform more than a day after the last retry. Everything else runs either way — the in-process refresh that keeps the YouTube session alive is gated only on `cookie_file`, and so is the manual re-import described below. Changing the flag takes effect on restart.
 
 #### Reading your real browser profile instead
 
@@ -753,7 +753,7 @@ cookie_file = "/data/cookies.txt"
 ```
 
 Leave `auto_enabled` off here. It only starts the headless-browser refresh
-timer and allows one automatic browser attempt on auth failure, and there is
+timer and allows an automatic browser attempt on auth failure, and there is
 no browser on such a host to run either; it has never gated the import.
 
 `browser_profile_dir` needs no entry: it defaults to `./browser-profile`,

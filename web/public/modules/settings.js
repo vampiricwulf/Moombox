@@ -2979,7 +2979,7 @@ export class SettingsController {
   // NOT gated on cfg-auto-cookies-enabled, deliberately. Everything below is
   // ACQUISITION — the browser login that puts cookies on disk, and the choice of
   // which browser runs it. The flag governs one thing: whether a slow
-  // headless-browser refresh timer exists, plus one automatic browser retry when
+  // headless-browser refresh timer exists, plus an automatic browser retry (up to 3 a job) when
   // auth fails. It has never governed setup (auto_enabled does not appear
   // anywhere in internal/cookies, and StartSetup is deliberately reachable with
   // it off), and hiding setup behind it made the setting impossible to reach the

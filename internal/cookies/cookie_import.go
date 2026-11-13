@@ -404,7 +404,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// not to destroy.
 		mergeErr := fmt.Errorf("%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
 			ErrCookieFileUnreadable, readErr)
-		s.setError(mergeErr.Error())
+		s.setFileError(mergeErr.Error())
 		s.logger.Error("cookie import: aborting rather than overwrite cookies.txt after a read failure",
 			"path", s.cookiePath, "err", readErr)
 		return ImportResult{}, mergeErr
@@ -415,7 +415,8 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	// paste is not a state of the INSTALL. Nothing ran, nothing was written,
 	// and the caller renders the refusal synchronously in the dialog that
 	// produced it — while lastError renders in Settings as a standing "your
-	// recordings will fail" that no later success clears.
+	// recordings will fail" that only a renewed browser pass, a new setup or a
+	// verified import of the right kind clears.
 	merged, err := prepareCookieImport(existing, netscape)
 	if err != nil {
 		return ImportResult{}, err
@@ -457,7 +458,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
-		s.setError("could not create the directory for cookies.txt: " + err.Error())
+		s.setFileError("could not create the directory for cookies.txt: " + err.Error())
 		return ImportResult{}, err
 	}
 	if err := writeCookieFile(s.cookiePath, []byte(merged), 0o600); err != nil {
@@ -467,7 +468,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		// against refresh.go's log-bound paragraph.
 		wrErr := fmt.Errorf("%w (%w) — if this is Docker, mount the data directory rather than cookies.txt itself",
 			ErrCookieFileUnwritable, err)
-		s.setError(wrErr.Error())
+		s.setFileError(wrErr.Error())
 		return ImportResult{}, wrErr
 	}
 
@@ -481,7 +482,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	// the process serving the old credentials while the file on disk is
 	// correct. Load is what the other two merge-writers use.
 	if err := s.jar.Load(s.cookiePath); err != nil {
-		s.setError("the imported cookies were written but could not be loaded: " + err.Error())
+		s.setFileError("the imported cookies were written but could not be loaded: " + err.Error())
 		return result, err
 	}
 
@@ -617,8 +618,24 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 	if result.TwitchOutcome == ImportInstalled {
 		s.noteSuppliedLocked("twitch")
 	}
+	// Retract a "Last cookie error" this import has disproved. Only a platform
+	// whose pasted rows are on disk AND verified counts; an accepted but
+	// inconclusive check retracts nothing, because a clear is an assertion.
+	// See retractLastErrorLocked for what each kind of message needs.
+	var verified []string
+	if result.YouTubeOutcome == ImportInstalled && result.YouTube == RefreshOK {
+		verified = append(verified, "youtube")
+	}
+	if result.TwitchOutcome == ImportInstalled && result.Twitch == RefreshOK {
+		verified = append(verified, "twitch")
+	}
+	retracted := len(verified) > 0 && s.retractLastErrorLocked(verified, true)
 	s.mu.Unlock()
 	s.announceRelogin()
+	if retracted {
+		s.logger.Info("cookie import verified — cleared the last cookie error",
+			"platforms", strings.Join(verified, ","))
+	}
 
 	// The completion line, and on a container it is the only view an operator
 	// has of what their paste did. Platform, outcome, verdict and a row count —

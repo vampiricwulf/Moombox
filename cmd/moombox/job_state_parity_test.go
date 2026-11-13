@@ -46,6 +46,13 @@ type jobStateParity struct {
 			Of      int       `json:"of"`
 		} `json:"want"`
 	} `json:"queuedHolds"`
+	CookieRetries []struct {
+		Name  string                  `json:"name"`
+		Holds jobstate.AdmissionHolds `json:"holds"`
+		Job   database.Job            `json:"job"`
+		Now   time.Time               `json:"now"`
+		Want  jobstate.CookieRetry    `json:"want"`
+	} `json:"cookieRetries"`
 }
 
 func loadJobStateParity(t *testing.T) jobStateParity {
@@ -239,5 +246,38 @@ func TestAwaitingProcessingParity(t *testing.T) {
 	want := `if (isAwaitingProcessing(job)) return "` + jobstate.AwaitingProcessingText + `";`
 	if !strings.Contains(string(src), want) {
 		t.Errorf("app.js formatProgress does not say %q for an awaiting-processing row", jobstate.AwaitingProcessingText)
+	}
+}
+
+// TestCookieRetryParity runs jobstate.AdmissionHolds.CookieRetryFor over the
+// table the dashboard's cookieRetry runs over too (owner ruling R2-C1): which
+// parked rows show their automatic cookie retries, and the 24-hour window to
+// the second. The two sentences are compared as each side words them.
+//
+// Mutant: a case's want edited, or the window changed on one side only — this
+// side or the node side fails.
+func TestCookieRetryParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.CookieRetries) < 8 {
+		t.Fatalf("parsed %d cookieRetries cases, want the table", len(p.CookieRetries))
+	}
+	for _, c := range p.CookieRetries {
+		got := c.Holds.CookieRetryFor(&c.Job, c.Now)
+		if got.Count != c.Want.Count || got.Of != c.Want.Of || !got.Last.Equal(c.Want.Last) {
+			t.Errorf("%s: CookieRetryFor = %+v, want %+v", c.Name, got, c.Want)
+		}
+	}
+	src := readUtilsJS(t)
+	for _, r := range []jobstate.CookieRetry{{Count: 2, Of: 3}, {Count: 3, Of: 3}} {
+		js := strings.NewReplacer("${retry.count}", strconv.Itoa(r.Count), "${retry.of}", strconv.Itoa(r.Of))
+		found := false
+		for _, m := range regexp.MustCompile("return `(Cookie retr[^`]*)`;").FindAllStringSubmatch(src, -1) {
+			if js.Replace(m[1]) == r.Text() {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("utils.js cookieRetryText has no sentence that reads %q", r.Text())
+		}
 	}
 }

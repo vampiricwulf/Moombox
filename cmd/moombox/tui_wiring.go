@@ -733,6 +733,7 @@ func (s *runState) runTUI() {
 		defer func() {
 			if result.Ran {
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "browser refresh")
+				s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "the browser refresh") // owner ruling R2-C2
 			}
 		}()
 
@@ -805,6 +806,7 @@ func (s *runState) runTUI() {
 			defer func() {
 				if result.Wrote {
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "a cookie file import")
+					s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "a cookie file import") // owner ruling R2-C2
 				}
 			}()
 
@@ -907,6 +909,7 @@ func (s *runState) runTUI() {
 			defer func() {
 				if result.Wrote {
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "the setup wizard")
+					s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "the setup wizard") // owner ruling R2-C2
 				}
 			}()
 

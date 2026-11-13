@@ -1,5 +1,5 @@
 {
-  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
+  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity, TestCookieRetryParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
   "pendingAutoAction": [
     { "name": "end unconfirmed is the mux's", "job": { "platform": "twitch", "status": "Error", "error": "twitch HLS: 500", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
     { "name": "end unconfirmed with the flap's text", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
@@ -72,5 +72,17 @@
     {"name": "own rate-limit requeue", "holds": {"jobs": {"y": {"attempt": 0, "of": 3, "until": "2026-11-09T14:30:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": "rate_limit", "until": "2026-11-09T14:30:00Z"}},
     {"name": "own hold run out", "holds": {"jobs": {"y": {"attempt": 1, "of": 3, "until": "2026-11-09T13:59:00Z"}}}, "job": {"id": "y", "platform": "youtube", "status": "Queued"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}},
     {"name": "not Queued", "holds": {"offline": true}, "job": {"id": "y", "platform": "youtube", "status": "Upcoming"}, "now": "2026-11-09T14:00:00Z", "want": {"reason": ""}}
+  ],
+  "cookieRetries": [
+    {"name": "an auth park with two used", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}},
+    {"name": "an auth park with all used", "holds": {"cookieRetries": {"a": {"count": 3, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 3, "of": 3, "last": "2026-11-12T13:00:00Z"}},
+    {"name": "an unclassified park counts", "holds": {"cookieRetries": {"a": {"count": 1, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 1, "of": 3, "last": "2026-11-12T13:00:00Z"}},
+    {"name": "a membership park shows none", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "membership"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
+    {"name": "one second inside the window", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-11T14:00:01Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 2, "of": 3, "last": "2026-11-11T14:00:01Z"}},
+    {"name": "the window passed", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-11T14:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
+    {"name": "none used", "holds": {"cookieRetries": {"a": {"count": 0, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
+    {"name": "another job's count", "holds": {"cookieRetries": {"b": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
+    {"name": "no snapshot entry at all", "holds": {}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
+    {"name": "not parked", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "Upcoming"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}}
   ]
 }

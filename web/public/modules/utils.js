@@ -1429,6 +1429,43 @@ export function diskGaugeLevel(disk, holds) {
 }
 
 /**
+ * How long a job's automatic cookie retry count stands after its last retry
+ * (jobstate.CookieRetryWindow, 24 hours). The shared table's boundary cases
+ * hold the two sides together.
+ */
+export const COOKIE_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * cookieRetry is jobstate.AdmissionHolds.CookieRetryFor (owner ruling
+ * R2-C1): the automatic cookie retries of a job parked in COOKIES? on its
+ * credentials, from the admissionHolds snapshot's cookieRetries. count 0 for
+ * any other row (a membership park is settled by an account change), for a
+ * job that has used none, and once the window has passed since the last one.
+ * @param {{cookieRetries?: Object<string, {count: number, of: number, last: string}>}|null} holds
+ * @param {object} job
+ * @param {number} [now] epoch milliseconds
+ * @returns {{count: number, of?: number, last?: string}}
+ */
+export function cookieRetry(holds, job, now = Date.now()) {
+  if (!holds || !job || job.status !== "COOKIES?" || job.parkReason === "membership") return { count: 0 };
+  const r = holds.cookieRetries?.[job.id];
+  if (!r || !(r.count > 0) || !(now < Date.parse(r.last) + COOKIE_RETRY_WINDOW_MS)) return { count: 0 };
+  return { count: r.count, of: r.of, last: r.last };
+}
+
+/**
+ * cookieRetryText is jobstate.CookieRetry.Text: the parked row's line in the
+ * TUI's words, "" when the job has used no retry.
+ * @param {{count: number, of?: number}} retry
+ * @returns {string}
+ */
+export function cookieRetryText(retry) {
+  if (!retry || !(retry.count > 0)) return "";
+  if (retry.count >= retry.of) return `Cookie retries used up (${retry.count} of ${retry.of}): no more automatic retries`;
+  return `Cookie retry ${retry.count} of ${retry.of} used`;
+}
+
+/**
  * The Twitch monitor's automatic-recovery budget, as the Go side declares it
  * (jobstate.MaxTwitchAutoRetries); the job-state parity test (cmd/moombox)
  * compares the two.

@@ -72,15 +72,16 @@ func (m *TaskListModel) setCompact(compact bool) {
 }
 
 // compactFigure is the short figure at the right edge of a compact row and
-// whether it is dim. For a Downloading, Muxing, Queued or Error row it is the
-// normal row's progress cell (progressCell): the percent, the wait tag while
-// the downloader waits, the hold tag, the pending mux or retry; a capture
+// whether it is dim. For a Downloading, Muxing, Queued, Error or COOKIES? row
+// it is the normal row's progress cell (progressCell): the percent, the wait
+// tag while the downloader waits, the hold tag, the pending mux or retry, the
+// cookie retries used; a capture
 // with no percent shows its elapsed time. Its own are the elapsed time while
 // live, the countdown while waiting, and the watched dot of a Finished row.
 // "" when the row has none.
 func (m *TaskListModel) compactFigure(job *database.Job, now time.Time) (text string, dim bool) {
 	switch job.Status {
-	case database.StatusDownloading, database.StatusMuxing, database.StatusQueued, database.StatusError:
+	case database.StatusDownloading, database.StatusMuxing, database.StatusQueued, database.StatusError, database.StatusCookies:
 		// The normal row's progress cell (progressCell owns the rule),
 		// without its trailing space.
 		cell, dim := m.progressCell(job, now)

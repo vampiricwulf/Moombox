@@ -1144,7 +1144,10 @@
                                 Enable the headless-browser refresh timer
                                 <span slot="help-text"
                                     >Adds a slow second refresh that re-opens your saved browser profile in the
-                                    background, plus one automatic browser attempt when authentication fails.
+                                    background, plus an automatic browser attempt when authentication fails. A job
+                                    parked on its cookies is retried this way up to 3 times; after that it
+                                    stays parked until you resume it, or until a cookie refresh, import or setup
+                                    verifies the platform more than a day after the last retry.
                                     Moombox's in-process cookie refresh runs either way, and so does an
                                     immediate profile import from the "Refresh cookies from browser profile"
                                     button below (or shift+click the header's "Refresh cookies", or
