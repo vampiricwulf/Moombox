@@ -20,20 +20,19 @@ func drainTypes(t *testing.T, c *wsClient) []string {
 	t.Helper()
 	var out []string
 	for {
-		select {
-		case f := <-c.writes:
-			b := f.data
-			var m struct {
-				Type    string         `json:"type"`
-				Payload versionedFrame `json:"payload"`
-			}
-			if err := json.Unmarshal(b, &m); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, m.Type+":"+m.Payload.Status)
-		default:
+		f, ok := c.writes.pop()
+		if !ok {
 			return out
 		}
+		b := f.data
+		var m struct {
+			Type    string         `json:"type"`
+			Payload versionedFrame `json:"payload"`
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, m.Type+":"+m.Payload.Status)
 	}
 }
 
@@ -110,20 +109,19 @@ func TestHubSendsAWriteATickOvertook(t *testing.T) {
 	frames := func() []string {
 		var out []string
 		for {
-			select {
-			case f := <-c.writes:
-				b := f.data
-				var m struct {
-					Type    string      `json:"type"`
-					Payload titledFrame `json:"payload"`
-				}
-				if err := json.Unmarshal(b, &m); err != nil {
-					t.Fatal(err)
-				}
-				out = append(out, m.Type+":"+m.Payload.Title)
-			default:
+			f, ok := c.writes.pop()
+			if !ok {
 				return out
 			}
+			b := f.data
+			var m struct {
+				Type    string      `json:"type"`
+				Payload titledFrame `json:"payload"`
+			}
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, m.Type+":"+m.Payload.Title)
 		}
 	}
 

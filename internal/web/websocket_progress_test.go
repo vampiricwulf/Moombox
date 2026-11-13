@@ -11,13 +11,18 @@ import (
 func drainFrames(client *wsClient) [][]byte {
 	var out [][]byte
 	for {
-		select {
-		case msg := <-client.writes:
-			out = append(out, msg.data)
-		default:
+		msg, ok := client.writes.pop()
+		if !ok {
 			return out
 		}
+		out = append(out, msg.data)
 	}
+}
+
+// popFrame takes the next queued frame, or the zero frame when there is none.
+func popFrame(client *wsClient) wsFrame {
+	f, _ := client.writes.pop()
+	return f
 }
 
 // attachTestClient registers a client with a queue deep enough that nothing
@@ -25,7 +30,7 @@ func drainFrames(client *wsClient) [][]byte {
 // coalesced a tick" with "the client was too slow", and only the first is
 // under test.
 func attachTestClient(hub *WebSocketHub, depth int) *wsClient {
-	client := &wsClient{writes: make(chan wsFrame, depth)}
+	client := &wsClient{writes: newWSQueue(depth)}
 	hub.mu.Lock()
 	hub.clients[client] = struct{}{}
 	hub.mu.Unlock()
@@ -161,29 +166,6 @@ func TestDroppedProgressFramesDoNotArmAResync(t *testing.T) {
 	}
 }
 
-// TestALostRowStillArmsAResyncAmongProgressFrames: the frame that matters is
-// the one LOST, not the one arriving. A job_deleted at the head of a full
-// queue is evicted by a progress tick, and no tick restates it.
-//
-// Mutant: decide by the incoming frame instead of the evicted one: nothing
-// arms and the deleted row stays on the tab.
-func TestALostRowStillArmsAResyncAmongProgressFrames(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-	client := attachTestClient(hub, wsWriteQueueSize)
-
-	hub.BroadcastJobDeleted("gone")
-	for i := 1; i < wsWriteQueueSize; i++ {
-		hub.BroadcastJobProgress(progressTick{ID: "job", Percent: i, version: uint64(i)})
-	}
-	if client.needsResync.Load() || client.drops.Load() != 0 {
-		t.Fatalf("fixture: the queue should be exactly full with nothing dropped")
-	}
-	hub.BroadcastJobProgress(progressTick{ID: "job", Percent: 99, version: 99})
-	if !client.needsResync.Load() {
-		t.Error("a tick evicted the job_deleted and no resync was armed")
-	}
-}
-
 // TestAReplayedTickIsNotTreatedAsRestated: the tick the hub sends again after
 // a row older than it is the one frame that puts the newer progress columns
 // back, and a stalled job may not tick again for minutes. Losing it arms a
@@ -198,12 +180,13 @@ func TestAReplayedTickIsNotTreatedAsRestated(t *testing.T) {
 	drainFrames(client)
 
 	// A one-slot client: the older row fills the queue and the replayed tick
-	// evicts it, then is itself evicted by a later frame.
+	// evicts it, then is itself evicted by a later frame nothing restates (a
+	// tick would be given up in its place).
 	slow := attachTestClient(hub, 1)
 	hub.BroadcastJobUpdate(progressTick{ID: "job", Percent: 40, version: 4})
 	slow.needsResync.Store(false) // the evicted row armed it; not under test
 	slow.lastResync.Store(time.Now().UnixNano())
-	hub.BroadcastJobProgress(progressTick{ID: "other", Percent: 1, version: 1})
+	hub.BroadcastJobDeleted("other")
 	if !slow.needsResync.Load() {
 		t.Error("the replayed tick was evicted and no resync was armed")
 	}

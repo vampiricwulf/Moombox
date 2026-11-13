@@ -49,20 +49,20 @@ func TestOnlyAResyncSnapshotIsQueuedAsASnapshot(t *testing.T) {
 	client := attachTestClient(hub, wsWriteQueueSize)
 
 	hub.Broadcast("job_deleted", map[string]any{"id": "x"})
-	if f := <-client.writes; f.snapshot {
+	if f := popFrame(client); f.snapshot {
 		t.Error("an ordinary frame was queued as a snapshot and would get the long write deadline")
 	}
 
 	client.needsResync.Store(true)
 	hub.Broadcast("job_deleted", map[string]any{"id": "y"})
-	if f := <-client.writes; !f.snapshot {
+	if f := popFrame(client); !f.snapshot {
 		t.Error("the resync that replaced a broadcast was not queued as a snapshot")
 	}
 
 	client.needsResync.Store(true)
 	client.lastResync.Store(0)
 	hub.flushResync(client)
-	if f := <-client.writes; !f.snapshot {
+	if f := popFrame(client); !f.snapshot {
 		t.Error("the resync the ping tick flushed was not queued as a snapshot")
 	}
 }
