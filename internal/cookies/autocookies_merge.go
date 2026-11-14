@@ -43,7 +43,9 @@ func isRelevantDomain(domain string) bool {
 	return isYouTubeDomain(domain) || isGoogleDomain(domain) || isTwitchDomain(domain)
 }
 
-// isEssentialCookie checks if a cookie should be included in extraction (matching TS).
+// isEssentialCookie checks if a cookie is included in extraction for its
+// NAME (matching TS). deduplicateAndFormat also keeps a row www.youtube.com
+// is sent under any name (wwwYouTubeRow, owner ruling KA-7).
 func isEssentialCookie(name, domain string) bool {
 	// YouTube essential cookies. Domain-guarded for the same reason the
 	// other two clauses below already are: several names in
@@ -89,7 +91,7 @@ func isEssentialCookie(name, domain string) bool {
 // deduplicateAndFormat filters, deduplicates (preferring youtube.com over google.com),
 // and formats cookies to Netscape format. Matches TS deduplicateCookies() behavior.
 func deduplicateAndFormat(cookies []extractedCookie) []string {
-	// Deduplicate by name, preferring youtube.com over google.com
+	// Deduplicate by platform and name, preferring youtube.com over google.com
 	type entry struct {
 		cookie extractedCookie
 		domain string
@@ -102,23 +104,40 @@ func deduplicateAndFormat(cookies []extractedCookie) []string {
 		if !isRelevantDomain(c.domain) {
 			continue
 		}
-		if !isEssentialCookie(c.name, c.domain) {
+		// A row www.youtube.com is sent is exported under any name (owner
+		// ruling KA-7, wwwYouTubeRow: Load's rule); every other row by
+		// name, as before.
+		named := isEssentialCookie(c.name, c.domain)
+		if !named && !wwwYouTubeRow(c.name, c.domain, c.path) {
 			continue
 		}
 
-		existing, exists := byName[c.name]
+		// The slot. A row kept by name shares one with the rows of its own
+		// platform and name, which is where youtube.com is preferred to
+		// google.com. Before KA-7 the bare name was enough for that: the
+		// names of the two platforms never meet. A row kept only for its
+		// scope can carry ANY name, a Twitch credential's or a google.com
+		// auth row's among them, so it gets a slot of its own (name and
+		// domain) and is written beside whatever else has the name. It
+		// never evicts a row kept by name and is never skipped for one;
+		// Load settles which of them the jar sends (youTubeRowRank).
+		key := cookiePlatformOf(c.domain) + "\x00" + c.name
+		if !named {
+			key = "scope\x00" + c.name + "\x00" + strings.ToLower(c.domain)
+		}
+		existing, exists := byName[key]
 		if exists && isYouTubeDomain(existing.domain) && !isYouTubeDomain(c.domain) {
 			continue // Already have youtube.com version, skip google.com
 		}
 		if !exists {
-			order = append(order, c.name)
+			order = append(order, key)
 		}
-		byName[c.name] = entry{cookie: c, domain: c.domain}
+		byName[key] = entry{cookie: c, domain: c.domain}
 	}
 
 	var lines []string
-	for _, name := range order {
-		e := byName[name]
+	for _, key := range order {
+		e := byName[key]
 		c := e.cookie
 
 		subdomain := "FALSE"

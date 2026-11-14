@@ -284,6 +284,13 @@ type DownloaderOptions struct {
 	// nil is safe and means "send no Cookie header", as an empty string did.
 	CookieHeader func() string
 
+	// MediaCookieHeader is the header a media host is sent when the safety
+	// net sends one: the session's cookies without the rows the jar keeps
+	// only because www.youtube.com is sent them (owner ruling KA-7;
+	// cookies.CookieJar.GetYouTubeMediaCookieHeader). Read per request, as
+	// CookieHeader is. nil means CookieHeader serves the media hosts too.
+	MediaCookieHeader func() string
+
 	// MediaCookies is the safety net's state for one download. A job that
 	// runs two downloaders (video and audio) hands both the same one, so the
 	// job pays for one refused request and logs one Warn, not one per
@@ -1786,11 +1793,19 @@ func (d *SegmentDownloader) cancelErr(ctx context.Context) error {
 //
 // A request to a media host (isMediaHost) gets no Cookie header until a
 // refusal has shown this download needs one (doRequest, which all six
-// callers send the request through). Every other host gets the jar's header
-// as it is. An empty value sends no header at all rather than an empty one.
+// callers send the request through), and then the media header
+// (DownloaderOptions.MediaCookieHeader). Every other host gets the jar's
+// header as it is. An empty value sends no header at all rather than an
+// empty one.
 func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	req.Header.Set("User-Agent", ua)
-	if isMediaHost(req.URL) && !d.mediaCookies.send.Load() {
+	if isMediaHost(req.URL) {
+		if !d.mediaCookies.send.Load() {
+			return
+		}
+		if ch := d.mediaCookieHeader(); ch != "" {
+			req.Header.Set("Cookie", ch)
+		}
 		return
 	}
 	if ch := d.cookieHeader(); ch != "" {
@@ -1818,6 +1833,16 @@ func (d *SegmentDownloader) cookieHeader() string {
 		return ""
 	}
 	return d.opts.CookieHeader()
+}
+
+// mediaCookieHeader is the current Cookie header for a media host, "" when
+// there is none to send: MediaCookieHeader, or cookieHeader when the caller
+// set none.
+func (d *SegmentDownloader) mediaCookieHeader() string {
+	if d.opts.MediaCookieHeader == nil {
+		return d.cookieHeader()
+	}
+	return d.opts.MediaCookieHeader()
 }
 
 // isMediaHost reports whether u is on googlevideo.com or one of its
@@ -1862,7 +1887,7 @@ func (d *SegmentDownloader) doRequest(req *http.Request) (*http.Response, error)
 	if req.Header.Get("Cookie") != "" || !isMediaHost(req.URL) {
 		return resp, nil
 	}
-	ch := d.cookieHeader()
+	ch := d.mediaCookieHeader()
 	if ch == "" {
 		return resp, nil
 	}

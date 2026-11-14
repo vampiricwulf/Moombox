@@ -353,12 +353,13 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// here would still be presented to the last segment hours later. The
 	// downloader keeps it from the media hosts and sends it only after one
 	// refused a request for want of it (engine.DownloaderOptions.CookieHeader).
-	var dashCookieHeader func() string
+	var dashCookieHeader, dashMediaCookieHeader func() string
 	// One for the job: the video and audio downloaders learn together whether
 	// the media hosts want the cookies.
 	mediaCookies := &engine.MediaCookieState{}
 	if job.YT != nil {
 		dashCookieHeader = job.YT.GetCookieHeader
+		dashMediaCookieHeader = job.YT.MediaCookieHeader
 	}
 
 	// Orchestrator-provided StartSeq takes priority (quality recovery/split).
@@ -392,6 +393,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			InitURL:             videoStream.Initialization,
 			PoToken:             dashPoToken,
 			CookieHeader:        dashCookieHeader,
+			MediaCookieHeader:   dashMediaCookieHeader,
 			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
@@ -435,6 +437,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			InitURL:             audioStream.Initialization,
 			PoToken:             dashPoToken,
 			CookieHeader:        dashCookieHeader,
+			MediaCookieHeader:   dashMediaCookieHeader,
 			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,

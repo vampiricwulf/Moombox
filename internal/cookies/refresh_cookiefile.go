@@ -55,8 +55,12 @@ const rowBreakingChars = "\t\r\n\x00"
 func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreakingChars) }
 
 // trackedCookieName reports whether name is one the cookie file tracks for the
-// declared origin's credential platform. It is the admission set for an
-// UNSCOPED Set-Cookie — one with no Domain= of its own to be judged on.
+// declared origin's credential platform. It is the admission set BY NAME for an
+// UNSCOPED Set-Cookie — one with no Domain= of its own to be judged on. Since
+// owner ruling KA-7 admitSetCookie also admits an unscoped header under any
+// other name when it comes from an origin www.youtube.com is sent the cookies
+// of and states Path=/ (wwwYouTubeRow); this set is what is admitted without
+// that.
 //
 // The set is the union of the two name predicates the rest of this package
 // already uses for the Google platform: essentialYouTubeCookies (the names
@@ -147,7 +151,11 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //     declared origin, which resolveRowUpdate rule 2, sameCookiePlatform and the
 //     insertion loop each enforce downstream. This is the newly-reachable surface,
 //     so it is also the narrow one: admitted only under a name the jar actually
-//     tracks (trackedCookieName), which keeps an unscoped foo=bar out of the file.
+//     tracks (trackedCookieName), which keeps an unscoped foo=bar out of the
+//     file — unless it states Path=/ and the origin is one www.youtube.com is
+//     sent the cookies of (owner ruling KA-7, wwwYouTubeRow): yt-dlp's jar
+//     keeps that cookie and sends it on every youtube.com request, so the file
+//     keeps it too.
 //
 // Why none of this widens what a hostile header can reach:
 //
@@ -310,7 +318,9 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		maxAge     int64
 		hasMaxAge  bool
 		httpOnly   bool
+		secure     bool
 		domainAttr string
+		pathAttr   string
 	)
 	// Every attribute is read to the end of the header. The old loop broke
 	// out early on Max-Age<=0, which threw away the Domain= that usually
@@ -344,8 +354,13 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 			// one wins is map-iteration order. CPython normalizes the same
 			// way (_normalized_cookie_tuples: `if k == "domain": v = v.lower()`).
 			domainAttr = strings.ToLower(strings.TrimSpace(dom))
+		case strings.HasPrefix(trimmed, "path="):
+			_, p, _ := strings.Cut(part, "=")
+			pathAttr = strings.TrimSpace(p)
 		case trimmed == "httponly":
 			httpOnly = true
+		case trimmed == "secure":
+			secure = true
 		}
 	}
 
@@ -413,8 +428,11 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		if p == "" || p != origin.platform() {
 			return cookieUpdateKey{}, cookieUpdate{}, false
 		}
-	} else if !trackedCookieName(name, origin) {
-		// Step 3.
+	} else if !trackedCookieName(name, origin) && !wwwYouTubeRow(name, string(origin), pathAttr) {
+		// Step 3. Since owner ruling KA-7 an unscoped header from an origin
+		// www.youtube.com is sent the cookies of is also admitted under any
+		// name, when it states Path=/ (wwwYouTubeRow, the rule Load keeps
+		// the row by once it is written).
 		return cookieUpdateKey{}, cookieUpdate{}, false
 	}
 
@@ -422,7 +440,9 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		Value:    value,
 		Expiry:   expiry,
 		HTTPOnly: httpOnly,
+		Secure:   secure,
 		Delete:   deleteCookie,
+		Path:     pathAttr,
 	}, true
 }
 
@@ -576,7 +596,7 @@ func rewriteCookieRows(data []byte, logger interface {
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
 				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
-				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok {
+				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok && !narrowerPathScopeRow(cookieName, rowDomain, parts[2]) {
 					handled[key] = true
 					// essentialYouTubeCookies is a set of NAMES, and several of
 					// them (PREF, CONSENT, YSC, LOGIN_INFO, the rotating
@@ -832,8 +852,13 @@ func rewriteCookieRows(data []byte, logger interface {
 		if strings.HasPrefix(domain, ".") {
 			subdomains = "TRUE"
 		}
+		// Secure when the Set-Cookie said so, as yt-dlp's jar records it and
+		// writes it back (plain SIDCC is sent Secure and has no prefix to say
+		// so), and always for a __Secure- name, which is the rule this line
+		// had before the attribute was read. No reader in this package uses
+		// the field; yt-dlp or a browser reading the file back does.
 		secure := "FALSE"
-		if strings.HasPrefix(name, "__Secure-") {
+		if cu.Secure || strings.HasPrefix(name, "__Secure-") {
 			secure = "TRUE"
 		}
 		// An HttpOnly cookie is written as a "#HttpOnly_"-prefixed row — the
@@ -923,9 +948,18 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	//    and, the day a second caller exists, an unscoped deletion in a
 	//    google.com reply reaching .youtube.com. An undeclared origin covers
 	//    nothing, so the rule simply does not fire.
+	//
+	//    Under a name the jar keeps only for a row's scope (owner ruling KA-7)
+	//    it reaches only a row www.youtube.com is sent. The update was admitted
+	//    as a cookie of that scope; written into a music.youtube.com row of the
+	//    name it was counted as handled, no .youtube.com row was made, Load does
+	//    not keep the music row under such a name, and the cookie was never
+	//    sent, with the music row's own value lost. Left alone, the row keeps
+	//    its value and the insertion loop adds the .youtube.com row. The names
+	//    the jar keeps by name are matched as they always were.
 	if origin.covers(rowDomain) {
 		for _, k := range candidates {
-			if k.Domain == "" {
+			if k.Domain == "" && !(scopeKeptName(k.Name) && crossesConsentSides(k, rowDomain, origin)) {
 				return k, updates[k], true
 			}
 		}
@@ -956,12 +990,45 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	return cookieUpdateKey{}, cookieUpdate{}, false
 }
 
+// narrowerPathScopeRow reports whether a file row is one no update may be
+// written into: a YouTube or Google row on a path other than "/" under a name
+// the jar keeps only for a row's scope (neither essential nor a google.com
+// auth name; owner ruling KA-7).
+//
+// An update under such a name was admitted because it states Path=/
+// (wwwYouTubeRow), and a row is matched by name and domain, never by path.
+// So when the file held only a /feed row of the name (an import writes every
+// row), the reply's value was written into that row and counted as handled:
+// no "/" row was made, Load does not keep the /feed row, and the cookie
+// yt-dlp sends on every youtube.com request was never sent, with the /feed
+// row's own value lost. Left alone, the row keeps its value and the insertion
+// loop adds the "/" row.
+//
+// The names the jar keeps by name are matched as they always were, whatever
+// the row's path.
+func narrowerPathScopeRow(name, rowDomain, rowPath string) bool {
+	return strings.TrimSpace(rowPath) != "/" && cookiePlatformOf(rowDomain) == "google" && scopeKeptName(name)
+}
+
+// scopeKeptName reports whether name is one the YouTube jar keeps only for
+// the scope of its row (owner ruling KA-7): neither an essential name nor a
+// google.com auth name.
+func scopeKeptName(name string) bool {
+	return !essentialYouTubeCookies[name] && !isGoogleOnlyAuthName(name)
+}
+
 // crossesConsentSides reports whether update k, a youtube-only essential name,
 // would refresh a row on the other side of www.youtube.com's read
 // (sentToWWWYouTube) from its own — an unscoped update's side being its
 // declared origin's. Always false for every other name.
+//
+// A name the jar keeps only from a row www.youtube.com is sent (owner ruling
+// KA-7: one that is neither essential nor a google.com auth name, plain SIDCC
+// for one) stays on its side the same way. google.com sets a cookie of its
+// own under several of those names, with another value, and YouTube's
+// renewal must not be written over it.
 func crossesConsentSides(k cookieUpdateKey, rowDomain string, origin cookieOrigin) bool {
-	if !youtubeOnlyEssentialCookies[k.Name] {
+	if !youtubeOnlyEssentialCookies[k.Name] && (essentialYouTubeCookies[k.Name] || isGoogleOnlyAuthName(k.Name)) {
 		return false
 	}
 	updateDomain := k.Domain

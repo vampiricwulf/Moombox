@@ -61,6 +61,11 @@ const (
 // scoped to google.com, or expired, is not the jar's, and is left off the
 // header — so CAI and a fresh PREF take their places, as upstream's would.
 //
+// The rows the jar keeps only because www.youtube.com is sent them (owner
+// ruling KA-7, wwwYouTubeRow) follow the rest in a block of their own, an
+// expired one left out, exactly as GetCookieHeader orders and sends them
+// (youTubeHeaderLocked).
+//
 // One read lock over the whole build, so the auth verdict and the cookies
 // emitted are the same jar contents.
 func (j *CookieJar) YouTubePageCookieHeader() string {
@@ -68,14 +73,24 @@ func (j *CookieJar) YouTubePageCookieHeader() string {
 	defer j.mu.RUnlock()
 	now := time.Now().Unix()
 	pairs := make(map[string]string, len(j.youtube)+2)
+	scoped := make(map[string]string)
 	for name, e := range j.youtube {
+		if !namedYouTubeRow(name, e.domain) {
+			if !e.expiredAt(now) {
+				scoped[name] = e.value
+			}
+			continue
+		}
 		if pageCookieNames[name] && !youtubeSees(e, now) {
 			continue
 		}
 		pairs[name] = e.value
 	}
 	applyPageCookies(pairs, j.hasYouTubeAuthLocked())
-	return joinCookiePairs(pairs)
+	if len(scoped) == 0 {
+		return joinCookiePairs(pairs)
+	}
+	return joinCookiePairs(pairs) + "; " + joinCookiePairs(scoped)
 }
 
 // YouTubeConsentCookieHeader is the consent and language cookies alone — SOCS

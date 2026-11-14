@@ -16,8 +16,10 @@ package cookies
 //
 //   - only a reply from youtube.com or a subdomain of it, over https, with a
 //     2xx status, to a request that carried the session the jar holds now;
-//   - only a name the jar tracks for YouTube (trackedCookieName), with a
-//     value;
+//   - only a cookie the jar keeps for YouTube, with a value: a name it
+//     tracks (trackedCookieName), or any name scoped where www.youtube.com
+//     is sent it with Path=/ (wwwYouTubeRow, owner ruling KA-7; plain SIDCC
+//     is one);
 //   - never from a reply whose caller read it as signed out.
 //
 // A deletion or an empty value is never applied. For an auth cookie it is
@@ -368,7 +370,7 @@ func classifyYouTubeSetCookies(setCookies []string) (updates map[cookieUpdateKey
 	updates = make(map[cookieUpdateKey]cookieUpdate)
 	for _, sc := range setCookies {
 		key, cu, ok := admitSetCookie(sc, originYouTube)
-		if !ok || !renewableCookie(key) {
+		if !ok || !renewableCookie(key, cu) {
 			continue
 		}
 		if cu.Delete || cu.Value == "" {
@@ -389,17 +391,24 @@ func classifyYouTubeSetCookies(setCookies []string) (updates map[cookieUpdateKey
 }
 
 // renewableCookie reports whether a Set-Cookie admitSetCookie let through is
-// one the jar tracks for YouTube. An unscoped header already passed
-// trackedCookieName; a scoped one is held to the same names here, with the
-// youtube-only names (SOCS) kept to a domain www.youtube.com is sent.
-func renewableCookie(key cookieUpdateKey) bool {
+// one the jar keeps for YouTube. An unscoped header already passed
+// admitSetCookie's own name and scope rule; a scoped one is held to the same
+// names here, with the youtube-only names (SOCS) kept to a domain
+// www.youtube.com is sent.
+//
+// Since owner ruling KA-7 a scoped header is also kept under any other name
+// when its domain is one www.youtube.com is sent and it states Path=/
+// (wwwYouTubeRow, the rule Load keeps the row by once it is written). Plain
+// SIDCC, which YouTube renews on every page reply, is kept this way.
+func renewableCookie(key cookieUpdateKey, cu cookieUpdate) bool {
 	if key.Domain == "" {
 		return true
 	}
 	if youtubeOnlyEssentialCookies[key.Name] {
 		return sentToWWWYouTube(key.Domain)
 	}
-	return essentialYouTubeCookies[key.Name] || isGoogleOnlyAuthName(key.Name)
+	return essentialYouTubeCookies[key.Name] || isGoogleOnlyAuthName(key.Name) ||
+		wwwYouTubeRow(key.Name, key.Domain, cu.Path)
 }
 
 // youTubeSessionKeyOfHeader is CookieJar.youTubeSessionKey for a Cookie
@@ -492,15 +501,24 @@ func (j *CookieJar) noteSignedOutReplyLocked(reply YouTubeReply) {
 
 // changedRenewals returns the updates that differ from what the jar holds:
 // another value, or the same value with an expiry at least renewalExpirySlack
-// later. It reads the jar's memory only, so a reply that re-sends what the
+// later, or the same value with a live expiry when the one the jar holds has
+// run out. It reads the jar's memory only, so a reply that re-sends what the
 // jar already has costs no file read.
+//
+// The last case is for a short-lived cookie YouTube sets again under the same
+// value (GPS=1 for half an hour is the shape). The header leaves out an
+// expired row kept only for its scope, so without it the cookie stopped being
+// sent at its first expiry although YouTube had just set it again, which
+// yt-dlp's jar does send (owner ruling KA-7).
 func (j *CookieJar) changedRenewals(updates map[cookieUpdateKey]cookieUpdate) map[cookieUpdateKey]cookieUpdate {
 	changed := make(map[cookieUpdateKey]cookieUpdate, len(updates))
+	now := time.Now().Unix()
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for key, cu := range updates {
 		have, ok := j.youtube[key.Name]
-		same := ok && have.value == cu.Value &&
+		revived := ok && have.expiredAt(now) && (cu.Expiry == 0 || cu.Expiry > now)
+		same := ok && !revived && have.value == cu.Value &&
 			(key.Domain == "" || sameCookieScope(key.Domain, have.domain)) &&
 			cu.Expiry-have.expiry < int64(renewalExpirySlack/time.Second)
 		if !same {
