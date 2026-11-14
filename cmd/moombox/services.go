@@ -1421,9 +1421,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// again" (status_nudge.go).
 		s.nudgeDashboardStatus()
 	}
-	// The re-login flag is part of the same badge and has writers the auth
-	// check never sees (a failed recovery raises it, an import lowers it).
-	autoCookieSvc.OnReloginChange = s.nudgeDashboardStatus
+	// The re-login flag is part of the same badge in both UIs and has writers
+	// the auth check never sees (a failed recovery raises it, an import lowers
+	// it).
+	autoCookieSvc.OnReloginChange = s.reloginChanged
 
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms).

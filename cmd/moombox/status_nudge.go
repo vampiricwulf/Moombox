@@ -22,6 +22,18 @@ func (s *runState) nudgeDashboardStatus() {
 	s.wsHub.Broadcast(statusChangedFrame, nil)
 }
 
+// reloginChanged tells both UIs that a re-login flag was raised or lowered
+// (AutoCookieService.OnReloginChange). The flag is laid over the cookie badge
+// in each, and a change to it need not come with an auth change: a refresh
+// that fails verification on a platform that was already signed out raises it
+// and the re-check that follows finds nothing different. The dashboard is
+// nudged to read its status again; the TUI's badges are sent again, which
+// does not block and is a no-op without a TUI.
+func (s *runState) reloginChanged() {
+	s.nudgeDashboardStatus()
+	s.resendTUICookieStatus()
+}
+
 // wireSidecarStatusNudge nudges the dashboards on every sidecar health
 // publish and returns the unsubscribe. /api/status serves the health's
 // healthy, reason and restarts, and each publish changes one of them.

@@ -5,9 +5,11 @@ import (
 	"go/parser"
 	"go/token"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -37,7 +39,7 @@ func TestStatusChangesNudgeTheDashboard(t *testing.T) {
 	}
 
 	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), sweepTestLogger{})
-	svc.OnReloginChange = s.nudgeDashboardStatus
+	svc.OnReloginChange = s.reloginChanged
 	svc.FlagManualRelogin("youtube")
 	wantNudge("a re-login flag was raised")
 
@@ -47,6 +49,55 @@ func TestStatusChangesNudgeTheDashboard(t *testing.T) {
 	wantNudge("the sidecar went down")
 	sidecar.PublishHealth(sidecar.Health{Healthy: true, Restarts: 1})
 	wantNudge("the sidecar came back")
+}
+
+// The TUI's badge carries the re-login flag too, and the flag can change with
+// the auth status unchanged: the hook sends the TUI's cookie status again.
+// Before this only the dashboard heard, and the TUI kept the plain badge
+// until some unrelated auth transition.
+//
+// Mutant: reloginChanged without resendTUICookieStatus.
+func TestReloginFlagChangeReachesTheTUI(t *testing.T) {
+	svc := cookies.NewAutoCookieService(t.TempDir(), "", cookies.NewCookieJar(), sweepTestLogger{})
+	s := &runState{
+		autoCookieSvc: svc,
+		cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, sweepTestLogger{}),
+	}
+	// Signed out and checked, before and after: no auth transition happens.
+	auth := cookies.AuthStatus{Checked: true}
+	ch := make(chan tui.CookieStatusMsg, 1)
+	send := newTUICookieStatusSender(
+		func() cookies.AuthStatus { return auth },
+		func() map[string]bool { return svc.ReloginStatus() },
+		func() (bool, bool) { return true, true },
+		ch,
+	)
+	tuiFn := func(cookies.AuthStatus) { send(auth) }
+	s.authChangeTUI.Store(&tuiFn)
+	svc.OnReloginChange = s.reloginChanged
+
+	svc.FlagManualRelogin("youtube")
+	select {
+	case msg := <-ch:
+		if msg.YT != tui.CookieStatusRelogin {
+			t.Errorf("YouTube badge = %v after the flag was raised, want the re-login badge", msg.YT)
+		}
+		if msg.TW == tui.CookieStatusRelogin {
+			t.Error("Twitch badge shows re-login; only YouTube's flag was raised")
+		}
+	default:
+		t.Fatal("no cookie status reached the TUI when the re-login flag was raised")
+	}
+
+	svc.ClearManualRelogin("youtube")
+	select {
+	case msg := <-ch:
+		if msg.YT == tui.CookieStatusRelogin {
+			t.Error("YouTube badge still shows re-login after the flag was lowered")
+		}
+	default:
+		t.Fatal("no cookie status reached the TUI when the re-login flag was lowered")
+	}
 }
 
 // The three sources are wired where no test can drive them (initServices and
@@ -71,7 +122,7 @@ func TestStatusNudgeIsWiredToItsThreeSources(t *testing.T) {
 		if selectorIs(as.Lhs[0], "cookieRefresh", "OnAuthChange") && hasCallTo(as.Rhs[0], "s", "nudgeDashboardStatus") {
 			authChange = true
 		}
-		if selectorIs(as.Lhs[0], "autoCookieSvc", "OnReloginChange") && selectorIs(as.Rhs[0], "s", "nudgeDashboardStatus") {
+		if selectorIs(as.Lhs[0], "autoCookieSvc", "OnReloginChange") && selectorIs(as.Rhs[0], "s", "reloginChanged") {
 			relogin = true
 		}
 		return true
@@ -80,7 +131,7 @@ func TestStatusNudgeIsWiredToItsThreeSources(t *testing.T) {
 		t.Error("cookieRefresh.OnAuthChange does not call s.nudgeDashboardStatus — an auth change reaches the TUI only")
 	}
 	if !relogin {
-		t.Error("autoCookieSvc.OnReloginChange is not s.nudgeDashboardStatus — a raised or lowered re-login flag reaches no open dashboard")
+		t.Error("autoCookieSvc.OnReloginChange is not s.reloginChanged — a raised or lowered re-login flag reaches neither UI")
 	}
 
 	mainFile, err := parser.ParseFile(fset, "main.go", nil, 0)
