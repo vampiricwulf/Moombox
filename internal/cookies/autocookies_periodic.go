@@ -311,6 +311,7 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 		defer ticker.Stop()
 
 		s.visit = dailyVisit{started: time.Now(), jitter: rand.N(dailyVisitJitterMax)}
+		s.publishVisit()
 		daily := time.NewTicker(dailyVisitCheckEvery)
 		defer daily.Stop()
 

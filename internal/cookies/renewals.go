@@ -153,6 +153,8 @@ type renewalState struct {
 	// lastFlushWarn is when a failed write of cookies.txt was last logged at
 	// Warn. The write is retried every minute; the Warn is not.
 	lastFlushWarn time.Time
+	// lastAccepted is when a reply's renewal was last kept.
+	lastAccepted time.Time
 }
 
 // discardRenewalLogger is the logger a jar with none set logs to.
@@ -400,6 +402,7 @@ func (j *CookieJar) acceptRenewalsLocked(updates map[cookieUpdateKey]cookieUpdat
 	j.loadedMemo = false
 	j.mu.Unlock()
 
+	r.lastAccepted = time.Now()
 	j.noteEndpointNamesLocked(endpoint, client, names)
 	j.scheduleFlushLocked()
 }
@@ -589,4 +592,19 @@ func (j *CookieJar) HoldRenewalFlush() (release func()) {
 			j.scheduleFlushLocked()
 		})
 	}
+}
+
+// LastRenewalAt is when a YouTube reply last renewed a session cookie the jar
+// kept, in this process. nil when none has, and on a nil jar.
+func (j *CookieJar) LastRenewalAt() *time.Time {
+	if j == nil {
+		return nil
+	}
+	j.renew.mu.Lock()
+	defer j.renew.mu.Unlock()
+	if j.renew.lastAccepted.IsZero() {
+		return nil
+	}
+	t := j.renew.lastAccepted.UTC()
+	return &t
 }

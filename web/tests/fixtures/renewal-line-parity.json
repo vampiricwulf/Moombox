@@ -1,0 +1,39 @@
+{
+  "comment": "One line, two languages: Go cookies.RenewalLine and utils.js renewalLine (owner ruling K5). `status` holds the renewal keys of GET /api/cookies/auto-status: names and times only, never a cookie value. `now` is the reader's clock. A jsOnly row is a payload Go cannot produce.",
+  "cases": [
+    { "name": "nothing to say", "now": "2026-11-13T12:00:00Z", "status": {}, "line": "" },
+    { "name": "a reply renewed three minutes ago", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "2026-11-13T11:56:30Z" }, "line": "Renewal: YouTube replies renewed cookies 3 min ago" },
+    { "name": "a reply seconds ago", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "2026-11-13T11:59:40Z" }, "line": "Renewal: YouTube replies renewed cookies under a minute ago" },
+    { "name": "the reader's clock is behind the server's", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "2026-11-13T12:02:00Z" }, "line": "Renewal: YouTube replies renewed cookies under a minute ago" },
+    { "name": "a stamped pass that renewed two groups and left one old", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T10:00:00Z", "stamped": true, "groups": [
+        { "group": "sid", "renewed": ["HSID", "SID"], "unchanged": ["SAPISID"], "unknown": [], "renewedAt": "2026-11-13T10:00:03Z" },
+        { "group": "sidcc", "renewed": ["SIDCC"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-13T10:00:03Z" },
+        { "group": "psidts", "renewed": [], "unchanged": ["__Secure-1PSIDTS", "__Secure-3PSIDTS"], "unknown": [], "renewedAt": "2026-11-10T09:00:00Z" },
+        { "group": "google_account", "renewed": [], "unchanged": ["LSID"], "unknown": [], "renewedAt": "2026-11-12T10:00:00Z" } ] } },
+      "line": "Renewal: browser pass 2 h ago renewed SID family, SIDCC (oldest: PSIDTS pair, 3 d ago)" },
+    { "name": "a stamped pass that renewed every group", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T11:30:00Z", "stamped": true, "groups": [
+        { "group": "login_info", "renewed": ["LOGIN_INFO"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-13T11:30:02Z" },
+        { "group": "twitch", "renewed": ["auth-token"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-13T11:30:09Z" } ] } },
+      "line": "Renewal: browser pass 30 min ago renewed LOGIN_INFO, Twitch auth-token" },
+    { "name": "a stamped pass that renewed nothing", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T11:00:00Z", "stamped": true, "groups": [
+        { "group": "sid", "renewed": [], "unchanged": ["SID"], "unknown": [], "renewedAt": "2026-11-11T11:00:00Z" } ] } },
+      "line": "Renewal: browser pass 1 h ago renewed nothing (oldest: SID family, 2 d ago)" },
+    { "name": "a cookie store with no write stamp", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T07:00:00Z", "stamped": false, "groups": [
+        { "group": "sid", "renewed": [], "unchanged": [], "unknown": ["SID"] } ] } },
+      "line": "Renewal: browser pass 5 h ago, what it renewed is unknown" },
+    { "name": "one row stamped, another group not", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T11:00:00Z", "stamped": true, "groups": [
+        { "group": "sid", "renewed": [], "unchanged": [], "unknown": ["SID"] },
+        { "group": "sidcc", "renewed": ["SIDCC"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-13T11:00:01Z" } ] } },
+      "line": "Renewal: browser pass 1 h ago renewed SIDCC" },
+    { "name": "the next visit is hours away", "now": "2026-11-13T12:00:00Z", "status": { "nextVisitDue": "2026-11-14T09:30:00Z" }, "line": "Renewal: next daily visit in 21 h" },
+    { "name": "the next visit is days away", "now": "2026-11-13T12:00:00Z", "status": { "nextVisitDue": "2026-11-15T12:00:00Z" }, "line": "Renewal: next daily visit in 2 d" },
+    { "name": "the visit is due", "now": "2026-11-13T12:00:00Z", "status": { "nextVisitDue": "2026-11-13T11:00:00Z" }, "line": "Renewal: daily visit due" },
+    { "name": "all three", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "2026-11-13T11:15:00Z", "nextVisitDue": "2026-11-13T12:45:00Z", "renewalCensus": { "at": "2026-11-12T12:40:00Z", "stamped": true, "groups": [
+        { "group": "sidcc", "renewed": ["SIDCC"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-12T12:40:02Z" } ] } },
+      "line": "Renewal: YouTube replies renewed cookies 45 min ago; browser pass 23 h ago renewed SIDCC; next daily visit in 45 min" },
+    { "name": "times that do not parse", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "soon", "nextVisitDue": "", "renewalCensus": { "at": "never", "stamped": true, "groups": [] } }, "line": "", "jsOnly": true },
+    { "name": "a group this build does not know", "now": "2026-11-13T12:00:00Z", "status": { "renewalCensus": { "at": "2026-11-13T11:00:00Z", "stamped": true, "groups": [
+        { "group": "passkey", "renewed": ["X"], "unchanged": [], "unknown": [], "renewedAt": "2026-11-13T11:00:01Z" } ] } },
+      "line": "Renewal: browser pass 1 h ago renewed passkey" }
+  ]
+}

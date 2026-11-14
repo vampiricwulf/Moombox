@@ -561,6 +561,7 @@ func (s *AutoCookieService) importProfileCookies() (string, error) {
 
 	netscape, stats, err := readFirefoxCookies(s.profileDir)
 	s.logFirefoxReadStats(stats)
+	s.keepPassStamps(stats)
 	if err != nil {
 		return "", err
 	}

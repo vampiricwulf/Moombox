@@ -234,6 +234,12 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// its rollback. See CookieJar.HoldRenewalFlush.
 	defer s.jar.HoldRenewalFlush()()
 
+	// passStart is what the renewal census measures against: a profile row
+	// written at or after it was renewed by this pass. Any stamps an earlier,
+	// aborted pass left behind are dropped here.
+	passStart := time.Now()
+	s.takePassStamps()
+
 	var netscapeCookies string
 	var err error
 	// browserActed answers the question this function used to get wrong: did
@@ -418,6 +424,13 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	if err != nil {
 		s.setError(err.Error())
 		return refreshAborted(), err
+	}
+
+	// What the browser renewed, by name (owner ruling K5): one Info line per
+	// pass, and the same facts on the status. A pass that read nothing out of
+	// the browser has no census.
+	if netscapeCookies != "" {
+		s.recordCensus(passStart, netscapeCookies)
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity.

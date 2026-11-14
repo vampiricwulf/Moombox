@@ -112,6 +112,7 @@ func (s *AutoCookieService) runDailyVisitStep(ctx context.Context, interval time
 // only a renewing pass that verified moves, so a visit that launched a browser
 // and came back with the same cookies is retried like one that failed.
 func (s *AutoCookieService) dailyVisitStep(ctx context.Context, now func() time.Time, pass func(context.Context) bool) {
+	defer s.publishVisit()
 	v := &s.visit
 	t := now()
 	last := s.lastRefreshTime()
@@ -169,4 +170,11 @@ func (s *AutoCookieService) lastRefreshTime() *time.Time {
 	}
 	t := *s.lastRefresh
 	return &t
+}
+
+// publishVisit copies the loop's schedule to where the status reads it.
+func (s *AutoCookieService) publishVisit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.visitPub = s.visit
 }

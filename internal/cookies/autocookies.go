@@ -475,6 +475,16 @@ type AutoCookieService struct {
 	// dailyVisitStep directly, so it takes no lock.
 	visit dailyVisit
 
+	// visitPub is a copy of visit the loop publishes under mu after each check,
+	// so the status can say when the next daily visit is due.
+	visitPub dailyVisit
+
+	// passRead is the profile read of the pass in flight and lastCensus the
+	// census of the last browser pass (renewal_census.go). Both under mu,
+	// neither persisted.
+	passRead   passCensus
+	lastCensus *RenewalCensus
+
 	// OnPassCompleted is called after an AUTOMATIC refresh pass that actually
 	// ran, so whoever owns the in-process auth check can re-read the file this
 	// pass may have rewritten.
