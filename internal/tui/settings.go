@@ -200,7 +200,7 @@ var sections = []settingsSection{
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data (requires restart)", nil},
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
 			{"browser_type", "Browser type", fieldText, nil, "firefox/chrome/brave/edge/etc. (required if path set)", nil},
-			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h) (requires restart)", nil},
+			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes between browser refreshes while a job is active (default: 360 = 6h); with no job active, one runs once the cookies have gone a day without a refresh (requires restart)", nil},
 			{"dpapi_fallback", "DPAPI fallback (Windows)", fieldToggle, nil, "fallback: read REAL browser cookies via DPAPI when CDP refresh fails (privacy: reads your signed-in session)", nil},
 		},
 	},
