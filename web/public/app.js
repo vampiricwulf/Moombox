@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { cookieRetry, cookieRetryText, COOKIE_RETRY_WINDOW_MS, formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
+import { cookieRetry, cookieRetryText, COOKIE_RETRY_WINDOW_MS, formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieFlickering, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -1241,7 +1241,10 @@ export class MoomboxApp {
       // of reach on a phone. The pill's own text says when the first check is
       // pending (cookieIndicatorText).
       el.setAttribute("aria-label", title);
-      el.textContent = cookieIndicatorText(platform, status);
+      // "YT~" while the session flickers (cookieFlickering): signed in by the
+      // API check, pages intermittently signed out. Text, like the pending
+      // ellipsis, because a phone has no hover.
+      el.textContent = cookieIndicatorText(platform, status, cookieFlickering(status, relogin, parked[platform]));
     }
 
     // The first cookie check has not answered: ask again shortly, until it has.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/tui"
 )
 
 // apiCheckCause is the cause of a tier-1 recovery: the API check failed, or
@@ -111,5 +112,42 @@ func TestPageTriggeredPassArmsTheSignedOutWarn(t *testing.T) {
 		if got := linesContaining(s.log, stillOut); got != tc.want {
 			t.Errorf("%s: %d lines for two signed-out pages after the pass, want %d: %q", tc.name, got, tc.want, s.log.GetRecentLines())
 		}
+	}
+}
+
+// TestTUICookieStatusCarriesTheSessionHealth: the one sender of cookie status
+// to the TUI lays the derived health (cookies.SessionHealthOf, the predicate
+// the dashboard mirrors) and each back-off window's end on its message.
+//
+// Mutant: drop the health lines from newTUICookieStatusSender (the bar never
+// shows a flicker).
+func TestTUICookieStatusCarriesTheSessionHealth(t *testing.T) {
+	next := time.Now().Add(time.Hour)
+	auth := cookies.AuthStatus{
+		Checked:              true,
+		YouTubeAuthenticated: true,
+		HasYouTubeCookies:    true,
+		YouTubeVerification:  cookies.RefreshOK,
+		YouTubePages:         cookies.PageHealth{LastSignedOut: time.Now().Add(-time.Hour), Attempts: 2, NextAttempt: next},
+		TwitchAuthenticated:  true,
+		HasTwitchCookies:     true,
+		TwitchVerification:   cookies.RefreshOK,
+	}
+	ch := make(chan tui.CookieStatusMsg, 1)
+	send := newTUICookieStatusSender(
+		func() cookies.AuthStatus { return auth },
+		func() map[string]bool { return nil },
+		func() (bool, bool) { return true, true },
+		ch,
+	)
+	msg := send(auth)
+	if msg.YTHealth != cookies.SessionFlickering || !msg.YTNextTry.Equal(next) {
+		t.Errorf("YouTube: health %q next %v, want flickering and %v", msg.YTHealth, msg.YTNextTry, next)
+	}
+	if msg.TWHealth != cookies.SessionOK || !msg.TWNextTry.IsZero() {
+		t.Errorf("Twitch: health %q next %v, want ok and no time", msg.TWHealth, msg.TWNextTry)
+	}
+	if queued := <-ch; queued != msg {
+		t.Errorf("the queued message differs from the one returned: %+v", queued)
 	}
 }

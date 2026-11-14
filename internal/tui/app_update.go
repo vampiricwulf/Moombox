@@ -371,6 +371,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CookieStatusMsg:
 		a.SetCookieStatus(msg.YT, msg.TW, msg.YTActive, msg.TWActive)
+		a.SetSessionHealth(msg.YTHealth, msg.TWHealth, msg.YTNextTry, msg.TWNextTry)
 		return a, a.listenForUpdates()
 
 	case DiskStatusMsg:

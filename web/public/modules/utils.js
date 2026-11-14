@@ -602,9 +602,12 @@ export function parkedCookiePlatforms(jobs) {
  *
  * key at all and both titles degrade to exactly today's sentence.
  */
-export function cookieIndicatorState(platform, status, reloginRequired, parked) {
+export function cookieIndicatorState(platform, status, reloginRequired, parked, nowMs = Date.now()) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
   const state = cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked);
+  if (cookieFlickering(status, reloginRequired, parked, nowMs)) {
+    return { className: "indicator-warn", title: `${meta.name}: ${sessionHealthText(status, nowMs)}` };
+  }
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
   switch (state) {
@@ -698,9 +701,77 @@ export function cookieCheckPending(...statuses) {
  * @param {object|null|undefined} status
  * @returns {string}
  */
-export function cookieIndicatorText(platform, status) {
+export function cookieIndicatorText(platform, status, flickering = false) {
   const code = COOKIE_INDICATOR_PLATFORMS[platform].code;
+  if (flickering) return `${code}~`;
   return cookieCheckState(status) === "checking" ? `${code}…` : code;
+}
+
+/**
+ * SESSION_QUIET_RESET_MS is how long after a page last rendered signed out the
+ * session still reads as flickering: Go's livenessQuietReset (24 h), which is
+ * also when the recovery back-off starts over.
+ */
+export const SESSION_QUIET_RESET_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * sessionHealth is the dashboard's twin of Go's cookies.SessionHealthOf (owner
+ * ruling K4), compared with it over
+ * web/tests/fixtures/session-health-parity.json. It is derived on every draw
+ * from the platform's status payload and never stored:
+ *
+ *   - "relogin": the API check concluded the stored cookies are refused.
+ *   - "flickering": a page rendered signed out less than 24 h ago and the API
+ *     check has not failed. Moombox keeps working and retries on its own
+ *     back-off; there is nothing for the operator to do.
+ *   - "ok": neither.
+ *
+ * `pageSignedOutAt` is an additive key: an older binary omits it and every
+ * session then reads "ok" or "relogin", as before.
+ * @param {object|null|undefined} status cookieStatus or twitchAuthStatus
+ * @param {number} nowMs
+ * @returns {"ok"|"flickering"|"relogin"}
+ */
+export function sessionHealth(status, nowMs) {
+  if (status?.found && status?.verification === "failed") return "relogin";
+  const signedOut = Date.parse(status?.pageSignedOutAt || "");
+  if (!Number.isNaN(signedOut) && nowMs - signedOut < SESSION_QUIET_RESET_MS) return "flickering";
+  return "ok";
+}
+
+/**
+ * cookieFlickering says the pill shows the flickering state: the badge would
+ * otherwise read healthy (COOKIE_BADGE_PRECEDENCE's "ok") and sessionHealth is
+ * "flickering". Every other badge state already says something the operator
+ * should act on or wait for, and keeps its own text.
+ * @returns {boolean}
+ */
+export function cookieFlickering(status, reloginRequired, parked, nowMs = Date.now()) {
+  return cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked) === "ok"
+    && sessionHealth(status, nowMs) === "flickering";
+}
+
+/**
+ * sessionHealthText is the sentence for the flickering state, with the time
+ * of the next automatic attempt (`nextRecoveryAt`, the end of the current
+ * back-off window). A signed-out page asks for the attempt, so once the
+ * window is over the next one comes with the next such page.
+ * @returns {string}
+ */
+export function sessionHealthText(status, nowMs) {
+  const next = Date.parse(status?.nextRecoveryAt || "");
+  const when = !Number.isNaN(next) && next > nowMs
+    ? `no automatic attempt before ${formatClockTime(next)}`
+    : "next automatic attempt when a page next renders signed out";
+  return `Signed in, but pages are intermittently signed out; ${when}`;
+}
+
+/**
+ * formatClockTime is a local wall-clock time, "14:05", for a timestamp in ms.
+ */
+export function formatClockTime(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /**

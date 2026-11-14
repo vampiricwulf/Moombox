@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, sessionHealth, cookieFlickering, formatClockTime } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
 
@@ -83,4 +83,49 @@ test("an unchecked status shows checking, never no-cookies or re-login", () => {
   // Once checked, the same payload reads as it always did.
   assert.deepEqual(yt({ ...unchecked, checked: true, verification: "failed" }), { className: "indicator-warn", title: "YouTube: No cookies" });
   assert.match(yt({ ...unchecked, checked: true }, true).title, /Re-login required/);
+});
+
+// Owner ruling K4: the session health (ok | flickering | relogin) is one
+// predicate in two languages. The Go half of this fixture is
+// internal/cookies TestSessionHealthParity.
+const HEALTH_PARITY = JSON.parse(readFileSync(new URL("./fixtures/session-health-parity.json", import.meta.url), "utf8"));
+
+test("sessionHealth matches Go over the fixture", () => {
+  assert.ok(HEALTH_PARITY.cases.length >= 10);
+  for (const c of HEALTH_PARITY.cases) {
+    assert.equal(sessionHealth(c.status, Date.parse(c.now)), c.health, c.name);
+  }
+});
+
+// The flickering state is text on the pill, not only a colour or a tooltip,
+// and it never replaces a badge that already asks for something.
+// Mutants: the flicker arm ahead of relogin/parked; the pill text left "YT".
+test("a flickering session is shown on a healthy badge only", () => {
+  const now = Date.parse("2026-11-13T12:00:00Z");
+  const next = "2026-11-13T13:20:00Z";
+  const flick = { checked: true, found: true, authenticated: true, verification: "ok", pageSignedOutAt: "2026-11-13T11:50:00Z", nextRecoveryAt: next };
+  const s = cookieIndicatorState("youtube", flick, false, false, now);
+  assert.equal(s.className, "indicator-warn");
+  assert.equal(s.title, `YouTube: Signed in, but pages are intermittently signed out; no automatic attempt before ${formatClockTime(Date.parse(next))}`);
+  assert.equal(cookieIndicatorText("youtube", flick, cookieFlickering(flick, false, false, now)), "YT~");
+  assert.equal(cookieIndicatorText("twitch", flick, cookieFlickering(flick, false, false, now)), "TW~");
+
+  // The window is over: the next signed-out page asks for the attempt.
+  const due = { ...flick, nextRecoveryAt: "2026-11-13T11:55:00Z" };
+  assert.match(cookieIndicatorState("youtube", due, false, false, now).title, /next automatic attempt when a page next renders signed out$/);
+
+  // Relogin and parked keep their own text and the plain code.
+  assert.match(cookieIndicatorState("youtube", flick, true, false, now).title, /Re-login required/);
+  assert.match(cookieIndicatorState("youtube", flick, false, true, now).title, /A download stopped/);
+  assert.equal(cookieFlickering(flick, true, false, now), false);
+  assert.equal(cookieFlickering(flick, false, true, now), false);
+  // A quiet day later the badge is plain green again with no new payload.
+  const later = now + 24 * 60 * 60 * 1000;
+  assert.deepEqual(cookieIndicatorState("youtube", flick, false, false, later), { className: "indicator-ok", title: "YouTube: Authenticated" });
+  assert.equal(cookieFlickering(flick, false, false, later), false);
+});
+
+test("formatClockTime is zero-padded local time", () => {
+  const d = new Date(2026, 10, 13, 4, 5);
+  assert.equal(formatClockTime(d.getTime()), "04:05");
 });

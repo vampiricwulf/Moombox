@@ -3,9 +3,11 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -96,8 +98,17 @@ type StatusBarModel struct {
 	width    int
 	ytCookie CookieStatus
 	twCookie CookieStatus
-	ytActive bool
-	twActive bool
+	// ytFlicker / twFlicker: the platform's session health is flickering
+	// (cookies.SessionHealthOf: signed in by the API check, a page rendered
+	// signed out in the last day). Drawn on an otherwise healthy badge only.
+	// ytNextTry / twNextTry are the end of the recovery back-off window as a
+	// local clock time, "" when no recovery has been decided.
+	ytFlicker bool
+	twFlicker bool
+	ytNextTry string
+	twNextTry string
+	ytActive  bool
+	twActive  bool
 	// Jobs list for detecting COOKIES? status (B1)
 	jobs []*database.Job
 	// Disk status
@@ -163,6 +174,19 @@ func (m *StatusBarModel) SetWidth(w int) {
 func (m *StatusBarModel) SetCookieStatus(yt, tw CookieStatus) {
 	m.ytCookie = yt
 	m.twCookie = tw
+}
+
+// SetSessionHealth sets each platform's derived session health and the end
+// of its recovery back-off window (zero for none).
+func (m *StatusBarModel) SetSessionHealth(yt, tw cookies.SessionHealth, ytNextTry, twNextTry time.Time) {
+	clock := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.Local().Format("15:04")
+	}
+	m.ytFlicker, m.ytNextTry = yt == cookies.SessionFlickering, clock(ytNextTry)
+	m.twFlicker, m.twNextTry = tw == cookies.SessionFlickering, clock(twNextTry)
 }
 
 // SetActivePlatforms sets which platform indicators are visible.
@@ -264,6 +288,10 @@ type statusBarKey struct {
 	width           int
 	ytCookie        CookieStatus
 	twCookie        CookieStatus
+	ytFlicker       bool
+	twFlicker       bool
+	ytNextTry       string
+	twNextTry       string
 	ytActive        bool
 	twActive        bool
 	counts          barJobCounts
@@ -287,6 +315,10 @@ func (m *StatusBarModel) statusBarKey() statusBarKey {
 		width:           m.width,
 		ytCookie:        m.ytCookie,
 		twCookie:        m.twCookie,
+		ytFlicker:       m.ytFlicker,
+		twFlicker:       m.twFlicker,
+		ytNextTry:       m.ytNextTry,
+		twNextTry:       m.twNextTry,
 		ytActive:        m.ytActive,
 		twActive:        m.twActive,
 		counts:          m.counts,
@@ -628,6 +660,26 @@ func cookieUnknownLabel(code string, t barTier) string {
 	return code + ": Unknown"
 }
 
+// cookieFlickerLabel words the badge of a platform that is signed in by the
+// API check while its pages intermittently render signed out (owner ruling
+// K4). The code plus "~", which no other badge carries, so the state reads
+// without colour; the two widest tiers add when the next automatic attempt
+// can come. Unlike the other healthy states it is kept at every tier, the compact
+// layout's status line included: it is the only place the TUI says it.
+func cookieFlickerLabel(code string, t barTier, nextTry string) string {
+	switch {
+	case t > tierCompact:
+		return code + "~"
+	case t == tierCompact && nextTry == "":
+		return code + "~"
+	case t == tierCompact:
+		return code + "~ retry " + nextTry
+	case nextTry == "":
+		return code + "~ pages flicker"
+	}
+	return code + "~ pages flicker, retry after " + nextTry
+}
+
 // cookieCheckingLabel words the badge of a platform whose first cookie check
 // has not answered yet. Abbreviates at tierTight like its siblings, to the
 // code plus an ellipsis, which no other badge carries.
@@ -897,7 +949,11 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 				parts = append(parts, statusBarYelStyle.Render("YT"))
 			}
 		case badgeOK:
-			if healthy {
+			if m.ytFlicker {
+				// Signed in, pages intermittently signed out. Nothing to act
+				// on, but kept at every tier: see cookieFlickerLabel.
+				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("YT", t, m.ytNextTry)))
+			} else if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("YT"))
 			}
 		default:
@@ -950,7 +1006,10 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("TW", t)))
 			}
 		case badgeOK:
-			if healthy {
+			if m.twFlicker {
+				// Same arm as YouTube's.
+				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("TW", t, m.twNextTry)))
+			} else if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("TW"))
 			}
 		default:
