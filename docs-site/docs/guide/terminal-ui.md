@@ -169,7 +169,8 @@ selection, so a batch action only acts on rows you can see.
 ### Batch selection
 
 With the Tasks panel focused, ++space++ ticks or unticks the row under the
-cursor. The status bar shows `N selected`. While any rows are ticked, the
+cursor, and ++ctrl+a++ ticks every row shown. The status bar shows
+`N selected`. While any rows are ticked, the
 batch-capable chords act on the ticked rows instead of the cursor row:
 
 `A R` (Resume), `A I` (Reinitialize), `A X` (Cancel), `A D` (Delete) and `A W` (Toggle Watched).

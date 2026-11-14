@@ -91,6 +91,7 @@ shortcuts.
 | ++home++ / ++end++ | First / last row. |
 | ++enter++ | On the `Archived (N)` divider: expand or collapse the archive. |
 | ++space++ | Tick or untick the row for batch actions. |
+| ++ctrl+a++ | Tick every row shown (the rows the current filter leaves). ++esc++ clears the ticks. |
 | `/` | Open the filter query box. |
 
 Inside the filter query box:

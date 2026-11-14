@@ -298,6 +298,7 @@ dashboard.
 | `disk_status` | `{free, total, usedPct, warnLevel}` | A disk-space reading |
 | `update_available` | Release info | A newer release is found |
 | `update_cleared` | `{tagName}` | The pending release was skipped or withdrawn |
+| `status_changed` | None (`null`) | Cookie authentication, a re-login flag or the BotGuard sidecar's health changed. Read `GET /api/status` again. |
 | `pong` | — | Answer to `ping` |
 
 ## Related
