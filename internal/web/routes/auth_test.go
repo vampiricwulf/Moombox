@@ -395,6 +395,28 @@ func TestAuthLogoutInvalidatesSession(t *testing.T) {
 	}
 }
 
+// A caller that holds no session and no client token (a local peer the
+// middleware waives, or a second logout) ends nothing, so no browser's
+// socket is dropped for it. Mutant: closing on every logout.
+func TestAuthLogoutWithNoCredentialClosesNoSockets(t *testing.T) {
+	f := newAuthFixture(t)
+
+	for _, stale := range []string{"", "not-a-live-session"} {
+		req := loopbackRequest("POST", "/api/auth/logout", nil)
+		if stale != "" {
+			req.AddCookie(&http.Cookie{Name: "moombox_session", Value: stale})
+		}
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("logout (session cookie %q): want 200, got %d", stale, rec.Code)
+		}
+	}
+	if f.socketCloses != 0 {
+		t.Errorf("authenticated sockets closed %d times by logouts that ended nothing, want 0", f.socketCloses)
+	}
+}
+
 // --- /api/auth/set-password ---
 
 func TestAuthSetPasswordRejectsNonLoopbackUnauthenticated(t *testing.T) {
