@@ -122,7 +122,7 @@ wait line on an `Upcoming` row in place of its usual *Last check: …* time.
 | `Waiting for first segment... (…)` / `Waiting for next segment... (…)` | The stream has not produced new data yet. |
 | `Connection lost - reconnecting... (…)` | A network hiccup during recording. |
 | `Rate-limited - backing off... (…)` | Segment requests are being throttled. |
-| `Segment fetch failing - retrying... (…)` | A segment keeps failing; it is retried. |
+| `Segment fetch failing - retrying... (…)` | A segment keeps failing, or the request for the next one gets no answer from YouTube; it is retried. |
 | `Verifying stream ended... (…)` | No new data; Moombox is checking whether the stream really ended. See [`downloader.maximum_timeout`](../configuration/downloader.md#downloadermaximum_timeout). |
 | `Stream interrupted - waiting for resume... (…)` | The YouTube broadcast was interrupted and may come back. See [`downloader.interruption_timeout`](../configuration/downloader.md#downloaderinterruption_timeout). |
 
