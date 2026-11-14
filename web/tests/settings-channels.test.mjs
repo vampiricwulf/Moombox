@@ -390,10 +390,13 @@ test("a channel with a platform the monitors know keeps its selector locked", { 
   assert.equal("platform" in post.body, false, "a YouTube channel stored without the key gained one");
 });
 
-// Saved without a choice — a rename of the disabled entry — the stored string
-// goes back as it was, which the server accepts on a disabled channel.
-// Mutant killed: writing whatever the selector holds (the string is lost).
-test("an unrecognised platform is kept while nothing valid is chosen", { skip }, async () => {
+// Saved without a choice, the stored string is posted as it was. The server
+// refuses that save ("platform must be youtube or twitch", saveChannel in
+// channel_routes.go), which is the prompt to choose; the dialog never turns
+// the string into a platform nobody picked.
+// Mutant killed: writing whatever the selector holds (an empty platform,
+// which the server reads as YouTube and accepts).
+test("with nothing valid chosen, an unrecognised platform is posted unchanged for the server to refuse", { skip }, async () => {
   const typo = { id: "UCabcdefghijklmnopqrstuv", enabled: false, platform: "twich" };
   const h = await openWith([structuredClone(typo)]);
   h.app.settings.editChannel(typo.id);
@@ -401,4 +404,17 @@ test("an unrecognised platform is kept while nothing valid is chosen", { skip },
   await h.app.settings.saveChannel();
   await h.flush();
   assert.equal(h.http.matching("/api/config/channels", "POST").at(-1)?.body?.platform, "twich");
+});
+
+// The list is where the operator finds the row the dialog's note is about.
+// Mutant killed: every platform that is not "twitch" tagged YouTube.
+test("the channel list tags a platform it does not recognise as unknown, not as YouTube", { skip }, async () => {
+  const h = await openWith([
+    { id: "UCabcdefghijklmnopqrstuv", name: "Typo", enabled: false, platform: "twich" },
+    { id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "Plain", enabled: true },
+    { id: "shroud", platform: "twitch", enabled: true },
+  ]);
+  h.app.settings.renderChannelsList();
+  const tags = [...h.el("channels-list").querySelectorAll(".channel-card-title sl-tag")].map((t) => t.textContent);
+  assert.deepEqual(tags, ["Unknown platform", "YouTube", "Twitch"]);
 });

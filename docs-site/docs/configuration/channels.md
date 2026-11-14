@@ -122,8 +122,9 @@ Edge cases:
 - Any other value (a typo such as `twich`) is not guessed at: the channel is
   loaded disabled and a warning in the log names it. Correct the platform and
   enable the channel again. You can do both in the file, in the TUI's channel
-  editor, or in the dashboard, where the Edit Channel dialog unlocks
-  **Platform** for such a channel and says the stored value is not recognised.
+  editor, or in the dashboard, where the channel list tags such a channel
+  **Unknown platform** and its Edit Channel dialog unlocks **Platform** and
+  says the stored value is not recognised.
 
 ```toml
 [[channels]]

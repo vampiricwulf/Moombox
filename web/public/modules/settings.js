@@ -1445,9 +1445,13 @@ export class SettingsController {
         (ch, index) => {
           const isTwitch = ch.platform === "twitch";
           const isEnabled = ch.enabled !== false;
-          const platformTag = isTwitch
-            ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
-            : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
+          // A stored platform that is neither is not tagged YouTube: the
+          // Edit dialog asks for it to be chosen, and this is the row.
+          const platformTag = !knownChannelPlatform(ch.platform)
+            ? '<sl-tag size="small" variant="warning">Unknown platform</sl-tag> '
+            : isTwitch
+              ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
+              : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
           return `
       <div class="channel-card${isEnabled ? "" : " channel-card--disabled"}" data-channel-id="${this.app.escapeHtml(ch.id)}" data-index="${index}" draggable="true">
         <div class="channel-card-header">
@@ -1847,7 +1851,8 @@ export class SettingsController {
       ...(isTwitch ? { platform: "twitch" } : {}),
       // A stored platform that is neither is replaced by the one chosen,
       // written out for YouTube too: the spread above would carry the typo
-      // back. While nothing valid is chosen, the stored string stays.
+      // back. While nothing valid is chosen, the stored string is posted as it
+      // is, and the server refuses it ("platform must be youtube or twitch").
       ...(existingChannel && !knownChannelPlatform(existingChannel.platform) && (platform === "youtube" || platform === "twitch")
         ? { platform }
         : {}),
