@@ -104,7 +104,7 @@ func TestGapFillPlanEndKnown(t *testing.T) {
 	}{
 		{"mux failed after a normal end", database.Job{Status: database.StatusError, StreamEndTime: "2026-10-01T13:00:00Z"}, true},
 		{"cut off mid-broadcast", database.Job{Status: database.StatusError}, false},
-		{"ended while down", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, StreamEndTime: "x"}, false},
+		{"ended while down", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, ParkReason: database.ParkReasonTwitchEndedOffline, StreamEndTime: "x"}, false},
 		{"cancelled", database.Job{Status: database.StatusCancelled, StreamEndTime: "x"}, false},
 		{"mux after a cancel failed", database.Job{Status: database.StatusError, ParkReason: database.ParkReasonMuxAfterCancel, StreamEndTime: "x"}, false},
 	} {

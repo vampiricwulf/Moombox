@@ -18,10 +18,11 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "exact flap signature is recoverable",
+			name: "the flap as its writer records it is recoverable",
 			job: &database.Job{
 				Status:         database.StatusError,
 				Error:          TwitchOfflineErrMsg,
+				ParkReason:     database.ParkReasonTwitchOffline,
 				LastVideoSeq:   nil,
 				AutoRetryCount: 0,
 			},
@@ -42,6 +43,7 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			job: &database.Job{
 				Status:         database.StatusFinished,
 				Error:          TwitchOfflineErrMsg,
+				ParkReason:     database.ParkReasonTwitchOffline,
 				LastVideoSeq:   nil,
 				AutoRetryCount: 0,
 			},
@@ -52,6 +54,7 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			job: &database.Job{
 				Status:         database.StatusError,
 				Error:          TwitchOfflineErrMsg,
+				ParkReason:     database.ParkReasonTwitchOffline,
 				LastVideoSeq:   intPtr(42),
 				AutoRetryCount: 0,
 			},
@@ -62,6 +65,7 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			job: &database.Job{
 				Status:         database.StatusError,
 				Error:          TwitchOfflineErrMsg,
+				ParkReason:     database.ParkReasonTwitchOffline,
 				LastVideoSeq:   nil,
 				AutoRetryCount: 2,
 			},
@@ -72,6 +76,7 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			job: &database.Job{
 				Status:         database.StatusError,
 				Error:          TwitchOfflineErrMsg,
+				ParkReason:     database.ParkReasonTwitchOffline,
 				LastVideoSeq:   nil,
 				AutoRetryCount: 1,
 			},
@@ -157,12 +162,13 @@ func TestTwitchAutoRetryPending(t *testing.T) {
 			job:  &database.Job{Status: database.StatusError, Error: database.LegacyTwitchOfflineError, ParkReason: database.ParkReasonTwitchEndedOffline},
 			want: false,
 		},
-		// The one-release fallback (legacyOfflineFlapRow): a row an earlier
-		// release wrote, the frozen text and no reason.
+		// The one-release text fallback is gone (R-I1): a row an earlier
+		// release wrote, the frozen text and no reason, is given its reason
+		// when the database is opened and is not read by its text here.
 		{
-			name: "legacy row: the frozen text with no reason is recoverable",
+			name: "the frozen text with no reason routes nothing",
 			job:  &database.Job{Status: database.StatusError, Error: database.LegacyTwitchOfflineError},
-			want: true,
+			want: false,
 		},
 		{
 			name: "the frozen text under another reason is that reason's row",
@@ -198,7 +204,7 @@ func TestPendingAutoAction(t *testing.T) {
 		{"end unconfirmed with the flap's text is still the mux's", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonTwitchEndUnconfirmed), AutoActionMux},
 		{"end unconfirmed on YouTube: no monitor takes it", &database.Job{Platform: "youtube", Status: database.StatusError, ParkReason: database.ParkReasonTwitchEndUnconfirmed}, AutoActionNone},
 		{"end unconfirmed but no longer Error", tw(database.StatusCancelled, "", database.ParkReasonTwitchEndUnconfirmed), AutoActionNone},
-		{"offline flap, a legacy row: the text and no reason", tw(database.StatusError, database.LegacyTwitchOfflineError, database.ParkReasonNone), AutoActionRetry},
+		{"the flap's text with no reason routes nothing", tw(database.StatusError, database.LegacyTwitchOfflineError, database.ParkReasonNone), AutoActionNone},
 		{"offline flap", tw(database.StatusError, TwitchOfflineErrMsg, database.ParkReasonTwitchOffline), AutoActionRetry},
 		{"offline flap, by its reason under a reworded text", tw(database.StatusError, "the channel went away", database.ParkReasonTwitchOffline), AutoActionRetry},
 		{"manual add, offline reason: no monitor retries it", &database.Job{ID: "tw_4242", Platform: "twitch", Status: database.StatusError, Error: TwitchOfflineErrMsg, ParkReason: database.ParkReasonTwitchOffline, ManuallyAdded: true}, AutoActionNone},
@@ -317,11 +323,32 @@ func writtenBeforeOfflineParkReasons(job *database.Job) bool {
 	return job.Error != preParkReasonOfflineText && job.Error != preParkReasonEndedOfflineText
 }
 
+// asOpenLeavesIt is job as database.Open's backfill leaves it
+// (backfillTwitchOfflineParkReasons, re-stated): an Error row with no park
+// reason and one of the two frozen texts takes that text's reason. Every
+// other row is unchanged.
+func asOpenLeavesIt(job *database.Job) *database.Job {
+	if job.Status != database.StatusError || job.ParkReason != database.ParkReasonNone {
+		return job
+	}
+	out := *job
+	switch job.Error {
+	case database.LegacyTwitchOfflineError:
+		out.ParkReason = database.ParkReasonTwitchOffline
+	case database.LegacyTwitchEndedOfflineError:
+		out.ParkReason = database.ParkReasonTwitchEndedOffline
+	}
+	return &out
+}
+
 // TestOfflineParkReasonsKeepTheRecoveryTruthTable is the recovery's truth
 // table — status × park reason × error text × LastVideoSeq × AutoRetryCount ×
 // manual — pinned ahead of the Twitch-offline park reasons (R-I1): for every
 // row a writer could produce before them, TwitchAutoRetryPending and
-// PendingAutoAction answer as the text-keyed rule did.
+// PendingAutoAction answer as the text-keyed rule did, once the row is as
+// database.Open leaves it. The predicates read no text themselves (the
+// one-release fallback is gone), so the backfill is the whole of what keeps
+// an earlier release's rows recoverable.
 func TestOfflineParkReasonsKeepTheRecoveryTruthTable(t *testing.T) {
 	seq := 3
 	statuses := []database.JobStatus{database.StatusError, database.StatusCookies, database.StatusCancelled,
@@ -342,10 +369,11 @@ func TestOfflineParkReasonsKeepTheRecoveryTruthTable(t *testing.T) {
 								continue
 							}
 							rows++
-							if got, want := TwitchAutoRetryPending(job), preParkReasonRetryPending(job); got != want {
+							opened := asOpenLeavesIt(job)
+							if got, want := TwitchAutoRetryPending(opened), preParkReasonRetryPending(job); got != want {
 								t.Errorf("TwitchAutoRetryPending changed on %+v: %v, was %v", job, got, want)
 							}
-							if got, want := PendingAutoAction(job), preParkReasonPendingAutoAction(job); got != want {
+							if got, want := PendingAutoAction(opened), preParkReasonPendingAutoAction(job); got != want {
 								t.Errorf("PendingAutoAction changed on %+v: %q, was %q", job, got, want)
 							}
 						}
@@ -388,20 +416,5 @@ func TestOfflineParkReasonsKeepTheRecoveryTruthTable(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestLegacyOfflineTextIsTheWritersText holds the frozen text the fallback
-// and the boot backfill match (database.LegacyTwitchOfflineError) to the text
-// the worker writes, for as long as an older binary may run on this database
-// and key on it. Once the fallback is removed (the release after the one
-// that introduced the park reason) the text routes nothing and this test goes
-// with it.
-func TestLegacyOfflineTextIsTheWritersText(t *testing.T) {
-	if TwitchOfflineErrMsg != database.LegacyTwitchOfflineError || preParkReasonOfflineText != database.LegacyTwitchOfflineError {
-		t.Errorf("TwitchOfflineErrMsg = %q, the frozen legacy text is %q", TwitchOfflineErrMsg, database.LegacyTwitchOfflineError)
-	}
-	if preParkReasonEndedOfflineText != database.LegacyTwitchEndedOfflineError {
-		t.Errorf("the ended-offline text pinned here is %q, the frozen legacy text is %q", preParkReasonEndedOfflineText, database.LegacyTwitchEndedOfflineError)
 	}
 }

@@ -61,9 +61,8 @@ func offlineRefusal(t *testing.T, job *database.Job, stagingBase string) error {
 // production writer of the two Twitch-offline park reasons (R-I1):
 // processTwitchLive's offline branch puts the reason on its result beside the
 // frozen text, and through AsError and setJobError the row holds both. With
-// the reason dropped there, every new row would be routed only by the
-// one-release text fallback and lose its recovery, or its open Mux tail, when
-// that fallback goes.
+// the reason dropped there, no new row would be routed at all: nothing reads
+// the text, so the row would lose its recovery, or its open Mux tail.
 //
 // Mutants: the branch's result built without ParkReason (both rows read no
 // reason); the reason taken from a constant rather than twitchOfflineError
