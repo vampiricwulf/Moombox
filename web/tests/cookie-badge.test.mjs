@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, sessionHealth, cookieFlickering, formatClockTime } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, sessionHealth, renewalLine, cookieFlickering, formatClockTime } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
 
@@ -128,4 +128,15 @@ test("a flickering session is shown on a healthy badge only", () => {
 test("formatClockTime is zero-padded local time", () => {
   const d = new Date(2026, 10, 13, 4, 5);
   assert.equal(formatClockTime(d.getTime()), "04:05");
+});
+
+// Owner ruling K5: the renewal line is one sentence in two languages. The Go
+// half of this fixture is internal/cookies TestRenewalLineParity.
+const RENEWAL_PARITY = JSON.parse(readFileSync(new URL("./fixtures/renewal-line-parity.json", import.meta.url), "utf8"));
+
+test("renewalLine matches Go over the fixture", () => {
+  assert.ok(RENEWAL_PARITY.cases.length >= 10);
+  for (const c of RENEWAL_PARITY.cases) {
+    assert.equal(renewalLine(c.status, Date.parse(c.now)), c.line, c.name);
+  }
 });

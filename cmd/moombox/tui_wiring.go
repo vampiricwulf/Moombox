@@ -680,6 +680,14 @@ func (s *runState) runTUI() {
 		}
 		return ""
 	}
+	// The renewal facts R C and a successful R F end with: one line from the
+	// same status, worded by cookies.RenewalLine as the dashboard words it.
+	app.OnCookieRenewalLine = func() string {
+		if s.autoCookieSvc == nil {
+			return ""
+		}
+		return cookies.RenewalLine(s.autoCookieSvc.GetStatus(), time.Now())
+	}
 	// WIRED UNCONDITIONALLY. Do not put a cookies.auto_enabled gate back here,
 	// in either shape — not around the assignment, and not as a live read
 	// inside the closure.

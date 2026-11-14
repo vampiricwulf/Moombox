@@ -767,6 +767,81 @@ export function sessionHealthText(status, nowMs) {
 }
 
 /**
+ * RENEWAL_GROUP_LABELS names the census groups of `renewalCensus` (Go's
+ * cookies.CensusGroup) the way Go's censusGroupLabel does.
+ */
+const RENEWAL_GROUP_LABELS = {
+  sid: "SID family",
+  sidcc: "SIDCC",
+  psidts: "PSIDTS pair",
+  login_info: "LOGIN_INFO",
+  google_account: "Google account",
+  twitch: "Twitch auth-token",
+};
+
+/** renewalSpan words a length of time in ms the way Go's renewalSpan does. */
+function renewalSpan(ms) {
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+  if (ms < MIN) return "under a minute";
+  if (ms < HOUR) return `${Math.floor(ms / MIN)} min`;
+  if (ms < 48 * HOUR) return `${Math.floor(ms / HOUR)} h`;
+  return `${Math.floor(ms / (24 * HOUR))} d`;
+}
+
+/**
+ * renewalLine is the dashboard's twin of Go's cookies.RenewalLine (owner
+ * ruling K5), compared with it over
+ * web/tests/fixtures/renewal-line-parity.json: when a YouTube reply last
+ * renewed a cookie, what the last browser pass renewed, and when the next
+ * daily visit is due. It reads three additive keys of
+ * GET /api/cookies/auto-status (`replyRenewedAt`, `renewalCensus`,
+ * `nextVisitDue`), which carry names and times only. "" when none is set, as
+ * from an older binary.
+ *  {object|null|undefined} status the auto-status payload
+ *  {number} nowMs
+ *  {string}
+ */
+export function renewalLine(status, nowMs) {
+  const ago = (ms) => `${renewalSpan(Math.max(nowMs - ms, 0))} ago`;
+  const label = (group) => RENEWAL_GROUP_LABELS[group] || String(group);
+  const parts = [];
+
+  const reply = Date.parse(status?.replyRenewedAt || "");
+  if (!Number.isNaN(reply)) parts.push(`YouTube replies renewed cookies ${ago(reply)}`);
+
+  const census = status?.renewalCensus;
+  const at = Date.parse(census?.at || "");
+  if (census && !Number.isNaN(at)) {
+    let part = `browser pass ${ago(at)}`;
+    if (!census.stamped) {
+      part += ", what it renewed is unknown";
+    } else {
+      const groups = Array.isArray(census.groups) ? census.groups : [];
+      const renewed = groups.filter((g) => g.renewed?.length > 0).map((g) => label(g.group));
+      part += renewed.length ? ` renewed ${renewed.join(", ")}` : " renewed nothing";
+      let oldest = null;
+      let oldestAt = NaN;
+      for (const g of groups) {
+        const t = Date.parse(g.renewedAt || "");
+        if (!Number.isNaN(t) && (oldest === null || t < oldestAt)) {
+          oldest = g;
+          oldestAt = t;
+        }
+      }
+      if (oldest && oldestAt < at) part += ` (oldest: ${label(oldest.group)}, ${ago(oldestAt)})`;
+    }
+    parts.push(part);
+  }
+
+  const due = Date.parse(status?.nextVisitDue || "");
+  if (!Number.isNaN(due)) {
+    parts.push(due > nowMs ? `next daily visit in ${renewalSpan(due - nowMs)}` : "daily visit due");
+  }
+  return parts.length ? `Renewal: ${parts.join("; ")}` : "";
+}
+
+/**
  * formatClockTime is a local wall-clock time, "14:05", for a timestamp in ms.
  */
 export function formatClockTime(ms) {

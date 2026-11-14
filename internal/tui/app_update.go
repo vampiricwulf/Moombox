@@ -670,7 +670,15 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// TestRefreshResultCarriesTheMechanismThatRan pins that upstream.
 			a.setFeedbackWithSeverity("Cookies still work, but this pass could not confirm the browser refreshed them", severityWarning)
 		default:
-			a.setFeedback(mechanismLabel + " successful")
+			if msg.Renewal == "" {
+				a.setFeedback(mechanismLabel + " successful")
+			} else {
+				// What the pass renewed, by group, and when the next daily
+				// visit is due (owner ruling K5). Wrapped, so a narrow or
+				// compact terminal shows it whole; green stated, because
+				// the tail is prose the colour scan must not rank.
+				a.setWrappedFeedback(mechanismLabel+" successful | "+msg.Renewal, severitySuccess)
+			}
 		}
 		return a, nil
 
@@ -1382,6 +1390,11 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		// recorded is a fact about a PREVIOUS pass, and the conclusive verdict
 		// of THIS one is the only thing that earns red.
 		stated = max(stated, severityWarning)
+	}
+	if msg.Renewal != "" {
+		// Last of all, so the row cap takes it before anything above. It
+		// states facts and asks for nothing: the severity does not move.
+		line += " | " + msg.Renewal
 	}
 	return line, stated
 }

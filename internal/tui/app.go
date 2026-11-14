@@ -353,6 +353,8 @@ type (
 		YouTubeReason string
 		TwitchReason  string
 		LastError     string
+		// Renewal is cookies.RenewalLine at the time of the check, or "".
+		Renewal string
 	}
 	cookieForceRefreshResultMsg struct {
 		// Result is carried whole rather than pre-flattened to a bool pair.
@@ -370,6 +372,8 @@ type (
 		// the second one).
 		Result cookies.RefreshResult
 		Err    error
+		// Renewal is cookies.RenewalLine read after the pass, or "".
+		Renewal string
 	}
 
 	// Async results for a channel editor's ID (resolveChannelCmd). Input is
@@ -944,6 +948,11 @@ type App struct {
 	// and would force every wiring that has an auth check but no auto-cookie
 	// service to answer for a field it cannot see.
 	OnAutoCookieLastError func() string
+	// OnCookieRenewalLine reports cookies.RenewalLine for the auto-cookie
+	// status: what renews the session and when the next daily visit is due
+	// (owner ruling K5). "" when there is nothing to say; nil when there is no
+	// auto-cookie service. R C and a successful R F end with it.
+	OnCookieRenewalLine func() string
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

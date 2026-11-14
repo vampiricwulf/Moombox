@@ -39,6 +39,7 @@ func (a *App) recheckCookiesCmd() tea.Cmd {
 	// closure — the command below runs on a bubbletea worker and must not
 	// touch App fields. Same discipline recheckFn is already held to.
 	lastErrorFn := a.OnAutoCookieLastError
+	renewalFn := a.OnCookieRenewalLine
 	return safeCmd(func() tea.Msg {
 		yt, tw, ytReason, twReason := recheckFn()
 		msg := cookieRecheckResultMsg{
@@ -47,6 +48,9 @@ func (a *App) recheckCookiesCmd() tea.Cmd {
 		}
 		if lastErrorFn != nil {
 			msg.LastError = lastErrorFn()
+		}
+		if renewalFn != nil {
+			msg.Renewal = renewalFn()
 		}
 		return msg
 	})
@@ -431,9 +435,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		if a.OnForceRefreshCookies != nil {
 			a.setFeedback(cookieRefreshFeedback(a.cookieAcquisitionMode()))
 			refreshFn := a.OnForceRefreshCookies
+			renewalFn := a.OnCookieRenewalLine
 			return a, safeCmd(func() tea.Msg {
 				result, err := refreshFn()
-				return cookieForceRefreshResultMsg{Result: result, Err: err}
+				msg := cookieForceRefreshResultMsg{Result: result, Err: err}
+				if renewalFn != nil {
+					msg.Renewal = renewalFn()
+				}
+				return msg
 			})
 		}
 	case "E L":
