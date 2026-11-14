@@ -164,8 +164,8 @@ const (
 type WatchPageResult struct {
 	// reply is the page's HTTP reply with this page's own session verdict,
 	// for the caller that fetched it with the jar's session to offer to the
-	// cookie store (Auth.OfferReply). It holds Set-Cookie headers: never
-	// log it.
+	// cookie store (Auth.OfferReply). It holds the cookies the page renewed
+	// behind a pointer and prints as counts (cookies.YouTubeReply).
 	reply cookies.YouTubeReply
 
 	Ytcfg *YtcfgData

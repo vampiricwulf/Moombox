@@ -11,7 +11,7 @@ import "net/http"
 func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response, _ string) {
 	j := rs.jar
 	j.renew.mu.Lock()
-	updates, cleared := classifyYouTubeSetCookies(resp.Header.Values("Set-Cookie"))
+	updates, cleared, _ := classifyYouTubeSetCookies(resp.Header.Values("Set-Cookie"))
 	j.warnClearedLocked(cleared, YouTubeReply{Endpoint: guideReplyEndpoint, Client: guideReplyClient})
 	j.acceptRenewalsLocked(updates, guideReplyEndpoint, guideReplyClient)
 	j.renew.mu.Unlock()

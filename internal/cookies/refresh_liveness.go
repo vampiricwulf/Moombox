@@ -144,7 +144,8 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 		rs.logger.Warn("a page still renders signed out after the automatic recovery pass — the API check passes and pages do not agree",
 			"platform", platform,
 			"attempts", out.health.Attempts,
-			"nextAttemptAt", formatLogTime(out.health.NextAttempt))
+			"nextAttemptAt", formatLogTime(out.health.NextAttempt),
+			"replyRenewedAt", formatLogTime(rs.jar.lastRenewalTime()))
 	}
 
 	// The UIs draw the session health from these facts. Outside rs.mu, as
@@ -165,7 +166,8 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery",
 			"platform", platform,
 			"attempt", out.cause.Attempt,
-			"nextAttemptAfter", out.cause.NextWindow.String())
+			"nextAttemptAfter", out.cause.NextWindow.String(),
+			"replyRenewedAt", formatLogTime(rs.jar.lastRenewalTime()))
 		fn(platform, out.cause)
 	}
 }

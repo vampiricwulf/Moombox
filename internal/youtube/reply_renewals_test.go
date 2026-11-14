@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -26,7 +27,7 @@ func renewalService(t *testing.T) *Service {
 	t.Helper()
 	s := jarServiceFromCookieFile(t, cookieFileRows(
 		"SAPISID", "sap", "LOGIN_INFO", "li", "__Secure-1PSIDCC", "sidcc-old"))
-	s.Auth.jar.SetReplyHostCheckForTesting(func(scheme, host string) bool { return host == "127.0.0.1" })
+	cookies.AllowReplyHostForTesting(t, func(scheme, host string) bool { return host == "127.0.0.1" })
 	return s
 }
 

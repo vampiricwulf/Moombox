@@ -98,6 +98,7 @@ func TestVerifyPathNeverWritesTheJar(t *testing.T) {
 		if err != nil || !auth {
 			t.Fatalf("premise broken: auth=%v err=%v, want true/nil", auth, err)
 		}
+		jar.FlushRenewals() // the write is the flush timer's; a test does not wait for it
 
 		after, err := os.ReadFile(path)
 		if err != nil {

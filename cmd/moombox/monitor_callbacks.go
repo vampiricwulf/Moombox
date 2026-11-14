@@ -1181,7 +1181,8 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, cause
 			s.log.Info("auto-cookie recovery pass ran: the API check passes, but a signed-out page asked for this pass, so the result is unconfirmed until pages stay signed in",
 				"platform", platform,
 				"attempt", cause.Attempt,
-				"nextAttemptAfter", cause.NextWindow.String())
+				"nextAttemptAfter", cause.NextWindow.String(),
+				"replyRenewedAt", replyRenewedAtField(s.jar))
 			// The first signed-out page after this is reported once, at Warn.
 			s.cookieRefresh.NotePageRecoveryPass(platform, time.Now())
 			break
@@ -2529,4 +2530,15 @@ func (s *runState) onJobsChange(jobs []*database.Job) {
 		s.notifyMgr.RetainJobs(activeIDs)
 	}
 	s.wsHub.BroadcastJobsUpdate(listedJobs(s.configStore, filterJobsByAge(jobs, s.configStore)))
+}
+
+// replyRenewedAtField is when a YouTube reply last renewed a session cookie
+// Moombox kept, for a recovery log line: with it the line says whether the
+// replies were still renewing the session when a page rendered signed out. A
+// time only; "" when none has in this process.
+func replyRenewedAtField(jar *cookies.CookieJar) string {
+	if t := jar.LastRenewalAt(); t != nil {
+		return t.Format(time.RFC3339)
+	}
+	return ""
 }

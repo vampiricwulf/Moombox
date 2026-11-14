@@ -198,6 +198,12 @@ func (s *runState) shutdown() bool {
 			s.log.Warn("cookie startup sequence still running after stop", "waited", cookieShutdownWait.String())
 		}
 	})
+	// 4c. The renewals YouTube sent during a pass, an import or a setup that
+	// was still running when the refresh service stopped. That stop's flush
+	// stands down while one of them holds cookies.txt, and their release only
+	// arms a timer this process will not live to see. They have all ended
+	// now, so this write is the one that keeps those renewals.
+	stopService("CookieRenewals", s.jar.FlushRenewals)
 
 	// 5. Cleanup PO token provider
 	stopService("PotProvider", s.potProvider.Cleanup)

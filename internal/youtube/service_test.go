@@ -43,6 +43,7 @@ func jarServiceFromCookieFile(t *testing.T, cookieFile string) *Service {
 		t.Fatalf("write cookie file: %v", err)
 	}
 	jar := cookies.NewCookieJar()
+	t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 	if err := jar.Load(path); err != nil {
 		t.Fatalf("load cookie file: %v", err)
 	}

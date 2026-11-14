@@ -68,6 +68,7 @@ func renewalJar(t *testing.T) (*CookieJar, string, *renewalLog) {
 		t.Fatal(err)
 	}
 	jar := NewCookieJar()
+	t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 	if err := jar.Load(path); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +116,7 @@ func TestRenewalIsKeptInTheJarAndTheFile(t *testing.T) {
 	if got := jar.GetCookieFor(PlatformYouTube, "__Secure-1PSIDCC"); got != "sidcc-new" {
 		t.Errorf("jar __Secure-1PSIDCC = %q, want the renewed value: the next request must send it", got)
 	}
+	jar.FlushRenewals() // the write is the flush timer's; a test does not wait for it
 	if !strings.Contains(fileText(t, path), "\t__Secure-1PSIDCC\tsidcc-new") {
 		t.Errorf("cookies.txt does not hold the renewed __Secure-1PSIDCC after the first flush")
 	}
@@ -243,6 +245,7 @@ func TestSecondRenewalWaitsForTheNextFlush(t *testing.T) {
 			"__Secure-1PSIDCC="+v+"; Domain=.youtube.com; Path=/; Max-Age=31536000"))
 	}
 	offer("sidcc-first")
+	jar.FlushRenewals() // the first write, without waiting for the timer
 	offer("sidcc-second")
 
 	if got := jar.GetCookieFor(PlatformYouTube, "__Secure-1PSIDCC"); got != "sidcc-second" {
@@ -352,19 +355,32 @@ func TestRenewedNamesAreLoggedOncePerEndpoint(t *testing.T) {
 		r.Endpoint = endpoint
 		jar.OfferYouTubeReply(r)
 	}
-	sid := "SID=sid-renewed; Domain=.youtube.com; Path=/; Max-Age=31536000"
-	offer("membership page", sidccRenewal)
-	offer("membership page", sidccRenewal)
-	offer("membership page", sid)
-	offer("membership page", sidccRenewal)
-	offer("membership page", sid)
-	offer("player", sidccRenewal)
+	// A new value each time: a re-send of what the jar holds is not a renewal.
+	n := 0
+	sidcc := func() string {
+		n++
+		return fmt.Sprintf("__Secure-1PSIDCC=sidcc-%d; Domain=.youtube.com; Path=/; Max-Age=31536000", n)
+	}
+	sid := func() string {
+		n++
+		return fmt.Sprintf("SID=sid-%d; Domain=.youtube.com; Path=/; Max-Age=31536000", n)
+	}
+	offer("membership page", sidcc())
+	offer("membership page", sidcc())
+	offer("membership page", sid())
+	offer("membership page", sidcc())
+	offer("membership page", sid())
+	offer("player", sidcc())
+
+	// The same endpoint as another client is its own set.
+	jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/x", jar.GetCookieHeader(), 200, sidcc()).From("player", "TVHTML5", ReplyNoVerdict))
 
 	lines := log.containing("INFO", "renewed session cookies")
 	want := []string{
 		"endpoint=membership page client=web page names=__Secure-1PSIDCC",
 		"endpoint=membership page client=web page names=SID,__Secure-1PSIDCC",
 		"endpoint=player client=web page names=__Secure-1PSIDCC",
+		"endpoint=player client=TVHTML5 names=__Secure-1PSIDCC",
 	}
 	if len(lines) != len(want) {
 		t.Fatalf("want %d Info lines, got %d: %v", len(want), len(lines), lines)
@@ -401,6 +417,19 @@ func TestRenewalLogsNeverCarryACookieValue(t *testing.T) {
 		"HSID=; Domain=.youtube.com",                                                    // emptied
 		"YSC="+sentinel+"\t10; Domain=.youtube.com",                                     // row-breaking
 	))
+	jar.FlushRenewals()
+	// A signed-out reply: what it set and cleared is named, never kept.
+	signedOut := replyTo(t, "https://www.youtube.com/x", jar.GetCookieHeader(), 200,
+		"VISITOR_INFO1_LIVE="+sentinel+"12; Domain=.youtube.com; Path=/; Max-Age=31536000",
+		"__Secure-1PSIDCC=; Max-Age=0; Domain=.youtube.com")
+	signedOut.Verdict = ReplySignedOut
+	jar.OfferYouTubeReply(signedOut)
+	// A reply printed whole, by itself and as a field of another struct,
+	// shows counts and never what it holds.
+	// Not a constant, so vet does not object to the verbs that do not fit:
+	// those are the ones fmt answers by printing the value some other way.
+	verbs := strings.Join([]string{"%v", "%+v", "%#v", "%+v", "%#v", "%s", "%d"}, " | ")
+	log.add("PRINTED", fmt.Sprintf(verbs, signedOut, signedOut, signedOut, struct{ r YouTubeReply }{signedOut}, &signedOut, struct{ r YouTubeReply }{signedOut}, struct{ r YouTubeReply }{signedOut}))
 	// A flush that fails, so the write path's own error and Warn are in the
 	// log too.
 	jar.renew.mu.Lock()
@@ -423,7 +452,9 @@ func TestRenewalLogsNeverCarryACookieValue(t *testing.T) {
 
 	out := log.all()
 	if len(log.containing("WARN", "cleared an auth cookie")) == 0 || len(log.containing("INFO", "renewed session cookies")) == 0 ||
-		len(log.containing("WARN", "failed to update cookie file")) == 0 {
+		len(log.containing("WARN", "failed to update cookie file")) == 0 ||
+		len(log.containing("INFO", "names_set=VISITOR_INFO1_LIVE names_cleared=__Secure-1PSIDCC")) != 1 ||
+		len(log.containing("PRINTED", "renews=1 clears=1")) != 1 {
 		t.Fatalf("the test did not reach the lines it is checking:\n%s", out)
 	}
 	if strings.Contains(out, "SENTINEL") {
@@ -459,6 +490,7 @@ func TestGuideReplyIsOfferedWithItsVerdict(t *testing.T) {
 			if err != nil || authenticated != tc.wantKept {
 				t.Fatalf("checkAndRefreshYouTube = %v, %v", authenticated, err)
 			}
+			jar.FlushRenewals()
 
 			kept := strings.Contains(fileText(t, path), "sidcc-new") && jar.GetCookieFor(PlatformYouTube, "__Secure-1PSIDCC") == "sidcc-new"
 			if kept != tc.wantKept {

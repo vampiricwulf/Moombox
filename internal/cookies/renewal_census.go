@@ -350,7 +350,21 @@ func (s *AutoCookieService) recordCensus(passStart time.Time, netscape string) {
 	if !census.Stamped {
 		msg = "cookie renewal census — this browser's cookie store records no write time, so what the pass renewed is unknown"
 	}
-	s.logger.Info(msg, census.logFields(time.Now())...)
+	// The Go side of the same question, once per pass and not per reply:
+	// when a reply last renewed a cookie, and which names each endpoint and
+	// client has renewed since the pass before. A name that stopped being
+	// renewed is missing from this line. Names only.
+	now := time.Now()
+	fields := census.logFields(now)
+	lastReply, replyNames := s.jar.TakeReplyRenewals()
+	if replyNames == "" {
+		replyNames = "none"
+	}
+	fields = append(fields, "reply_renewed_since_last_pass", replyNames)
+	if !lastReply.IsZero() {
+		fields = append(fields, "reply_renewed_age", now.Sub(lastReply).Round(time.Second).String())
+	}
+	s.logger.Info(msg, fields...)
 }
 
 // nextVisitDue is when the daily visit next runs, from the schedule the loop

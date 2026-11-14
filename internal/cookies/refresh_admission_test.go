@@ -423,6 +423,7 @@ func TestB2UnscopedRotationReachesTheJar(t *testing.T) {
 		t.Fatalf("premise broken: auth=%v err=%v, want true/nil — the reply says logged_in=1", auth, err)
 	}
 
+	jar.FlushRenewals() // the write is the flush timer's; a test does not wait for it
 	// The row, on the domain the declared origin placed it on.
 	row := rowFor(t, readCookieRows(t, path), "SAPISID", ".youtube.com")
 	if row.value != "rotated-without-a-domain" {
