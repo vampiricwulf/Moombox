@@ -52,7 +52,10 @@ const cookieShutdownWait = 2 * time.Second
 //     something. It does not os.Stat the browser profile directory first:
 //     completing setup is what creates that directory, so a boot-time probe
 //     gave an operator who turned the setting on and then ran setup no timer
-//     until the next restart. periodicRefreshHasSource asks per tick.
+//     until the next restart. periodicRefreshHasSource asks per tick. The
+//     same loop also runs the daily visit: a pass when nothing has renewed
+//     the cookies for 24 h, active job or not, and never in the loop's first
+//     5 minutes (internal/cookies/autocookies_daily.go, owner ruling K3).
 //
 // Shutdown. The steps run under ctx, and a run that has ended skips the ones
 // not yet started. Both services refuse a start that comes after their Stop

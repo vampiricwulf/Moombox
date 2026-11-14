@@ -463,6 +463,18 @@ type AutoCookieService struct {
 	// false. Audit reports/cookies.md #23.
 	HasActiveJobs func() bool
 
+	// IsOnline reports whether the device has an internet connection.
+	// Optional. Only the daily visit (dailyVisitStep) asks: while it answers
+	// false a due visit waits for the next minute and nothing is counted or
+	// stamped, because a browser launched offline renews nothing. nil means
+	// "assume online".
+	IsOnline func() bool
+
+	// visit is the daily visit's schedule (see dailyVisit). Read and written
+	// only by the periodic refresh goroutine and by tests that drive
+	// dailyVisitStep directly, so it takes no lock.
+	visit dailyVisit
+
 	// OnPassCompleted is called after an AUTOMATIC refresh pass that actually
 	// ran, so whoever owns the in-process auth check can re-read the file this
 	// pass may have rewritten.
