@@ -2,7 +2,7 @@ package cookies
 
 // refresh_youtube.go — the YouTube guide-endpoint exchange: request
 // headers/body, the guide reply's auth verdict (and its fallback), and
-// processing the reply's Set-Cookie headers.
+// offering the reply's Set-Cookie headers to the renewal store (renewals.go).
 
 import (
 	"context"
@@ -450,14 +450,14 @@ func authResponseIsOurs(resp *http.Response, sent *http.Request, credentialHeade
 // restore them over a file that had already moved.
 //
 // So the write decision stays with the caller that owns it. This function reads
-// the jar and never writes it; only checkAndRefreshYouTube calls
-// processYouTubeSetCookies, and only on its own authenticated path. The
+// the jar and never writes it; only checkAndRefreshYouTube offers the reply
+// to the renewal store (CookieJar.OfferYouTubeReply), with its verdict. The
 // invariant is structural rather than a matter of discipline: there is no jar
 // write reachable from here to delete.
 //
 // The returned response has already had its body read to a verdict and CLOSED,
 // so only its headers are still meaningful — which is all
-// processYouTubeSetCookies reads. It is non-nil exactly when a request was made
+// that offer reads. It is non-nil exactly when a request was made
 // and a readable answer came back. Every error path returns nil, and so does the
 // never-configured gate, which is what makes "a reply we could not read is not a
 // reply anyone may write the jar from" a fact about the return values rather
@@ -565,98 +565,45 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	return authenticated, err
 }
 
+// guideReplyEndpoint and guideReplyClient name the guide check in the
+// renewal store's log lines.
+const (
+	guideReplyEndpoint = "guide"
+	guideReplyClient   = "WEB"
+)
+
 // checkAndRefreshYouTube makes a single guide API request to both check
-// YouTube auth status and refresh session cookies from Set-Cookie headers.
+// YouTube auth status and keep the session cookies its reply renewed.
 // This avoids the redundancy of separate check + refresh requests.
 //
-// It is the only caller in this file that writes the jar from a guide reply.
+// The reply goes to the one place every youtube.com reply's Set-Cookie
+// headers go, CookieJar.OfferYouTubeReply, with this check's verdict:
+//
+//   - A signed-in reply's renewals are kept.
+//   - A signed-out reply's are not. It is still offered, so an auth cookie
+//     it cleared is logged; nothing is removed from the store.
+//   - Anything short of a readable reply is not offered at all.
+//     youtubeGuideExchange runs authResponseIsOurs before the status and
+//     before the body, and returns a nil response for a redirected exchange,
+//     a non-200 and a body with no login marker: a reply we could not place
+//     or read is not one the jar may be written from.
+//
+// The session the reply belongs to is read off the request that was
+// answered (its Cookie header), not remembered from before the request: a
+// file an import replaced while the request was in flight no longer holds
+// that session and is left alone.
+//
+// It is the only caller in this file that offers a guide reply. The verify
+// path (checkYouTubeAuth) must not: see youtubeGuideExchange.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	// Whose session the request is about to carry. The reply's Set-Cookie
-	// rotations belong to it and to nothing else; see updateCookieFile.
-	sentAs := rs.jar.youTubeSessionKey()
 	authenticated, resp, err := rs.youtubeGuideExchange(ctx)
-	if err != nil || !authenticated {
-		// Anything short of an authenticated, readable reply stops here without
-		// the jar being touched. Two of those cases are worth naming at the
-		// write decision itself:
-		//
-		//   - Provenance. youtubeGuideExchange runs authResponseIsOurs before
-		//     the status AND before the body, which matters more on THIS path
-		//     than on the verify one: this is where Set-Cookie headers are
-		//     merged back into the jar, and a redirected exchange must not be
-		//     allowed to write to it at all.
-		//   - An unreadable body. A reply we could not read is not a reply we
-		//     may write the jar from, for the same reason a redirected one is
-		//     not: we do not know whose session it describes. Both cases return
-		//     a nil response, so there would be nothing to merge here even if
-		//     this branch were deleted.
+	if err != nil || resp == nil {
 		return authenticated, err
 	}
-	rs.processYouTubeSetCookies(resp, sentAs)
-	return true, nil
-}
-
-// processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
-// and merges updated cookies into the cookie file.
-//
-// sentAs is the jar's youTubeSessionKey when the request was built: the
-// rotations are written only into a file that still holds that session.
-func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response, sentAs string) {
-	setCookies := resp.Header.Values("Set-Cookie")
-	if len(setCookies) == 0 {
-		rs.logger.Debug("youtube session refresh: no Set-Cookie headers")
-		return
+	verdict := ReplySignedOut
+	if authenticated {
+		verdict = ReplySignedIn
 	}
-
-	// originYouTube: this function is only ever fed a youtube.com guide
-	// response, and admitSetCookie needs to be told so — a Set-Cookie with no
-	// Domain= is host-scoped to the response that carried it, and the header
-	// alone does not say which response that was.
-	updates := make(map[cookieUpdateKey]cookieUpdate)
-	refused := 0
-	for _, sc := range setCookies {
-		key, cu, ok := admitSetCookie(sc, originYouTube)
-		if !ok {
-			refused++
-			continue
-		}
-		updates[key] = cu
-	}
-	if refused > 0 {
-		// A COUNT, never the header. A Set-Cookie is the credential itself, and
-		// a refused one is by definition the shape we did not vouch for, so
-		// neither its value nor its raw text may be written to a log.
-		rs.logger.Debug("youtube session refresh: Set-Cookie headers not admitted", "count", refused)
-	}
-
-	if len(updates) == 0 {
-		rs.logger.Debug("youtube session refresh: no relevant cookies to update")
-		return
-	}
-
-	rs.logger.Debug("youtube session refresh: updating cookies", "count", len(updates))
-
-	// A failure here is not cosmetic: the rotated values are discarded and
-	// the on-disk session ages out, so downloads eventually start failing
-	// for a reason that has nothing to do with the download. Name the
-	// deployment mistake that actually causes it — updateCookieFile ends in
-	// writeFileAtomic (temp file + rename), and a rename cannot replace a
-	// single-file bind mount.
-	//
-	// The same originYouTube is declared a second time here, to the write path,
-	// which needs it for its own three decisions — see updateCookieFile.
-	if err := rs.updateCookieFile(updates, originYouTube, sentAs); err != nil {
-		if errors.Is(err, errCookieSessionReplaced) {
-			rs.logger.Debug("youtube session refresh: cookies.txt now holds another session; its rotations were not applied")
-			return
-		}
-		rs.logger.Warn("youtube session refresh: failed to update cookie file — rotated session cookies were discarded and the file will go stale",
-			"err", err,
-			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")
-		return
-	}
-
-	if err := rs.jar.Reload(); err != nil {
-		rs.logger.Warn("youtube session refresh: failed to reload jar", "err", err)
-	}
+	rs.jar.OfferYouTubeReply(ReplyOf(resp).From(guideReplyEndpoint, guideReplyClient, verdict))
+	return authenticated, nil
 }

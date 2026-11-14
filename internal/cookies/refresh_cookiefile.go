@@ -483,7 +483,19 @@ var errCookieSessionReplaced = errors.New("cookies.txt holds a different session
 // operator had just been told was imported. A file whose session is no longer
 // sentAs is left alone (errCookieSessionReplaced).
 func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin, sentAs string) error {
-	filePath := rs.jar.GetFilePath()
+	return updateCookieFileAt(rs.jar.GetFilePath(), rs.logger, updates, origin, sentAs)
+}
+
+// updateCookieFileAt is updateCookieFile for a named file and logger: the
+// read, the session guard, the row rewrite (rewriteCookieRows) and the atomic
+// write. The renewal store's flush (CookieJar.FlushRenewals) calls it
+// directly.
+func updateCookieFileAt(filePath string, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin, sentAs string) error {
 	if filePath == "" {
 		return fmt.Errorf("no cookie file path configured")
 	}
@@ -492,14 +504,50 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	if err != nil {
 		return fmt.Errorf("read cookie file: %w", err)
 	}
-	if sentAs != "" {
-		onDisk := NewCookieJar()
-		onDisk.loadFrom(data, filePath)
-		if onDisk.youTubeSessionKey() != sentAs {
-			return errCookieSessionReplaced
-		}
+	if sentAs != "" && youTubeSessionKeyOf(data) != sentAs {
+		return errCookieSessionReplaced
 	}
 
+	out, handled, err := rewriteCookieRows(data, logger, updates, origin)
+	if err != nil {
+		return err
+	}
+
+	// Atomic write via the shared same-package helper — it uses a unique
+	// temp name (the AutoCookieService writes the same cookies.txt, so a
+	// fixed ".tmp" would let the two writers interleave) and applies the
+	// memoized parent-dir DACL tightening.
+	if err := writeFileAtomic(filePath, []byte(out), 0o600); err != nil {
+		return err
+	}
+
+	if handled > 0 {
+		logger.Debug("updated cookies in file", "updated", handled)
+	}
+
+	return nil
+}
+
+// youTubeSessionKeyOf is CookieJar.youTubeSessionKey for cookies.txt bytes a
+// caller holds: "" when they carry no SAPISID.
+func youTubeSessionKeyOf(data []byte) string {
+	probe := NewCookieJar()
+	probe.parseRows(data, "")
+	return probe.youTubeSessionKey()
+}
+
+// rewriteCookieRows is updateCookieFile's row rules over bytes a caller
+// holds: every rule in that doc comment, with no file read or written. It
+// returns the rewritten file text and how many updates it applied. The
+// renewal store uses it twice with the same pending updates, once to state
+// what the jar holds in memory and once to write the file, so the two cannot
+// disagree.
+func rewriteCookieRows(data []byte, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}, updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin) (string, int, error) {
 	// Index by name once so each row costs a map lookup rather than a scan of
 	// every pending update.
 	byName := make(map[string][]cookieUpdateKey, len(updates))
@@ -552,17 +600,20 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 						// Drop the row. Writing it back with an empty value
 						// left a credential-shaped hole nothing could prune.
 						if rowHasEssential {
-							rs.logger.Info("youtube session refresh: the server deleted an essential cookie — the signed-in session may have ended",
+							logger.Info("youtube session refresh: the server deleted an essential cookie — the signed-in session may have ended",
 								"name", cookieName, "domain", rowDomain)
 						} else {
-							rs.logger.Debug("youtube session refresh: server deleted a cookie", "name", cookieName, "domain", rowDomain)
+							logger.Debug("youtube session refresh: server deleted a cookie", "name", cookieName, "domain", rowDomain)
 						}
 						continue
 					}
 					// An empty value with NO expiry attribute is refused, not
 					// applied. Scoped to this path only — the global version of
 					// this guard was rejected in review, and this function is
-					// reachable from processYouTubeSetCookies alone.
+					// reachable from the renewal store alone, which no longer
+					// hands it an empty value or a deletion at all
+					// (classifyYouTubeSetCookies): this branch and the
+					// deletion one above stay as the writer's own last guard.
 					//
 					// Two reasons it is a refusal rather than a third deletion form:
 					//
@@ -594,10 +645,10 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 					//     returns, so a truncated body cannot blank one.)
 					if cu.Value == "" {
 						if rowHasEssential && strings.Join(parts[6:], "\t") != "" {
-							rs.logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
+							logger.Warn("youtube session refresh: refused to blank an essential cookie — the Set-Cookie carried an empty value but no expiry, so it is not a deletion and the existing value was kept",
 								"name", cookieName, "domain", rowDomain)
 						} else {
-							rs.logger.Debug("youtube session refresh: ignoring empty-valued Set-Cookie with no expiry", "name", cookieName, "domain", rowDomain)
+							logger.Debug("youtube session refresh: ignoring empty-valued Set-Cookie with no expiry", "name", cookieName, "domain", rowDomain)
 						}
 						result.WriteString(line)
 						result.WriteString("\n")
@@ -650,7 +701,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan cookie file: %w", err)
+		return "", 0, fmt.Errorf("scan cookie file: %w", err)
 	}
 
 	// Add new cookies that weren't found in the existing file. A deletion for
@@ -665,7 +716,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 			continue
 		}
 		if cu.Value == "" {
-			rs.logger.Debug("youtube session refresh: not inserting an empty-valued cookie", "name", key.Name, "domain", key.Domain)
+			logger.Debug("youtube session refresh: not inserting an empty-valued cookie", "name", key.Name, "domain", key.Domain)
 			continue
 		}
 		name := key.Name
@@ -697,7 +748,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		// rotating SID on both .google.com and .youtube.com against a file
 		// holding only the .google.com row must still insert the .youtube.com one.
 		if domain == "" && hasScopedSibling(updates, byName[name]) {
-			rs.logger.Debug("cookie update: not inserting an unscoped cookie beside a scoped one of the same name",
+			logger.Debug("cookie update: not inserting an unscoped cookie beside a scoped one of the same name",
 				"name", name, "origin", string(origin))
 			continue
 		}
@@ -709,7 +760,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 			//
 			// It used to be guessed from the cookie NAME: .youtube.com, or
 			// .google.com when isGoogleOnlyAuthName said so. That branch was DEAD
-			// CODE for as long as it existed — processYouTubeSetCookies opened
+			// CODE for as long as it existed — the guide reply's handler opened
 			// with a substring pre-filter that dropped every Domain-less header
 			// before it could become an unscoped key — and going live exposed it
 			// as the exact inverse of resolveRowUpdate's rule 2. An unscoped SID
@@ -771,7 +822,7 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		// alone would read that as a match.
 		insertPlatform := cookiePlatformOf(domain)
 		if insertPlatform == "" || insertPlatform != origin.platform() {
-			rs.logger.Debug("cookie update: refusing to insert a row outside the declaring origin's platform",
+			logger.Debug("cookie update: refusing to insert a row outside the declaring origin's platform",
 				"name", name, "domain", domain, "origin", string(origin))
 			continue
 		}
@@ -796,25 +847,13 @@ func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpd
 		// Netscape format: domain, include_subdomains, path, secure, expiry, name, value
 		if _, werr := fmt.Fprintf(&result, "%s%s\t%s\t/\t%s\t%d\t%s\t%s\n",
 			prefix, domain, subdomains, secure, cu.Expiry, name, cu.Value); werr != nil {
-			return fmt.Errorf("write new cookie row: %w", werr)
+			return "", 0, fmt.Errorf("write new cookie row: %w", werr)
 		}
-		rs.logger.Debug("added new cookie to file", "name", name, "domain", domain)
+		logger.Debug("added new cookie to file", "name", name, "domain", domain)
 		handled[key] = true
 	}
 
-	// Atomic write via the shared same-package helper — it uses a unique
-	// temp name (the AutoCookieService writes the same cookies.txt, so a
-	// fixed ".tmp" would let the two writers interleave) and applies the
-	// memoized parent-dir DACL tightening.
-	if err := writeFileAtomic(filePath, []byte(result.String()), 0o600); err != nil {
-		return err
-	}
-
-	if len(handled) > 0 {
-		rs.logger.Debug("updated cookies in file", "updated", len(handled))
-	}
-
-	return nil
+	return result.String(), len(handled), nil
 }
 
 // hasScopedSibling reports whether any of these same-name update keys carries an

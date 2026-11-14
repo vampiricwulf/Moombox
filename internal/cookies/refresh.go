@@ -464,6 +464,9 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 			"using", defaultRefreshInterval.String())
 		interval = defaultRefreshInterval
 	}
+	// The jar's renewal store (renewals.go) logs through this service's
+	// logger: its lines are about the same session this service checks.
+	jar.SetRenewalLogger(logger)
 	return &RefreshService{
 		jar:                   jar,
 		refreshInterval:       interval,
@@ -635,6 +638,9 @@ func (rs *RefreshService) Stop() {
 	if cancel != nil {
 		cancel()
 	}
+	// The renewals kept in the last minute are written now: the timer that
+	// would have written them does not outlive the process.
+	rs.jar.FlushRenewals()
 	rs.logger.Info("cookie refresh service stopped")
 }
 

@@ -475,7 +475,7 @@ func TestUnscopedDeletionFromTheWireStaysInsideTheOrigin(t *testing.T) {
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tfixture-youtube\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse("SAPISID=; Max-Age=0"), "")
+	rs.writeAdmittedSetCookies(setCookieResponse("SAPISID=; Max-Age=0"), "")
 
 	rows := readCookieRows(t, path)
 	for _, r := range rowsNamed(rows, "SAPISID") {
@@ -663,7 +663,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 			".google.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-google\n"
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-		rs.processYouTubeSetCookies(setCookieResponse(
+		rs.writeAdmittedSetCookies(setCookieResponse(
 			"SID=; Domain=.google.com; Max-Age=0",
 			"SID=fresh; Path=/; Secure",
 		), "")

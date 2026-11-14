@@ -75,7 +75,16 @@ func pointYouTubeGuideAt(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	orig := youtubeGuideURL
 	youtubeGuideURL = srv.URL
-	t.Cleanup(func() { youtubeGuideURL = orig })
+	// The renewal store keeps Set-Cookie headers from youtube.com over https
+	// only; the stand-in guide is an httptest server, so its host is let
+	// through for the length of the test.
+	origRule := replyHostRule
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	replyHostRule = func(scheme, h string) bool { return scheme == "http" && h == host }
+	t.Cleanup(func() { youtubeGuideURL = orig; replyHostRule = origRule })
 }
 
 // pointTwitchValidateAt is the Twitch equivalent. One seam, but the same rule:
