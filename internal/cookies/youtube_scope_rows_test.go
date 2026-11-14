@@ -313,3 +313,39 @@ func TestBrowserExportKeepsARowAScopeKeptRowSharesANameWith(t *testing.T) {
 		}
 	}
 }
+
+// A reply's Path=/ cookie under a name kept only for its scope is not written
+// into a narrower-path row of that name: that row keeps its value and the "/"
+// row is added, which is the one Load keeps and every request sends. The new
+// row is written Secure when the Set-Cookie said so.
+//
+// Mutants: rewriteCookieRows without narrowerPathScopeRow (the /feed row
+// takes the value, no "/" row is made and nothing is sent); the insertion
+// writing Secure from the __Secure- prefix alone (the row is FALSE).
+func TestARenewalLeavesANarrowerPathRowAlone(t *testing.T) {
+	feedRow := ".youtube.com\tTRUE\t/feed\tTRUE\t2000000000\tSIDCC\tfeed-own\n"
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	jar := loadRowsInto(t, path, strings.Split(strings.TrimSuffix(strings.TrimPrefix(renewalSeed+feedRow, "# Netscape HTTP Cookie File\n"), "\n"), "\n"))
+	t.Cleanup(jar.FlushRenewals)
+
+	jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/feed/x", jar.GetCookieHeader(), 200,
+		"SIDCC=sidcc-new; Domain=.youtube.com; Path=/; Secure; Max-Age=31536000"))
+
+	if !strings.HasSuffix(jar.GetCookieHeader(), "; SIDCC=sidcc-new") {
+		t.Errorf("the next request does not send the renewed SIDCC")
+	}
+	jar.FlushRenewals()
+	file := fileText(t, path)
+	if !strings.Contains(file, feedRow) {
+		t.Errorf("the narrower-path row was changed")
+	}
+	added := false
+	for line := range strings.SplitSeq(file, "\n") {
+		if strings.HasPrefix(line, ".youtube.com\tTRUE\t/\tTRUE\t") && strings.HasSuffix(line, "\tSIDCC\tsidcc-new") {
+			added = true
+		}
+	}
+	if !added {
+		t.Errorf("cookies.txt holds no Secure youtube.com SIDCC row on / with the renewed value")
+	}
+}

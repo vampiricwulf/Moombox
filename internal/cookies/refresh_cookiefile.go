@@ -318,6 +318,7 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		maxAge     int64
 		hasMaxAge  bool
 		httpOnly   bool
+		secure     bool
 		domainAttr string
 		pathAttr   string
 	)
@@ -358,6 +359,8 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 			pathAttr = strings.TrimSpace(p)
 		case trimmed == "httponly":
 			httpOnly = true
+		case trimmed == "secure":
+			secure = true
 		}
 	}
 
@@ -437,6 +440,7 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 		Value:    value,
 		Expiry:   expiry,
 		HTTPOnly: httpOnly,
+		Secure:   secure,
 		Delete:   deleteCookie,
 		Path:     pathAttr,
 	}, true
@@ -592,7 +596,7 @@ func rewriteCookieRows(data []byte, logger interface {
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])
 				rowDomain := strings.TrimPrefix(strings.TrimSpace(parts[0]), "#HttpOnly_")
-				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok {
+				if key, cu, ok := resolveRowUpdate(updates, byName[cookieName], rowDomain, origin); ok && !narrowerPathScopeRow(cookieName, rowDomain, parts[2]) {
 					handled[key] = true
 					// essentialYouTubeCookies is a set of NAMES, and several of
 					// them (PREF, CONSENT, YSC, LOGIN_INFO, the rotating
@@ -848,8 +852,13 @@ func rewriteCookieRows(data []byte, logger interface {
 		if strings.HasPrefix(domain, ".") {
 			subdomains = "TRUE"
 		}
+		// Secure when the Set-Cookie said so, as yt-dlp's jar records it and
+		// writes it back (plain SIDCC is sent Secure and has no prefix to say
+		// so), and always for a __Secure- name, which is the rule this line
+		// had before the attribute was read. No reader in this package uses
+		// the field; yt-dlp or a browser reading the file back does.
 		secure := "FALSE"
-		if strings.HasPrefix(name, "__Secure-") {
+		if cu.Secure || strings.HasPrefix(name, "__Secure-") {
 			secure = "TRUE"
 		}
 		// An HttpOnly cookie is written as a "#HttpOnly_"-prefixed row — the
@@ -970,6 +979,27 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 		return only, updates[only], true
 	}
 	return cookieUpdateKey{}, cookieUpdate{}, false
+}
+
+// narrowerPathScopeRow reports whether a file row is one no update may be
+// written into: a YouTube or Google row on a path other than "/" under a name
+// the jar keeps only for a row's scope (neither essential nor a google.com
+// auth name; owner ruling KA-7).
+//
+// An update under such a name was admitted because it states Path=/
+// (wwwYouTubeRow), and a row is matched by name and domain, never by path.
+// So when the file held only a /feed row of the name (an import writes every
+// row), the reply's value was written into that row and counted as handled:
+// no "/" row was made, Load does not keep the /feed row, and the cookie
+// yt-dlp sends on every youtube.com request was never sent, with the /feed
+// row's own value lost. Left alone, the row keeps its value and the insertion
+// loop adds the "/" row.
+//
+// The names the jar keeps by name are matched as they always were, whatever
+// the row's path.
+func narrowerPathScopeRow(name, rowDomain, rowPath string) bool {
+	return strings.TrimSpace(rowPath) != "/" && cookiePlatformOf(rowDomain) == "google" &&
+		!essentialYouTubeCookies[name] && !isGoogleOnlyAuthName(name)
 }
 
 // crossesConsentSides reports whether update k, a youtube-only essential name,
