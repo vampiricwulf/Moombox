@@ -1025,7 +1025,12 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // on RefreshResult.Ran, because a pass that DECLINED to run and a pass that
 // ran without reaching an answer are the same verdict and not the same event —
 // see that branch.
-func (s *runState) runCookieRecovery(ctx context.Context, platform string, refresh cookieRefresher, notify authFailureNotifier) {
+//
+// cause is what asked for the pass (owner ruling K4). It changes one thing: what
+// a pass that verified may claim. The verdict is the API check's, and a pass a
+// signed-out PAGE asked for started with that check already passing, so
+// "succeeded" would be a claim about nothing. See the RefreshOK arm.
+func (s *runState) runCookieRecovery(ctx context.Context, platform string, cause cookies.RecoveryCause, refresh cookieRefresher, notify authFailureNotifier) {
 	result, err := refresh(ctx)
 
 	// The re-check, on EVERY exit below rather than only the successful one.
@@ -1167,6 +1172,20 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 
 	switch result.Verdict(platform) {
 	case cookies.RefreshOK:
+		if cause.Trigger == cookies.RecoveryTriggerPage {
+			// Not "succeeded". The API check passed before this pass and passes
+			// after it; what was wrong is a page that rendered signed out, and
+			// only pages staying signed in can say that is over. The field log
+			// of October 2026 has 55 "recovery succeeded" lines in 60 hours
+			// for a session that never changed.
+			s.log.Info("auto-cookie recovery pass ran: the API check passes, but a signed-out page asked for this pass, so the result is unconfirmed until pages stay signed in",
+				"platform", platform,
+				"attempt", cause.Attempt,
+				"nextAttemptAfter", cause.NextWindow.String())
+			// The first signed-out page after this is reported once, at Warn.
+			s.cookieRefresh.NotePageRecoveryPass(platform, time.Now())
+			break
+		}
 		s.log.Info("auto-cookie recovery succeeded", "platform", platform)
 
 	case cookies.RefreshFailed:
@@ -1310,7 +1329,7 @@ func (s *runState) runCookieRecovery(ctx context.Context, platform string, refre
 // (internal/notifications.Manager.Send), so sending inline cannot stall the
 // refresh loop — the same reason OnAuthRecovered and OnCredentialsChanged
 // below send inline.
-func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refresh cookieRefresher, notify authFailureNotifier) {
+func (s *runState) handleRecoveryNeeded(platform string, cause cookies.RecoveryCause, autoEnabled bool, refresh cookieRefresher, notify authFailureNotifier) {
 	if !autoEnabled {
 		// Warn, not Debug. Debug was right for "we did nothing"; it is not
 		// right for "we are telling the operator their recordings will fail".
@@ -1368,7 +1387,14 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 	// runCookieRecovery — see cookieReplacementGuidance there for why the
 	// notification copy leads with the dashboard import rather than the host's
 	// own browser.
-	s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
+	if cause.Trigger == cookies.RecoveryTriggerPage {
+		// Info: ObserveLiveness has already logged the Warn for this fire,
+		// and "auth lost" is more than a signed-out page says.
+		s.log.Info("A page rendered signed out, attempting auto-cookie recovery",
+			"platform", platform, "attempt", cause.Attempt)
+	} else {
+		s.log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1377,7 +1403,7 @@ func (s *runState) handleRecoveryNeeded(platform string, autoEnabled bool, refre
 		}()
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer refreshCancel()
-		s.runCookieRecovery(refreshCtx, platform, refresh, notify)
+		s.runCookieRecovery(refreshCtx, platform, cause, refresh, notify)
 	}()
 }
 
@@ -1610,7 +1636,7 @@ func (s *runState) wireMonitorCallbacks() {
 	var resumeMu sync.Mutex
 	lastAutoResume := make(map[string]time.Time)
 
-	s.cookieRefresh.OnRecoveryNeeded = func(platform string) {
+	s.cookieRefresh.OnRecoveryNeeded = func(platform string, cause cookies.RecoveryCause) {
 		var autoEnabled bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			autoEnabled = c.Cookies.AutoEnabled
@@ -1634,7 +1660,7 @@ func (s *runState) wireMonitorCallbacks() {
 		// protected by RefreshCookiesDetailed's own pre/post verification and
 		// platformsToRestore, not by the guard. The full derivation is at
 		// automaticImportGuard.
-		s.handleRecoveryNeeded(platform, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
+		s.handleRecoveryNeeded(platform, cause, autoEnabled, s.autoCookieSvc.RefreshCookiesDetailed, notifyAuthFailure)
 	}
 
 	// Both credential-repair edges, wired together because they mean the same

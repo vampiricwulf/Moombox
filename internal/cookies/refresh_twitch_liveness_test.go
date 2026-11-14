@@ -311,7 +311,7 @@ func TestTwitchFallbackFiresRecoveryWhenArmed(t *testing.T) {
 
 	rs := NewRefreshService(jarWithTwitchAuth(t), 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 	rs.TwitchFallbackLiveness = func(context.Context) (bool, bool) { return false, true }
 
 	rs.doRefresh(context.Background())
@@ -325,7 +325,7 @@ func TestTwitchFallbackFiresRecoveryWhenArmed(t *testing.T) {
 	// one above proves nothing if every probe outcome fires.
 	inconclusive := NewRefreshService(jarWithTwitchAuth(t), 0, nopLogger{})
 	var quiet []string
-	inconclusive.OnRecoveryNeeded = func(platform string) { quiet = append(quiet, platform) }
+	inconclusive.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { quiet = append(quiet, platform) }
 	inconclusive.TwitchFallbackLiveness = func(context.Context) (bool, bool) { return false, false }
 
 	inconclusive.doRefresh(context.Background())

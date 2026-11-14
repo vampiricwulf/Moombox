@@ -198,7 +198,7 @@ func TestAChangeToDeadCredentialsClearsTheMarkAndReportsTheTruth(t *testing.T) {
 func TestTwitchMarkFiresRecoveryOncePerLoss(t *testing.T) {
 	rs, path := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	// A first conclusive check, so the baseline is "authenticated" and the next
 	// loss is a WITNESSED transition rather than the startup case.
@@ -246,7 +246,7 @@ func TestTwitchMarkFiresRecoveryOncePerLoss(t *testing.T) {
 func TestATwitchMarkBeforeAnyPassIsThatPlatformsFirstConclusion(t *testing.T) {
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusUnauthorized)
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.NoteTwitchAuthLoss(twitchLossNoLoginCookie)
 	if len(fired) != 1 || fired[0] != "twitch" {
@@ -275,7 +275,7 @@ func TestTwitchMarkNeverFiresRecoveryForAnUnconfiguredPlatform(t *testing.T) {
 
 	rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.NoteTwitchAuthLoss(twitchLossLoginRefused)
 
@@ -450,7 +450,7 @@ func TestTwitchMarkFiresAuthChangeOnAVerdictTransitionOnly(t *testing.T) {
 // probe.
 func TestTwitchMarkStampsTheSharedRecoveryDedupe(t *testing.T) {
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
-	rs.OnRecoveryNeeded = func(string) {}
+	rs.OnRecoveryNeeded = func(string, RecoveryCause) {}
 
 	// A healthy first pass, so the mark below is a WITNESSED fall and its fire
 	// path is reached at all. It must stamp nothing itself.
@@ -511,7 +511,7 @@ func TestTwitchMarkAndTierTwoFireRecoveryOnce(t *testing.T) {
 
 	rs, _ := twitchMarkFixture(t, "test-token-aaaa", "", http.StatusOK)
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 	twitchFires := func() int {
 		n := 0
 		for _, p := range fired {
@@ -604,7 +604,7 @@ func TestTwitchAuthLossWarnCarriesTheMappedSentenceOnly(t *testing.T) {
 	// this package's own unexported field, the fixture is shared by nine
 	// tests, and swapping it here changes nothing for any of them.
 	rs.logger = rec
-	rs.OnRecoveryNeeded = func(string) {}
+	rs.OnRecoveryNeeded = func(string, RecoveryCause) {}
 
 	// Off-vocabulary AND credential-shaped, which is the only input that can
 	// separate the two implementations: for a KNOWN reason the mapped sentence

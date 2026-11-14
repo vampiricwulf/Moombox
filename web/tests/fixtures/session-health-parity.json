@@ -1,0 +1,17 @@
+{
+  "comment": "One predicate, two languages: Go cookies.SessionHealthOf and utils.js sessionHealth (owner ruling K4). `status` holds the wire keys of the cookieStatus / twitchAuthStatus payloads the predicate reads; `pageSignedOutAt` is omitted on the wire when no page has rendered signed out. `now` is the reader's clock. A page signed out less than 24 h ago reads flickering unless the API check has failed, which reads relogin. A jsOnly row is a payload Go cannot produce.",
+  "cases": [
+    { "name": "signed in, no signed-out page", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok" }, "health": "ok" },
+    { "name": "signed in, a page signed out an hour ago", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-13T11:00:00Z" }, "health": "flickering" },
+    { "name": "one second short of a quiet day", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-12T12:00:01Z" }, "health": "flickering" },
+    { "name": "a quiet day exactly", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-12T12:00:00Z" }, "health": "ok" },
+    { "name": "a signed-out page from days ago", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-09T08:30:00Z" }, "health": "ok" },
+    { "name": "check inconclusive, a page signed out", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "unknown", "pageSignedOutAt": "2026-11-13T11:59:00Z" }, "health": "flickering" },
+    { "name": "check failed", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "failed" }, "health": "relogin" },
+    { "name": "check failed outranks a signed-out page", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "failed", "pageSignedOutAt": "2026-11-13T11:00:00Z" }, "health": "relogin" },
+    { "name": "nothing configured", "now": "2026-11-13T12:00:00Z", "status": { "found": false, "verification": "failed" }, "health": "ok" },
+    { "name": "the reader's clock is behind the server's", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-13T12:03:00Z" }, "health": "flickering" },
+    { "name": "older binary, no verification or page key", "now": "2026-11-13T12:00:00Z", "status": { "found": true }, "health": "ok", "jsOnly": true },
+    { "name": "a page time that does not parse", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "soon" }, "health": "ok", "jsOnly": true }
+  ]
+}

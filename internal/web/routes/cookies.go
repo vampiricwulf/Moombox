@@ -723,6 +723,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// that pass (up to 45 s, then a pass of its own) would hold the request
 		// for a refresh that did nothing.
 		if result.Ran {
+			// The operator's own refresh: the recovery back-off starts over
+			// (owner ruling K4). Never done for an automatic pass.
+			refreshSvc.ClearRecoveryEscalation()
 			refreshSvc.CheckNowAfterWrite(req.Context())
 			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
 		} else {
@@ -804,6 +807,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (K4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
 		}()
@@ -1006,6 +1010,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (K4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")
 		}()

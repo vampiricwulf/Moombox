@@ -70,7 +70,9 @@ const (
 	// livenessRefireFactor and livenessRefireCap turn livenessRefireWindow
 	// above into a per-platform back-off, decided by the owner 2026-08-29:
 	// alarm, re-alarm 30 minutes later, then double — 1 h, 2 h, 4 h — capped
-	// near a day, and start over when auth returns.
+	// near a day. The schedule starts over only after livenessQuietReset with
+	// no signed-out page (owner ruling K4, 2026-11-13; it used to start over on
+	// any signed-in verdict, see livenessQuietReset).
 	//
 	// WHY A SCHEDULE. Tier 1 notifies once per process for a session already
 	// dead at startup: shouldFireRecovery's witnessed-transition arm needs
@@ -89,6 +91,32 @@ const (
 	// flip, which is what kept arming a one-constant change.
 	livenessRefireFactor = 2
 	livenessRefireCap    = 24 * time.Hour
+
+	// livenessQuietReset is how long a platform must go without a signed-out
+	// page verdict before its back-off returns to the base (owner ruling K4,
+	// 2026-11-13). The reset used to be any conclusive signed-in verdict. A
+	// session whose pages flicker between signed in and signed out then reset
+	// the schedule every few minutes: 55 browser launches in 60 hours in the
+	// October 2026 field log, none of which changed anything. Its own
+	// constant, equal to livenessRefireCap today and not derived from it.
+	//
+	// It is also the horizon of the derived session health: a signed-out page
+	// older than this no longer reads as flickering (SessionHealthOf).
+	livenessQuietReset = 24 * time.Hour
+
+	// livenessDeadRun and livenessRunSpacing keep an escalated window from
+	// hiding a real loss (owner ruling K4). A run of livenessDeadRun
+	// signed-out page verdicts with no signed-in one between them fires
+	// recovery whatever the window says, once per run, unless a recovery was
+	// already decided inside that run. A flicker breaks the run with a
+	// signed-in page; a dead session does not.
+	//
+	// The run counts verdicts at least livenessRunSpacing apart. The
+	// membership probe delivers one verdict per channel within seconds, so
+	// without the spacing one feed cycle on a three-channel install would
+	// complete the run by itself. With it the run takes three separate cycles.
+	livenessDeadRun    = 3
+	livenessRunSpacing = 5 * time.Minute
 
 	// livenessFreshWindow bounds how old the last conclusive liveness
 	// observation may be before a periodic refresh pays for the
@@ -329,6 +357,15 @@ type RefreshService struct {
 	// livenessRefireWindowFor; all three take rs.mu from their caller.
 	livenessRefireBackoff map[string]time.Duration
 
+	// pageEpisodes holds, per platform, what the signed-out page verdicts of
+	// the current back-off episode add up to: when the last one landed, the
+	// run of consecutive ones, how many recoveries they have fired, and the
+	// last page-triggered pass. In memory only: after a restart the schedule
+	// starts from the base and the session health reads ok until the next
+	// signed-out page. Written by foldLiveness, ClearRecoveryEscalation and
+	// NotePageRecoveryPass under rs.mu.
+	pageEpisodes map[string]pageEpisode
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -342,8 +379,11 @@ type RefreshService struct {
 	// OnRecoveryNeeded is called when a platform transitions from
 	// authenticated to not-authenticated due to genuine auth loss (not
 	// a network error and not a never-authenticated state). The platform
-	// parameter is "youtube" or "twitch".
-	OnRecoveryNeeded func(platform string)
+	// parameter is "youtube" or "twitch". cause says what asked for it: a
+	// failed API check (or credentials refused where they were used), or a
+	// page that rendered signed out, with that episode's attempt number and
+	// the window before the next one.
+	OnRecoveryNeeded func(platform string, cause RecoveryCause)
 
 	// OnAuthRecovered is called when a platform transitions from
 	// not-authenticated to authenticated (the inverse of OnRecoveryNeeded).
@@ -475,6 +515,7 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 		lastRecoveryDecided:   make(map[string]time.Time),
 		lastLivenessKnown:     make(map[string]livenessRecord),
 		livenessRefireBackoff: make(map[string]time.Duration),
+		pageEpisodes:          make(map[string]pageEpisode),
 	}
 }
 
@@ -679,7 +720,7 @@ func (rs *RefreshService) AwaitPass(ctx context.Context) bool {
 func (rs *RefreshService) GetStatus() AuthStatus {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
-	return rs.status
+	return rs.statusLocked()
 }
 
 // CheckNow triggers an immediate cookie refresh and auth check, and reports

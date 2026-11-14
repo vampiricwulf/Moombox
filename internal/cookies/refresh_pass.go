@@ -90,7 +90,7 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 		rs.status.TwitchVerification = RefreshFailed
 		rs.status.TwitchError = twitchAuthLossMessage(reason)
 		changed = authStatusChanged(prev, rs.status)
-		statusCopy = rs.status
+		statusCopy = rs.statusLocked()
 
 		// The dedupe, decided under the lock and advanced under it, so two
 		// concurrent downgrades on one dead pair cannot both witness the
@@ -124,7 +124,7 @@ func (rs *RefreshService) NoteTwitchAuthLoss(reason string) {
 		// itself.
 		rs.logger.Warn("twitch credentials were refused where they were used, triggering recovery",
 			"reason", twitchAuthLossMessage(reason))
-		rs.OnRecoveryNeeded("twitch")
+		rs.OnRecoveryNeeded("twitch", RecoveryCause{Trigger: RecoveryTriggerAuthCheck})
 	}
 }
 
@@ -239,7 +239,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 			}
 			if !rs.status.Checked {
 				rs.status.Checked = true
-				ended, statusCopy = true, rs.status
+				ended, statusCopy = true, rs.statusLocked()
 			}
 		}()
 		if ended && rs.OnAuthChange != nil {
@@ -489,7 +489,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		// writes rs.status under rs.mu, so reading it after Unlock is a race —
 		// and the callback could observe a status newer than the transition
 		// that triggered it.
-		statusCopy = rs.status
+		statusCopy = rs.statusLocked()
 	}()
 
 	if changed && rs.OnAuthChange != nil {
@@ -531,12 +531,12 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 		if shouldFireRecovery(ytConcluded, prevYT, ytAuth, ytErr, hasYTCookies) {
 			rs.noteRecoveryDecided("youtube", time.Now())
 			rs.logger.Warn("youtube auth lost, triggering recovery")
-			rs.OnRecoveryNeeded("youtube")
+			rs.OnRecoveryNeeded("youtube", RecoveryCause{Trigger: RecoveryTriggerAuthCheck})
 		}
 		if shouldFireRecovery(twConcluded, prevTW, twEffective, twErr, hasTWCookies) {
 			rs.noteRecoveryDecided("twitch", time.Now())
 			rs.logger.Warn("twitch auth lost, triggering recovery")
-			rs.OnRecoveryNeeded("twitch")
+			rs.OnRecoveryNeeded("twitch", RecoveryCause{Trigger: RecoveryTriggerAuthCheck})
 		}
 	}
 

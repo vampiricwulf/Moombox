@@ -442,7 +442,7 @@ func TestTwitchSessionWithoutItsTokenFiresRecovery(t *testing.T) {
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.doRefresh(context.Background())
 
@@ -469,7 +469,7 @@ func TestNeverConfiguredPlatformsStaySilent(t *testing.T) {
 
 	rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.doRefresh(context.Background())
 

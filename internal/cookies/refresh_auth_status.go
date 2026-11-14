@@ -91,6 +91,14 @@ type AuthStatus struct {
 	// PLATFORM-INDEPENDENT on purpose. One file holds both platforms' rows, so
 	// both status payloads project it and either badge can name it.
 	CookieFileError string `json:"cookieFileError,omitempty"`
+
+	// YouTubePages / TwitchPages are the signed-out page facts the session
+	// health is derived from (SessionHealthOf). They are laid in when a
+	// status is read (RefreshService.statusLocked), not kept in the stored
+	// status, and they are not in authStatusChanged: ObserveLiveness and
+	// ClearRecoveryEscalation push their own changes.
+	YouTubePages PageHealth `json:"-"`
+	TwitchPages  PageHealth `json:"-"`
 }
 
 // Unchecked reports that no cookie auth check has finished in this process,
