@@ -159,7 +159,7 @@ func absOutputDir(outputDir string) string {
 }
 
 // setThresholds records the configured warn/critical percentages the next
-// reading's recovery margin is measured from. Called before every onReading,
+// reading's recovery margin is measured from. Called before every onVolumes,
 // so a threshold edited in Settings applies from the next check.
 func (d *diskAlerts) setThresholds(warnPct, critPct int) {
 	d.thresholds = config.DiskConfig{WarnPercent: warnPct, CriticalPercent: critPct}
@@ -239,12 +239,6 @@ func (d *diskAlerts) readStaging(outputDir, stagingDir string) *routes.DiskStatu
 		Free: ds.Free, Total: ds.Total, UsedPct: ds.UsedPct,
 		WarnLevel: routes.DiskWarnLevel(ds.UsedPct, d.thresholds),
 	}
-}
-
-// onReading feeds one successful reading of the output directory's volume
-// in, with no staging volume beside it.
-func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time.Time) {
-	d.onVolumes(ds, outputDir, nil, "", now)
 }
 
 // onVolumes feeds one successful disk reading in: the output directory's
