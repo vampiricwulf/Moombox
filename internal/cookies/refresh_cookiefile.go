@@ -948,9 +948,18 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 	//    and, the day a second caller exists, an unscoped deletion in a
 	//    google.com reply reaching .youtube.com. An undeclared origin covers
 	//    nothing, so the rule simply does not fire.
+	//
+	//    Under a name the jar keeps only for a row's scope (owner ruling KA-7)
+	//    it reaches only a row www.youtube.com is sent. The update was admitted
+	//    as a cookie of that scope; written into a music.youtube.com row of the
+	//    name it was counted as handled, no .youtube.com row was made, Load does
+	//    not keep the music row under such a name, and the cookie was never
+	//    sent, with the music row's own value lost. Left alone, the row keeps
+	//    its value and the insertion loop adds the .youtube.com row. The names
+	//    the jar keeps by name are matched as they always were.
 	if origin.covers(rowDomain) {
 		for _, k := range candidates {
-			if k.Domain == "" {
+			if k.Domain == "" && !(scopeKeptName(k.Name) && crossesConsentSides(k, rowDomain, origin)) {
 				return k, updates[k], true
 			}
 		}
@@ -998,8 +1007,14 @@ func resolveRowUpdate(updates map[cookieUpdateKey]cookieUpdate, candidates []coo
 // The names the jar keeps by name are matched as they always were, whatever
 // the row's path.
 func narrowerPathScopeRow(name, rowDomain, rowPath string) bool {
-	return strings.TrimSpace(rowPath) != "/" && cookiePlatformOf(rowDomain) == "google" &&
-		!essentialYouTubeCookies[name] && !isGoogleOnlyAuthName(name)
+	return strings.TrimSpace(rowPath) != "/" && cookiePlatformOf(rowDomain) == "google" && scopeKeptName(name)
+}
+
+// scopeKeptName reports whether name is one the YouTube jar keeps only for
+// the scope of its row (owner ruling KA-7): neither an essential name nor a
+// google.com auth name.
+func scopeKeptName(name string) bool {
+	return !essentialYouTubeCookies[name] && !isGoogleOnlyAuthName(name)
 }
 
 // crossesConsentSides reports whether update k, a youtube-only essential name,

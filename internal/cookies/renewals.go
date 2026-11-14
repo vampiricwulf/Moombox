@@ -501,15 +501,24 @@ func (j *CookieJar) noteSignedOutReplyLocked(reply YouTubeReply) {
 
 // changedRenewals returns the updates that differ from what the jar holds:
 // another value, or the same value with an expiry at least renewalExpirySlack
-// later. It reads the jar's memory only, so a reply that re-sends what the
+// later, or the same value with a live expiry when the one the jar holds has
+// run out. It reads the jar's memory only, so a reply that re-sends what the
 // jar already has costs no file read.
+//
+// The last case is for a short-lived cookie YouTube sets again under the same
+// value (GPS=1 for half an hour is the shape). The header leaves out an
+// expired row kept only for its scope, so without it the cookie stopped being
+// sent at its first expiry although YouTube had just set it again, which
+// yt-dlp's jar does send (owner ruling KA-7).
 func (j *CookieJar) changedRenewals(updates map[cookieUpdateKey]cookieUpdate) map[cookieUpdateKey]cookieUpdate {
 	changed := make(map[cookieUpdateKey]cookieUpdate, len(updates))
+	now := time.Now().Unix()
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for key, cu := range updates {
 		have, ok := j.youtube[key.Name]
-		same := ok && have.value == cu.Value &&
+		revived := ok && have.expiredAt(now) && (cu.Expiry == 0 || cu.Expiry > now)
+		same := ok && !revived && have.value == cu.Value &&
 			(key.Domain == "" || sameCookieScope(key.Domain, have.domain)) &&
 			cu.Expiry-have.expiry < int64(renewalExpirySlack/time.Second)
 		if !same {

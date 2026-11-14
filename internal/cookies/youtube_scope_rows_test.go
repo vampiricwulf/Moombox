@@ -62,11 +62,11 @@ func TestLoadKeepsEveryRowWWWYouTubeIsSent(t *testing.T) {
 // never configured, and has no session or identity: the auth predicates read
 // their own names and nothing else (owner ruling KA-7, point 4).
 //
-// Mutant: any of the four predicates widened to "the jar holds a YouTube
-// row".
+// Mutant: any of the five predicates widened to "the jar holds a YouTube
+// row" (the expired SIDCC is the row ExpiredAuthCookiesFor would then count).
 func TestScopeKeptRowsAreNotAuthCookies(t *testing.T) {
 	jar := loadRows(t, []string{
-		cookieRow(".youtube.com", "0", "SIDCC", "v"),
+		cookieRow(".youtube.com", "1000", "SIDCC", "v"),
 		cookieRow(".youtube.com", "0", "__Secure-YEC", "v"),
 	})
 	if jar.GetCookieHeader() == "" {
@@ -347,5 +347,66 @@ func TestARenewalLeavesANarrowerPathRowAlone(t *testing.T) {
 	}
 	if !added {
 		t.Errorf("cookies.txt holds no Secure youtube.com SIDCC row on / with the renewed value")
+	}
+}
+
+// A reply that sets again, with a live expiry, a cookie whose row in the jar
+// has expired is a renewal even when the value is the same and the expiry
+// moved on by less than a day: the header leaves out an expired row kept only
+// for its scope, so without it a short-lived cookie YouTube keeps setting
+// under one value was not sent again after its first expiry.
+//
+// Mutant: changedRenewals without its expired-row case (the next header has
+// no GPS).
+func TestAReplyRevivesAnExpiredScopeKeptRow(t *testing.T) {
+	expired := ".youtube.com\tTRUE\t/\tTRUE\t" + strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10) + "\tGPS\t1\n"
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	jar := loadRowsInto(t, path, strings.Split(strings.TrimSuffix(strings.TrimPrefix(renewalSeed+expired, "# Netscape HTTP Cookie File\n"), "\n"), "\n"))
+	t.Cleanup(jar.FlushRenewals)
+	if strings.Contains(jar.GetCookieHeader(), "GPS=") {
+		t.Fatal("fixture: the expired row is sent")
+	}
+
+	jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/feed/x", jar.GetCookieHeader(), 200,
+		"GPS=1; Domain=.youtube.com; Path=/; Secure; Max-Age=1800"))
+
+	if !strings.HasSuffix(jar.GetCookieHeader(), "; GPS=1") {
+		t.Errorf("the next request does not send the cookie the reply set again")
+	}
+}
+
+// An unscoped Set-Cookie under a name kept only for its scope is not written
+// into a row of a YouTube host www.youtube.com is not under: that row keeps
+// its value and the .youtube.com row is added, which is the one Load keeps
+// and every request sends.
+//
+// Mutant: resolveRowUpdate's rule 2 without the side test (the
+// music.youtube.com row takes the value, no .youtube.com row is made and
+// nothing is sent).
+func TestAnUnscopedRenewalLeavesAnotherHostsRowAlone(t *testing.T) {
+	musicRow := ".music.youtube.com\tTRUE\t/\tTRUE\t2000000000\tFOO\tmusic-own\n"
+	path := filepath.Join(t.TempDir(), "cookies.txt")
+	jar := loadRowsInto(t, path, strings.Split(strings.TrimSuffix(strings.TrimPrefix(renewalSeed+musicRow, "# Netscape HTTP Cookie File\n"), "\n"), "\n"))
+	t.Cleanup(jar.FlushRenewals)
+
+	jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/feed/x", jar.GetCookieHeader(), 200,
+		"FOO=foo-new; Path=/; Max-Age=31536000"))
+
+	if !strings.HasSuffix(jar.GetCookieHeader(), "; FOO=foo-new") {
+		t.Errorf("the next request does not send the cookie the reply set")
+	}
+	jar.FlushRenewals()
+	file := fileText(t, path)
+	if !strings.Contains(file, musicRow) {
+		t.Errorf("the music.youtube.com row was changed")
+	}
+	added := false
+	for line := range strings.SplitSeq(file, "\n") {
+		if strings.HasPrefix(line, ".youtube.com\tTRUE\t/\t") && strings.HasSuffix(line, "\tFOO\tfoo-new") {
+			added = true
+		}
+	}
+	if !added {
+		t.Errorf("cookies.txt holds no .youtube.com FOO row with the value the reply set")
 	}
 }
