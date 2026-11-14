@@ -115,7 +115,7 @@ Tags that can appear in the progress slot:
 |---|---|
 | `⋯ wait` | The download is waiting (for example, between retries) rather than making progress. |
 | `⏸ offline` | A `Queued` job held because Moombox is offline. |
-| `⏸ disk` | A `Queued` job held because the output disk reached the critical threshold. See [`disk.disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). |
+| `⏸ disk` | A `Queued` job held because the output disk, or the staging disk when it is a different and fuller one, reached the critical threshold. See [`disk.disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). |
 | `⏸ rate limit` | A `Queued` YouTube job held for an hour after a YouTube rate-limit. |
 | `⟳ 2/3` | A `Queued` job waiting to retry (attempt 2 of 3). |
 | `⟳ mux` | An `Error` job that Moombox will mux by itself once the Twitch monitor confirms the broadcast is over. |
@@ -250,7 +250,7 @@ The cookie indicators appear only for the platforms enabled in
 | Indicator | Meaning | What to do |
 |---|---|---|
 | green `YT` / `TW` | Cookies are configured and authenticate. | Nothing. |
-| orange `YT~` / `TW~` (`YT~ pages flicker, retry after 14:05` on a wide bar) | Flickering: the cookies authenticate, but a page came back signed out in the last 24 hours. | Nothing; Moombox retries by itself at the time shown. `R C` spells it out at any width. |
+| orange `YT~` / `TW~`; a wider bar reads `YT~ retry 14:05`, the widest `YT~ pages flicker, retry after 14:05` | Flickering: the cookies authenticate, but a page came back signed out in the last 24 hours. | Nothing; Moombox retries by itself at the time shown. `R C` spells it out at any width. |
 | yellow `YT` | No YouTube cookies configured. | Optional; see [Cookies](cookies.md). |
 | dim `TW` | No Twitch cookies configured (or no check yet). | Optional. |
 | orange `YT: Unknown` | The last check could not reach a conclusion (network error, unexpected answer). | Usually nothing; it is re-checked. |
@@ -309,6 +309,8 @@ if the cursor moves in the meantime.
 `A I` (Reinitialize) names what the reset deletes and any automatic action it
 cancels, for example
 `Press I to confirm reinit: cancels the pending automatic mux, and deletes 2 recorded parts (1.2GB) and 40 staged files (850.0MB) — "Title" (3s)`.
+When the job already has a single-file archive, the line also says the reset
+sets it aside instead of deleting it (`sets the existing archive (3.2GB) aside, and deletes …`).
 The dashboard shows the same summary before its Reinitialize.
 
 ### What each action chord does

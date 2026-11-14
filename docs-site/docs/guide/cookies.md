@@ -380,7 +380,7 @@ appear only for **active** platforms. Moombox decides this as follows:
     | Display | Meaning |
     |---|---|
     | green `YT` / `TW` | Working. |
-    | orange `YT~` / `TW~` (`YT~ retry 14:05` when there is room) | Flickering: the login check passes, but a page came back signed out in the last 24 hours. Moombox retries by itself at the time shown; nothing to do. ++r++ ++c++ spells it out at any width. |
+    | orange `YT~` / `TW~`; a wider bar reads `YT~ retry 14:05`, the widest `YT~ pages flicker, retry after 14:05` | Flickering: the login check passes, but a page came back signed out in the last 24 hours. Moombox retries by itself at the time shown; nothing to do. ++r++ ++c++ spells it out at any width. |
     | yellow `YT` | No YouTube cookies. |
     | dim `TW` | Twitch anonymous — normal. |
     | `YT: Unknown` (`YT` when narrow) | The last check could not reach the site. |

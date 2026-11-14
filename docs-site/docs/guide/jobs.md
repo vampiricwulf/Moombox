@@ -334,9 +334,10 @@ recorded parts (3.1GB) and 41 staged files (812.0MB).* — or says it could
 not tell. Reinitialize also gives a Twitch job a fresh automatic-retry
 budget. This cannot be undone.
 
-An archive the job **already has** is not deleted. A single-file archive is
-renamed where it is, to `<name>.restart-<timestamp>.mp4`, with its chat,
-thumbnail and description files, before the new download starts. The confirm
+A **single-file archive** the job already has is not deleted: it is renamed
+where it is, to `<name>.restart-<timestamp>.mp4`, with its chat, thumbnail
+and description files, before the new download starts. (The parts of a split
+recording are deleted, as listed above.) The confirm
 says so (*… sets the existing archive (3.2GB) aside, and deletes …*), and
 afterwards Job Details lists the file under **Set-aside Archives** as *kept,
 never replaced*. Delete it yourself once you no longer want it.

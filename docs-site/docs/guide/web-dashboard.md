@@ -129,7 +129,10 @@ by title; `Cancelled` and `Finished` rows are newest first (by last update).
     recorded parts (3.1GB) and 41 staged files (812.0MB). This cannot be
     undone."* If the job is waiting for an automatic Twitch mux or retry,
     the sentence starts with what it cancels ("cancels the pending automatic
-    mux, and deletes …"). If the preview cannot be read, the dialog says so
+    mux, and deletes …"). If the job already has a single-file archive, the
+    sentence also says that it is set aside, not deleted ("sets the existing
+    archive (3.2GB) aside, and deletes …"); see
+    [Reinitialize](jobs.md#reinitialize). If the preview cannot be read, the dialog says so
     and lists what a reset can delete: set-aside recordings, recorded parts,
     staged data and imported chapters.
 
