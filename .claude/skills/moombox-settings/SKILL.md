@@ -52,11 +52,15 @@ SomeSetting string `toml:"some_setting" json:"some_setting"`
 - The field is drawn below 60x20 too, by the bare form (`internal/tui/settings_bare.go`), from the same `fieldDef`: nothing to add there, but keep its label distinct from its section's other labels in their first twenty cells (`TestBareSettingsLabelsStayDistinct`), and write its `help` so the first 30 cells say what matters, since that is all a 30x6 terminal shows of it
 
 ### 8. Hot-Reload (if runtime-changeable)
-Ten callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
+Fourteen callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_routes.go`) support hot-reload; everything else requires restart:
 - `OnLogLevelChange(level)` → `log.SetLevel()`
 - `OnMaxParallelChange(n)` → `dlWorker.SetParallelDownloads()`
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
 - `OnChannelChange()` → `kickMonitors` to re-evaluate channels
+- `OnMonitorIntervalChange()` → `kickMonitors` (a changed `feed_check_interval`, `decapi_check_interval` or `twitch_check_interval`; not called when the save also carried channels)
+- `OnActivePlatformsChange()` → `resendTUICookieStatus` (the platforms whose cookie indicators show changed)
+- `OnDiskSettingsChange()` → `requestDiskRecheck` (`disk.disk_warn_percent`, `disk.disk_critical_percent`, `paths.output_directory` or `paths.staging_directory` changed)
+- `OnSegmentWorkersChange(n)` → `warnSegmentWorkers` (the high-value warning boot logs)
 - `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 17)
 - `OnGoSoftLimitChange(mb)` → `debug.SetMemoryLimit` (0 restores the boot limit)
 - `OnTrustForwardedProtoChange(trust)` → the `internal/web` atomic flag
