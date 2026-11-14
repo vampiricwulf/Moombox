@@ -98,17 +98,17 @@ type StatusBarModel struct {
 	width    int
 	ytCookie CookieStatus
 	twCookie CookieStatus
-	// ytFlicker / twFlicker: the platform's session health is flickering
-	// (cookies.SessionHealthOf: signed in by the API check, a page rendered
-	// signed out in the last day). Drawn on an otherwise healthy badge only.
-	// ytNextTry / twNextTry are the end of the recovery back-off window as a
-	// local clock time, "" when no recovery has been decided.
-	ytFlicker bool
-	twFlicker bool
-	ytNextTry string
-	twNextTry string
-	ytActive  bool
-	twActive  bool
+	// ytSession / twSession are the facts each platform's session health is
+	// derived from. The health itself is never stored: flicker works it out
+	// at every draw with cookies.SessionHealthOf, so the badge goes back to
+	// plain once the quiet day has passed and the retry time goes once it is
+	// behind, with no further status push (CLAUDE.md State machines rule 5).
+	ytSession SessionFacts
+	twSession SessionFacts
+	// now is the clock flicker reads; time.Now outside tests.
+	now      func() time.Time
+	ytActive bool
+	twActive bool
 	// Jobs list for detecting COOKIES? status (B1)
 	jobs []*database.Job
 	// Disk status
@@ -176,17 +176,91 @@ func (m *StatusBarModel) SetCookieStatus(yt, tw CookieStatus) {
 	m.twCookie = tw
 }
 
-// SetSessionHealth sets each platform's derived session health and the end
-// of its recovery back-off window (zero for none).
-func (m *StatusBarModel) SetSessionHealth(yt, tw cookies.SessionHealth, ytNextTry, twNextTry time.Time) {
-	clock := func(t time.Time) string {
-		if t.IsZero() {
-			return ""
-		}
-		return t.Local().Format("15:04")
+// SessionFacts is what one platform's session health is derived from: the
+// API check's answer and the page facts (cookies.AuthStatus). Times and
+// verdicts only.
+type SessionFacts struct {
+	Found        bool
+	Verification cookies.RefreshVerdict
+	Pages        cookies.PageHealth
+}
+
+// SessionFactsOf reads one platform's facts ("youtube" or "twitch") off an
+// auth status.
+func SessionFactsOf(s cookies.AuthStatus, platform string) SessionFacts {
+	if platform == "twitch" {
+		return SessionFacts{Found: s.HasTwitchCookies, Verification: s.TwitchVerification, Pages: s.TwitchPages}
 	}
-	m.ytFlicker, m.ytNextTry = yt == cookies.SessionFlickering, clock(ytNextTry)
-	m.twFlicker, m.twNextTry = tw == cookies.SessionFlickering, clock(twNextTry)
+	return SessionFacts{Found: s.HasYouTubeCookies, Verification: s.YouTubeVerification, Pages: s.YouTubePages}
+}
+
+// SetSessionHealth sets the facts each platform's session health is derived
+// from.
+func (m *StatusBarModel) SetSessionHealth(yt, tw SessionFacts) {
+	m.ytSession, m.twSession = yt, tw
+}
+
+// clock is the status bar's clock.
+func (m *StatusBarModel) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// flicker derives, now, whether f's session is flickering
+// (cookies.SessionHealthOf, the one predicate) and when the next automatic
+// attempt can come: a local clock time, with the weekday when that is not
+// today, and "" when no recovery has been decided or the window is already
+// behind (the next signed-out page then fires one).
+func (f SessionFacts) flicker(now time.Time) (on bool, nextTry string) {
+	if cookies.SessionHealthOf(f.Found, f.Verification, f.Pages.LastSignedOut, now) != cookies.SessionFlickering {
+		return false, ""
+	}
+	return true, attemptClock(f.Pages.NextAttempt, now)
+}
+
+// attemptClock words the end of a back-off window: "14:05", "Sat 14:05"
+// when that is another day, "" when there is none ahead.
+func attemptClock(next, now time.Time) string {
+	if next.IsZero() || !next.After(now) {
+		return ""
+	}
+	next, now = next.Local(), now.Local()
+	if next.YearDay() != now.YearDay() || next.Year() != now.Year() {
+		return next.Format("Mon 15:04")
+	}
+	return next.Format("15:04")
+}
+
+// sessionHealthLine is the flickering state in words, for the R C result: one
+// clause for each active platform whose badge reads healthy while its pages
+// flicker, with the time of the next automatic attempt. "" when neither does.
+// The bar shows the same state as "YT~"; this is where it is spelled out at
+// every terminal size.
+func (m *StatusBarModel) sessionHealthLine() string {
+	now := m.clock()
+	var parts []string
+	for _, p := range []struct {
+		label  string
+		active bool
+		badge  CookieStatus
+		facts  SessionFacts
+	}{
+		{"YouTube", m.ytActive, m.ytCookie, m.ytSession},
+		{"Twitch", m.twActive, m.twCookie, m.twSession},
+	} {
+		on, nextTry := p.facts.flicker(now)
+		if !p.active || p.badge != CookieStatusOK || !on {
+			continue
+		}
+		when := "next automatic attempt when a page next renders signed out"
+		if nextTry != "" {
+			when = "no automatic attempt before " + nextTry
+		}
+		parts = append(parts, p.label+" is signed in, but its pages are intermittently signed out; "+when)
+	}
+	return strings.Join(parts, " | ")
 }
 
 // SetActivePlatforms sets which platform indicators are visible.
@@ -285,9 +359,11 @@ func (m *StatusBarModel) SetBackfillStatus(chID, name, tab string, pages int, st
 // compare equal to itself and would cost one full render per frame — the safe
 // direction, and unreachable anyway: the value comes from an integer ratio.
 type statusBarKey struct {
-	width           int
-	ytCookie        CookieStatus
-	twCookie        CookieStatus
+	width    int
+	ytCookie CookieStatus
+	twCookie CookieStatus
+	// Derived at each draw (SessionFacts.flicker), so the frame follows the
+	// clock: the flicker ends and the retry time goes without a status push.
 	ytFlicker       bool
 	twFlicker       bool
 	ytNextTry       string
@@ -311,14 +387,17 @@ type statusBarKey struct {
 }
 
 func (m *StatusBarModel) statusBarKey() statusBarKey {
+	now := m.clock()
+	ytFlicker, ytNextTry := m.ytSession.flicker(now)
+	twFlicker, twNextTry := m.twSession.flicker(now)
 	return statusBarKey{
 		width:           m.width,
 		ytCookie:        m.ytCookie,
 		twCookie:        m.twCookie,
-		ytFlicker:       m.ytFlicker,
-		twFlicker:       m.twFlicker,
-		ytNextTry:       m.ytNextTry,
-		twNextTry:       m.twNextTry,
+		ytFlicker:       ytFlicker,
+		twFlicker:       twFlicker,
+		ytNextTry:       ytNextTry,
+		twNextTry:       twNextTry,
 		ytActive:        m.ytActive,
 		twActive:        m.twActive,
 		counts:          m.counts,
@@ -665,7 +744,9 @@ func cookieUnknownLabel(code string, t barTier) string {
 // K4). The code plus "~", which no other badge carries, so the state reads
 // without colour; the two widest tiers add when the next automatic attempt
 // can come. Unlike the other healthy states it is kept at every tier, the compact
-// layout's status line included: it is the only place the TUI says it.
+// layout's status line included. The narrow tiers have no room for the time:
+// the R C result spells the state out with it at every size
+// (sessionHealthLine).
 func cookieFlickerLabel(code string, t barTier, nextTry string) string {
 	switch {
 	case t > tierCompact:
@@ -949,10 +1030,10 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 				parts = append(parts, statusBarYelStyle.Render("YT"))
 			}
 		case badgeOK:
-			if m.ytFlicker {
+			if on, nextTry := m.ytSession.flicker(m.clock()); on {
 				// Signed in, pages intermittently signed out. Nothing to act
 				// on, but kept at every tier: see cookieFlickerLabel.
-				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("YT", t, m.ytNextTry)))
+				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("YT", t, nextTry)))
 			} else if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("YT"))
 			}
@@ -1006,9 +1087,9 @@ func (m *StatusBarModel) renderCookieStatus(t barTier, counts barJobCounts) stri
 				parts = append(parts, statusBarWrnStyle.Render(cookieUnknownLabel("TW", t)))
 			}
 		case badgeOK:
-			if m.twFlicker {
+			if on, nextTry := m.twSession.flicker(m.clock()); on {
 				// Same arm as YouTube's.
-				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("TW", t, m.twNextTry)))
+				parts = append(parts, statusBarWrnStyle.Render(cookieFlickerLabel("TW", t, nextTry)))
 			} else if healthy {
 				parts = append(parts, statusBarGrnStyle.Render("TW"))
 			}

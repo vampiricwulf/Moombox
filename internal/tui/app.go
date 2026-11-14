@@ -73,13 +73,11 @@ type (
 		TW       CookieStatus
 		YTActive bool
 		TWActive bool
-		// The derived session health of each platform (cookies.SessionHealthOf,
-		// owner ruling K4) and the end of its recovery back-off window. The
-		// bar draws "flickering" on an otherwise healthy badge.
-		YTHealth  cookies.SessionHealth
-		TWHealth  cookies.SessionHealth
-		YTNextTry time.Time
-		TWNextTry time.Time
+		// The facts each platform's session health is derived from. The
+		// health is not carried: the bar derives it at every draw
+		// (cookies.SessionHealthOf), so it follows the clock.
+		YTSession SessionFacts
+		TWSession SessionFacts
 	}
 	DiskStatusMsg struct {
 		Free    uint64
@@ -1131,11 +1129,11 @@ func (a *App) SetCookieStatus(yt, tw CookieStatus, ytActive, twActive bool) {
 	a.statusBar.SetActivePlatforms(ytActive, twActive)
 }
 
-// SetSessionHealth applies both platforms' derived session health and the
-// end of each recovery back-off window to the status bar: before Run as the
-// seed, and for every CookieStatusMsg after.
-func (a *App) SetSessionHealth(yt, tw cookies.SessionHealth, ytNextTry, twNextTry time.Time) {
-	a.statusBar.SetSessionHealth(yt, tw, ytNextTry, twNextTry)
+// SetSessionHealth applies the facts both platforms' session health is
+// derived from to the status bar: before Run as the seed, and for every
+// CookieStatusMsg after.
+func (a *App) SetSessionHealth(yt, tw SessionFacts) {
+	a.statusBar.SetSessionHealth(yt, tw)
 }
 
 // SetAdmissionHolds applies the backlog scheduler's hold snapshot to the

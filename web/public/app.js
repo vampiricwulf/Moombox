@@ -14,7 +14,7 @@ import { UpdateController } from "./modules/update-indicator.js";
 import { FilterBarController } from "./modules/filter-bar.js";
 import { isClipJob } from "./modules/filter-engine.js";
 import { JobDetailsController, stampFactsStatus } from "./modules/job-details.js";
-import { cookieRetry, cookieRetryText, COOKIE_RETRY_WINDOW_MS, formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, cookieFlickering, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
+import { cookieRetry, cookieRetryText, COOKIE_RETRY_WINDOW_MS, formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput, cookieIndicatorState, sessionHealthLines, cookieFlickering, cookieIndicatorText, cookieCheckPending, cookieRecheckToast, cookieRefreshPreflightToast, cookieRefreshMechanismLabel, parkedCookiePlatforms, serverErrorMessage, reloginPromptTarget, canResumeJob, NAME_COLLATOR, streamUrl, isImportPlaceholderId, reinitializeDeletesText, sumReinitializePreviews, pendingAutoAction, pendingAutoActionText, isWaitLine, isAwaitingProcessing, queuedHold, queuedHoldText, CANCEL_STATUSES, REINIT_STATUSES, DELETE_STATUSES, WATCHED_STATUSES, isBackfillRetained, toastDuration } from "./modules/utils.js";
 import { applyLogoutVisibility, bindLogout } from "./modules/logout.js";
 
 // TASK_STATUS_PRIORITY orders the Tasks list's status groups (_sortJobs).
@@ -1245,6 +1245,20 @@ export class MoomboxApp {
       // API check, pages intermittently signed out. Text, like the pending
       // ellipsis, because a phone has no hover.
       el.textContent = cookieIndicatorText(platform, status, cookieFlickering(status, relogin, parked[platform]));
+    }
+
+    // The same state in words, visible in Settings beside the renewal line:
+    // the pill has room for "YT~" only, and a phone cannot hover it for the
+    // sentence or the time of the next automatic attempt. Derived here on
+    // every draw, like the pills.
+    const healthEl = document.getElementById("cookie-session-health");
+    if (healthEl) {
+      const lines = sessionHealthLines([
+        { platform: "youtube", status: this.cookieStatus, relogin: !!this.autoCookieReloginRequired?.youtube, parked: parked.youtube, active: ytActive },
+        { platform: "twitch", status: this.twitchAuthStatus, relogin: !!this.autoCookieReloginRequired?.twitch, parked: parked.twitch, active: twActive },
+      ]);
+      healthEl.textContent = lines.join("\n");
+      healthEl.style.display = lines.length ? "" : "none";
     }
 
     // The first cookie check has not answered: ask again shortly, until it has.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
@@ -94,5 +95,33 @@ func TestCookieChordsReadTheRenewalLine(t *testing.T) {
 	_, cmd = app.dispatchAction("R F", nil)
 	if got, _ := cmd().(cookieForceRefreshResultMsg); got.Renewal != renewalLineSample {
 		t.Errorf("R F result carries %q", got.Renewal)
+	}
+}
+
+// TestRecheckLineSaysAFlickeringSessionInWords: the bar has room only for
+// "YT~" below its two widest tiers, so the R C result carries the state as a
+// sentence with the time of the next automatic attempt, at every terminal
+// size. It asks for nothing: a healthy check stays green.
+//
+// Mutant: leave sessionHealthLine out of cookieRecheckFeedback.
+func TestRecheckLineSaysAFlickeringSessionInWords(t *testing.T) {
+	next, noon := todayAt(14, 5)
+	app := NewApp()
+	app.width = 200
+	app.statusBar.now = func() time.Time { return noon }
+	app.statusBar.SetActivePlatforms(true, false)
+	app.statusBar.SetCookieStatus(CookieStatusOK, CookieStatusOK)
+	facts := flickeringFacts(next)
+	facts.Pages.LastSignedOut = noon.Add(-time.Minute)
+	app.SetSessionHealth(facts, SessionFacts{})
+
+	app.Update(cookieRecheckResultMsg{YouTube: cookies.RefreshOK, Renewal: renewalLineSample})
+	const health = "YouTube is signed in, but its pages are intermittently signed out; no automatic attempt before 14:05"
+	ok := cookies.RecheckReport(cookies.RecheckedPlatform{Label: "YouTube", Verdict: cookies.RefreshOK})
+	if want := ok + " | " + health + " | " + renewalLineSample; app.feedback.msg != want {
+		t.Errorf("R C feedback = %q\nwant %q", app.feedback.msg, want)
+	}
+	if app.feedback.sev != severitySuccess {
+		t.Errorf("severity = %v, want success: the flicker asks for nothing", app.feedback.sev)
 	}
 }

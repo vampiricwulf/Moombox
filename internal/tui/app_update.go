@@ -371,7 +371,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CookieStatusMsg:
 		a.SetCookieStatus(msg.YT, msg.TW, msg.YTActive, msg.TWActive)
-		a.SetSessionHealth(msg.YTHealth, msg.TWHealth, msg.YTNextTry, msg.TWNextTry)
+		a.SetSessionHealth(msg.YTSession, msg.TWSession)
 		return a, a.listenForUpdates()
 
 	case DiskStatusMsg:
@@ -1390,6 +1390,12 @@ func (a *App) cookieRecheckFeedback(msg cookieRecheckResultMsg) (string, feedbac
 		// recorded is a fact about a PREVIOUS pass, and the conclusive verdict
 		// of THIS one is the only thing that earns red.
 		stated = max(stated, severityWarning)
+	}
+	if health := a.statusBar.sessionHealthLine(); health != "" {
+		// The flickering state in words, with the time of the next automatic
+		// attempt: the bar's "YT~" has no room for either below its two
+		// widest tiers. It asks for nothing, so the severity does not move.
+		line += " | " + health
 	}
 	if msg.Renewal != "" {
 		// Last of all, so the row cap takes it before anything above. It

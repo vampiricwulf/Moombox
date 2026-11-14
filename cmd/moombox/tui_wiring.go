@@ -1207,7 +1207,7 @@ func (s *runState) runTUI() {
 	// check sends from here on is applied after it.
 	initial := cookieSend(s.cookieRefresh.GetStatus())
 	app.SetCookieStatus(initial.YT, initial.TW, initial.YTActive, initial.TWActive)
-	app.SetSessionHealth(initial.YTHealth, initial.TWHealth, initial.YTNextTry, initial.TWNextTry)
+	app.SetSessionHealth(initial.YTSession, initial.TWSession)
 
 	// Send initial job list. The forwarders are already subscribed, so it
 	// carries the floor like a resync does: an event queued before this read
@@ -1433,11 +1433,10 @@ func newTUICookieStatusSender(
 		}
 		var msg tui.CookieStatusMsg
 		msg.YT, msg.TW = cookieBadgesFor(auth, relogin())
-		// The derived session health (cookies.SessionHealthOf, the one
-		// predicate; the dashboard mirrors it) and each back-off window's end.
-		now := time.Now()
-		msg.YTHealth, msg.TWHealth = auth.SessionHealth("youtube", now), auth.SessionHealth("twitch", now)
-		msg.YTNextTry, msg.TWNextTry = auth.YouTubePages.NextAttempt, auth.TwitchPages.NextAttempt
+		// The facts the session health is derived from. The bar derives the
+		// health itself at every draw (cookies.SessionHealthOf, the one
+		// predicate; the dashboard mirrors it), so it follows the clock.
+		msg.YTSession, msg.TWSession = tui.SessionFactsOf(auth, "youtube"), tui.SessionFactsOf(auth, "twitch")
 		msg.YTActive, msg.TWActive = active()
 		select {
 		case ch <- msg:

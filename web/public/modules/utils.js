@@ -761,9 +761,29 @@ export function cookieFlickering(status, reloginRequired, parked, nowMs = Date.n
 export function sessionHealthText(status, nowMs) {
   const next = Date.parse(status?.nextRecoveryAt || "");
   const when = !Number.isNaN(next) && next > nowMs
-    ? `no automatic attempt before ${formatClockTime(next)}`
+    ? `no automatic attempt before ${formatAttemptTime(next, nowMs)}`
     : "next automatic attempt when a page next renders signed out";
   return `Signed in, but pages are intermittently signed out; ${when}`;
+}
+
+/**
+ * sessionHealthLines is the flickering state as visible text for the Settings
+ * cookie block: one line for each active platform whose pill reads "YT~" /
+ * "TW~", the platform's name and sessionHealthText's sentence with the time
+ * of the next automatic attempt. The pill has room for the short form only,
+ * and its tooltip is out of reach on a phone. Empty when no platform
+ * flickers. Worked out on every draw from the status payload, never stored.
+ * @param {Array<{platform: string, status: object, relogin: boolean, parked: boolean, active: boolean}>} platforms
+ * @param {number} nowMs
+ * @returns {string[]}
+ */
+export function sessionHealthLines(platforms, nowMs = Date.now()) {
+  const lines = [];
+  for (const p of platforms) {
+    if (!p.active || !cookieFlickering(p.status, p.relogin, p.parked, nowMs)) continue;
+    lines.push(`${COOKIE_INDICATOR_PLATFORMS[p.platform].name}: ${sessionHealthText(p.status, nowMs)}`);
+  }
+  return lines;
 }
 
 /**
@@ -847,6 +867,20 @@ export function renewalLine(status, nowMs) {
 export function formatClockTime(ms) {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * formatAttemptTime is formatClockTime for a time ahead, with the weekday in
+ * front ("Sat 14:05") when it falls on another local day than nowMs: a
+ * back-off window can be a day long, and a bare clock time would then read
+ * as today's. The TUI's attemptClock words it the same way.
+ */
+export function formatAttemptTime(ms, nowMs) {
+  const d = new Date(ms);
+  const now = new Date(nowMs);
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const clock = formatClockTime(ms);
+  return sameDay ? clock : `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${clock}`;
 }
 
 /**

@@ -141,11 +141,13 @@ func TestTUICookieStatusCarriesTheSessionHealth(t *testing.T) {
 		ch,
 	)
 	msg := send(auth)
-	if msg.YTHealth != cookies.SessionFlickering || !msg.YTNextTry.Equal(next) {
-		t.Errorf("YouTube: health %q next %v, want flickering and %v", msg.YTHealth, msg.YTNextTry, next)
+	// The facts, not a health worked out once: the bar derives that at every
+	// draw, so it follows the clock.
+	if want := tui.SessionFactsOf(auth, "youtube"); msg.YTSession != want || !msg.YTSession.Pages.NextAttempt.Equal(next) {
+		t.Errorf("YouTube facts = %+v, want %+v", msg.YTSession, want)
 	}
-	if msg.TWHealth != cookies.SessionOK || !msg.TWNextTry.IsZero() {
-		t.Errorf("Twitch: health %q next %v, want ok and no time", msg.TWHealth, msg.TWNextTry)
+	if want := tui.SessionFactsOf(auth, "twitch"); msg.TWSession != want || !msg.TWSession.Pages.LastSignedOut.IsZero() {
+		t.Errorf("Twitch facts = %+v, want %+v with no signed-out page", msg.TWSession, want)
 	}
 	if queued := <-ch; queued != msg {
 		t.Errorf("the queued message differs from the one returned: %+v", queued)

@@ -1196,6 +1196,18 @@
                                 id="auto-cookie-last-error"
                                 style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small)"
                             ></div>
+                            <!--
+                                sessionHealthLines (utils.js): a session whose
+                                pages flicker, in words, with the time of the
+                                next automatic attempt. The header pill shows
+                                the same state as "YT~". Filled by app.js with
+                                the pills; hidden while no platform flickers.
+                            -->
+                            <div
+                                id="cookie-session-health"
+                                role="status"
+                                style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small); color: var(--sl-color-warning-700); white-space: pre-line"
+                            ></div>
                             <!-- renewalLine (utils.js): what renews the session. Names and times only. -->
                             <div
                                 id="auto-cookie-renewal"

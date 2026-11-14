@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, sessionHealth, renewalLine, cookieFlickering, formatClockTime } from "../public/modules/utils.js";
+import { cookieIndicatorState, cookieIndicatorText, cookieCheckState, cookieBadgeState, cookieCheckPending, sessionHealth, renewalLine, cookieFlickering, formatClockTime, formatAttemptTime, sessionHealthLines } from "../public/modules/utils.js";
 
 const yt = (status, relogin = false, parked = false) => cookieIndicatorState("youtube", status, relogin, parked);
 
@@ -106,7 +106,7 @@ test("a flickering session is shown on a healthy badge only", () => {
   const flick = { checked: true, found: true, authenticated: true, verification: "ok", pageSignedOutAt: "2026-11-13T11:50:00Z", nextRecoveryAt: next };
   const s = cookieIndicatorState("youtube", flick, false, false, now);
   assert.equal(s.className, "indicator-warn");
-  assert.equal(s.title, `YouTube: Signed in, but pages are intermittently signed out; no automatic attempt before ${formatClockTime(Date.parse(next))}`);
+  assert.equal(s.title, `YouTube: Signed in, but pages are intermittently signed out; no automatic attempt before ${formatAttemptTime(Date.parse(next), now)}`);
   assert.equal(cookieIndicatorText("youtube", flick, cookieFlickering(flick, false, false, now)), "YT~");
   assert.equal(cookieIndicatorText("twitch", flick, cookieFlickering(flick, false, false, now)), "TW~");
 
@@ -123,6 +123,40 @@ test("a flickering session is shown on a healthy badge only", () => {
   const later = now + 24 * 60 * 60 * 1000;
   assert.deepEqual(cookieIndicatorState("youtube", flick, false, false, later), { className: "indicator-ok", title: "YouTube: Authenticated" });
   assert.equal(cookieFlickering(flick, false, false, later), false);
+});
+
+// The words and the time are visible text in Settings, not only the pill's
+// tooltip: one line for each platform whose pill reads "YT~" / "TW~".
+// Mutants: the line built for a platform that is not active, or whose badge
+// asks for something; the time left out of the line.
+test("a flickering session is spelled out as visible text with the next attempt", () => {
+  const now = Date.parse("2026-11-13T12:00:00Z");
+  const next = Date.parse("2026-11-13T13:20:00Z");
+  const flick = { checked: true, found: true, authenticated: true, verification: "ok", pageSignedOutAt: "2026-11-13T11:50:00Z", nextRecoveryAt: "2026-11-13T13:20:00Z" };
+  const ok = { checked: true, found: true, authenticated: true, verification: "ok" };
+  const row = (platform, status, extra = {}) => ({ platform, status, relogin: false, parked: false, active: true, ...extra });
+
+  assert.deepEqual(sessionHealthLines([row("youtube", flick), row("twitch", ok)], now), [
+    `YouTube: Signed in, but pages are intermittently signed out; no automatic attempt before ${formatAttemptTime(next, now)}`,
+  ]);
+  assert.equal(sessionHealthLines([row("youtube", flick), row("twitch", flick)], now).length, 2);
+  assert.match(sessionHealthLines([row("twitch", flick)], now)[0], /^Twitch: /);
+  // Nothing for a platform that is off, re-login, parked, or past the quiet day.
+  assert.deepEqual(sessionHealthLines([row("youtube", flick, { active: false })], now), []);
+  assert.deepEqual(sessionHealthLines([row("youtube", flick, { relogin: true })], now), []);
+  assert.deepEqual(sessionHealthLines([row("youtube", flick, { parked: true })], now), []);
+  assert.deepEqual(sessionHealthLines([row("youtube", flick)], now + 24 * 60 * 60 * 1000), []);
+
+  // The page has the element app.js fills, and app.js fills it from this helper.
+  assert.match(readFileSync(new URL("../public/index.html", import.meta.url), "utf8"), /id="cookie-session-health"/);
+  const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(app, /getElementById\("cookie-session-health"\)[\s\S]{0,400}sessionHealthLines\(/);
+});
+
+test("formatAttemptTime names the day when it is not today", () => {
+  const now = new Date(2026, 10, 13, 12, 0).getTime();
+  assert.equal(formatAttemptTime(new Date(2026, 10, 13, 14, 5).getTime(), now), "14:05");
+  assert.equal(formatAttemptTime(new Date(2026, 10, 14, 9, 5).getTime(), now), "Sat 09:05");
 });
 
 test("formatClockTime is zero-padded local time", () => {
