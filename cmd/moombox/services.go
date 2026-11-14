@@ -292,7 +292,7 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // hook safe whoever calls it. Before Arc 10 the
 // only thing on that goroutine was refreshCookiesDetailed; this hook adds the
 // whole of RefreshService.refresh — jar.Reload, two HTTP round-trips,
-// updateCookieFile, and the OnAuthChange / OnRecoveryNeeded /
+// updateCookieFileAt, and the OnAuthChange / OnRecoveryNeeded /
 // OnCredentialsChanged fan-out, the last of which reaches the worker's Twitch
 // chat registry and every live chat session in it. That is a far wider panic
 // surface than the loop was written against.
