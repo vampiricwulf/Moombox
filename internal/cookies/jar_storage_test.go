@@ -419,14 +419,22 @@ func TestTwitchDomainAuthNameIsNeverAdmitted(t *testing.T) {
 
 	// The converse direction is closed by the same domain-first switch and is
 	// worth pinning so a later "simplification" cannot open it: Twitch's own
-	// four names are only consulted on the twitch.tv branch. A google.com or
-	// youtube.com row carrying one of them is never admitted at all.
+	// four names are only consulted on the twitch.tv branch. A google.com row
+	// carrying one of them is never admitted at all.
+	//
+	// A youtube.com row carrying one is YouTube's own cookie since owner
+	// ruling KA-7 (wwwYouTubeRow keeps a row www.youtube.com is sent under
+	// any name), so it is in the YouTube jar. This pin used to say it was in
+	// no jar; what it still says is that it is never a Twitch credential.
 	for _, name := range []string{"auth-token", "twilight-user", "login", "name"} {
-		jar := loadRows(t, []string{
-			cookieRow(".google.com", "0", name, "cross-site-row"),
-			cookieRow(".youtube.com", "0", name, "cross-site-row"),
-		})
+		jar := loadRows(t, []string{cookieRow(".google.com", "0", name, "cross-site-row")})
 		assertAbsent(t, jar, name, "the Twitch name set must stay domain-guarded")
+
+		jar = loadRows(t, []string{cookieRow(".youtube.com", "0", name, "cross-site-row")})
+		if e, ok := lookupEntry(jar, PlatformTwitch, name); ok {
+			t.Errorf("twitch/%s = %q from %q, want absent: a youtube.com row is never a Twitch cookie",
+				name, e.value, e.domain)
+		}
 	}
 }
 

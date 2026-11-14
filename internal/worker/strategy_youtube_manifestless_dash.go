@@ -348,12 +348,13 @@ func DownloadManifestlessDash(
 	// here would be sent unchanged to the final segment. The downloader keeps
 	// it from the media hosts and sends it only after one refused a request for
 	// want of it (engine.DownloaderOptions.CookieHeader).
-	var cookieHeader func() string
+	var cookieHeader, mediaCookieHeader func() string
 	// One for the job: the video and audio downloaders learn together whether
 	// the media hosts want the cookies.
 	mediaCookies := &engine.MediaCookieState{}
 	if job.YT != nil {
 		cookieHeader = job.YT.GetCookieHeader
+		mediaCookieHeader = job.YT.MediaCookieHeader
 	}
 
 	// Orchestrator-provided start sequences (quality recovery / split path);
@@ -416,6 +417,7 @@ func DownloadManifestlessDash(
 			InitInlineAtStart:   !forceVideoSeq,
 			PoToken:             videoPot,
 			CookieHeader:        cookieHeader,
+			MediaCookieHeader:   mediaCookieHeader,
 			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
@@ -485,6 +487,7 @@ func DownloadManifestlessDash(
 			InitInlineAtStart:   !forceAudioSeq,
 			PoToken:             audioPot,
 			CookieHeader:        cookieHeader,
+			MediaCookieHeader:   mediaCookieHeader,
 			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,

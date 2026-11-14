@@ -146,7 +146,13 @@ func TestRenewalIsNotKept(t *testing.T) {
 		{name: "a request with the consent cookies alone", cookie: func(*CookieJar) string { return "SOCS=CAI; PREF=hl=en" }},
 		{name: "a request that carried another session", cookie: func(*CookieJar) string { return "SAPISID=sapisid-B; LOGIN_INFO=login-B" }},
 		{name: "a reply read as signed out", edit: func(r YouTubeReply) YouTubeReply { r.Verdict = ReplySignedOut; return r }},
-		{name: "a name the jar does not track", header: "foo=sidcc-new; Domain=.youtube.com; Path=/"},
+		// Owner ruling KA-7 changed this row: it used to refuse any name the
+		// jar does not track. Such a name is now kept from a domain
+		// www.youtube.com is sent, with Path=/, and refused otherwise.
+		{name: "an untracked name on google.com", header: "foo=sidcc-new; Domain=.google.com; Path=/"},
+		{name: "an untracked name on a host www is not under", header: "foo=sidcc-new; Domain=.music.youtube.com; Path=/"},
+		{name: "an untracked name with no path", header: "foo=sidcc-new; Domain=.youtube.com"},
+		{name: "an untracked name on a narrower path", header: "foo=sidcc-new; Domain=.youtube.com; Path=/feed"},
 		{name: "a domain off the platform", header: "__Secure-1PSIDCC=sidcc-new; Domain=.evil.tld; Path=/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

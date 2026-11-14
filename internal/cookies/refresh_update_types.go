@@ -28,6 +28,11 @@ type cookieUpdate struct {
 	// Delete marks a deletion request: Max-Age<=0, or an Expires at or before
 	// now. The row is removed, not rewritten empty — see admitSetCookie. The renewal store never applies one (renewals.go).
 	Delete bool
+	// Path is the Set-Cookie's Path= attribute as sent, "" when it sent none.
+	// It decides admission only (wwwYouTubeRow, owner ruling KA-7): no writer
+	// reads it, an existing row keeps its own path and a new row is written
+	// on "/".
+	Path string
 }
 
 // cookieOrigin names the SITE whose response produced a batch of cookie

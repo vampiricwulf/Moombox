@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,7 +137,16 @@ type CookieJar struct {
 	renew renewalState
 }
 
-// Essential YouTube cookies needed for authentication.
+// Essential YouTube cookies: the names the jar keeps from a YouTube or a
+// Google domain whatever the row's scope (admitsEssentialYouTubeName).
+//
+// Until owner ruling KA-7 (2026-11-14) this list was the whole of what the
+// jar kept for YouTube. It no longer is: a row www.youtube.com is sent is
+// kept under any name (wwwYouTubeRow), as yt-dlp's jar keeps it. The list
+// still decides the rows that rule does not reach (a google.com row, a row
+// on a YouTube host www is not under, a row on a narrower path), which rows
+// lead the Cookie header, and what a media host may be sent
+// (namedYouTubeRow).
 var essentialYouTubeCookies = map[string]bool{
 	"SAPISID": true, "__Secure-1PAPISID": true, "__Secure-3PAPISID": true,
 	"SID": true, "HSID": true, "SSID": true, "APISID": true,
@@ -189,8 +199,9 @@ var youtubeOnlyEssentialCookies = map[string]bool{"SOCS": true}
 // domain, is one the jar keeps under essentialYouTubeCookies: an essential
 // name on a YouTube or a Google domain, except that a youtube-only name
 // (youtubeOnlyEssentialCookies) is kept only from a row www.youtube.com is
-// sent. The one rule Load, isEssentialCookie (browser extraction) and
-// trackedCookieName (an unscoped Set-Cookie's admission) apply.
+// sent. It is the name half of the rule Load, isEssentialCookie (browser
+// extraction) and trackedCookieName (an unscoped Set-Cookie's admission)
+// apply; keepsYouTubeRow is the whole of it.
 func admitsEssentialYouTubeName(name, domain string) bool {
 	if !essentialYouTubeCookies[name] {
 		return false
@@ -210,6 +221,66 @@ func admitsEssentialYouTubeName(name, domain string) bool {
 func sentToWWWYouTube(domain string) bool {
 	d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
 	return isYouTubeDomain(d) && domainMatches("www.youtube.com", d)
+}
+
+// googleAuthRow reports whether a row is one of the google.com auth rows the
+// jar keeps: SID, HSID, SSID, APISID, SAPISID and the __Secure-1P and
+// __Secure-3P families, on a Google domain.
+func googleAuthRow(name, domain string) bool {
+	return isGoogleDomain(domain) && isGoogleOnlyAuthName(name)
+}
+
+// namedYouTubeRow reports whether a row is one the jar keeps for its NAME:
+// an essential name (admitsEssentialYouTubeName) or a google.com auth row
+// (googleAuthRow). It is the whole of what the jar kept before owner ruling
+// KA-7, and it still decides three things: what is kept from a google.com
+// row or from a YouTube host www.youtube.com is not under, which pairs lead
+// the Cookie header (youTubeHeaderLocked), and what a media host may be sent
+// (GetYouTubeMediaCookieHeader).
+func namedYouTubeRow(name, domain string) bool {
+	return admitsEssentialYouTubeName(name, domain) || googleAuthRow(name, domain)
+}
+
+// wwwYouTubeRow reports whether a row is one every request to
+// www.youtube.com carries whatever it is called (owner ruling KA-7: "Do what
+// yt-dlp does"): its domain is one www.youtube.com is sent (sentToWWWYouTube),
+// its path is "/", and its name can stand in a Cookie header
+// (cookieNameToken).
+//
+// yt-dlp has no list of names. Its jar loads every row of the cookie file
+// (YoutubeDLCookieJar.load, yt_dlp/cookies.py) or of the browser's store
+// (extract_cookies_from_browser) and a request carries each one whose domain
+// and path match its URL (get_cookie_header, through http.cookiejar's
+// add_cookie_header). The path is held to "/" here because the jar keeps one
+// row per name and sends it to every youtube.com path: a row scoped to a
+// narrower path is one upstream sends to that path only.
+func wwwYouTubeRow(name, domain, path string) bool {
+	return sentToWWWYouTube(domain) && strings.TrimSpace(path) == "/" && cookieNameToken(name)
+}
+
+// keepsYouTubeRow is the one admission rule for a youtube.com or google.com
+// row: Load, the browser export (deduplicateAndFormat) and a reply's
+// Set-Cookie (renewableCookie, admitSetCookie) all apply it.
+func keepsYouTubeRow(name, domain, path string) bool {
+	return namedYouTubeRow(name, domain) || wwwYouTubeRow(name, domain, path)
+}
+
+// cookieNameToken reports whether name is an RFC 6265 cookie-name (an RFC
+// 7230 token): visible ASCII with no separator. A name kept only because of
+// where its row is scoped (wwwYouTubeRow) is written into the Cookie header
+// as it is, so one holding ';', '=', a space or a control character would
+// split the header.
+func cookieNameToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f || strings.IndexByte(`()<>@,;:\"/[]?={}`, c) >= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Essential Twitch cookies.
@@ -630,13 +701,12 @@ func (j *CookieJar) parseRows(data []byte, filePath string) int {
 		var dest map[string]cookieEntry
 		switch {
 		case isYouTubeDomain(domain) || isGoogleDomain(domain):
-			// The google.com auth names are admitted on google.com only; the
-			// broader essential set is admitted on either YouTube or Google,
-			// SOCS from a YouTube domain alone (admitsEssentialYouTubeName).
-			isGoogleAuth := isGoogleDomain(domain) && (name == "SID" || name == "HSID" ||
-				name == "SSID" || name == "APISID" || name == "SAPISID" ||
-				strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P"))
-			if !admitsEssentialYouTubeName(name, domain) && !isGoogleAuth {
+			// A row www.youtube.com is sent is kept under any name (owner
+			// ruling KA-7, wwwYouTubeRow). Every other row of the platform
+			// is kept by name, as before it: the google.com auth names on
+			// google.com only; the broader essential set on either YouTube
+			// or Google, SOCS from a YouTube domain alone (namedYouTubeRow).
+			if !keepsYouTubeRow(name, domain, parts[2]) {
 				continue
 			}
 			dest = youtube
@@ -924,7 +994,9 @@ func sanitizeCookieValue(v string) string {
 // different Cookie headers for the same jar contents — a poor fit for
 // SAPISIDHASH flows where an attacker-controlled reshuffle makes HTTP-level
 // debugging painful and occasionally trips YouTube endpoints that inspect
-// __Secure-* ordering. Alphabetical is simple and deterministic.
+// __Secure-* ordering. Alphabetical is simple and deterministic. The YouTube
+// header is two such blocks, the rows kept by name and then the rows kept
+// for their scope (youTubeHeaderLocked, owner ruling KA-7).
 //
 // The YouTube header leaves out a youtube-only essential cookie
 // (youtubeOnlyEssentialCookies: SOCS) whose expiry has passed. yt-dlp never
@@ -946,13 +1018,12 @@ func (j *CookieJar) GetCookieHeaderFor(p Platform) string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
+	if p == PlatformYouTube {
+		return j.youTubeHeaderLocked(false)
+	}
 	entries := j.jarFor(p)
-	now := time.Now().Unix()
 	names := make([]string, 0, len(entries))
-	for name, e := range entries {
-		if p == PlatformYouTube && youtubeOnlyEssentialCookies[name] && e.expiredAt(now) {
-			continue
-		}
+	for name := range entries {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -961,6 +1032,59 @@ func (j *CookieJar) GetCookieHeaderFor(p Platform) string {
 		pairs = append(pairs, name+"="+sanitizeCookieValue(entries[name].value))
 	}
 	return strings.Join(pairs, "; ")
+}
+
+// youTubeHeaderLocked renders the YouTube jar as a Cookie header; namedOnly
+// leaves out every row kept only for its scope (GetYouTubeMediaCookieHeader).
+// Callers hold j.mu.
+//
+// ORDER (owner ruling KA-7, "nothing may truncate or reorder auth cookies"):
+// the rows the jar keeps by name (namedYouTubeRow: every auth cookie is one)
+// come first, sorted by name, and the rows kept only for their scope
+// (wwwYouTubeRow) follow, sorted by name. The first block is byte for byte
+// the header a jar holding no other row sends, so a wider jar moves no auth
+// cookie and puts nothing ahead of one. Nothing is ever cut: every pair the
+// rules below let through is in the header, whatever its length.
+//
+// EXPIRY: a row kept only for its scope is left out once its expiry has
+// passed, as SOCS is and for the same reason: yt-dlp does not send an
+// expired cookie, and it is not a credential whose expiry is the loss
+// signal. The rows kept by name are sent expired or not, as they always
+// were.
+func (j *CookieJar) youTubeHeaderLocked(namedOnly bool) string {
+	now := time.Now().Unix()
+	named := make([]string, 0, len(j.youtube))
+	var scoped []string
+	for name, e := range j.youtube {
+		switch {
+		case !namedYouTubeRow(name, e.domain):
+			if !namedOnly && !e.expiredAt(now) {
+				scoped = append(scoped, name)
+			}
+		case youtubeOnlyEssentialCookies[name] && e.expiredAt(now):
+		default:
+			named = append(named, name)
+		}
+	}
+	sort.Strings(named)
+	sort.Strings(scoped)
+	pairs := make([]string, 0, len(named)+len(scoped))
+	for _, name := range slices.Concat(named, scoped) {
+		pairs = append(pairs, name+"="+sanitizeCookieValue(j.youtube[name].value))
+	}
+	return strings.Join(pairs, "; ")
+}
+
+// GetYouTubeMediaCookieHeader is the Cookie header a googlevideo.com host is
+// sent when the segment downloader's safety net sends one at all (owner
+// ruling KA-6): the rows the jar keeps by name (namedYouTubeRow), which is
+// the header GetCookieHeader sent before owner ruling KA-7, and none of the
+// rows kept only because www.youtube.com is sent them. Those are youtube.com's
+// own cookies, and the media hosts are another site.
+func (j *CookieJar) GetYouTubeMediaCookieHeader() string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.youTubeHeaderLocked(true)
 }
 
 // GetCookieHeader returns the YOUTUBE Cookie header.
@@ -1011,8 +1135,10 @@ func (j *CookieJar) hasYouTubeAuthLocked() bool {
 // reporting — and the narrower predicate reads it as never-configured.
 //
 // Every name here must also be in essentialYouTubeCookies above, or Load
-// drops it and this predicate can never observe it. Pinned by
-// TestAuthCookieNameListsDoNotDrift.
+// drops its google.com row and this predicate cannot observe a session whose
+// cookies are scoped there. Pinned by TestAuthCookieNameListsDoNotDrift.
+// Owner ruling KA-7 widened what the jar keeps and did not widen this list:
+// a row kept only for its scope is never an auth cookie.
 var youtubeAuthCookieNames = []string{
 	"SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID",
 	"SID", "HSID", "SSID", "APISID",

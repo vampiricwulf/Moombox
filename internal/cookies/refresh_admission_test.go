@@ -814,6 +814,13 @@ func TestScopedInsertionCreatesOnItsDeclaredDomain(t *testing.T) {
 //
 // Discriminates against a fix that merely deletes the pre-filter: without the
 // tracked-name check, a .youtube.com "sessionid" row appears.
+//
+// Owner ruling KA-7 narrowed this pin. It used to send both headers with
+// Path=/ and want neither written; an unscoped youtube.com cookie that states
+// Path=/ is now kept under any name (wwwYouTubeRow;
+// TestPlainSIDCCIsRenewedFromAReply has the kept case). What is still refused
+// is an untracked name with no Path= or a narrower one, which a request to
+// another youtube.com path would not carry.
 func TestUnscopedUntrackedNameIsNotWritten(t *testing.T) {
 	initial := "# Netscape HTTP Cookie File\n" +
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tLOGIN_INFO\tfixture-login\n"
@@ -825,8 +832,8 @@ func TestUnscopedUntrackedNameIsNotWritten(t *testing.T) {
 	}
 
 	rs.processYouTubeSetCookies(setCookieResponse(
-		"sessionid=fixture-session; Path=/; Secure; HttpOnly",
-		"_ga=fixture-analytics; Path=/",
+		"sessionid=fixture-session; Secure; HttpOnly",
+		"_ga=fixture-analytics; Path=/feed",
 	), "")
 
 	after, err := os.ReadFile(path)

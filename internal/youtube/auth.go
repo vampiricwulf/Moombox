@@ -65,6 +65,14 @@ func (a *Auth) GetCookieHeader() string {
 	return a.jar.GetCookieHeader()
 }
 
+// MediaCookieHeader is the Cookie header for a googlevideo.com host, on the
+// one path that sends it one (the segment downloader's safety net): the
+// session without the rows the jar keeps only because www.youtube.com is
+// sent them. See cookies.CookieJar.GetYouTubeMediaCookieHeader.
+func (a *Auth) MediaCookieHeader() string {
+	return a.jar.GetYouTubeMediaCookieHeader()
+}
+
 // PageCookieHeader is the Cookie header for a YouTube HTML page fetched with
 // the jar's session: the authenticated watch page, the homepage, the liveness
 // and membership pages, chat's continuation page, the chapter read at the mux

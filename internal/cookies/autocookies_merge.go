@@ -43,7 +43,9 @@ func isRelevantDomain(domain string) bool {
 	return isYouTubeDomain(domain) || isGoogleDomain(domain) || isTwitchDomain(domain)
 }
 
-// isEssentialCookie checks if a cookie should be included in extraction (matching TS).
+// isEssentialCookie checks if a cookie is included in extraction for its
+// NAME (matching TS). deduplicateAndFormat also keeps a row www.youtube.com
+// is sent under any name (wwwYouTubeRow, owner ruling KA-7).
 func isEssentialCookie(name, domain string) bool {
 	// YouTube essential cookies. Domain-guarded for the same reason the
 	// other two clauses below already are: several names in
@@ -102,7 +104,10 @@ func deduplicateAndFormat(cookies []extractedCookie) []string {
 		if !isRelevantDomain(c.domain) {
 			continue
 		}
-		if !isEssentialCookie(c.name, c.domain) {
+		// A row www.youtube.com is sent is exported under any name (owner
+		// ruling KA-7, wwwYouTubeRow: Load's rule); every other row by
+		// name, as before.
+		if !isEssentialCookie(c.name, c.domain) && !wwwYouTubeRow(c.name, c.domain, c.path) {
 			continue
 		}
 

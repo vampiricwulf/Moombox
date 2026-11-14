@@ -16,8 +16,10 @@ package cookies
 //
 //   - only a reply from youtube.com or a subdomain of it, over https, with a
 //     2xx status, to a request that carried the session the jar holds now;
-//   - only a name the jar tracks for YouTube (trackedCookieName), with a
-//     value;
+//   - only a cookie the jar keeps for YouTube, with a value: a name it
+//     tracks (trackedCookieName), or any name scoped where www.youtube.com
+//     is sent it with Path=/ (wwwYouTubeRow, owner ruling KA-7; plain SIDCC
+//     is one);
 //   - never from a reply whose caller read it as signed out.
 //
 // A deletion or an empty value is never applied. For an auth cookie it is
@@ -368,7 +370,7 @@ func classifyYouTubeSetCookies(setCookies []string) (updates map[cookieUpdateKey
 	updates = make(map[cookieUpdateKey]cookieUpdate)
 	for _, sc := range setCookies {
 		key, cu, ok := admitSetCookie(sc, originYouTube)
-		if !ok || !renewableCookie(key) {
+		if !ok || !renewableCookie(key, cu) {
 			continue
 		}
 		if cu.Delete || cu.Value == "" {
@@ -389,17 +391,24 @@ func classifyYouTubeSetCookies(setCookies []string) (updates map[cookieUpdateKey
 }
 
 // renewableCookie reports whether a Set-Cookie admitSetCookie let through is
-// one the jar tracks for YouTube. An unscoped header already passed
-// trackedCookieName; a scoped one is held to the same names here, with the
-// youtube-only names (SOCS) kept to a domain www.youtube.com is sent.
-func renewableCookie(key cookieUpdateKey) bool {
+// one the jar keeps for YouTube. An unscoped header already passed
+// admitSetCookie's own name and scope rule; a scoped one is held to the same
+// names here, with the youtube-only names (SOCS) kept to a domain
+// www.youtube.com is sent.
+//
+// Since owner ruling KA-7 a scoped header is also kept under any other name
+// when its domain is one www.youtube.com is sent and it states Path=/
+// (wwwYouTubeRow, the rule Load keeps the row by once it is written). Plain
+// SIDCC, which YouTube renews on every page reply, is kept this way.
+func renewableCookie(key cookieUpdateKey, cu cookieUpdate) bool {
 	if key.Domain == "" {
 		return true
 	}
 	if youtubeOnlyEssentialCookies[key.Name] {
 		return sentToWWWYouTube(key.Domain)
 	}
-	return essentialYouTubeCookies[key.Name] || isGoogleOnlyAuthName(key.Name)
+	return essentialYouTubeCookies[key.Name] || isGoogleOnlyAuthName(key.Name) ||
+		wwwYouTubeRow(key.Name, key.Domain, cu.Path)
 }
 
 // youTubeSessionKeyOfHeader is CookieJar.youTubeSessionKey for a Cookie

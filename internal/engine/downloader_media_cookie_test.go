@@ -427,3 +427,33 @@ func TestRefusalIsNotRepeatedWhenCookiesWereSent(t *testing.T) {
 		})
 	}
 }
+
+// TestSafetyNetSendsMediaHostsTheMediaHeader: when the caller names a media
+// header (owner ruling KA-7: the session without the rows the jar keeps only
+// because www.youtube.com is sent them), that is what the retry and the rest
+// of the download send a media host. The jar's whole header never reaches
+// one.
+//
+// Mutants: doRequest or setCommonHeaders left on cookieHeader (the whole
+// header is seen on the retry, or on the follow-up request).
+func TestSafetyNetSendsMediaHostsTheMediaHeader(t *testing.T) {
+	const wholeHeader = sessionCookieSentinel + "; SIDCC=youtube-only"
+	host := &mediaHost{head: "5000", refuse: withoutCookies}
+	serveEngineInMemory(t, host)
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:           mediaBase,
+		OutputFile:        filepath.Join(t.TempDir(), "media.mp4"),
+		Logger:            &secretLogger{},
+		CookieHeader:      func() string { return wholeHeader },
+		MediaCookieHeader: func() string { return sessionCookieSentinel },
+	})
+
+	for _, seq := range []int{1, 2} {
+		if _, _, err := d.fetchSegment(t.Context(), d.buildSegmentURL(seq)); err != nil {
+			t.Fatalf("fetchSegment %d: %v", seq, err)
+		}
+	}
+	if got, want := host.cookiesSeen(), []string{"", sessionCookieSentinel, sessionCookieSentinel}; !slices.Equal(got, want) {
+		t.Errorf("Cookie headers = %q, want %q", got, want)
+	}
+}

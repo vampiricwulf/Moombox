@@ -415,6 +415,12 @@ func (s *Service) GetCookieHeader() string {
 	return s.Auth.GetCookieHeader()
 }
 
+// MediaCookieHeader returns the Cookie header for a media host
+// (Auth.MediaCookieHeader).
+func (s *Service) MediaCookieHeader() string {
+	return s.Auth.MediaCookieHeader()
+}
+
 // ChatSessionHeaders is the signed-in account's identity for a live chat
 // request — X-Goog-AuthUser, and X-Goog-PageId for a brand account
 // (accountSessionHeaders) — read at call time off the session the probes
