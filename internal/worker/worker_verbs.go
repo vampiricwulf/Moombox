@@ -780,7 +780,7 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 
 		if gapPlan != nil {
 			w.orchestrator.keepTwitchGapFillPlan(gapPlan)
-		} else if job.Platform == "twitch" && !job.IsVod && (prior == nil || prior.Status != database.StatusFinished) {
+		} else if job.Platform == "twitch" && !job.IsVod && !muxOfFinishedArchive(prior, bootRemux) {
 			// A live capture that lacks nothing, as ExecuteTwitch's finalize
 			// treats one: a row an earlier archive of this job left (its
 			// fill's outcome, owner decision PR-R5 — a Retry or a
@@ -793,6 +793,8 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 			// plans nothing for it, and the row its own finalize left — a
 			// plan still waiting for the VOD, whose spans were measured over
 			// every staged part, this one included — still describes it.
+			// The boot's re-mux of that Mux, interrupted by a restart, is
+			// the same (muxOfFinishedArchive).
 			_ = w.db.DeleteGapFill(jobID)
 		}
 
@@ -804,6 +806,27 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 	})
 
 	return nil
+}
+
+// muxOfFinishedArchive reports whether a mux re-finalizes an archive that had
+// already finished, so that the gap-fill row its own finalize left still
+// describes it: prior, the row as muxJob found it, is Finished (the Mux
+// action on a part its finalize could not mux), or it is the Muxing row of
+// that same Mux, interrupted by a restart and muxed again at boot.
+//
+// A Muxing row does not say what it was before, so the boot case is read
+// off file_size: only a Finished write records one (muxAndFinalize,
+// finalizeMultiSegmentJob, and the writes made on a Finished row since), the
+// Muxing write keeps it, and a reset — the only way a live Twitch job is
+// recorded again — clears it (reinitResetFields). So a Muxing row with a
+// size was Finished when its mux began, and one without is a capture's
+// first finalize, or a re-run's, whose leftover row is an earlier archive's.
+func muxOfFinishedArchive(prior *database.Job, bootRemux bool) bool {
+	if prior == nil {
+		return false
+	}
+	return prior.Status == database.StatusFinished ||
+		(bootRemux && prior.Status == database.StatusMuxing && prior.FileSize != nil)
 }
 
 // queuedOrRunning names why jobID's staging belongs to a queue run — its last

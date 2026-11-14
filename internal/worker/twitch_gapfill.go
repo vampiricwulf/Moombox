@@ -442,9 +442,9 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		// A mux is running on the job: the operator's Mux of a Finished
 		// archive for a part its finalize could not mux, which leaves the
 		// archive, and the plan that describes it, as they were (muxJob keeps
-		// the row, unless Moombox restarts during that mux: the boot's re-mux
-		// cannot tell this row from a re-run's and drops it), or a mux of a
-		// re-run, whose own end replaces or drops the row. Either way the row
+		// the row, across a restart during that mux too: muxOfFinishedArchive),
+		// or a mux of a re-run, whose own end replaces or drops the row. Either
+		// way the row
 		// is that mux's to settle, not this look's to drop: it is left as it
 		// is, due, and the next sweep looks again.
 		f.logger.Debug("gap-fill: the job is being muxed; looking again at the next sweep", "jobID", plan.JobID)
