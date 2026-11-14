@@ -426,7 +426,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		return refreshAborted(), err
 	}
 
-	// What the browser renewed, by name (owner ruling K5): one Info line per
+	// What the browser renewed, by name (owner ruling KA-5): one Info line per
 	// pass, and the same facts on the status. A pass that read nothing out of
 	// the browser has no census.
 	if netscapeCookies != "" {

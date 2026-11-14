@@ -25,7 +25,7 @@ func driveDead(rs *RefreshService, platform string, from time.Time, span, step t
 // reaches a fortnight in eleven alarms, and a session that recovered two weeks
 // ago is still suppressed.
 //
-// Re-pinned for owner ruling K4 (2026-11-13): it used to space its verdicts a
+// Re-pinned for owner ruling KA-4 (2026-11-13): it used to space its verdicts a
 // full day apart, which the 24 h quiet reset now reads as a new episode each
 // time. A dead session's verdicts arrive every feed cycle, so that is what
 // this drives.
@@ -57,7 +57,7 @@ func TestRecordLivenessRefireWindowStopsAtTheCap(t *testing.T) {
 }
 
 // TestRecordLivenessRefireResetsOnlyAfterAQuietDay is the RESET, re-pinned for
-// owner ruling K4 (2026-11-13). It replaces
+// owner ruling KA-4 (2026-11-13). It replaces
 // TestRecordLivenessRefireResetsWhenAuthReturns, which pinned the old rule: any
 // signed-in verdict put the platform back on the base. A session whose pages
 // flicker produces a signed-in verdict every few minutes, so the old rule
@@ -177,7 +177,7 @@ func escalatedThenSignedIn(t *testing.T) (rs *RefreshService, t0 time.Time) {
 
 // TestDeadRunFiresInsideAnEscalatedWindow: with the reset a day away, an
 // escalated window must not hide a session that dies outright (owner ruling
-// K4). livenessDeadRun signed-out verdicts in a row, no signed-in one between
+// KA-4). livenessDeadRun signed-out verdicts in a row, no signed-in one between
 // them, fire whatever the window says, once.
 //
 // Mutations: drop `deadRun` from the window check (the third verdict stays
@@ -312,7 +312,7 @@ func TestRecoveryCauseSaysWhatAskedForIt(t *testing.T) {
 	}
 }
 
-// TestSignedOutPageAfterAPassIsWarnedOnce is ruling K4(b)'s "one Warn per pass,
+// TestSignedOutPageAfterAPassIsWarnedOnce is ruling KA-4(b)'s "one Warn per pass,
 // not per verdict".
 //
 // Mutations: drop `ep.passWarned = true` (three Warns); drop the Warn (none);
@@ -479,7 +479,7 @@ func TestSessionHealthParity(t *testing.T) {
 }
 
 // TestLivenessBackoffLinesCarryNoCookieValue is the leak test for the lines
-// and the status facts ruling K4 added: the fire Warn's attempt and window,
+// and the status facts ruling KA-4 added: the fire Warn's attempt and window,
 // the signed-out-after-a-pass Warn, and the page facts on the status. Names,
 // counts and times only.
 func TestLivenessBackoffLinesCarryNoCookieValue(t *testing.T) {

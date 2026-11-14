@@ -2,7 +2,7 @@ package cookies
 
 // session_health.go — the derived session health (ok | flickering | relogin),
 // the page facts it is derived from, and what a recovery is told about why it
-// was asked for (owner ruling K4, 2026-11-13).
+// was asked for (owner ruling KA-4, 2026-11-13).
 
 import "time"
 
@@ -155,7 +155,7 @@ func pageHealthMoved(before, after PageHealth, now time.Time) bool {
 // setup, an import, a manual refresh) and for nothing automatic: an
 // automatic pass that verifies proves only that the API check passes, which
 // it does throughout a flicker, so clearing on one would bring the 30-minute
-// relaunch storm back (owner ruling K4).
+// relaunch storm back (owner ruling KA-4).
 //
 // The dedupe stamp (lastRecoveryDecided) is kept, as resetLivenessRefire
 // keeps it. Safe on a nil service.

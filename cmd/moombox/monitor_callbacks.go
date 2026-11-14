@@ -1026,7 +1026,7 @@ const cookieReplacementGuidance = "Export a fresh Netscape cookies.txt from a br
 // ran without reaching an answer are the same verdict and not the same event —
 // see that branch.
 //
-// cause is what asked for the pass (owner ruling K4). It changes one thing: what
+// cause is what asked for the pass (owner ruling KA-4). It changes one thing: what
 // a pass that verified may claim. The verdict is the API check's, and a pass a
 // signed-out PAGE asked for started with that check already passing, so
 // "succeeded" would be a claim about nothing. See the RefreshOK arm.

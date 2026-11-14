@@ -716,7 +716,7 @@ export const SESSION_QUIET_RESET_MS = 24 * 60 * 60 * 1000;
 
 /**
  * sessionHealth is the dashboard's twin of Go's cookies.SessionHealthOf (owner
- * ruling K4), compared with it over
+ * ruling KA-4), compared with it over
  * web/tests/fixtures/session-health-parity.json. It is derived on every draw
  * from the platform's status payload and never stored:
  *
@@ -811,7 +811,7 @@ function renewalSpan(ms) {
 
 /**
  * renewalLine is the dashboard's twin of Go's cookies.RenewalLine (owner
- * ruling K5), compared with it over
+ * ruling KA-5), compared with it over
  * web/tests/fixtures/renewal-line-parity.json: when a YouTube reply last
  * renewed a cookie, what the last browser pass renewed, and when the next
  * daily visit is due. It reads three additive keys of

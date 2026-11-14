@@ -741,7 +741,7 @@ func (s *runState) runTUI() {
 		defer func() {
 			if result.Ran {
 				// The operator's own refresh: the recovery back-off starts over
-				// (owner ruling K4). Never done for an automatic pass.
+				// (owner ruling KA-4). Never done for an automatic pass.
 				s.cookieRefresh.ClearRecoveryEscalation()
 				recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "browser refresh")
 				s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "the browser refresh") // owner ruling R2-C2
@@ -816,7 +816,7 @@ func (s *runState) runTUI() {
 			// while deleting the property it protects.
 			defer func() {
 				if result.Wrote {
-					s.cookieRefresh.ClearRecoveryEscalation() // an operator gesture (K4)
+					s.cookieRefresh.ClearRecoveryEscalation() // an operator gesture (KA-4)
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "a cookie file import")
 					s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "a cookie file import") // owner ruling R2-C2
 				}
@@ -920,7 +920,7 @@ func (s *runState) runTUI() {
 			// the re-check has to outlive nothing.
 			defer func() {
 				if result.Wrote {
-					s.cookieRefresh.ClearRecoveryEscalation() // an operator gesture (K4)
+					s.cookieRefresh.ClearRecoveryEscalation() // an operator gesture (KA-4)
 					recheckAfterCookieWrite(context.Background(), s.checkNowFn(), s.log, "the setup wizard")
 					s.resumeAfterVerifiedCookies(result.YouTube, result.Twitch, "the setup wizard") // owner ruling R2-C2
 				}

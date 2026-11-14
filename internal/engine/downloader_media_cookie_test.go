@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-// These tests pin owner ruling K6 (2026-11-13) on the wire: the session
+// These tests pin owner ruling KA-6 (2026-11-13) on the wire: the session
 // cookies are not sent to a media host, a media request refused with 403
 // while they are withheld is asked once more with them, and when that does
 // not help the 403 handling that was there before runs exactly as it did.

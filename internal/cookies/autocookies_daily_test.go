@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestDailyVisitDue is the due rule's table (owner ruling K3): a visit is due
+// TestDailyVisitDue is the due rule's table (owner ruling KA-3): a visit is due
 // when no pass has renewed the cookies for 24 h plus the cycle's jitter, the
 // loop has been up for the start hold, and no retry wait is running.
 func TestDailyVisitDue(t *testing.T) {
@@ -220,7 +220,7 @@ func TestDailyVisitNotDueCostsNothing(t *testing.T) {
 // pass (periodicTick) on a browserless host with a profile to import from.
 //
 //   - With no active job the 6-hourly tick skips, as it always has.
-//   - The daily visit runs anyway: that is the whole of ruling K3. Mutant:
+//   - The daily visit runs anyway: that is the whole of ruling KA-3. Mutant:
 //     ask shouldSkipPeriodicRefresh for passDailyVisit too — no verification
 //     runs and the second assertion fails.
 //   - Once cookies.txt exists, a browser-free daily visit stands down on the

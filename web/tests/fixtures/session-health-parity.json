@@ -1,5 +1,5 @@
 {
-  "comment": "One predicate, two languages: Go cookies.SessionHealthOf and utils.js sessionHealth (owner ruling K4). `status` holds the wire keys of the cookieStatus / twitchAuthStatus payloads the predicate reads; `pageSignedOutAt` is omitted on the wire when no page has rendered signed out. `now` is the reader's clock. A page signed out less than 24 h ago reads flickering unless the API check has failed, which reads relogin. A jsOnly row is a payload Go cannot produce.",
+  "comment": "One predicate, two languages: Go cookies.SessionHealthOf and utils.js sessionHealth (owner ruling KA-4). `status` holds the wire keys of the cookieStatus / twitchAuthStatus payloads the predicate reads; `pageSignedOutAt` is omitted on the wire when no page has rendered signed out. `now` is the reader's clock. A page signed out less than 24 h ago reads flickering unless the API check has failed, which reads relogin. A jsOnly row is a payload Go cannot produce.",
   "cases": [
     { "name": "signed in, no signed-out page", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok" }, "health": "ok" },
     { "name": "signed in, a page signed out an hour ago", "now": "2026-11-13T12:00:00Z", "status": { "found": true, "verification": "ok", "pageSignedOutAt": "2026-11-13T11:00:00Z" }, "health": "flickering" },

@@ -147,7 +147,7 @@ func TestRecordLivenessRefireWindowDoublesAfterEachAlarm(t *testing.T) {
 }
 
 // The CAP and the RESET are pinned in refresh_liveness_backoff_test.go, with
-// the rest of owner ruling K4's schedule.
+// the rest of owner ruling KA-4's schedule.
 
 // TestRecordLivenessRefireBackoffIsPerPlatform: the schedule is keyed like the
 // three maps beside it. TestRecordLivenessSeparatesPlatforms pins the same

@@ -217,7 +217,7 @@ func TestUnrotatedJarSendsByteIdenticalHeader(t *testing.T) {
 // before the rule.
 //
 // This replaces TestCookieHeaderIsNotHostScoped, which pinned the opposite
-// (owner ruling K6, 2026-11-13). What happens when a media host refuses a
+// (owner ruling KA-6, 2026-11-13). What happens when a media host refuses a
 // request sent without the header is in downloader_media_cookie_test.go.
 //
 // Mutants: isMediaHost matching by substring (the two look-alikes lose the

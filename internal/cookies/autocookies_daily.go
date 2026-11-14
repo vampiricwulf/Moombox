@@ -3,7 +3,7 @@ package cookies
 // autocookies_daily.go — the daily visit: a refresh pass that runs when no
 // pass has renewed the cookies for 24 h, whether or not a job is active.
 //
-// Owner ruling K3 (2026-11-13). The 6-hourly tick skips while nothing is
+// Owner ruling KA-3 (2026-11-13). The 6-hourly tick skips while nothing is
 // recording (shouldSkipPeriodicRefresh), so an install that sat idle went days
 // without the managed browser visiting the sites, and the session cookies were
 // never renewed in that time. The tick and its rule are unchanged. This is a

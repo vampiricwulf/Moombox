@@ -674,7 +674,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.setFeedback(mechanismLabel + " successful")
 			} else {
 				// What the pass renewed, by group, and when the next daily
-				// visit is due (owner ruling K5). Wrapped, so a narrow or
+				// visit is due (owner ruling KA-5). Wrapped, so a narrow or
 				// compact terminal shows it whole; green stated, because
 				// the tail is prose the colour scan must not rank.
 				a.setWrappedFeedback(mechanismLabel+" successful | "+msg.Renewal, severitySuccess)

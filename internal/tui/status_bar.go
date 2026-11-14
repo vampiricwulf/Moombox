@@ -741,7 +741,7 @@ func cookieUnknownLabel(code string, t barTier) string {
 
 // cookieFlickerLabel words the badge of a platform that is signed in by the
 // API check while its pages intermittently render signed out (owner ruling
-// K4). The code plus "~", which no other badge carries, so the state reads
+// KA-4). The code plus "~", which no other badge carries, so the state reads
 // without colour; the two widest tiers add when the next automatic attempt
 // can come. Unlike the other healthy states it is kept at every tier, the compact
 // layout's status line included. The narrow tiers have no room for the time:

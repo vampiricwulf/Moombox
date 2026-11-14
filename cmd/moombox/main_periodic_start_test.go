@@ -233,7 +233,7 @@ func exprText(expr ast.Expr) string {
 }
 
 // TestDailyVisitIsToldWhenTheDeviceIsOffline pins the wiring of
-// AutoCookieService.IsOnline (owner ruling K3).
+// AutoCookieService.IsOnline (owner ruling KA-3).
 //
 // The field is nil-safe by contract — nil means "assume online" — so dropping
 // the assignment breaks nothing a behaviour test in internal/cookies can see:

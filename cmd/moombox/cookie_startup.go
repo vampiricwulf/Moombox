@@ -55,7 +55,7 @@ const cookieShutdownWait = 2 * time.Second
 //     until the next restart. periodicRefreshHasSource asks per tick. The
 //     same loop also runs the daily visit: a pass when nothing has renewed
 //     the cookies for 24 h, active job or not, and never in the loop's first
-//     5 minutes (internal/cookies/autocookies_daily.go, owner ruling K3).
+//     5 minutes (internal/cookies/autocookies_daily.go, owner ruling KA-3).
 //
 // Shutdown. The steps run under ctx, and a run that has ended skips the ones
 // not yet started. Both services refuse a start that comes after their Stop

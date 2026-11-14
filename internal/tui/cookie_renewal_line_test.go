@@ -9,7 +9,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
-// The renewal line (cookies.RenewalLine, owner ruling K5) on the TUI's two
+// The renewal line (cookies.RenewalLine, owner ruling KA-5) on the TUI's two
 // cookie results: R C and a successful R F.
 
 const renewalLineSample = "Renewal: YouTube replies renewed cookies 3 min ago; " +

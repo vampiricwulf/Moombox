@@ -44,7 +44,7 @@ func linesContaining(log *logger.Logger, sub string) int {
 }
 
 // TestRecoverySucceededIsClaimedOnlyAfterAFailedAPICheck is owner ruling
-// K4(b). A pass that verified may say "succeeded" only when a failed API check
+// KA-4(b). A pass that verified may say "succeeded" only when a failed API check
 // asked for it. A pass a signed-out page asked for started with that check
 // passing, so it says it ran, that the check passes, and that the result is
 // unconfirmed, with its attempt number and the next window. October 2026's

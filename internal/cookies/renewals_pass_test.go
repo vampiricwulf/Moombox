@@ -53,7 +53,7 @@ func offerRenewal(t *testing.T, jar *CookieJar, name, value string) {
 		name+"="+value+"; Domain=.youtube.com; Path=/; Max-Age=31536000"))
 }
 
-// K2. A browser pass's merge lets the profile win by name, as it always has,
+// KA-2. A browser pass's merge lets the profile win by name, as it always has,
 // except for a name YouTube renewed on a reply after the pass began: there
 // the value Go was sent stays, in the jar and in the file.
 func TestBrowserPassDoesNotUndoARenewalReceivedDuringIt(t *testing.T) {
@@ -85,7 +85,7 @@ func TestBrowserPassDoesNotUndoARenewalReceivedDuringIt(t *testing.T) {
 	}
 }
 
-// K2. The rollback of a pass that regressed YouTube restores the previous
+// KA-2. The rollback of a pass that regressed YouTube restores the previous
 // rows, and must not restore a value older than one YouTube has sent since
 // the pass read them.
 func TestRollbackDoesNotRestoreAValueOlderThanARenewal(t *testing.T) {
@@ -116,7 +116,7 @@ func TestRollbackDoesNotRestoreAValueOlderThanARenewal(t *testing.T) {
 	}
 }
 
-// K2, the case the same-session test above does not reach: the merge brings a
+// KA-2, the case the same-session test above does not reach: the merge brings a
 // different LOGIN_INFO in from the profile, so for the length of the verify the
 // file holds another session. The renewal kept during the pass must wait that
 // out and be back, in the jar and the file, once the pass has rolled back.

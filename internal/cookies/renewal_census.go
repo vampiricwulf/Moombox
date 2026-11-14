@@ -1,7 +1,7 @@
 package cookies
 
 // renewal_census.go — the renewal census: which session cookies a browser
-// pass renewed, by name (owner ruling K5, 2026-11-13).
+// pass renewed, by name (owner ruling KA-5, 2026-11-13).
 //
 // Until this existed the only gauge of a pass was the LOGIN_INFO-pinned
 // horizon, which cannot say whether a visit re-stamped the SID family, the

@@ -1478,7 +1478,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return stats.ActiveCount > 0
 	}
 
-	// The daily visit (owner ruling K3) is the one pass that runs with no
+	// The daily visit (owner ruling KA-3) is the one pass that runs with no
 	// active job: when no pass has renewed the cookies for 24 h. It waits
 	// while the device is offline, because a browser launched offline renews
 	// nothing.

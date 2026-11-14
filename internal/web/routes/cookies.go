@@ -209,7 +209,7 @@ func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
 }
 
 // withPageHealth adds the two keys the session health is derived from (owner
-// ruling K4) to a platform's status payload. Machine fields only, RFC 3339
+// ruling KA-4) to a platform's status payload. Machine fields only, RFC 3339
 // UTC, and each is present only when it has a value:
 //
 //   - pageSignedOutAt — when a page last rendered signed out. With `found` and
@@ -748,7 +748,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// for a refresh that did nothing.
 		if result.Ran {
 			// The operator's own refresh: the recovery back-off starts over
-			// (owner ruling K4). Never done for an automatic pass.
+			// (owner ruling KA-4). Never done for an automatic pass.
 			refreshSvc.ClearRecoveryEscalation()
 			refreshSvc.CheckNowAfterWrite(req.Context())
 			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
@@ -831,7 +831,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
-			refreshSvc.ClearRecoveryEscalation() // an operator gesture (K4)
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (KA-4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
 		}()
@@ -1034,7 +1034,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
-			refreshSvc.ClearRecoveryEscalation() // an operator gesture (K4)
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (KA-4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")
 		}()

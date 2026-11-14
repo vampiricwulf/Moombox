@@ -948,7 +948,7 @@ type App struct {
 	OnAutoCookieLastError func() string
 	// OnCookieRenewalLine reports cookies.RenewalLine for the auto-cookie
 	// status: what renews the session and when the next daily visit is due
-	// (owner ruling K5). "" when there is nothing to say; nil when there is no
+	// (owner ruling KA-5). "" when there is nothing to say; nil when there is no
 	// auto-cookie service. R C and a successful R F end with it.
 	OnCookieRenewalLine func() string
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if

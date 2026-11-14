@@ -85,7 +85,7 @@ test("an unchecked status shows checking, never no-cookies or re-login", () => {
   assert.match(yt({ ...unchecked, checked: true }, true).title, /Re-login required/);
 });
 
-// Owner ruling K4: the session health (ok | flickering | relogin) is one
+// Owner ruling KA-4: the session health (ok | flickering | relogin) is one
 // predicate in two languages. The Go half of this fixture is
 // internal/cookies TestSessionHealthParity.
 const HEALTH_PARITY = JSON.parse(readFileSync(new URL("./fixtures/session-health-parity.json", import.meta.url), "utf8"));
@@ -164,7 +164,7 @@ test("formatClockTime is zero-padded local time", () => {
   assert.equal(formatClockTime(d.getTime()), "04:05");
 });
 
-// Owner ruling K5: the renewal line is one sentence in two languages. The Go
+// Owner ruling KA-5: the renewal line is one sentence in two languages. The Go
 // half of this fixture is internal/cookies TestRenewalLineParity.
 const RENEWAL_PARITY = JSON.parse(readFileSync(new URL("./fixtures/renewal-line-parity.json", import.meta.url), "utf8"));
 

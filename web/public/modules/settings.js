@@ -3137,7 +3137,7 @@ export class SettingsController {
         // browser info would read as a state of its own. The colour is the
         // warning token this panel already uses for its inline validation
         // message and for the setup countdown — no new class.
-        // What renews the session, in one line (owner ruling K5): names and
+        // What renews the session, in one line (owner ruling KA-5): names and
         // times only. Hidden while the server has nothing to say.
         const renewalEl = document.getElementById("auto-cookie-renewal");
         if (renewalEl) {

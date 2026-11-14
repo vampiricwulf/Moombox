@@ -1,5 +1,5 @@
 {
-  "comment": "One line, two languages: Go cookies.RenewalLine and utils.js renewalLine (owner ruling K5). `status` holds the renewal keys of GET /api/cookies/auto-status: names and times only, never a cookie value. `now` is the reader's clock. A jsOnly row is a payload Go cannot produce.",
+  "comment": "One line, two languages: Go cookies.RenewalLine and utils.js renewalLine (owner ruling KA-5). `status` holds the renewal keys of GET /api/cookies/auto-status: names and times only, never a cookie value. `now` is the reader's clock. A jsOnly row is a payload Go cannot produce.",
   "cases": [
     { "name": "nothing to say", "now": "2026-11-13T12:00:00Z", "status": {}, "line": "" },
     { "name": "a reply renewed three minutes ago", "now": "2026-11-13T12:00:00Z", "status": { "replyRenewedAt": "2026-11-13T11:56:30Z" }, "line": "Renewal: YouTube replies renewed cookies 3 min ago" },

@@ -71,7 +71,7 @@ const (
 	// above into a per-platform back-off, decided by the owner 2026-08-29:
 	// alarm, re-alarm 30 minutes later, then double — 1 h, 2 h, 4 h — capped
 	// near a day. The schedule starts over only after livenessQuietReset with
-	// no signed-out page (owner ruling K4, 2026-11-13; it used to start over on
+	// no signed-out page (owner ruling KA-4, 2026-11-13; it used to start over on
 	// any signed-in verdict, see livenessQuietReset).
 	//
 	// WHY A SCHEDULE. Tier 1 notifies once per process for a session already
@@ -93,7 +93,7 @@ const (
 	livenessRefireCap    = 24 * time.Hour
 
 	// livenessQuietReset is how long a platform must go without a signed-out
-	// page verdict before its back-off returns to the base (owner ruling K4,
+	// page verdict before its back-off returns to the base (owner ruling KA-4,
 	// 2026-11-13). The reset used to be any conclusive signed-in verdict. A
 	// session whose pages flicker between signed in and signed out then reset
 	// the schedule every few minutes: 55 browser launches in 60 hours in the
@@ -105,7 +105,7 @@ const (
 	livenessQuietReset = 24 * time.Hour
 
 	// livenessDeadRun and livenessRunSpacing keep an escalated window from
-	// hiding a real loss (owner ruling K4). A run of livenessDeadRun
+	// hiding a real loss (owner ruling KA-4). A run of livenessDeadRun
 	// signed-out page verdicts with no signed-in one between them fires
 	// recovery whatever an escalated window says. The count starts over at
 	// every recovery a page verdict fires, so a session that is still dead

@@ -68,7 +68,7 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //     livenessRefireCap (24 h). The platform goes back on the base only after
 //     livenessQuietReset (24 h) with no signed-out page, or on an operator's
 //     setup, import or manual refresh (ClearRecoveryEscalation). A signed-in
-//     verdict alone no longer resets it (owner ruling K4, 2026-11-13): a
+//     verdict alone no longer resets it (owner ruling KA-4, 2026-11-13): a
 //     flickering session produces one every few minutes. A session that reads
 //     dead forever therefore pages on a decaying schedule, not 48 times a day.
 //   - The dead-session run. livenessDeadRun signed-out verdicts in a row, with
@@ -253,7 +253,7 @@ func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.
 	rs.lastLivenessObserved[platform] = now
 	rs.lastLivenessKnown[platform] = record
 
-	// THE RESET (owner ruling K4): livenessQuietReset with no signed-out page
+	// THE RESET (owner ruling KA-4): livenessQuietReset with no signed-out page
 	// puts the platform back on the base, whichever verdict is the first to
 	// find the quiet. A signed-in verdict by itself does not: during a
 	// flicker one arrives every few minutes, and resetting on it re-ran the
@@ -373,7 +373,7 @@ func (rs *RefreshService) escalateLivenessRefire(platform string) {
 // Two callers: foldLiveness, once livenessQuietReset has passed with no
 // signed-out page, and ClearRecoveryEscalation, the operator's gestures. Never
 // a signed-in verdict by itself, and never an automatic pass that verified
-// (owner ruling K4). It clears the
+// (owner ruling KA-4). It clears the
 // ESCALATION only. Clearing lastRecoveryDecided here would let a healthy
 // verdict from one channel swallow a dead verdict from the next in the same
 // cycle, which is the whole reason those are two maps.

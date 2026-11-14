@@ -36,7 +36,7 @@ type AutoCookieStatus struct {
 	LastError             *string                   `json:"lastError"`
 	NeedsManualRelogin    AutoCookieReloginRequired `json:"needsManualRelogin"`
 
-	// The renewal facts (owner ruling K5). Machine fields only: times and
+	// The renewal facts (owner ruling KA-5). Machine fields only: times and
 	// cookie names, never a value and never a label. All three are held in
 	// memory and absent until they have something to say.
 	//

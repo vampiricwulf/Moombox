@@ -8,7 +8,7 @@ import (
 )
 
 // TestCookieStatusPayloadsCarryThePageFacts: the two keys the dashboard's
-// sessionHealth reads (owner ruling K4) are on each platform's payload from
+// sessionHealth reads (owner ruling KA-4) are on each platform's payload from
 // that platform's own facts, as RFC 3339 UTC, and absent when there is nothing
 // to say, so a healthy install's payload is what it was.
 //

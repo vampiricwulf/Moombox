@@ -102,3 +102,25 @@ Three more series look like the ids here and are not on this page. `Q1` to `Q13`
 - **Q6 (2026-09-27)** — with `network.public_url` set, a job embed's title links to the dashboard job.
 
 See operations.md § Notifications (Discord Webhooks).
+
+## YouTube session keep-alive, 2026-11-13
+
+No design spec was ever in the tree for this one: the owner's rulings were the brief. Its ids are written `KA-1` to `KA-6` so they cannot be taken for the chat-card rulings `K1` to `K4` above. The goal the owner gave: keep the cookies alive without the operator doing anything after the first sign-in.
+
+- **KA-1** — every youtube.com reply to a request that carried the session offers its `Set-Cookie` headers to one helper, `CookieJar.OfferYouTubeReply`. A tracked name with a value on a 2xx reply that was not read as signed out is kept, in the jar at once and in `cookies.txt` within a minute. A deletion is never applied; one that names an auth cookie is logged.
+- **KA-2** — a browser pass's merge still lets the profile win by name, except for a name a reply renewed after the pass began; the rollback does not restore a value older than such a renewal.
+- **KA-3** — a refresh pass runs at least once a day whether or not a job is active (the daily visit), beside the unchanged `refresh_interval` tick.
+- **KA-4** — the recovery back-off resets only after 24 h with no signed-out page, three signed-out pages in a row fire inside an escalated window, only an operator's gesture clears the escalation, a page-triggered pass does not log "succeeded", and each platform has a derived session health (`ok`, `flickering`, `relogin`; `cookies.SessionHealthOf`) shown in both UIs.
+- **KA-5** — each browser pass logs a renewal census by cookie name, and the auto-cookie status carries the renewal facts as machine fields.
+- **KA-6** — the segment downloader sends no session cookies to `googlevideo.com` hosts, with one retry with them after a 403.
+
+See data-and-storage.md § Refresh Service, platform-services.md and user-interfaces.md.
+
+Where the build departs from the wording of a ruling, on purpose:
+
+- **KA-1, the Warn is throttled.** The ruling asks for one Warn for a cleared auth cookie. A dead session draws the same deletion on about a thousand requests a day, so the line is logged at most once an hour for one cookie, endpoint and client (`renewalWarnEvery`).
+- **KA-1, one reply is not offered.** The guide POST of the verify path (`CheckYouTubeAuth`) judges a pass's merged cookies and must not also write the jar it is judging.
+- **KA-1, unchanged re-sends are not renewals.** A reply that re-sends the value the jar holds, with an expiry less than a day later, is not kept or written (`renewalExpirySlack`). The ruling's flush is "when something changed".
+- **KA-1, SIDCC is not kept.** Only names the jar tracks are kept, and the unprefixed `SIDCC` is not one of them; the `__Secure-1PSIDCC` and `__Secure-3PSIDCC` pair is.
+- **KA-4, the run of three is spaced.** The ruling says three consecutive signed-out page verdicts. The membership probe delivers one verdict a channel within seconds, so three channels would complete the run in one feed cycle; the run counts verdicts at least 5 minutes apart (`livenessRunSpacing`). It also counts from the last recovery a page verdict fired, fires once per stretch of signed-out pages, and stands down on the base window and for a recovery the API check decided. The spacing has not been put to the owner as a question of its own.
+- **KA-6, the retry does not prove its cause.** A media 403 that would have cleared on any second ask looks the same as one that needed the cookies. The cookies stay on for the rest of that download either way, and the Warn says what happened without naming a cause.
