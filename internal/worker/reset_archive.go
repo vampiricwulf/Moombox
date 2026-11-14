@@ -515,6 +515,14 @@ func (o *DownloadOrchestrator) otherRows(jobID string) (*outputOwners, error) {
 // row does not name, ahead of the age rule: the other job can have started
 // later and finished first, and its archive is then newer than this run.
 //
+// A known limit, kept on purpose: a row with an output_directory of its own
+// is counted at its relative path under the global directory as well
+// (rowRelativeLocations and rowAbsoluteLocations, the moved-tree rule), so a
+// job in another output tree that resolves to the same relative name is
+// taken for the owner of the file here and this finalize is refused for it.
+// Narrowing that would miss a junction that aliases the same folder. The
+// way out is the one the error gives: rename one of the two, then Mux.
+//
 // Nor a file kept under another existing job's marker (the archive that
 // job's reset could not rename, outputOwners.asideOwner): set aside, it
 // would go under this job's marker and stop being the other's. It is refused

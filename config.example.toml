@@ -254,7 +254,10 @@
 # on.
 #
 # auto_enabled itself governs exactly two things: a slow second refresh
-# that re-opens the profile below in a headless browser on a timer, and
+# that re-opens the profile below in a headless browser on a timer (a
+# refresh_interval tick only while a job is recording, and in any case
+# at least once a day when nothing else has renewed the cookies, with
+# or without an active job), and
 # an automatic browser attempt when authentication fails (with it off,
 # Moombox notifies you instead; a job parked on its cookies is retried
 # this way up to 3 times). The in-process refresh that keeps the
@@ -295,7 +298,8 @@
 
 # How often the auto_enabled refresh timer above runs, in minutes (or a
 # duration string like "6h"). Range: 10 to 10080 (7 days). Takes effect on
-# restart.
+# restart. A tick runs only while a job is recording; the once-a-day pass
+# of an idle install is not set here.
 # refresh_interval = 360
 
 # Override the auto-detected browser with an exact executable. browser_type
@@ -391,7 +395,7 @@
 
 # ─── Disk Space ─────────────────────────────────────────────────────────────
 # [disk]
-# disk_warn_percent = 90                     # Warning alert when the output disk is this full (1-99).
+# disk_warn_percent = 90                     # Warning alert when the output disk (or a staging disk on another volume) is this full (1-99).
 # disk_critical_percent = 95                 # Critical alert at this usage; must be above the warning.
 #                                             With staging_directory on a different drive, the alerts and the
 #                                             backlog hold go by the fuller of the two drives.

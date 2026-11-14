@@ -726,3 +726,10 @@ func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 		t.Error("a logged-out liveness verdict cleared the dedupe in the same window tier-1 recovery fired in — the second attempt would be declined by the auto-cookie single-flight, having spent a goroutine and a two-minute timeout on a problem the first one is already working")
 	}
 }
+
+// recordLiveness is foldLiveness reduced to its two oldest answers, for the
+// tests that ask only those.
+func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) (recoveryDue, notable bool) {
+	out := rs.foldLiveness(platform, loggedIn, now)
+	return out.due, out.notable
+}

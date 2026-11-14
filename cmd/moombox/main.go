@@ -658,10 +658,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		// checkDisk takes a reading, publishes it to both UIs and runs the
 		// alert decision. The gauge and the frame are the output directory's
 		// volume; the alerts also judge the staging directory's when it is
-		// on another volume, and act on the fuller of the two. The ticker calls it every third tick; a save that
-		// changes the thresholds or the output directory asks for one at once
-		// (requestDiskRecheck), so the gauge and the alerts do not keep the
-		// old settings for up to six minutes.
+		// on another volume, and act on the fuller of the two. The ticker calls
+		// it every third tick; a save that changes the thresholds, the output
+		// directory or the staging directory asks for one at once
+		// (requestDiskRecheck), so the gauge and the alerts do not keep the old
+		// settings for up to six minutes.
 		checkDisk := func() {
 			var diskOutputDir, diskStagingDir string
 			var warnPct, critPct int

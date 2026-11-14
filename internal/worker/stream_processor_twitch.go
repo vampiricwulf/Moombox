@@ -34,9 +34,10 @@ const TwitchOfflineErrMsg = jobstate.TwitchOfflineErrMsg
 // the archive. Such a muxed job keeps a gap-fill plan, its tail open
 // (twitchMuxGapFillPlan, owner decision D17) — by the park reason written
 // beside this text, database.ParkReasonTwitchEndedOffline, not by the text
-// (owner ruling R-I1). It is still database.LegacyTwitchEndedOfflineError
-// byte for byte, which the release before the park reason keys on: reword it
-// only once no such binary can run on a database this one wrote.
+// (owner ruling R-I1). It still reads as the frozen
+// database.LegacyTwitchEndedOfflineError, the text rows from before the
+// reason carry and database.Open's backfill matches; that constant is the
+// backfill's and stays as it is, and this one may be reworded without it.
 const twitchEndedOfflineErrMsg = "stream ended while Moombox was offline — captured data can be muxed via the Mux action"
 
 // twitchOfflineError picks the error a non-manual Twitch job takes when its

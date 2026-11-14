@@ -62,7 +62,7 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //
 // WHAT BOUNDS A WRONG VERDICT now that this gate no longer does:
 //
-//   - The per-platform back-off recordLiveness computes. The first re-alarm
+//   - The per-platform back-off foldLiveness computes. The first re-alarm
 //     lands livenessRefireWindow (30 min) after the first alarm; every alarm
 //     after that multiplies the window by livenessRefireFactor, up to
 //     livenessRefireCap (24 h). The platform goes back on the base only after
@@ -76,7 +76,7 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //     escalated window cannot hide a session that died outright.
 //   - The tier-1 stamp. Both tier-1 fire paths — refresh's status block and
 //     NoteTwitchAuthLoss — call noteRecoveryDecided, which writes
-//     lastRecoveryDecided, the same map recordLiveness consults. So tier 2
+//     lastRecoveryDecided, the same map foldLiveness consults. So tier 2
 //     cannot fire a second recovery for a loss tier 1 has already raised
 //     WITHIN THAT PLATFORM'S CURRENT WINDOW. That is one window's suppression,
 //     not a permanent one: a session still dead when the window expires
@@ -198,13 +198,6 @@ type livenessOutcome struct {
 	healthMoved bool
 	health      PageHealth
 	status      AuthStatus
-}
-
-// recordLiveness is foldLiveness reduced to its two oldest answers, for the
-// callers and tests that ask only those.
-func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) (recoveryDue, notable bool) {
-	out := rs.foldLiveness(platform, loggedIn, now)
-	return out.due, out.notable
 }
 
 // foldLiveness folds one conclusive observation into the liveness maps and
@@ -459,7 +452,7 @@ func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 	// Tier 1 is working on this loss: signed-out pages do not fire the
 	// dead-session rule for it as well, whether the run had started when the
 	// API check failed or starts after it. The next signed-in page verdict
-	// re-arms the rule (recordLiveness).
+	// re-arms the rule (foldLiveness).
 	if rs.pageEpisodes == nil {
 		rs.pageEpisodes = make(map[string]pageEpisode)
 	}

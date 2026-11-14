@@ -23,6 +23,7 @@ references/
 
 # Docs and repo meta not needed to compile
 docs/
+docs-site/
 reports/
 screenshots/
 /*.md

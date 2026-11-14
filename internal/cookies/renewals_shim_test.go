@@ -18,6 +18,13 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response, _ string
 	j.FlushRenewals()
 }
 
+// updateCookieFile is updateCookieFileAt on the service's own cookie file and
+// logger, for the tests that pin the writer's row rules. Production reaches
+// the writer only through the renewal store's flush.
+func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin, sentAs string) error {
+	return updateCookieFileAt(rs.jar.GetFilePath(), rs.logger, updates, origin, sentAs)
+}
+
 // writeAdmittedSetCookies applies a reply's Set-Cookie headers straight to
 // cookies.txt through admitSetCookie and updateCookieFile, deletions and all,
 // then reloads the jar. It is what the guide reply's handler did before the

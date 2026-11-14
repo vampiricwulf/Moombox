@@ -373,8 +373,9 @@ func twitchMuxEndKnown(prior *database.Job, tailOpen bool) bool {
 //
 // Otherwise the two markers say so outright, each a park reason:
 // twitch_ended_offline (the broadcast ended while Moombox was down, owner
-// ruling R-I1 — for one release also a row from before that reason existed,
-// read by its text: legacyEndedOfflineRow) and twitch_end_unconfirmed. A row
+// ruling R-I1; the error text routes nothing, and a row from before the
+// reason existed is given it when the database is opened) and
+// twitch_end_unconfirmed. A row
 // holds one park reason, so neither is ever read on a row
 // ParkReasonMuxAfterCancel closed. Any other Error row is read by stream_end_time,
 // which a live Twitch capture writes in ExecuteTwitch's finalize just before
@@ -396,26 +397,5 @@ func twitchMuxTailOpen(prior *database.Job) bool {
 	case database.ParkReasonTwitchEndedOffline, database.ParkReasonTwitchEndUnconfirmed:
 		return true
 	}
-	if legacyEndedOfflineRow(prior) {
-		return true
-	}
 	return prior.StreamEndTime == ""
-}
-
-// legacyEndedOfflineRow reports whether prior is an "ended while offline" row
-// as releases before database.ParkReasonTwitchEndedOffline wrote it: the
-// frozen error text and no park reason at all. database.Open backfills the
-// reason onto such rows, so this is read only for one a boot has not
-// converted — written by an older binary still running against this
-// database, or one whose backfill failed. A Mux a crash interrupted is not
-// such a row: its claim cleared the reason and left the text, but it is
-// Muxing, and the boot re-mux of a Muxing row plans no gap-fill at all
-// (twitchMuxGapFillPlan's status gate) — pinned by
-// TestBootRemuxOfAnEndedOfflineRowReadsNeitherMarker.
-//
-// ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function and its one
-// call, in twitchMuxTailOpen, in the release after the one that introduces
-// ParkReasonTwitchEndedOffline.
-func legacyEndedOfflineRow(prior *database.Job) bool {
-	return prior.ParkReason == database.ParkReasonNone && prior.Error == database.LegacyTwitchEndedOfflineError
 }

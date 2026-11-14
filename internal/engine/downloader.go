@@ -904,6 +904,13 @@ func (d *SegmentDownloader) getPoToken() string {
 // strategy tokenised.
 func (d *SegmentDownloader) PoToken() string { return d.getPoToken() }
 
+// MediaCookies is the media-cookie state this downloader reads and writes:
+// DownloaderOptions.MediaCookies, or its own when that was nil. Read-only,
+// and like PoToken above it is here for the worker tests, which use it to
+// assert that every setup of one run shares one state
+// (media_cookie_run_test.go); nothing else calls it.
+func (d *SegmentDownloader) MediaCookies() *MediaCookieState { return d.mediaCookies }
+
 // emitActivity reports the current wait reason to OnActivity. Nil-callback safe.
 func (d *SegmentDownloader) emitActivity(a DownloadActivity) {
 	if d.OnActivity != nil {

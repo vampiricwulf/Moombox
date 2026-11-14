@@ -47,17 +47,22 @@ Moombox measures the volume that holds the
 [output directory](paths-and-logs.md#pathsoutput_directory): how full it is,
 in percent, and how many gigabytes are free. It takes a reading at startup,
 every six minutes after that, and at once when you save new thresholds or a
-new output directory. The dashboard's disk gauge and the TUI status bar
+new output or staging directory. The dashboard's disk gauge and the TUI status bar
 (`Disk 45% (120G free)`) show the latest reading. While backlog admission is
 still held but usage has already dropped below the critical threshold, the
 dashboard gauge shows a separate "holding" state rather than plain warning,
 and the TUI adds `holding` to its disk reading, so you can tell admission has
 not resumed yet.
 
-!!! note "Only the output drive is measured"
+!!! note "A staging directory on another drive is watched too"
     If your [staging directory](paths-and-logs.md#pathsstaging_directory) is
-    on a different volume, Moombox does not watch that volume's free space.
-    Recordings are written to staging first, so keep an eye on it yourself.
+    on a different volume, Moombox reads that volume at every check as well.
+    The disk alerts and the **Held: disk full** backlog hold go by the fuller
+    of the two, and the alert says whether it is the output drive or the
+    staging drive. The gauge and the status bar still show the output
+    volume only, so an alert or a hold can appear while the gauge looks
+    healthy. If the staging volume cannot be read, the output volume is
+    judged alone.
 
 What the two thresholds set off:
 
@@ -262,8 +267,11 @@ sidecar_hard_limit_mb = 1024
 Moombox keeps track of whether the machine can reach the internet, so that it
 does not spend requests, retries and error budgets on a dead link. Every five
 seconds it races TCP connections to the probe targets; the first one that
-completes a handshake proves the link is up. If none answers within three
-seconds, the poll fails. Two failed polls in a row put Moombox **offline**;
+completes a handshake proves the link is up. When no probe target has
+connected after about one second, or all of them have failed sooner, Moombox
+also tries `www.youtube.com:443` and `gql.twitch.tv:443` in the same poll and
+counts either one as online. If nothing answers within three seconds, the
+poll fails. Two failed polls in a row put Moombox **offline**;
 one good poll puts it back online.
 Besides the active probe, a burst of failed requests (five or more, from at
 least two different parts of Moombox, within 30 seconds) also puts it offline
@@ -303,9 +311,10 @@ outage cannot make Moombox think it is offline.
 Change it when your network blocks those addresses: a corporate firewall, a
 country that blocks one of the providers, or a host that can only reach the
 internet through specific endpoints. If none of the targets is reachable,
-every poll fails and Moombox treats the machine as offline the whole time, so
-pick hosts that are reliably up and reachable from where Moombox runs. Use
-more than one. A target given by name is looked up with the system's DNS on
+Moombox stays online as long as YouTube or Twitch answers (see the fallback
+above) and logs a warning that names this setting; it is offline only when
+those fail too. The fallback can add up to a second to each poll, so still pick hosts that
+are reliably up and reachable from where Moombox runs. Use more than one. A target given by name is looked up with the system's DNS on
 every poll, so it also fails while DNS does; IP addresses avoid that.
 
 Each entry must be:

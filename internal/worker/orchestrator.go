@@ -111,7 +111,7 @@ type DownloadOrchestrator struct {
 	// globalOutputDir is paths.output_directory as it stands now, absolute
 	// (resolveOutputDir; set by the worker): what the rows' relative columns
 	// are read against when a finalize asks whether another row names a file
-	// (otherRowNaming). nil (an orchestrator a test builds by struct literal)
+	// (otherRows). nil (an orchestrator a test builds by struct literal)
 	// reads as the default directory.
 	globalOutputDir func() string
 

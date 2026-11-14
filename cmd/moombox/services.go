@@ -292,7 +292,7 @@ func twitchAuthLossHook(mark func(reason string), log interface {
 // hook safe whoever calls it. Before Arc 10 the
 // only thing on that goroutine was refreshCookiesDetailed; this hook adds the
 // whole of RefreshService.refresh — jar.Reload, two HTTP round-trips,
-// updateCookieFile, and the OnAuthChange / OnRecoveryNeeded /
+// updateCookieFileAt, and the OnAuthChange / OnRecoveryNeeded /
 // OnCredentialsChanged fan-out, the last of which reaches the worker's Twitch
 // chat registry and every live chat session in it. That is a far wider panic
 // surface than the loop was written against.
@@ -1421,9 +1421,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 		// again" (status_nudge.go).
 		s.nudgeDashboardStatus()
 	}
-	// The re-login flag is part of the same badge and has writers the auth
-	// check never sees (a failed recovery raises it, an import lowers it).
-	autoCookieSvc.OnReloginChange = s.nudgeDashboardStatus
+	// The re-login flag is part of the same badge in both UIs and has writers
+	// the auth check never sees (a failed recovery raises it, an import lowers
+	// it).
+	autoCookieSvc.OnReloginChange = s.reloginChanged
 
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms).

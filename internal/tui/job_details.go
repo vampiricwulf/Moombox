@@ -433,6 +433,10 @@ func (m *JobDetailsModel) SetGapFill(g *GapFillView) {
 // the details panel reads it (worker.SetAsideArchive).
 type SetAsideArchiveEntry struct {
 	Name string
+	// Path is where the file is, shown under its line: after a Reinitialize
+	// the row names no file, and a kept one can sit in the directory of the
+	// row's earlier output file rather than the one the job now resolves to.
+	Path string
 	Size int64
 }
 
@@ -931,13 +935,20 @@ func (m *JobDetailsModel) buildRows() {
 	// it writes (worker.ScanSetAsideArchives, owner ruling R2-W1b). Moombox never
 	// replaces or deletes them and Files does not offer them while the job
 	// exists, so this is where the operator learns their names. Nothing to
-	// recover: each is a whole file.
+	// recover: each is a whole file. The path is beneath each line, dimmed and
+	// broken by width alone, as the Kept Recording block shows its path (the
+	// dashboard carries it as the line's tooltip).
 	if n := len(m.setAsideArchives); n > 0 {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Set-aside Archives (%d)", n)})
 		for _, a := range m.setAsideArchives {
 			for _, line := range breakWidth(setAsideArchiveLine(a.Name, a.Size), m.blockWrapWidth()) {
 				m.rows = append(m.rows, detailRow{kind: rowField, value: line})
+			}
+			if a.Path != "" {
+				for _, line := range breakWidth(a.Path, m.blockWrapWidth()) {
+					m.rows = append(m.rows, detailRow{kind: rowField, value: line, color: ColorGray})
+				}
 			}
 		}
 	}

@@ -322,6 +322,8 @@ still staged. See [Installation](../getting-started/installation.md).
 - **Did a *Channel Not Responding* notification arrive?** It means every
   monitor covering that channel failed repeatedly (*it may be renamed, banned,
   or misconfigured, and its streams are being missed*). Check the channel ID.
+  If the alert says the feed keeps answering 404, that is common when YouTube
+  is busy and usually clears by itself; check the ID only if it lasts.
   A *Channel Responding Again* follows when it recovers.
 - **Was Moombox offline?** See [Internet outages](#internet-outages) below.
 
@@ -338,7 +340,7 @@ line says why it is waiting:
 |---|---|
 | *Waiting in queue...* | Nothing holds it; its channel's archive slots are in use. It is admitted when one frees up. |
 | *Held: offline* | Moombox thinks the internet is down. Nothing is admitted until it is back. |
-| *Held: disk full* | The output disk reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Admission resumes once usage is 2 points below it. |
+| *Held: disk full* | The output disk, or the staging disk when it is a different and fuller one, reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Admission resumes once usage is 2 points below it. |
 | *Held: YouTube rate limit until 14:05* | YouTube rate-limited the session. YouTube backlog waits for an hour. |
 | *Retry 2 of 3 at 14:05* | This backlog job failed (or found the disk full) and went back to `Queued`; it is admitted again at the time shown. |
 
@@ -374,6 +376,9 @@ subscriber-only, or your cookies expired. (Age-restricted videos end in
 notification (*Cookies needed: …*) names the job. Fix the cookies (sign in
 again, or import a fresh `cookies.txt`) and the job resumes on its own;
 *Authentication Recovered* is sent when Moombox sees working cookies again.
+A parked job is retried automatically at most 3 times; if its error then says
+the cookies are not the cause, refreshing them again will not help, and
+**Resume** or **Reinitialize** is the way to try once more.
 If the account simply is not a member, refreshing the same account will not
 help. See [Cookies and sign-in](../guide/cookies.md).
 
@@ -475,7 +480,7 @@ The cookie guide has its own table of messages:
 
 | Notification | Meaning |
 |---|---|
-| *Disk Space Warning* | The output drive passed [`disk_warn_percent`](../configuration/disk-memory-connectivity.md#diskdisk_warn_percent) (90 %). Repeated at most every 30 minutes. |
+| *Disk Space Warning* | The output drive (or the staging drive, when it is a different and fuller one; the alert names which) passed [`disk_warn_percent`](../configuration/disk-memory-connectivity.md#diskdisk_warn_percent) (90 %). Repeated at most every 30 minutes. |
 | *Disk Space Critical* | It passed [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent) (95 %). Backlog jobs stop being admitted (*Held: disk full*); live and running downloads are **not** paused. |
 | *Disk Space Recovered* | Usage is back at least 2 points below the warning threshold. |
 | *Disk Monitoring Failed* | Disk checks failed twice in a row (*volume offline or I/O error*); low-disk alerts are suspended until *Disk Monitoring Recovered*. Check that the output drive or network share is mounted. |

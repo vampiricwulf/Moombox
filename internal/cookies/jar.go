@@ -362,7 +362,7 @@ func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 //
 // The objection to that ruling is a race, and the race does not exist. Every
 // writer of this file goes through writeFileAtomic (autocookies.go); the
-// refresh service's own updateCookieFile ends there too. It writes a temp file
+// refresh service's own updateCookieFileAt ends there too. It writes a temp file
 // and calls os.Rename, and never unlinks the destination first — so the only
 // question is whether the rename itself can leave the name momentarily absent,
 // and on both shipped platforms it cannot:
@@ -1507,7 +1507,7 @@ func (j *CookieJar) YouTubeIdentity() string {
 }
 
 // youTubeSessionKey fingerprints the session for the cookie-rotation guard
-// (updateCookieFile): YouTubeIdentity's inputs, but present whenever SAPISID
+// (updateCookieFileAt): YouTubeIdentity's inputs, but present whenever SAPISID
 // is. A session with no LOGIN_INFO is still a session whose rotations must
 // not land in another one's file, and YouTubeIdentity's "" for it switched
 // the guard off. "" only when there is no SAPISID, and so no session at all.

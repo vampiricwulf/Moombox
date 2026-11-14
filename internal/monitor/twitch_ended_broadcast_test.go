@@ -108,13 +108,13 @@ func TestAutoRetryRefusesTheLatchedRow(t *testing.T) {
 // under a reworded error, the text routing nothing — and offers neither the
 // row whose budget is spent, the row that downloaded a segment, the
 // ended-offline row (the operator's Mux), nor a row with no reason under
-// that same reworded text. A row from before the reason existed, the frozen
-// text alone, is still offered for one release.
+// that same reworded text, nor one with the flap's frozen text and no reason:
+// the one-release text fallback is gone, and a row from before the reason
+// existed is given it when the database is opened.
 //
 // Mutants: TwitchAutoRetryPending keyed on the error text (the reworded
 // twitch_offline row is not offered); the reason read without the budget or
-// the segment term; the legacy fallback dropped (the legacy row is not
-// offered) or widened to any text (the unmarked row is).
+// the segment term; the text read again (the bare-text row is offered).
 func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 	rows := []struct {
 		login, stream string
@@ -128,7 +128,7 @@ func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 		{"started", "300", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 0, true},
 		{"ended", "400", "Twitch says the channel is not live", database.ParkReasonTwitchEndedOffline, 0, false},
 		{"unmarked", "500", "Twitch says the channel is not live", database.ParkReasonNone, 0, false},
-		{"legacy", "600", database.LegacyTwitchOfflineError, database.ParkReasonNone, 0, false},
+		{"baretext", "600", database.LegacyTwitchOfflineError, database.ParkReasonNone, 0, false},
 	}
 	var chans []config.ChannelConfig
 	streams := map[string]string{}
@@ -169,7 +169,7 @@ func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 	tm.doCheck(context.Background())
 
 	slices.Sort(offered)
-	if !slices.Equal(offered, []string{"tw_100", "tw_600"}) {
-		t.Errorf("OnStreamRecover got %v, want [tw_100 tw_600] — the marked flap and the legacy row", offered)
+	if !slices.Equal(offered, []string{"tw_100"}) {
+		t.Errorf("OnStreamRecover got %v, want [tw_100] — the marked flap alone", offered)
 	}
 }

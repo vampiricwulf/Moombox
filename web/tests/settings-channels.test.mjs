@@ -345,3 +345,76 @@ test("the channel dialog round-trips a Twitch channel's twitch_archive_clips", {
   post = y.http.matching("/api/config/channels", "POST").at(-1);
   assert.equal(post?.body?.twitch_archive_clips, undefined, "never posted for YouTube");
 });
+
+// A channel whose platform in config.toml is neither youtube nor twitch is
+// loaded disabled and keeps its string (owner ruling R2-M2), and the server
+// refuses to enable it. The Edit dialog locked the platform selector and
+// carried the string back on every save, so only the TUI or the file could
+// correct it.
+//
+// Mutants killed: the selector locked for every edit; the chosen platform
+// written only for Twitch (YouTube posts "twich" again); the note left out.
+test("the Edit dialog can correct a stored platform it does not recognise", { skip }, async () => {
+  const typo = { id: "UCabcdefghijklmnopqrstuv", name: "Typo", enabled: false, platform: "twich", terms: "(?i)karaoke" };
+  for (const chosen of ["youtube", "twitch"]) {
+    const h = await openWith([structuredClone(typo)]);
+    h.app.settings.editChannel(typo.id);
+    const select = h.el("channel-platform-select");
+    assert.equal(select.disabled, false, "the selector is open");
+    assert.equal(select.helpText, 'The stored platform "twich" is not recognised. Choose the right one.');
+
+    select.value = chosen;
+    await h.app.settings.saveChannel();
+    await h.flush();
+    const post = h.http.matching("/api/config/channels", "POST").at(-1);
+    assert.equal(post?.body?.platform, chosen, "the chosen platform replaces the stored string");
+    assert.equal(post?.body?.terms, "(?i)karaoke", "the rest of the entry is kept");
+  }
+});
+
+// The exception is that one state. Mutants killed: the selector open for
+// every edit; platform written on every edit (a YouTube channel stored
+// without the key gains one).
+test("a channel with a platform the monitors know keeps its selector locked", { skip }, async () => {
+  const yt = { id: "UCabcdefghijklmnopqrstuv", name: "Plain", enabled: true };
+  const h = await openWith([structuredClone(yt), { id: "shroud", platform: "twitch", enabled: true }]);
+  h.app.settings.editChannel("shroud");
+  assert.equal(h.el("channel-platform-select").disabled, true);
+  assert.equal(h.el("channel-platform-select").helpText, "");
+
+  h.app.settings.editChannel(yt.id);
+  assert.equal(h.el("channel-platform-select").disabled, true);
+  await h.app.settings.saveChannel();
+  await h.flush();
+  const post = h.http.matching("/api/config/channels", "POST").at(-1);
+  assert.equal("platform" in post.body, false, "a YouTube channel stored without the key gained one");
+});
+
+// Saved without a choice, the stored string is posted as it was. The server
+// refuses that save ("platform must be youtube or twitch", saveChannel in
+// channel_routes.go), which is the prompt to choose; the dialog never turns
+// the string into a platform nobody picked.
+// Mutant killed: writing whatever the selector holds (an empty platform,
+// which the server reads as YouTube and accepts).
+test("with nothing valid chosen, an unrecognised platform is posted unchanged for the server to refuse", { skip }, async () => {
+  const typo = { id: "UCabcdefghijklmnopqrstuv", enabled: false, platform: "twich" };
+  const h = await openWith([structuredClone(typo)]);
+  h.app.settings.editChannel(typo.id);
+  h.el("channel-platform-select").value = "";
+  await h.app.settings.saveChannel();
+  await h.flush();
+  assert.equal(h.http.matching("/api/config/channels", "POST").at(-1)?.body?.platform, "twich");
+});
+
+// The list is where the operator finds the row the dialog's note is about.
+// Mutant killed: every platform that is not "twitch" tagged YouTube.
+test("the channel list tags a platform it does not recognise as unknown, not as YouTube", { skip }, async () => {
+  const h = await openWith([
+    { id: "UCabcdefghijklmnopqrstuv", name: "Typo", enabled: false, platform: "twich" },
+    { id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "Plain", enabled: true },
+    { id: "shroud", platform: "twitch", enabled: true },
+  ]);
+  h.app.settings.renderChannelsList();
+  const tags = [...h.el("channels-list").querySelectorAll(".channel-card-title sl-tag")].map((t) => t.textContent);
+  assert.deepEqual(tags, ["Unknown platform", "YouTube", "Twitch"]);
+});

@@ -14,25 +14,11 @@ const MaxTwitchAutoRetries = 2
 // writes it (worker.TwitchOfflineErrMsg is this constant) beside
 // database.ParkReasonTwitchOffline, and the reason is what
 // TwitchAutoRetryPending keys on (owner ruling R-I1): the text is what the
-// operator reads and routes nothing in this binary. It is still the frozen
-// database.LegacyTwitchOfflineError byte for byte, because the release before
-// the park reason keys on the text — reword it only once no such binary can
-// run on a database this one wrote (TestLegacyOfflineTextIsTheWritersText).
+// operator reads and routes nothing. It still reads as the frozen
+// database.LegacyTwitchOfflineError, the text rows from before the reason
+// carry and database.Open's backfill matches; that constant is the backfill's
+// and stays as it is, and this one may be reworded without it.
 const TwitchOfflineErrMsg = "twitch channel is offline"
-
-// legacyOfflineFlapRow reports whether job is an offline-flap row as releases
-// before database.ParkReasonTwitchOffline wrote it: the frozen error text and
-// no park reason at all. database.Open backfills the reason onto such rows,
-// so this is read only for one a boot has not converted — written by an older
-// binary still running against this database, or one whose backfill failed.
-//
-// ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function and its one
-// call, in TwitchAutoRetryPending, in the release after the one that
-// introduces ParkReasonTwitchOffline. The dashboard's twin is
-// legacyOfflineFlapRow in web/public/modules/utils.js.
-func legacyOfflineFlapRow(job *database.Job) bool {
-	return job.ParkReason == database.ParkReasonNone && job.Error == database.LegacyTwitchOfflineError
-}
 
 // TwitchAutoRetryPending reports whether job is an errored Twitch live job the
 // Twitch monitor will re-initialise (AutoReinitializeJob) when it finds the
@@ -41,8 +27,10 @@ func legacyOfflineFlapRow(job *database.Job) bool {
 // each a park reason setJobError records — the offline flap,
 // ParkReasonTwitchOffline, or a probe that never reached Twitch,
 // ParkReasonTwitchUnreachable. Anything else waits for the operator. The
-// error text routes nothing, but for one release: a flap row from before its
-// reason existed is still read by its text (legacyOfflineFlapRow).
+// error text routes nothing: a flap row from before its reason existed is
+// given the reason when the database is opened
+// (database backfillTwitchOfflineParkReasons, on every Open), and one that
+// backfill could not write is not retried until a later start converts it.
 //
 // The one predicate for every caller (it replaced two copies kept in sync by
 // comment):
@@ -58,10 +46,9 @@ func legacyOfflineFlapRow(job *database.Job) bool {
 // a row the unconfirmed-end latch marked (ParkReasonTwitchEndUnconfirmed) is
 // the automatic mux's, never a re-initialisation's, which would delete the
 // staging the mux exists to archive; ParkReasonTwitchEndedOffline and
-// ParkReasonMuxAfterCancel are the operator's Mux's. The legacy text is read
-// only on a row no reason claimed, which keeps the same exclusions for it.
-// Every row a writer from before ParkReasonTwitchOffline could produce is
-// answered as the text-keyed rule answered it
+// ParkReasonMuxAfterCancel are the operator's Mux's. Every row a writer from
+// before ParkReasonTwitchOffline could produce is answered, once Open has
+// backfilled it, as the text-keyed rule answered it
 // (TestOfflineParkReasonsKeepTheRecoveryTruthTable).
 func TwitchAutoRetryPending(job *database.Job) bool {
 	if job == nil || job.Status != database.StatusError {
@@ -70,9 +57,7 @@ func TwitchAutoRetryPending(job *database.Job) bool {
 	switch job.ParkReason {
 	case database.ParkReasonTwitchOffline, database.ParkReasonTwitchUnreachable:
 	default:
-		if !legacyOfflineFlapRow(job) {
-			return false
-		}
+		return false
 	}
 	return job.LastVideoSeq == nil && job.AutoRetryCount < MaxTwitchAutoRetries
 }

@@ -96,7 +96,7 @@ Fields marked YouTube or Twitch only appear for that platform.
 
 | Field (dashboard) | Field (TUI) | What it does | Reference |
 |---|---|---|---|
-| Platform | Platform | YouTube or Twitch. Locked after the channel is added (dashboard). | [`platform`](../configuration/channels.md#channelsplatform) |
+| Platform | Platform | YouTube or Twitch. Locked after the channel is added (dashboard), unless the stored value is neither, which the dialog lets you correct. | [`platform`](../configuration/channels.md#channelsplatform) |
 | Channel ID / Channel Login | Channel ID | The channel to poll. Locked after the channel is added (dashboard). | [`id`](../configuration/channels.md#channelsid) |
 | Display Name | Display name | Friendly name shown in the list. | [`name`](../configuration/channels.md#channelsname) |
 | Filter Pattern (regex) | Filter regex | Only archive titles that match. | [`terms`](../configuration/channels.md#channelsterms) |
@@ -105,7 +105,7 @@ Fields marked YouTube or Twitch only appear for that platform.
 | Archive slots | Archive slots | Backlog downloads at once; blank = global. | [`archive_slots`](../configuration/channels.md#channelsarchive_slots) |
 | Also archive uploads & premieres (YouTube only) | Archive uploads & premieres (YouTube only) | Archive finished content too, not just live streams. | [`include_non_live_content`](../configuration/channels.md#channelsinclude_non_live_content) |
 | Fill ad breaks from the archive VOD (Twitch only) | Fill ad breaks from the VOD (Twitch only) | Recover skipped ad breaks after a live capture. | [`twitch_gap_fill_ad_breaks`](../configuration/channels.md#channelstwitch_gap_fill_ad_breaks) |
-| Queue past VODs, highlights & uploads (Twitch only) | Queue past VODs (Twitch only) | Hourly: queue the channel's past videos. | [`twitch_vod_backlog`](../configuration/channels.md#channelstwitch_vod_backlog) |
+| Queue past VODs, highlights & uploads (Twitch only) | Queue past VODs (Twitch only) | When the channel is saved, then hourly: queue the channel's past videos. | [`twitch_vod_backlog`](../configuration/channels.md#channelstwitch_vod_backlog) |
 | Also archive new clips (Twitch only) | Archive new clips (Twitch only) | Hourly: queue the channel's new clips. | [`twitch_archive_clips`](../configuration/channels.md#channelstwitch_archive_clips) |
 | Quality Preference | Quality preference | Quality to record; default Best (Source). | [`quality_preference`](../configuration/channels.md#channelsquality_preference) |
 | Enabled | Enabled | Pause the channel without removing it. | [`enabled`](../configuration/channels.md#channelsenabled) |
@@ -347,8 +347,8 @@ once. Live and upcoming streams and newly published videos never wait in
 The scheduler admits nothing:
 
 - while Moombox is offline;
-- while the output disk is at or above its critical threshold, until usage
-  is 2 points below it;
+- while the output disk (or a separate, fuller staging disk) is at or above
+  its critical threshold, until usage is 2 points below it;
 - for an hour after YouTube rate-limits the session (YouTube backlog only);
 - for a disabled channel.
 
@@ -374,10 +374,13 @@ Details: [Jobs](jobs.md) and [Command line](../reference/cli.md).
 
 Moombox counts each channel's failed checks. When a channel fails **20 checks
 in a row** (about 5 minutes at the Twitch default, longer for YouTube), it
-logs a warning ("channel failing monitor checks — verify it still exists")
-and sends a **Channel Not Responding** notification (event
+logs a warning (usually "channel failing monitor checks — verify it still
+exists") and sends a **Channel Not Responding** notification (event
 `channel_unhealthy`). The usual causes are a renamed or deleted channel, a
-ban, or a typo in the ID. When the channel answers again, Moombox sends
+ban, or a typo in the ID. One case is different: when the YouTube feed
+answers 404, the warning, the alert and the channel's **Last Error** say that
+this is common when YouTube is busy and usually clears by itself. The channel
+is still checked; look at the channel ID only if it lasts. When the channel answers again, Moombox sends
 **Channel Responding Again** (`channel_healthy`).
 
 - For YouTube, the alert is held back while the other YouTube monitor

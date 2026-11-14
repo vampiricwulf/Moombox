@@ -70,7 +70,7 @@ both UIs. The first hold that applies is shown, in this order:
 | Line | Why | Ends when |
 |---|---|---|
 | `Held: offline` | Moombox's connectivity check says the internet is unreachable. Nothing is admitted. | Connectivity returns. |
-| `Held: disk full` | The output disk reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Nothing is admitted. | Usage falls **2 points** below the critical threshold. |
+| `Held: disk full` | The output disk, or the staging disk when it is a different and fuller one, reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Nothing is admitted. | Usage falls **2 points** below the critical threshold. |
 | `Held: YouTube rate limit until 14:05` | YouTube rate-limited the session. No **YouTube** backlog is admitted (Twitch backlog still is). | The hour runs out. |
 | `Retry 2 of 3 at 14:05` | This video's last attempt failed in a way worth retrying, and it was sent back to `Queued`. | The backoff runs out. |
 | `Waiting in queue...` | Nothing holds it; it waits for a free archive slot. | A slot frees up. |
@@ -122,7 +122,7 @@ wait line on an `Upcoming` row in place of its usual *Last check: …* time.
 | `Waiting for first segment... (…)` / `Waiting for next segment... (…)` | The stream has not produced new data yet. |
 | `Connection lost - reconnecting... (…)` | A network hiccup during recording. |
 | `Rate-limited - backing off... (…)` | Segment requests are being throttled. |
-| `Segment fetch failing - retrying... (…)` | A segment keeps failing; it is retried. |
+| `Segment fetch failing - retrying... (…)` | A segment keeps failing, or the request for the next one gets no answer from YouTube; it is retried. |
 | `Verifying stream ended... (…)` | No new data; Moombox is checking whether the stream really ended. See [`downloader.maximum_timeout`](../configuration/downloader.md#downloadermaximum_timeout). |
 | `Stream interrupted - waiting for resume... (…)` | The YouTube broadcast was interrupted and may come back. See [`downloader.interruption_timeout`](../configuration/downloader.md#downloaderinterruption_timeout). |
 
@@ -333,6 +333,14 @@ asks the server first and names what will go, for example *This deletes 2
 recorded parts (3.1GB) and 41 staged files (812.0MB).* — or says it could
 not tell. Reinitialize also gives a Twitch job a fresh automatic-retry
 budget. This cannot be undone.
+
+A **single-file archive** the job already has is not deleted: it is renamed
+where it is, to `<name>.restart-<timestamp>.mp4`, with its chat, thumbnail
+and description files, before the new download starts. (The parts of a split
+recording are deleted, as listed above.) The confirm
+says so (*… sets the existing archive (3.2GB) aside, and deletes …*), and
+afterwards Job Details lists the file under **Set-aside Archives** as *kept,
+never replaced*. Delete it yourself once you no longer want it.
 
 !!! warning
     If a job has a partial recording you might want, **Mux** it (or

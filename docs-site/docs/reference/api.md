@@ -121,7 +121,7 @@ direct loopback connection (see
 |---|---|---|
 | `GET` | `/api/auth/status` | Open to everyone. `{authRequired, authenticated, hasPassword, passwordlessExternal}`. |
 | `POST` | `/api/auth/login` | Body `{password}`. Sets the session and client-token cookies. |
-| `POST` | `/api/auth/logout` | Ends the session, revokes this browser's client token, clears both cookies. |
+| `POST` | `/api/auth/logout` | Ends the session, revokes this browser's client token, clears both cookies. Open dashboards reconnect their live connection, and one that is no longer signed in is refused. |
 | `POST` | `/api/auth/set-password` | Body `{currentPassword, newPassword}`. Set or change the password (8–128 characters). Needs a logged-in session or a local/private address; the first password needs a session or this machine. |
 | `POST` | `/api/auth/remove-password` | Body `{currentPassword}`. Removes the password and resets access to `localhost`. |
 | `GET` | `/api/client-tokens` | List remembered clients: `id`, `tokenPrefix`, `label`, `createdAt`, `lastUsedAt`, shortened `lastIp`. |
@@ -225,7 +225,7 @@ direct loopback connection (see
 | `GET` | `/api/files/orphaned` | Output files and staging folders no job uses. |
 | `DELETE` | `/api/files/orphaned` | Body `{paths:[…]}`. Delete them. |
 | `GET` | `/api/history/orphaned` | History rows with no job, which stop a video being discovered again. |
-| `DELETE` | `/api/history/orphaned` | Body `{videoIds:[…]}`. Remove them so the videos can be found again. |
+| `DELETE` | `/api/history/orphaned` | Body `{videoIds:[…]}`. Remove them so the videos can be found again. A row whose video has a job by now is kept; `removed` in the answer is the number of rows removed. |
 | `POST` | `/api/import` | Upload a zip archive to import as a job (5 per minute). |
 
 ### Updates, FFmpeg, setup and plugin
@@ -298,6 +298,7 @@ dashboard.
 | `disk_status` | `{free, total, usedPct, warnLevel}` | A disk-space reading |
 | `update_available` | Release info | A newer release is found |
 | `update_cleared` | `{tagName}` | The pending release was skipped or withdrawn |
+| `status_changed` | None (`null`) | Cookie authentication, a re-login flag or the BotGuard sidecar's health changed. Read `GET /api/status` again. |
 | `pong` | — | Answer to `ping` |
 
 ## Related

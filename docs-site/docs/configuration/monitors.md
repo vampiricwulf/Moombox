@@ -136,8 +136,8 @@ When to change it:
 Edge cases:
 
 - Admission also pauses, for every channel, while Moombox is offline, while
-  the output disk is at or above its critical threshold (until usage is 2
-  points below it), and for an hour after YouTube rate-limits the session
+  the output disk (or a separate, fuller staging disk) is at or above its
+  critical threshold (until usage is 2 points below it), and for an hour after YouTube rate-limits the session
   (YouTube backlog only). See [Jobs](../guide/jobs.md).
 - A **disabled** channel gets no slots: its `Queued` backlog stays paused
   until you enable it again. Downloads already running are not stopped.

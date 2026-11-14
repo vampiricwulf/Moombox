@@ -158,7 +158,7 @@ func (rs *RefreshService) refresh(ctx context.Context, allowFallback bool) bool 
 	// 30-minute ticker — and until this guard existed none of them looked to
 	// see whether another was already running. A manual recheck landing during
 	// a ticker pass ran a second full pass alongside the first: two guide
-	// fetches, two Set-Cookie merges, and two updateCookieFile rewrites of the
+	// fetches, two Set-Cookie merges, and two updateCookieFileAt rewrites of the
 	// SAME file interleaved, which is the part that is not merely wasteful.
 	//
 	// A second caller does nothing and returns. It does not queue and it does

@@ -82,7 +82,7 @@ const (
 	// one loss. The back-off keeps the first hour responsive and then gets out
 	// of the way.
 	//
-	// LIVE SINCE ARMING (2026-09-03): recordLiveness computes the schedule,
+	// LIVE SINCE ARMING (2026-09-03): foldLiveness computes the schedule,
 	// ObserveLiveness logs the answer, and livenessRecoveryArmed is true, so
 	// that same answer is what decides whether OnRecoveryNeeded is called. The
 	// state moves on every observation whatever the verdict, which is what
@@ -325,7 +325,7 @@ type RefreshService struct {
 	// timeout spent being told no.
 	//
 	// "Decided", not "fired", and the distinction outlived arming. The stamp is
-	// written by recordLiveness, UPSTREAM of ObserveLiveness's nil check on
+	// written by foldLiveness, UPSTREAM of ObserveLiveness's nil check on
 	// OnRecoveryNeeded, so a service with no callback wired still consumes the
 	// window. What the map records is the DECISION it exists to de-duplicate;
 	// whether a call followed is a separate question, which is why nothing

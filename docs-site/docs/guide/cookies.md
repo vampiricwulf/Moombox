@@ -296,7 +296,10 @@ Two separate mechanisms run. Only the first is always on.
 **The in-process refresh (always on, every 30 minutes).** Moombox checks each
 platform's login against YouTube and Twitch at startup and then every 30
 minutes, and writes back the cookie values YouTube rotates, so a YouTube
-session stays alive for as long as YouTube allows. This needs no browser and
+session stays alive for as long as YouTube allows. Between checks it also
+keeps the session cookies YouTube renews on its ordinary replies (the same
+ones a browser would keep): in memory at once, and in the cookie file within
+a minute. This needs no browser and
 no setting. It is not configurable. Press **Refresh cookies** in the status
 bar (plain click) or ++r++ then ++c++ in the TUI (**Recheck Cookies**) to run
 it now; the answer reads, for example, "Cookies: YouTube OK, Twitch — could
@@ -308,9 +311,24 @@ Moombox also re-opens the Moombox-only browser profile in the background every
 [`cookies.refresh_interval`](../configuration/cookies.md#cookiesrefresh_interval)
 (6 hours by default) and re-extracts its cookies. A tick is skipped when no
 job is `Live` or `Downloading`, when a refresh already succeeded within the
-last half interval, and when the browser profile folder does not exist yet. The same
-switch allows **one automatic browser attempt** when Moombox finds a platform
-has lost its login.
+last half interval, and when the browser profile folder does not exist yet.
+
+So that an idle install does not go days without a visit, the same timer also
+runs a pass **at least once a day**, with or without an active job, whenever
+nothing else has renewed the cookies for 24 hours. A daily visit that renewed
+nothing is tried again after 30 minutes, then less and less often, up to once
+a day. It waits while Moombox is offline.
+
+The same switch allows **automatic browser attempts** when Moombox finds a
+platform has lost its login. A job parked in `COOKIES?` is retried this way up
+to three times (see [below](#the-cookies-status)).
+
+Settings → Cookies shows a **Renewal** line when there is something to report:
+when a YouTube reply last renewed a cookie, which cookie groups the last
+browser pass renewed, and when the next daily visit is due (for example
+"Renewal: YouTube replies renewed cookies 3 min ago; next daily visit in
+21 h"). In the TUI the same line ends the **Recheck Cookies** (++r++ ++c++)
+result. It names cookies and times only, never a value.
 
 Every refresh is checked per platform before it counts: if newly extracted
 cookies do not authenticate and the previous ones did, the previous ones are
@@ -339,6 +357,7 @@ appear only for **active** platforms. Moombox decides this as follows:
     | Colour | Tooltip | Meaning |
     |---|---|---|
     | Green | "YouTube: Authenticated" | Working. |
+    | Yellow, reads `YT~` / `TW~` | "YouTube: Signed in, but pages are intermittently signed out; no automatic attempt before 14:05" | Flickering: the login check passes, but a page came back signed out in the last 24 hours. Moombox retries by itself; nothing to do. Settings → Cookies shows the same sentence as text. |
     | Yellow | "YouTube: No cookies" | No YouTube login. |
     | Grey | "Twitch: Anonymous" | No Twitch login — normal. |
     | Yellow | "Cookies saved — Moombox could not establish whether they work" | The last check could not reach the site. |
@@ -361,6 +380,7 @@ appear only for **active** platforms. Moombox decides this as follows:
     | Display | Meaning |
     |---|---|
     | green `YT` / `TW` | Working. |
+    | orange `YT~` / `TW~`; a wider bar reads `YT~ retry 14:05`, the widest `YT~ pages flicker, retry after 14:05` | Flickering: the login check passes, but a page came back signed out in the last 24 hours. Moombox retries by itself at the time shown; nothing to do. ++r++ ++c++ spells it out at any width. |
     | yellow `YT` | No YouTube cookies. |
     | dim `TW` | Twitch anonymous — normal. |
     | `YT: Unknown` (`YT` when narrow) | The last check could not reach the site. |
@@ -368,12 +388,13 @@ appear only for **active** platforms. Moombox decides this as follows:
     | `YT: cookies.txt unreadable` (`YT?` when narrow) | The file cannot be read. |
     | red `YT: Re-login` (`YT!` when narrow) | Sign in again. When the bar is wide enough it adds `(E L)`, the chord that fixes it. |
 
-    The same labels apply to `TW`. When the bar is very narrow, the first
-    four (the states that need no action) are hidden.
+    The same labels apply to `TW`. When the bar is very narrow, the plain
+    green, yellow, dim and `Unknown` states are hidden; `YT~` stays.
 
 The order of importance is the same in both: re-login, then unreadable file,
 then a parked job or refused cookies, then "could not establish", then none,
-then OK.
+then OK. Flickering is a variant of OK: it only ever replaces the plain green
+badge, never a re-login or a refusal.
 
 When a platform loses its login, Moombox also sends a notification (see
 [Notifications](notifications.md)). With `auto_enabled` off it is titled
@@ -386,14 +407,22 @@ A job stops in `COOKIES?` instead of `Error` when signing in is the fix:
 YouTube said "sign in" or "members only", Twitch refused the login, or a
 Twitch stream or VOD is subscriber-only. Moombox then:
 
-1. tries one automatic cookie refresh, if
+1. asks for an automatic cookie refresh, if
    [`cookies.auto_enabled`](../configuration/cookies.md#cookiesauto_enabled) is
    on;
 2. otherwise waits. The job's message names the cookie file to replace.
 
-**Parked jobs resume on their own** once that platform's login works again —
-after a browser login, an import, a profile refresh or a successful automatic
-refresh. Backlog VODs go back to `Queued`; other jobs go back to `Upcoming`.
+A parked job is retried automatically **up to 3 times**. If the cookies
+verify as signed in and the platform still refuses the video after the third
+retry, the job stays in `COOKIES?`, its error says the cookies are not the
+cause, and no further refresh is asked for on its behalf. The count starts
+again 24 hours after the last retry, or when you **Resume**, **Reinitialize**,
+**Cancel** or **Delete** the job.
+
+**Parked jobs resume on their own** once that platform's login works again:
+any browser login, import, profile refresh or automatic refresh (the daily
+visit included) that ends with the platform verified resumes every job parked
+on that platform, within each job's 3 automatic retries. Backlog VODs go back to `Queued`; other jobs go back to `Upcoming`.
 Queued VODs are re-admitted a few at a time under the
 channel's archive slots. You get a notification such as "Resumed 3 job(s)
 waiting on YouTube cookies — backlog re-queues and drains at archive_slots per

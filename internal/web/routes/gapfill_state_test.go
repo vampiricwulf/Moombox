@@ -3,6 +3,7 @@ package routes
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -18,7 +19,9 @@ func TestJobPayloadCarriesTheGapFillState(t *testing.T) {
 	f := newJobsFixture(t)
 	f.addJob(t, "tw_gf", func(j *database.Job) { j.Platform = "twitch" })
 	f.addJob(t, "tw_none", func(j *database.Job) { j.Platform = "twitch" })
-	plan := `{"jobId":"tw_gf","deadline":"2026-10-02T13:00:00Z","spans":[{"fromMs":1,"toMs":2,"kind":"late_start","afterPart":-1},{"fromMs":3,"toMs":4,"kind":"lost","afterPart":0}],"lastReason":"the archive VOD is still recording"}`
+	// A deadline still ahead: one already past is left out of the payload.
+	deadline := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	plan := `{"jobId":"tw_gf","deadline":"` + deadline + `","spans":[{"fromMs":1,"toMs":2,"kind":"late_start","afterPart":-1},{"fromMs":3,"toMs":4,"kind":"lost","afterPart":0}],"lastReason":"the archive VOD is still recording"}`
 	if err := f.db.SaveGapFill(database.GapFill{JobID: "tw_gf", Plan: plan, NextCheckAt: "2026-10-01T13:10:00Z"}); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +35,7 @@ func TestJobPayloadCarriesTheGapFillState(t *testing.T) {
 		} `json:"gapFill"`
 	}
 	body := f.getJSON(t, "/api/jobs/tw_gf", &got)
-	if g := got.GapFill; g == nil || g.State != "pending" || g.Spans != 2 || g.Until != "2026-10-02T13:00:00Z" || g.Reason != "the archive VOD is still recording" {
+	if g := got.GapFill; g == nil || g.State != "pending" || g.Spans != 2 || g.Until != deadline || g.Reason != "the archive VOD is still recording" {
 		t.Errorf("gapFill = %+v; body = %s", got.GapFill, body)
 	}
 

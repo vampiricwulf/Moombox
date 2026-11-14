@@ -109,7 +109,7 @@ const (
 	// error (worker twitchOfflineError), never inferred from the text; the
 	// re-initialisation clears it. Rows from before the reason existed
 	// carried the text alone (LegacyTwitchOfflineError): Open backfills
-	// them, and the reader accepts the bare text for one release.
+	// them, and no reader goes by the text.
 	ParkReasonTwitchOffline ParkReason = "twitch_offline"
 
 	// ParkReasonTwitchEndedOffline is the fifth ERROR-row reason (owner
@@ -129,8 +129,7 @@ const (
 // reasons existed (owner ruling R-I1), when the text alone routed the
 // monitor's recovery and the Mux's gap-fill tail. Frozen: these are the bytes
 // on disk in rows an earlier release wrote, which the boot backfill
-// (backfillTwitchOfflineParkReasons) and the one-release reader fallbacks
-// (jobstate legacyOfflineFlapRow, worker legacyEndedOfflineRow) match — they
+// (backfillTwitchOfflineParkReasons) matches, and nothing else reads — they
 // do not follow a later rewording of the text the worker writes today
 // (jobstate.TwitchOfflineErrMsg, worker twitchEndedOfflineErrMsg), which
 // routes nothing any more.

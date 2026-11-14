@@ -103,6 +103,10 @@ export class MoomboxApp {
     // Whether the current socket has delivered a frame yet (the heartbeat
     // waits longer for the first one, WS_FIRST_FRAME_TIMEOUT_MS).
     this._wsGotFrame = false;
+    // Whether onopen's status read still covers this socket: set there,
+    // cleared by the socket's first initial_state, which therefore reads
+    // no status of its own. A later snapshot is a resync and does.
+    this._wsStatusFresh = false;
     this._wsRefusedReachable = 0;
     this.autoCookieReloginRequired = null;
     // Tri-state; see loadStatus. null = the server has no opinion.
@@ -977,6 +981,10 @@ export class MoomboxApp {
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
+        // Settings' "Last refresh" and renewal lines describe the pass before
+        // this one until they are read again. Not awaited: it reports its
+        // own failure.
+        this.settings?.loadAutoCookieStatus();
         // Five branches where there were three. Three independent facts come
         // back and each can disagree with the others: `ran` (did this pass do
         // any work), `verdict` (what it concluded, if anything) and `renewed`
@@ -1367,6 +1375,7 @@ export class MoomboxApp {
       this._setConnState(ConnState.OPEN);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
+      this._wsStatusFresh = true;
       // Reload config on reconnect so the form reflects any server-side changes
       // (e.g., config saved via TUI, or restart-required settings that were applied).
       // Skip if user has unsaved changes to avoid silently overwriting their edits.
@@ -1677,6 +1686,12 @@ export class MoomboxApp {
         // Safe to re-run on every reconnect: _consumeJobHash clears the hash
         // before it looks anything up, so the second call finds nothing.
         this._consumeJobHash();
+        // A snapshot sent as a resync stands in for frames this tab lost,
+        // and a status_changed nudge may be one of them: the snapshot
+        // carries no status, so it is read again. Not for a socket's first
+        // snapshot: onopen has just asked.
+        if (this._wsStatusFresh) this._wsStatusFresh = false;
+        else this.onStatusChanged();
         break;
       }
 

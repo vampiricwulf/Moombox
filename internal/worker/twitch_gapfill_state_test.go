@@ -104,7 +104,7 @@ func TestGapFillPlanEndKnown(t *testing.T) {
 	}{
 		{"mux failed after a normal end", database.Job{Status: database.StatusError, StreamEndTime: "2026-10-01T13:00:00Z"}, true},
 		{"cut off mid-broadcast", database.Job{Status: database.StatusError}, false},
-		{"ended while down", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, StreamEndTime: "x"}, false},
+		{"ended while down", database.Job{Status: database.StatusError, Error: twitchEndedOfflineErrMsg, ParkReason: database.ParkReasonTwitchEndedOffline, StreamEndTime: "x"}, false},
 		{"cancelled", database.Job{Status: database.StatusCancelled, StreamEndTime: "x"}, false},
 		{"mux after a cancel failed", database.Job{Status: database.StatusError, ParkReason: database.ParkReasonMuxAfterCancel, StreamEndTime: "x"}, false},
 	} {
@@ -120,7 +120,8 @@ func TestGapFillPlanEndKnown(t *testing.T) {
 // and why. A job without a row, a VOD, and a job that is not Finished report
 // none.
 //
-// Mutants: the pending state's deadline or span count left out; the outcome
+// Mutants: the pending state's deadline or span count left out; a deadline
+// already past still reported as "until"; the outcome
 // not read (a settled row reads as pending); the Finished gate dropped (a
 // re-run job shows its earlier archive's fill).
 func TestTwitchGapFillStateOf(t *testing.T) {
@@ -136,8 +137,16 @@ func TestTwitchGapFillStateOf(t *testing.T) {
 	p.LastReason = "the archive VOD is still recording"
 	saveTwitchGapFillPlan(f.db, p, gapStart)
 	want := GapFillState{State: GapFillPending, Spans: 1, Until: deadline.Format(time.RFC3339), Reason: "the archive VOD is still recording"}
-	if s := TwitchGapFillStateOf(f.db, job()); s == nil || *s != want {
+	if s := twitchGapFillStateAt(f.db, job(), gapStart.Add(time.Hour)); s == nil || *s != want {
 		t.Errorf("pending: state %+v, want %+v", s, want)
+	}
+	// Past the deadline the plan waits for its last look, which an outage
+	// holds: the details name the reason and no deadline already gone.
+	p.LastReason = gapFillOfflineReason
+	saveTwitchGapFillPlan(f.db, p, gapStart)
+	held := GapFillState{State: GapFillPending, Spans: 1, Reason: gapFillOfflineReason}
+	if s := twitchGapFillStateAt(f.db, job(), deadline.Add(time.Hour)); s == nil || *s != held {
+		t.Errorf("held past the deadline: state %+v, want %+v", s, held)
 	}
 
 	row, _ := f.db.GetGapFill("tw_1")

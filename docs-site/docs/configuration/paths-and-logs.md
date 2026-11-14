@@ -127,7 +127,7 @@ log_file_path = "/var/log/moombox/moombox.log"
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `./output` | Any non-empty directory path | Jobs created or started after the save | Dashboard: Settings → Paths → **Output Directory**. TUI: Settings → Paths → **Output directory**. Also in both first-run wizards. |
+| `./output` | Any non-empty directory path | Jobs that start downloading after the save | Dashboard: Settings → Paths → **Output Directory**. TUI: Settings → Paths → **Output directory**. Also in both first-run wizards. |
 
 Where finished archives go. Each archive's path inside it comes from
 [`downloader.output_template`](downloader.md#downloaderoutput_template) —
@@ -145,10 +145,13 @@ Edge cases:
 - A channel can have its own
   [`output_directory`](channels.md#channelsoutput_directory), which wins
   over this setting for that channel's jobs.
-- Jobs the channel monitors create record the output directory at the
-  moment they are created. Changing this setting therefore applies to jobs
-  created afterwards; jobs already in the list keep the directory they were
-  created with.
+- A change reaches every job a channel monitor found that has not started
+  downloading yet: an `Upcoming` or `Queued` job takes the directory set at
+  the moment its download starts. A job that has started, or finished, keeps
+  the directory it started with, and so does one you Resume or one that is
+  retried. A job you Reinitialize follows the current setting again.
+- A waiting job whose channel has since been removed keeps the directory it
+  was created with.
 - Moombox creates the directory (and the template's subfolders) when it
   writes the first archive. The first-run wizards create it up front and
   refuse a path they cannot create.

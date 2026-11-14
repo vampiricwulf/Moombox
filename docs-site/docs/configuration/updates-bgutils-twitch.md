@@ -54,7 +54,9 @@ verifying the binary's signature are described in
 | `true` (`false` in the Docker image's seeded config) | `true` / `false` | Immediately | Dashboard: Settings → Updates → **Automatically check for updates**. TUI: Settings → Updates → **Auto-check updates**. |
 
 When on, Moombox checks for a new release a few seconds after it starts and
-every 24 hours after that. Turning it on while Moombox runs triggers a check
+every 24 hours after that. A check that fails (no network yet, GitHub
+refusing the request) is tried again after 15 minutes and then after an hour
+before the daily schedule resumes. Turning it on while Moombox runs triggers a check
 within a minute; turning it off stops the schedule at once.
 
 When off, Moombox never checks by itself. The dashboard's **Check Now** button

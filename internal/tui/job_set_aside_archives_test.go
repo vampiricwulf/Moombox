@@ -32,7 +32,7 @@ func setAsideArchiveRows(m *JobDetailsModel) []detailRow {
 // web/tests/job-set-aside-archives.test.mjs), and drops the block when the
 // cursor moves to another job.
 //
-// Mutants: no block; the list not cleared by SetJob on a job switch (the next
+// Mutants: no block; the file's path not shown; the list not cleared by SetJob on a job switch (the next
 // job shows this one's files).
 func TestDetailsPanelListsTheArchivesAReinitializeSetAside(t *testing.T) {
 	m := NewJobDetailsModel()
@@ -42,17 +42,28 @@ func TestDetailsPanelListsTheArchivesAReinitializeSetAside(t *testing.T) {
 		t.Fatalf("a job with no set-aside archive grew a %d-row block", len(rows))
 	}
 
-	m.SetSetAsideArchives([]SetAsideArchiveEntry{{Name: "Show.restart-1700000000.mp4", Size: 3 << 30}})
+	const path = `E:Old ArchiveShow.restart-1700000000.mp4`
+	m.SetSetAsideArchives([]SetAsideArchiveEntry{{Name: "Show.restart-1700000000.mp4", Path: path, Size: 3 << 30}})
 	rows := setAsideArchiveRows(m)
 	if len(rows) < 2 || rows[0].label != "Set-aside Archives (1)" {
 		t.Fatalf("rows = %+v, want the block with its count", rows)
 	}
-	var joined string
+	var joined, where string
 	for _, r := range rows[1:] {
+		if r.color == ColorGray {
+			where += r.value
+			continue
+		}
 		joined += r.value
 	}
 	if want := "Show.restart-1700000000.mp4 (3.0GB, kept, never replaced)"; joined != want {
 		t.Errorf("the block reads %q, want %q", joined, want)
+	}
+	// The whole path is under the line, dimmed: after a Reinitialize the
+	// row names no file, and nothing else on screen says where a kept one
+	// is (the dashboard has it as the line's tooltip).
+	if where != path {
+		t.Errorf("the path under the line reads %q, want %q", where, path)
 	}
 
 	m.SetJob(&database.Job{ID: "j2", Title: "t", VideoID: "v2", Status: database.StatusFinished, Platform: "youtube"})

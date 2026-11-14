@@ -455,3 +455,9 @@ func TestStagingAlertStaysOpenWhileItsVolumeCannotBeRead(t *testing.T) {
 		t.Fatalf("staging now on the output volume at 50%%: %v, want Disk Space Recovered", got)
 	}
 }
+
+// onReading feeds one successful reading of the output directory's volume
+// in, with no staging volume beside it.
+func (d *diskAlerts) onReading(ds *routes.DiskStatus, outputDir string, now time.Time) {
+	d.onVolumes(ds, outputDir, nil, "", now)
+}

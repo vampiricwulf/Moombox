@@ -43,7 +43,7 @@ type cookieUpdate struct {
 //
 // It exists because a Set-Cookie with no Domain= attribute is host-scoped to
 // the response that carried it, and by the time the updates reach
-// updateCookieFile that response is gone: the map holds a nil Domain and
+// updateCookieFileAt that response is gone: the map holds a nil Domain and
 // nothing else. Two of the matching rules need to know where it came from
 // anyway — resolveRowUpdate's rule 2 and sameCookiePlatform's Domain-less
 // default — and both used to assume youtube.com, which was a true statement
@@ -52,7 +52,7 @@ type cookieUpdate struct {
 //
 // The three constants are the complete set. The zero value names no site and is
 // deliberately inert: covers reports false for every row, platform reports
-// nothing, and updateCookieFile's insertion loop refuses every row whose
+// nothing, and updateCookieFileAt's insertion loop refuses every row whose
 // platform does not match the declared one — which for the zero value is all of
 // them. So a caller that forgets to declare an origin updates only rows whose
 // own Domain= scope-matches, and writes nothing new at all.

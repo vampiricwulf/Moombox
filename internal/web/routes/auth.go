@@ -149,7 +149,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 
 	// POST /api/auth/logout - requires valid session
 	r.Post("/api/auth/logout", func(rw http.ResponseWriter, req *http.Request) {
+		// ended: this call ended a session or a client token. A caller that
+		// held neither (a local or LAN peer the middleware waives, a second
+		// logout) ends nothing, and closes no socket below.
 		token := getSessionToken(req)
+		ended := token != "" && deps.Auth.ValidateSession(token)
 		if token != "" {
 			deps.Auth.InvalidateSession(token)
 		}
@@ -161,9 +165,17 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 				if ct, err := deps.DB.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
 					if web.VerifyToken(cookie.Value, ct.TokenHash) {
 						deps.DB.DeleteClientToken(ct.ID)
+						ended = true
 					}
 				}
 			}
+		}
+
+		// The session and token this browser held are gone, and a socket is
+		// checked only when it opens: another tab's would stay open on them.
+		// Other browsers reconnect on their own credentials.
+		if ended {
+			deps.closeAuthenticatedSockets()
 		}
 
 		clearSessionCookie(rw, req)

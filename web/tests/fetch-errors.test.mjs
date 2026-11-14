@@ -155,3 +155,29 @@ test("a held profile on the browser refresh toasts its sentence as a warning", {
   assert.equal(failed.textContent, "cookies.sqlite is locked by another process");
   assert.equal(failed.variant, "danger");
 });
+
+// Settings' "Last refresh" and renewal lines are written only by
+// loadAutoCookieStatus, which the refresh button beside them never called:
+// after a pass they still described the one before it. The TUI's R F reads
+// its renewal line again after the pass.
+//
+// Mutant: drop the loadAutoCookieStatus call from autoCookieRefresh's
+// answered arm — the line keeps the old pass.
+test("a browser refresh re-reads the renewal line beside its button", { skip }, async () => {
+  let auto = { replyRenewedAt: new Date(Date.now() - 3 * 3600e3).toISOString() };
+  const h = await harness.makeApp({
+    routes: {
+      "GET /api/cookies/auto-status": () => auto,
+      "POST /api/cookies/auto-refresh": () => ({ success: true, ran: true, verdict: "verified", renewed: true }),
+    },
+  });
+  await h.app.settings.loadAutoCookieStatus();
+  await h.flush();
+  assert.equal(h.el("auto-cookie-renewal").textContent, "Renewal: YouTube replies renewed cookies 3 h ago");
+
+  auto = { replyRenewedAt: new Date().toISOString() };
+  await h.app.autoCookieRefresh();
+  for (let i = 0; i < 4; i++) await h.flush();
+  assert.equal(h.el("auto-cookie-renewal").textContent, "Renewal: YouTube replies renewed cookies under a minute ago",
+    "the renewal line still describes the pass before this one");
+});

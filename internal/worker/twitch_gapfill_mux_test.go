@@ -48,17 +48,32 @@ func TestGapFillLeavesAPlanWhileItsJobIsMuxing(t *testing.T) {
 // job: the recovered opening is added ahead of the recorded parts, the newly
 // muxed one among them.
 //
+// The same holds when Moombox restarts during that Mux: the row is left
+// Muxing, the boot pass muxes it again, and that re-mux keeps the plan as
+// the operator's would have (muxOfFinishedArchive). It used to drop it, the
+// Muxing row not saying it had been Finished.
+//
 // Mutants: the Mux's DeleteGapFill run for a Finished prior (the plan is
-// gone); the plan kept but the fill refused on the re-finalized row.
+// gone); the boot re-mux of a row that was Finished treated as any other
+// boot re-mux (its plan is gone); the plan kept but the fill refused on the
+// re-finalized row.
 func TestMuxOfAFinishedTwitchJobKeepsItsPendingGapFill(t *testing.T) {
+	t.Run("the operator's Mux", func(t *testing.T) { muxOfAFinishedTwitchJobKeepsItsPendingGapFill(t, false) })
+	t.Run("the boot re-mux of that Mux", func(t *testing.T) { muxOfAFinishedTwitchJobKeepsItsPendingGapFill(t, true) })
+}
+
+func muxOfAFinishedTwitchJobKeepsItsPendingGapFill(t *testing.T, interrupted bool) {
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
 	var stagingBase string
 	w.readConfig(func(c *config.MoomboxConfig) { stagingBase = c.Paths.EffectiveStagingDir() })
 	outDir := t.TempDir()
 	const id = "tw_1"
+	// What a Finished write records, and a reset clears: the size.
+	fileSize := int64(5)
 	if _, err := db.AddJob(&database.Job{ID: id, VideoID: "1", URL: "https://twitch.tv/streamer", Platform: "twitch",
 		Title: "Big day", Status: database.StatusFinished, OutputDirectory: outDir,
+		FileSize:        &fileSize,
 		StreamStartTime: gapStart.Format(time.RFC3339), TwitchQuality: "chunked"}); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +102,14 @@ func TestMuxOfAFinishedTwitchJobKeepsItsPendingGapFill(t *testing.T) {
 	}
 	w.twitchLiveness = func(context.Context, string) (*twitch.TwitchStreamInfo, error) { return nil, nil }
 
-	if err := w.MuxJob(id); err != nil {
+	if interrupted {
+		// What the operator's Mux leaves when the process dies during it:
+		// its Muxing write, over a row that still holds what Finished wrote.
+		db.UpdateJobFields(id, map[string]any{"status": database.StatusMuxing})
+		if err := w.muxJob(id, muxActionFailure, true); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := w.MuxJob(id); err != nil {
 		t.Fatal(err)
 	}
 	w.wg.Wait()

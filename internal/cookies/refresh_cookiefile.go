@@ -2,7 +2,7 @@ package cookies
 
 // refresh_cookiefile.go — the Netscape cookie-file rewrite rules:
 // parsing one Set-Cookie header (admitSetCookie) and applying it
-// against the file's existing rows (updateCookieFile).
+// against the file's existing rows (updateCookieFileAt).
 
 import (
 	"bufio"
@@ -71,12 +71,12 @@ func hasRowBreakingChar(s string) bool { return strings.ContainsAny(s, rowBreaki
 // not one.
 //
 // isGoogleOnlyAuthName is used here as a NAME predicate and nothing more. It
-// used to double as updateCookieFile's domain-inventor for a Domain-less update
+// used to double as updateCookieFileAt's domain-inventor for a Domain-less update
 // and no longer does; see the insertion loop for why that was wrong.
 //
 // Only the Google platform has a set here, and the reason is now simply that
 // only a Google-platform caller exists. Until this fix round there was a
-// structural reason as well — updateCookieFile invented a Domain-less update's
+// structural reason as well — updateCookieFileAt invented a Domain-less update's
 // domain from the cookie NAME and knew only youtube.com and google.com, so an
 // admitted Twitch cookie would have been refused at the write — but that
 // fallback now uses the declared origin's own site and would place a .twitch.tv
@@ -115,7 +115,7 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //     an ordinary way for youtube.com to rotate its own first-party cookies.
 //     Such a header contains neither substring, so it never reached the parser —
 //     while the rest of this package plainly expected it to. resolveRowUpdate's
-//     rule 2 exists to confine a Domain-less deletion, and updateCookieFile's
+//     rule 2 exists to confine a Domain-less deletion, and updateCookieFileAt's
 //     insertion loop has a whole branch for a Domain-less update; both were
 //     unreachable. That is the "cookies.txt untouched for a day" symptom: it
 //     fails safe, and it still strands the session. (The insertion branch had
@@ -166,7 +166,7 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 //     .google.com auth from a youtube.com reply: that was already true, and it
 //     is now true and reachable rather than true and dead.
 //   - Row-breaking characters cannot reach the file (1).
-//   - Everything downstream is untouched: updateCookieFile's refusal to blank an
+//   - Everything downstream is untouched: updateCookieFileAt's refusal to blank an
 //     essential cookie, the seven-field rebuild, writeFileAtomic.
 //
 // WHAT AN ADMITTED HEADER MAY DO, BY VERB. The design first, because the rules
@@ -263,7 +263,7 @@ func trackedCookieName(name string, origin cookieOrigin) bool {
 // Two layers, and they are not redundant. THIS one decides what becomes an
 // update at all, and it is the only code that ever sees the raw header — so
 // row-breaking characters and the tracked-name rule belong here and nowhere else.
-// updateCookieFile's insertion guard is the last check before a row is WRITTEN,
+// updateCookieFileAt's insertion guard is the last check before a row is WRITTEN,
 // and it covers the domain that loop DERIVES from the declared origin for an
 // unscoped update — a domain that does not exist yet when this function returns,
 // and which this function therefore cannot judge. Neither subsumes the other.
@@ -446,11 +446,11 @@ func admitSetCookie(sc string, origin cookieOrigin) (cookieUpdateKey, cookieUpda
 	}, true
 }
 
-// errCookieSessionReplaced is updateCookieFile declining to write rotations
+// errCookieSessionReplaced is updateCookieFileAt declining to write rotations
 // for a session cookies.txt no longer holds.
 var errCookieSessionReplaced = errors.New("cookies.txt holds a different session than the one the rotations are for")
 
-// updateCookieFile re-reads the cookie file, updates matching cookies with new
+// updateCookieFileAt re-reads the cookie file, updates matching cookies with new
 // values and expiry, and adds new cookies not already in the file.
 //
 // Behavior notes relative to the original implementation:
@@ -496,20 +496,17 @@ var errCookieSessionReplaced = errors.New("cookies.txt holds a different session
 // YouTube deletion.
 //
 // sentAs, when not empty, is the youTubeSessionKey of the session the response
-// answered (see checkAndRefreshYouTube). The file is re-read here, at write
+// answered (the renewal store's flush passes the one its renewals were kept
+// for). The file is re-read here, at write
 // time, and an import — or anything else that writes cookies.txt — can have
 // replaced it while the request was in flight: the old session's rotated
 // __Secure-1PSIDTS then landed on the new session's rows, a mixed file the
 // operator had just been told was imported. A file whose session is no longer
 // sentAs is left alone (errCookieSessionReplaced).
-func (rs *RefreshService) updateCookieFile(updates map[cookieUpdateKey]cookieUpdate, origin cookieOrigin, sentAs string) error {
-	return updateCookieFileAt(rs.jar.GetFilePath(), rs.logger, updates, origin, sentAs)
-}
-
-// updateCookieFileAt is updateCookieFile for a named file and logger: the
-// read, the session guard, the row rewrite (rewriteCookieRows) and the atomic
-// write. The renewal store's flush (CookieJar.FlushRenewals) calls it
-// directly.
+//
+// The steps are the read, the session guard, the row rewrite
+// (rewriteCookieRows) and the atomic write. The one production caller is the
+// renewal store's flush (CookieJar.FlushRenewals).
 func updateCookieFileAt(filePath string, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -556,7 +553,7 @@ func youTubeSessionKeyOf(data []byte) string {
 	return probe.youTubeSessionKey()
 }
 
-// rewriteCookieRows is updateCookieFile's row rules over bytes a caller
+// rewriteCookieRows is updateCookieFileAt's row rules over bytes a caller
 // holds: every rule in that doc comment, with no file read or written. It
 // returns the rewritten file text and how many updates it applied. The
 // renewal store uses it twice with the same pending updates, once to state
@@ -1074,7 +1071,7 @@ func sameCookieScope(a, b string) bool {
 // SAPISID, or the __Secure- variants.
 //
 // It is a statement about NAMES, and it must not be used to decide a DOMAIN.
-// updateCookieFile's insertion loop used to do exactly that for a Set-Cookie
+// updateCookieFileAt's insertion loop used to do exactly that for a Set-Cookie
 // with no Domain=, which wrote a host-only youtube.com SID onto .google.com —
 // a different cookie, sent to a different host. The sole caller now is
 // trackedCookieName, which asks only whether the jar tracks the name.

@@ -198,3 +198,47 @@ test("the reload-after-saving toast is shown once per version", { skip }, async 
   await settle(h);
   assert.equal(toasts(), 1);
 });
+
+// A status_changed frame is an ordinary frame: a full write queue can give it
+// up, and what the tab gets in its place is a resync snapshot, an
+// initial_state frame that carries no status. The badges stayed as they were
+// until the next nudge or a reconnect.
+//
+// Mutant: no onStatusChanged call in the initial_state case — the alert
+// outlives the sidecar's recovery.
+test("a resync snapshot re-reads the status a lost status_changed frame was about", { skip }, async () => {
+  let status = {
+    activePlatforms: { youtube: true, twitch: true },
+    botguardSidecar: { healthy: false, reason: "stdout EOF", restarts: 0 },
+  };
+  const h = await harness.makeApp({ routes: { "GET /api/status": () => status } });
+  assert.match(warnings(h), /PO tokens: sidecar down/);
+
+  status = { ...status, botguardSidecar: { healthy: true, reason: "", restarts: 1 } };
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await settle(h);
+  assert.doesNotMatch(warnings(h), /sidecar down/, "the snapshot left the badge of a lost nudge in place");
+});
+
+// A socket's first snapshot follows onopen's own status read, so it asks for
+// none; only a later snapshot on the same socket is a resync.
+//
+// Mutant: onStatusChanged on every initial_state — each connect and
+// reconnect reads GET /api/status twice.
+test("a socket's first snapshot reads no status of its own, and a resync after it does", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/status": () => ({}) } });
+  const ws = h.sockets[h.sockets.length - 1];
+  ws.readyState = 1;
+  const before = reads(h);
+  ws.onopen();
+  await settle(h);
+  assert.equal(reads(h) - before, 1, "onopen reads the status once");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await settle(h);
+  assert.equal(reads(h) - before, 1, "the first snapshot of a socket read the status onopen had just read");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await settle(h);
+  assert.equal(reads(h) - before, 2, "a resync snapshot on the open socket did not read the status");
+});

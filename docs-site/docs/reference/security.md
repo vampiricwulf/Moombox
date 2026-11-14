@@ -110,8 +110,7 @@ is answered with the login page (the address bar is kept), and any `/api/`
 request gets `401 {"error":"Authentication required"}`. A small set of paths
 stays open so the login page can load and the yt-dlp plugin can find
 Moombox: the login page and its two scripts, the favicon,
-`/api/auth/status`, `/api/auth/login`, `/ping` and `/minter_cache` (the last
-is loopback-only anyway).
+`/api/auth/status`, `/api/auth/login` and `/ping`.
 
 Once logged in, the status bar shows a logout button; it ends the session and
 revokes the browser's client token.

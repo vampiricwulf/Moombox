@@ -818,9 +818,9 @@ function renewalSpan(ms) {
  * GET /api/cookies/auto-status (`replyRenewedAt`, `renewalCensus`,
  * `nextVisitDue`), which carry names and times only. "" when none is set, as
  * from an older binary.
- *  {object|null|undefined} status the auto-status payload
- *  {number} nowMs
- *  {string}
+ * @param {object|null|undefined} status the auto-status payload
+ * @param {number} nowMs
+ * @returns {string}
  */
 export function renewalLine(status, nowMs) {
   const ago = (ms) => `${renewalSpan(Math.max(nowMs - ms, 0))} ago`;
@@ -1653,36 +1653,14 @@ export function cookieRetryText(retry) {
 export const MAX_TWITCH_AUTO_RETRIES = 2;
 
 /**
- * The offline flap's error as rows carried it before its park reason existed
- * (database.LegacyTwitchOfflineError, frozen; the same parity test compares
- * the two). Read by legacyOfflineFlapRow alone.
- */
-export const LEGACY_TWITCH_OFFLINE_ERROR = "twitch channel is offline";
-
-/**
- * legacyOfflineFlapRow is the dashboard's twin of jobstate's
- * legacyOfflineFlapRow: an offline-flap row as releases before the
- * "twitch_offline" park reason wrote it — the frozen text and no park reason
- * at all. Boot backfills the reason onto such rows, so this is read only for
- * one a boot has not converted.
- *
- * ONE-RELEASE FALLBACK (owner ruling R-I1): delete this function, its one
- * call in pendingAutoAction and LEGACY_TWITCH_OFFLINE_ERROR in the release
- * after the one that introduces the park reason, with the Go twin.
- * @param {object} job
- * @returns {boolean}
- */
-function legacyOfflineFlapRow(job) {
-  return !job.parkReason && job.error === LEGACY_TWITCH_OFFLINE_ERROR;
-}
-
-/**
  * pendingAutoAction is the dashboard's twin of jobstate.PendingAutoAction
  * (owner ruling R-D2): the automatic action the Twitch monitor will take for
  * an Error row — "auto_mux" once its broadcast is confirmed over (a row the
  * unconfirmed-end latch marked), "auto_retry" when it is live again (the
  * offline flap or an unreachable probe, each by its park reason, before any
- * segment, retries left) — or "" for none. The error text routes nothing. GET /api/jobs/{id} sends the Go answer as
+ * segment, retries left) — or "" for none. The error text routes nothing (a row
+ * from before the park reasons existed is given its reason when the database
+ * is opened). GET /api/jobs/{id} sends the Go answer as
  * pendingAutoAction; the job list and the WebSocket send the row alone, so
  * the rows derive it here. cmd/moombox's job-state parity test runs both
  * against web/tests/fixtures/job-state-parity.json.
@@ -1695,7 +1673,7 @@ export function pendingAutoAction(job) {
   // A manual add writes no history row, so the monitor's recovery never
   // reaches it (jobstate.PendingAutoAction); its end latch is still the mux's.
   if (job.manuallyAdded) return "";
-  if (job.parkReason !== "twitch_offline" && job.parkReason !== "twitch_unreachable" && !legacyOfflineFlapRow(job)) return "";
+  if (job.parkReason !== "twitch_offline" && job.parkReason !== "twitch_unreachable") return "";
   if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";
   return (Number(job.autoRetryCount) || 0) < MAX_TWITCH_AUTO_RETRIES ? "auto_retry" : "";
 }

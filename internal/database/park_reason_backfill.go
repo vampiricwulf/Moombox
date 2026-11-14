@@ -21,8 +21,8 @@ import "database/sql"
 //     (schema 23) is already refused this database by v24-v27.
 //   - A version block runs once. A row written afterwards by an older binary
 //     on this database (a rollback that ran for a while, then the update
-//     again) would keep the bare text, and once the readers' one-release
-//     text fallback is gone nothing would route it. Run on every Open, the
+//     again) would keep the bare text, and no reader routes a row by its
+//     text (the one-release fallback is gone). Run on every Open, the
 //     backfill converts it at the next boot.
 //
 // Exact: status Error, an empty park_reason, error equal to one of the frozen
@@ -30,9 +30,11 @@ import "database/sql"
 // the Mux's own Muxing write leave the text on it) and any other wording are
 // left alone. updated_at is not touched and no subscriber is told: at boot
 // nothing is subscribed, and the one other caller of Open, the `moombox add`
-// side process, converts under a running daemon only rows whose two shapes
-// that daemon reads alike. Idempotent, and a failure is logged, not fatal —
-// the row is read by its text this release and converted on a later Open
+// side process, converts under a running daemon only rows that daemon had
+// read as waiting for the operator, and reads from the database again at its
+// next poll. Idempotent, and a failure is logged, not fatal: nothing reads
+// such a row by its text, so it has no automatic retry (and an ended-offline
+// one is muxed by its stream_end_time alone) until a later Open converts it
 // (`moombox add` opens with no logger, so there it is silent).
 //
 // The UPDATE is sent only when a read finds a row to convert. An UPDATE that
@@ -61,7 +63,7 @@ func (db *Database) backfillTwitchOfflineParkReasons() {
 		if db.logger == nil {
 			return
 		}
-		db.logger.Warn("twitch offline park_reason backfill failed; the rows are read by their error text until a later start converts them", "err", err)
+		db.logger.Warn("twitch offline park_reason backfill failed; Twitch offline rows from an earlier release get no automatic retry until a later start converts them", "err", err)
 		return
 	}
 	if n, err := res.RowsAffected(); err == nil && n > 0 && db.logger != nil {

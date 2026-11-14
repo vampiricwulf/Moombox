@@ -29,10 +29,11 @@ page [Channels](../guide/channels.md) walks through both.
     A channel added, edited, enabled, disabled or removed from the dashboard
     takes effect at once: the save runs a check of all three monitors. In the
     terminal UI the change takes effect when you save the Settings overlay.
-    Settings that shape a download (output directory, quality) are copied
-    onto each job when the job is created, so a change applies to **jobs
-    created after it**, not to jobs that already exist. Hand edits to
-    `config.toml` are read at the next start.
+    The quality is copied onto each job when the job is created, so a change
+    applies to **jobs created after it**. The output directory is settled
+    later, when a job starts downloading: a change also reaches jobs still
+    waiting in `Upcoming` or `Queued`, and never a job that has started. Hand
+    edits to `config.toml` are read at the next start.
 
 !!! note "Validation"
     Moombox refuses, when you save from the dashboard or the TUI, a channel
@@ -116,8 +117,14 @@ Edge cases:
 
 - Pasting a `twitch.tv` URL or a YouTube URL/@handle sets it for you.
 - The dashboard locks the platform once the channel exists.
-- Write it in lowercase. The YouTube monitors treat every value other than
-  exactly `twitch` as YouTube.
+- Write it in lowercase. A value that only differs by case or spaces
+  (`"Twitch"`) is corrected when the file is loaded.
+- Any other value (a typo such as `twich`) is not guessed at: the channel is
+  loaded disabled and a warning in the log names it. Correct the platform and
+  enable the channel again. You can do both in the file, in the TUI's channel
+  editor, or in the dashboard, where the channel list tags such a channel
+  **Unknown platform** and its Edit Channel dialog unlocks **Platform** and
+  says the stored value is not recognised.
 
 ```toml
 [[channels]]
@@ -320,7 +327,7 @@ archive_slots = 1
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| Empty (use [`paths.output_directory`](paths-and-logs.md#pathsoutput_directory)) | A folder path | Next job created | Dashboard: Add/Edit Channel → **Output directory** (blank = global). TUI: channel editor → **Output directory** (blank = global). |
+| Empty (use [`paths.output_directory`](paths-and-logs.md#pathsoutput_directory)) | A folder path | Jobs that start downloading after the save | Dashboard: Add/Edit Channel → **Output directory** (blank = global). TUI: channel editor → **Output directory** (blank = global). |
 
 Where this channel's finished files go, instead of the global output
 directory. The
@@ -330,11 +337,15 @@ applies beneath it, so with the default template files land in
 
 Edge cases:
 
-- The folder is copied onto each job when the job is created. Changing it
-  does not move existing files or redirect jobs that already exist.
+- The folder is settled when a job starts downloading, so a change also
+  reaches this channel's jobs still waiting in `Upcoming` or `Queued`.
+  Changing it does not move existing files or redirect jobs that have
+  started or finished. See
+  [`paths.output_directory`](paths-and-logs.md#pathsoutput_directory).
 - A relative path is resolved against Moombox's working directory.
 - The disk-space alerts and the backlog's disk gate measure the **global**
-  output directory's volume only, not a per-channel folder on another drive.
+  output directory's volume (and the staging directory's, when that is a
+  different one), not a per-channel folder on another drive.
 - In Docker, use a path inside a mounted volume, or the files stay inside the
   container.
 
@@ -418,13 +429,16 @@ twitch_gap_fill_ad_breaks = true
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `false` | `true` or `false` | Next hourly backlog run | Dashboard: Add/Edit Channel → **Queue past VODs, highlights & uploads (Twitch only)** (badge **Past VODs**). TUI: channel editor → **Queue past VODs (Twitch only)**. |
+| `false` | `true` or `false` | On save (within 5 minutes if a run just finished; a save in the first two minutes after start waits for the first run), then hourly | Dashboard: Add/Edit Channel → **Queue past VODs, highlights & uploads (Twitch only)** (badge **Past VODs**). TUI: channel editor → **Queue past VODs (Twitch only)**. |
 
 Archive the channel's past videos, not just its live streams. Once an hour
 (the first run is two minutes after Moombox starts) Moombox lists the
 channel's newest 100 videos of every type (past broadcasts, highlights and
 uploads) and queues each one it has not archived before as a `Queued`
-backlog job, paced by [archive slots](#channelsarchive_slots).
+backlog job, paced by [archive slots](#channelsarchive_slots). Saving a
+channel also starts a run at once, so a channel you just switched this on for
+is listed without waiting for the hour, and a run that came due while Moombox
+was offline happens when the connection returns.
 
 Skipped:
 

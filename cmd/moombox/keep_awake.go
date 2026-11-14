@@ -25,12 +25,19 @@ type keepAwake struct {
 	working map[string]struct{}
 	held    bool
 	stopped bool
-	// supported is keepawake.Supported(): where holding does nothing, reconcile
-	// reads nothing.
+	// refused: the operating system turned down the hold that is wanted now,
+	// and the warning for it has been logged. The request is made again on
+	// every change and every reconcile; the warning is not repeated until a
+	// hold has succeeded or none is wanted.
+	refused bool
+	// supported is keepawake.Supported(): where holding does nothing, seed and
+	// reconcile read nothing.
 	supported bool
-	// hold asks the operating system (keepawake.Holder.Hold); allJobs reads
-	// every row for a rebuild.
+	// hold asks the operating system (keepawake.Holder.Hold); close ends the
+	// holder at shutdown (keepawake.Holder.Close; nil in a test that has
+	// none); allJobs reads every row for a rebuild.
 	hold    func(on bool) bool
+	close   func()
 	allJobs func() ([]*database.Job, error)
 	logger  interface {
 		Debug(msg string, args ...any)
@@ -90,10 +97,15 @@ func (k *keepAwake) rebuildLocked(jobs []*database.Job) {
 // bulk change. The list a bulk writer hands OnJobsChange is not used: it was
 // read at that writer's commit and is delivered later on its own goroutine, so
 // a job that went Downloading in between would be dropped by it and the hold
-// released for the rest of the capture.
+// released for the rest of the capture. Where holding does nothing (Linux)
+// it reads nothing. With the setting off it still reads, because turning the
+// setting on takes the hold from the working set as it stands.
 func (k *keepAwake) seed() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if !k.supported {
+		return
+	}
 	k.readLocked()
 }
 
@@ -138,28 +150,38 @@ func (k *keepAwake) setEnabled(on bool) {
 	k.applyLocked()
 }
 
-// stop lets the host sleep again for good: the shutdown's.
+// stop lets the host sleep again for good and ends the holder's thread: the
+// shutdown's. Nothing is asked of the holder after it.
 func (k *keepAwake) stop() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.stopped = true
 	k.applyLocked()
+	if k.close != nil {
+		k.close()
+	}
 }
 
 // applyLocked makes the hold match what is wanted.
 func (k *keepAwake) applyLocked() {
 	want := k.enabled && !k.stopped && len(k.working) > 0
+	if !want {
+		k.refused = false
+	}
 	if want == k.held {
 		return
 	}
 	if !k.hold(want) {
-		if want && keepawake.Supported() {
+		// Asked again at the next change or reconcile; warned about once.
+		if want && k.supported && !k.refused {
+			k.refused = true
 			k.logger.Warn("keep-awake: Windows refused the request; the PC may sleep during this capture")
 		}
 		k.held = false
 		return
 	}
 	k.held = want
+	k.refused = false
 	if want {
 		k.logger.Debug("keep-awake: a capture or mux is running, asking Windows not to sleep", "jobs", len(k.working))
 	} else {
@@ -175,6 +197,7 @@ func (s *runState) startKeepAwake(enabled bool) {
 		enabled:   enabled,
 		supported: keepawake.Supported(),
 		hold:      holder.Hold,
+		close:     holder.Close,
 		allJobs:   s.db.GetAllJobs,
 		logger:    s.log,
 	}

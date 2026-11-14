@@ -121,6 +121,12 @@ type dashRetryState struct {
 	// when the head moves past lastConfirmedHead.
 	sameHeadRetryDelay int
 	lastConfirmedHead  int
+	// transportFailure is set by handleDashError for the length of its call
+	// into handleHTTPError, for a fetch that got no complete HTTP answer
+	// while the device is online: at the live edge that is a retry of a
+	// failing request, not the healthy wait for the next segment, and the
+	// progress line says so.
+	transportFailure bool
 }
 
 // newDashRetryState returns the state a loop starts with: no failures, and
@@ -545,7 +551,10 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	// (HeadCurrentAtFinalize).
 	d.logger.Debug("[Downloader] segment fetch got no complete answer — handled like a server error",
 		"seq", d.currentSeq.Load(), "status", statusCode, "headSeq", d.headSeq.Load(), "error", fetchErr)
-	return d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
+	rs.transportFailure = true
+	err := d.handleHTTPError(ctx, hasStartedDownloading, rs, delayCap)
+	rs.transportFailure = false
+	return err
 }
 
 // non403CipherMarkers lists lower-cased substrings that mean the 403
@@ -1208,9 +1217,13 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// healthy stream caught up to the head), escalating to "verifying end" once
 	// the no-segment gap crosses the verify interval and we start checking with
 	// YouTube. The tracker's 2s segment grace suppresses both when the next
-	// segment arrives promptly, so a healthy stream shows neither.
+	// segment arrives promptly, so a healthy stream shows neither. A fetch
+	// that got no HTTP answer at all (rs.transportFailure) is not that steady
+	// state: until the checks start it reads as the retry it is.
 	if d.lastSegTime.Since() >= streamStatusCheckInterval {
 		d.emitActivity(ActivityVerifyingEnd)
+	} else if rs.transportFailure {
+		d.emitActivity(ActivityRetrying)
 	} else {
 		d.emitActivity(ActivityWaitingForSegment)
 	}

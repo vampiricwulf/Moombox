@@ -185,3 +185,36 @@ func TestBehindHeadFetchFailuresEmitRetrying(t *testing.T) {
 		}
 	})
 }
+
+// At the live edge a fetch that got no HTTP answer (a reset, a timeout; the
+// device online) is a failing request being retried, not the healthy wait
+// for a segment that has not published yet, and the progress line says so
+// until the stream-status checks start (owner ruling on the post-2.9.9
+// review's F17). An HTTP error at the edge keeps the wait line: there the
+// edge answered, and "not yet" is what a 404 for the next sequence means.
+//
+// Mutant: the transport flag not set (or not read): the first row emits
+// ActivityWaitingForSegment. The flag left set after the call: the second
+// row emits ActivityRetrying.
+func TestAtEdgeTransportFailureEmitsRetrying(t *testing.T) {
+	d, got := newActivityDownloader(t)
+	d.headSeq.Store(10)
+	d.currentSeq.Store(10)
+	d.lastHeadProbeTime.StoreNow() // no head probe: there is no server
+	d.lastSegTime.StoreNow()       // a fresh gap: before the verify interval
+	d.delays = fastDelays()
+	rs := newDashRetryState()
+
+	if err := d.handleDashError(t.Context(), 0, errors.New("read tcp: connection reset by peer"), rs, true, 60); err != nil {
+		t.Fatalf("handleDashError returned %v, want nil (continue)", err)
+	}
+	if *got != ActivityRetrying {
+		t.Errorf("transport failure at the edge: activity = %v, want ActivityRetrying", *got)
+	}
+	if err := d.handleDashError(t.Context(), 404, nil, rs, true, 60); err != nil {
+		t.Fatalf("handleDashError returned %v, want nil (continue)", err)
+	}
+	if *got != ActivityWaitingForSegment {
+		t.Errorf("404 at the edge after a transport failure: activity = %v, want ActivityWaitingForSegment", *got)
+	}
+}

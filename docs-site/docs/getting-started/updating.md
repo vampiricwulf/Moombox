@@ -17,7 +17,9 @@ programs.
 
 With [`updates.auto_check_updates`](../configuration/updates-bgutils-twitch.md#updatesauto_check_updates)
 on (the default outside Docker), Moombox asks GitHub for the latest release
-about five seconds after it starts and then every 24 hours. Turning the
+about five seconds after it starts and then every 24 hours. A failed check is
+tried again after 15 minutes, then after an hour, before the daily schedule
+resumes. Turning the
 setting on while Moombox runs triggers a check within a minute; turning it off
 stops the schedule without a restart. Only stable releases are offered;
 pre-releases are never picked up by the check.

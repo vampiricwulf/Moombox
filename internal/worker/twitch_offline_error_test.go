@@ -36,8 +36,4 @@ func TestTwitchOfflineErrorNamesTheMuxForAnInterruptedCapture(t *testing.T) {
 			t.Errorf("%s: got %q (%q), want %q (%q)", tc.name, got, reason, tc.want, tc.reason)
 		}
 	}
-	// The texts are still the frozen ones an earlier release keys on.
-	if TwitchOfflineErrMsg != database.LegacyTwitchOfflineError || twitchEndedOfflineErrMsg != database.LegacyTwitchEndedOfflineError {
-		t.Error("an offline error text no longer equals its frozen legacy text; see legacyEndedOfflineRow for when it may be reworded")
-	}
 }

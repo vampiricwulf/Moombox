@@ -95,6 +95,16 @@ export const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 // unticks would write it out with the rest instead of silently dropping it.
 const DEFAULT_MENTION_EVENTS = ["error", "auth", "disk_critical", "update_failed", "crash_recovered", "sidecar_down"];
 
+/**
+ * Whether `platform` is one the monitors know: Go's
+ * config.ValidChannelPlatform. Empty means YouTube.
+ * @param {string|null|undefined} platform
+ * @returns {boolean}
+ */
+function knownChannelPlatform(platform) {
+  return !platform || platform === "youtube" || platform === "twitch";
+}
+
 // Settings that require a process restart to take effect
 // Each entry is [nestedPath, formElementId] for change detection
 //
@@ -1435,9 +1445,13 @@ export class SettingsController {
         (ch, index) => {
           const isTwitch = ch.platform === "twitch";
           const isEnabled = ch.enabled !== false;
-          const platformTag = isTwitch
-            ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
-            : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
+          // A stored platform that is neither is not tagged YouTube: the
+          // Edit dialog asks for it to be chosen, and this is the row.
+          const platformTag = !knownChannelPlatform(ch.platform)
+            ? '<sl-tag size="small" variant="warning">Unknown platform</sl-tag> '
+            : isTwitch
+              ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
+              : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
           return `
       <div class="channel-card${isEnabled ? "" : " channel-card--disabled"}" data-channel-id="${this.app.escapeHtml(ch.id)}" data-index="${index}" draggable="true">
         <div class="channel-card-header">
@@ -1690,9 +1704,17 @@ export class SettingsController {
 
     document.getElementById("channel-id-input").disabled = !!channel;
 
-    // Lock platform when editing (can't change platform of existing channel)
+    // Lock platform when editing (can't change platform of existing channel).
+    // The one exception is a stored platform that is neither: a hand-edited
+    // file's typo, which the server loads as a disabled channel and refuses
+    // to enable. The selector stays open so it can be corrected here, as the
+    // TUI's channel form can, and a line under it says why.
     if (platformSelect) {
-      platformSelect.disabled = !!channel;
+      const unknown = !!channel && !knownChannelPlatform(channel.platform);
+      platformSelect.disabled = !!channel && !unknown;
+      platformSelect.helpText = unknown
+        ? `The stored platform "${channel.platform}" is not recognised. Choose the right one.`
+        : "";
     }
 
     dialog.show();
@@ -1827,6 +1849,13 @@ export class SettingsController {
       name: name || undefined,
       enabled,
       ...(isTwitch ? { platform: "twitch" } : {}),
+      // A stored platform that is neither is replaced by the one chosen,
+      // written out for YouTube too: the spread above would carry the typo
+      // back. While nothing valid is chosen, the stored string is posted as it
+      // is, and the server refuses it ("platform must be youtube or twitch").
+      ...(existingChannel && !knownChannelPlatform(existingChannel.platform) && (platform === "youtube" || platform === "twitch")
+        ? { platform }
+        : {}),
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
       ...(isTwitch
         ? {
@@ -3137,6 +3166,14 @@ export class SettingsController {
         // browser info would read as a state of its own. The colour is the
         // warning token this panel already uses for its inline validation
         // message and for the setup countdown — no new class.
+        const lastErrorEl = document.getElementById("auto-cookie-last-error");
+        if (lastErrorEl) {
+          const lastError = status.lastError || "";
+          lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
+          lastErrorEl.style.color = "var(--text-warning)";
+          lastErrorEl.style.display = lastError ? "" : "none";
+        }
+
         // What renews the session, in one line (owner ruling KA-5): names and
         // times only. Hidden while the server has nothing to say.
         const renewalEl = document.getElementById("auto-cookie-renewal");
@@ -3144,14 +3181,6 @@ export class SettingsController {
           const line = renewalLine(status, Date.now());
           renewalEl.textContent = line;
           renewalEl.style.display = line ? "" : "none";
-        }
-
-        const lastErrorEl = document.getElementById("auto-cookie-last-error");
-        if (lastErrorEl) {
-          const lastError = status.lastError || "";
-          lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
-          lastErrorEl.style.color = "var(--text-warning)";
-          lastErrorEl.style.display = lastError ? "" : "none";
         }
 
         // A setup in progress on the server with no owner in this page (a
