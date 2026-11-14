@@ -107,7 +107,8 @@ const gapFillOutcomeRecheck = 7 * 24 * time.Hour
 // GapFillState is a job's gap-fill as the job API reports it (field gapFill):
 // State is GapFillPending, GapFillFilled or GapFillKept; Spans the spans
 // planned (pending) or recovered (filled); Until the plan's deadline while
-// pending; Reason why a pending plan is still waiting, why the archive was
+// pending and still ahead (empty once it has passed: a plan waiting for its
+// last look is not "until" a time already gone); Reason why a pending plan is still waiting, why the archive was
 // kept, or why some spans of a fill stayed gaps.
 type GapFillState struct {
 	State  string `json:"state"`
@@ -122,6 +123,11 @@ type GapFillState struct {
 // archive until its new finalize replaces or drops it, and that row says
 // nothing about the capture now running.
 func TwitchGapFillStateOf(db *database.Database, job *database.Job) *GapFillState {
+	return twitchGapFillStateAt(db, job, time.Now())
+}
+
+// twitchGapFillStateAt is TwitchGapFillStateOf read at now.
+func twitchGapFillStateAt(db *database.Database, job *database.Job, now time.Time) *GapFillState {
 	if db == nil || job == nil || job.Platform != "twitch" || job.IsVod || job.Status != database.StatusFinished {
 		return nil
 	}
@@ -136,7 +142,15 @@ func TwitchGapFillStateOf(db *database.Database, job *database.Job) *GapFillStat
 	if o := plan.Outcome; o != nil {
 		return &GapFillState{State: o.State, Spans: o.Spans, Reason: o.Reason}
 	}
-	return &GapFillState{State: GapFillPending, Spans: len(plan.Spans), Until: plan.Deadline, Reason: plan.LastReason}
+	st := &GapFillState{State: GapFillPending, Spans: len(plan.Spans), Reason: plan.LastReason}
+	// A deadline already past is left out: the plan is then waiting for its
+	// last look (owner ruling R2-F1), which an outage or a full volume holds
+	// for as long as it lasts, and "until <a time gone by>" would read as
+	// overdue. Reason says what it waits for.
+	if deadline, err := time.Parse(time.RFC3339, plan.Deadline); err != nil || deadline.After(now) {
+		st.Until = plan.Deadline
+	}
+	return st
 }
 
 // gapFillWindow is how long after the broadcast ends the fill waits for its
@@ -463,8 +477,8 @@ func (f *twitchGapFiller) step(ctx context.Context, row database.GapFill, now ti
 		// Every request of a look would fail, and the look would count
 		// toward the backoff: the plan is left as it is, due, and the next
 		// sweep looks again, as the backlog scheduler admits nothing offline.
-		// A last look held this way says why in the job's details, whose
-		// "until" is by then past.
+		// A last look held this way says why in the job's details, which
+		// no longer name the deadline (twitchGapFillStateAt).
 		f.logger.Debug("gap-fill: the device is offline; looking again at the next sweep", "jobID", plan.JobID)
 		if lastLook {
 			f.holdLastLook(&plan, row, gapFillOfflineReason)

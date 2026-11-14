@@ -208,7 +208,7 @@ The job details show the state on a finished live Twitch job:
 
 | Gap-fill line | Meaning |
 |---|---|
-| *Gap-fill pending: N spans, until …* | Waiting for the VOD (with the last reason, if any). |
+| *Gap-fill pending: N spans, until …* | Waiting for the VOD (with the last reason, if any). Once the 24 hours are over the time is left off: the fill is waiting for its last look, and the reason says why (for example, the device is offline). |
 | *Filled N spans* | The missing stretches were added as recovered parts. |
 | *Kept as recorded: …* | Nothing was filled, and why. |
 
