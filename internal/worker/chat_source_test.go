@@ -39,7 +39,7 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 			IsReplay:     true,
 			VisitorData:  "vd",
 		}}
-		got, err := chatSourceFor(context.Background(), info, "vid", "")
+		got, err := chatSourceFor(context.Background(), info, "vid", "", nil)
 		if err != nil {
 			t.Fatalf("chatSourceFor: %v", err)
 		}
@@ -57,10 +57,10 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 			FetchedAt:    time.Now(),
 			Continuation: "carried",
 		}}
-		if _, err := chatSourceFor(context.Background(), info, "vid", ""); err != nil {
+		if _, err := chatSourceFor(context.Background(), info, "vid", "", nil); err != nil {
 			t.Fatalf("chatSourceFor: %v", err)
 		}
-		got, err := chatSourceFor(context.Background(), info, "vid", "")
+		got, err := chatSourceFor(context.Background(), info, "vid", "", nil)
 		if err != nil {
 			t.Fatalf("chatSourceFor (second): %v", err)
 		}
@@ -75,7 +75,7 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 			FetchedAt:    time.Now().Add(-10 * time.Minute),
 			Continuation: "carried",
 		}}
-		got, err := chatSourceFor(context.Background(), info, "vid", "")
+		got, err := chatSourceFor(context.Background(), info, "vid", "", nil)
 		if err != nil {
 			t.Fatalf("chatSourceFor: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 	t.Run("no continuation means no source", func(t *testing.T) {
 		fetched = 0
 		info := &youtube.VideoInfo{Chat: youtube.ChatSource{FetchedAt: time.Now()}}
-		if _, err := chatSourceFor(context.Background(), info, "vid", ""); err != nil {
+		if _, err := chatSourceFor(context.Background(), info, "vid", "", nil); err != nil {
 			t.Fatalf("chatSourceFor: %v", err)
 		}
 		if fetched != 1 {
@@ -97,7 +97,7 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 
 	t.Run("a nil info still works", func(t *testing.T) {
 		fetched = 0
-		if _, err := chatSourceFor(context.Background(), nil, "vid", ""); err != nil {
+		if _, err := chatSourceFor(context.Background(), nil, "vid", "", nil); err != nil {
 			t.Fatalf("chatSourceFor(nil): %v", err)
 		}
 		if fetched != 1 {
@@ -110,7 +110,7 @@ func TestChatSourceForReusesAFreshPage(t *testing.T) {
 		fetchWatchPageForChat = func(context.Context, string, string) (*youtube.WatchPageResult, error) {
 			return nil, boom
 		}
-		if _, err := chatSourceFor(context.Background(), nil, "vid", ""); !errors.Is(err, boom) {
+		if _, err := chatSourceFor(context.Background(), nil, "vid", "", nil); !errors.Is(err, boom) {
 			t.Fatalf("err = %v, want the fetch error", err)
 		}
 	})

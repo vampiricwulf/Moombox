@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -117,7 +118,12 @@ type ChatAPI struct {
 	// calls keep cookieHeader: they are Innertube, whose context states the
 	// language itself.
 	pageCookieHeader func() string
-	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
+	// offerReply hands a youtube.com reply's Set-Cookie headers to the
+	// cookie store (youtube.Auth.OfferReply), so the session cookies a chat
+	// poll or its watch page renews are the ones the next request sends.
+	// nil = the replies are not offered (no jar: a cookieless capture).
+	offerReply   func(cookies.YouTubeReply)
+	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	// sessionHeaders returns the signed-in account's identity headers —
 	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — and
 	// X-Youtube-Bootstrap-Logged-In while its page said LOGGED_IN, re-read per
@@ -222,6 +228,17 @@ func freshContinuationWatchURL(videoID string) string {
 	return fmt.Sprintf("%s/watch?v=%s&bpctr=9999999999&has_verified=1", youtubeBase, videoID)
 }
 
+// offer hands resp's Set-Cookie headers to the cookie store. Neither chat
+// request reads a session verdict off its reply, so none is stated; the
+// store itself keeps only what a 2xx youtube.com reply sent to a request
+// that carried the jar's session.
+func (api *ChatAPI) offer(resp *http.Response, endpoint, client string) {
+	if api.offerReply == nil {
+		return
+	}
+	api.offerReply(cookies.ReplyOf(resp).From(endpoint, client, cookies.ReplyNoVerdict))
+}
+
 // FetchFreshContinuation fetches a chat continuation token from the watch page.
 func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) (continuation string, isReplay bool, err error) {
 	url := freshContinuationWatchURL(videoID)
@@ -252,6 +269,7 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, err
 	}
 	defer resp.Body.Close()
+	api.offer(resp, "chat watch page", "web page")
 
 	// Detect EU/consent-wall redirect — the response URL switches to
 	// consent.youtube.com / consent.google.com when YouTube wants the
@@ -357,6 +375,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, err
 	}
 	defer resp.Body.Close()
+	api.offer(resp, "live chat", constants.WebClient.ClientName)
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
