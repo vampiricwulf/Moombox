@@ -3137,6 +3137,14 @@ export class SettingsController {
         // browser info would read as a state of its own. The colour is the
         // warning token this panel already uses for its inline validation
         // message and for the setup countdown — no new class.
+        const lastErrorEl = document.getElementById("auto-cookie-last-error");
+        if (lastErrorEl) {
+          const lastError = status.lastError || "";
+          lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
+          lastErrorEl.style.color = "var(--text-warning)";
+          lastErrorEl.style.display = lastError ? "" : "none";
+        }
+
         // What renews the session, in one line (owner ruling KA-5): names and
         // times only. Hidden while the server has nothing to say.
         const renewalEl = document.getElementById("auto-cookie-renewal");
@@ -3144,14 +3152,6 @@ export class SettingsController {
           const line = renewalLine(status, Date.now());
           renewalEl.textContent = line;
           renewalEl.style.display = line ? "" : "none";
-        }
-
-        const lastErrorEl = document.getElementById("auto-cookie-last-error");
-        if (lastErrorEl) {
-          const lastError = status.lastError || "";
-          lastErrorEl.textContent = lastError ? `Last cookie error: ${lastError}` : "";
-          lastErrorEl.style.color = "var(--text-warning)";
-          lastErrorEl.style.display = lastError ? "" : "none";
         }
 
         // A setup in progress on the server with no owner in this page (a

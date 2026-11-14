@@ -818,9 +818,9 @@ function renewalSpan(ms) {
  * GET /api/cookies/auto-status (`replyRenewedAt`, `renewalCensus`,
  * `nextVisitDue`), which carry names and times only. "" when none is set, as
  * from an older binary.
- *  {object|null|undefined} status the auto-status payload
- *  {number} nowMs
- *  {string}
+ * @param {object|null|undefined} status the auto-status payload
+ * @param {number} nowMs
+ * @returns {string}
  */
 export function renewalLine(status, nowMs) {
   const ago = (ms) => `${renewalSpan(Math.max(nowMs - ms, 0))} ago`;
