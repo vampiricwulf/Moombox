@@ -95,6 +95,16 @@ export const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 // unticks would write it out with the rest instead of silently dropping it.
 const DEFAULT_MENTION_EVENTS = ["error", "auth", "disk_critical", "update_failed", "crash_recovered", "sidecar_down"];
 
+/**
+ * Whether `platform` is one the monitors know: Go's
+ * config.ValidChannelPlatform. Empty means YouTube.
+ * @param {string|null|undefined} platform
+ * @returns {boolean}
+ */
+function knownChannelPlatform(platform) {
+  return !platform || platform === "youtube" || platform === "twitch";
+}
+
 // Settings that require a process restart to take effect
 // Each entry is [nestedPath, formElementId] for change detection
 //
@@ -1690,9 +1700,17 @@ export class SettingsController {
 
     document.getElementById("channel-id-input").disabled = !!channel;
 
-    // Lock platform when editing (can't change platform of existing channel)
+    // Lock platform when editing (can't change platform of existing channel).
+    // The one exception is a stored platform that is neither: a hand-edited
+    // file's typo, which the server loads as a disabled channel and refuses
+    // to enable. The selector stays open so it can be corrected here, as the
+    // TUI's channel form can, and a line under it says why.
     if (platformSelect) {
-      platformSelect.disabled = !!channel;
+      const unknown = !!channel && !knownChannelPlatform(channel.platform);
+      platformSelect.disabled = !!channel && !unknown;
+      platformSelect.helpText = unknown
+        ? `The stored platform "${channel.platform}" is not recognised. Choose the right one.`
+        : "";
     }
 
     dialog.show();
@@ -1827,6 +1845,12 @@ export class SettingsController {
       name: name || undefined,
       enabled,
       ...(isTwitch ? { platform: "twitch" } : {}),
+      // A stored platform that is neither is replaced by the one chosen,
+      // written out for YouTube too: the spread above would carry the typo
+      // back. While nothing valid is chosen, the stored string stays.
+      ...(existingChannel && !knownChannelPlatform(existingChannel.platform) && (platform === "youtube" || platform === "twitch")
+        ? { platform }
+        : {}),
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
       ...(isTwitch
         ? {

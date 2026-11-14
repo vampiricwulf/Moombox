@@ -96,7 +96,7 @@ Fields marked YouTube or Twitch only appear for that platform.
 
 | Field (dashboard) | Field (TUI) | What it does | Reference |
 |---|---|---|---|
-| Platform | Platform | YouTube or Twitch. Locked after the channel is added (dashboard). | [`platform`](../configuration/channels.md#channelsplatform) |
+| Platform | Platform | YouTube or Twitch. Locked after the channel is added (dashboard), unless the stored value is neither, which the dialog lets you correct. | [`platform`](../configuration/channels.md#channelsplatform) |
 | Channel ID / Channel Login | Channel ID | The channel to poll. Locked after the channel is added (dashboard). | [`id`](../configuration/channels.md#channelsid) |
 | Display Name | Display name | Friendly name shown in the list. | [`name`](../configuration/channels.md#channelsname) |
 | Filter Pattern (regex) | Filter regex | Only archive titles that match. | [`terms`](../configuration/channels.md#channelsterms) |

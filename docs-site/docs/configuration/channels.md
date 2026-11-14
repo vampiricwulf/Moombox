@@ -116,8 +116,13 @@ Edge cases:
 
 - Pasting a `twitch.tv` URL or a YouTube URL/@handle sets it for you.
 - The dashboard locks the platform once the channel exists.
-- Write it in lowercase. The YouTube monitors treat every value other than
-  exactly `twitch` as YouTube.
+- Write it in lowercase. A value that only differs by case or spaces
+  (`"Twitch"`) is corrected when the file is loaded.
+- Any other value (a typo such as `twich`) is not guessed at: the channel is
+  loaded disabled and a warning in the log names it. Correct the platform and
+  enable the channel again. You can do both in the file, in the TUI's channel
+  editor, or in the dashboard, where the Edit Channel dialog unlocks
+  **Platform** for such a channel and says the stored value is not recognised.
 
 ```toml
 [[channels]]
