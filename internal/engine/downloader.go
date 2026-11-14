@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -267,12 +268,19 @@ type DownloaderOptions struct {
 	// minutes, and a header snapshotted at construction was still being sent
 	// to the last segment of the recording.
 	//
-	// What it returns is deliberately NOT filtered or host-scoped here. Making
-	// the header live keeps the bytes on the wire identical to what an
-	// unrotated jar sent before; deciding that entitlement rides the signed URL
-	// rather than the session — and dropping cookies for *.googlevideo.com —
-	// is an unmeasured premise whose failure would land on exactly the
-	// members-only and age-gated captures cookies exist to serve.
+	// The header goes to every host EXCEPT googlevideo.com and its
+	// subdomains, where the media lives: segments, init segments, byte ranges
+	// and manifests are fetched without it, as a browser and yt-dlp fetch
+	// them. Those hosts are a different site from youtube.com, the access is
+	// in the signed URL, and every media request used to replay the session
+	// to a host that never renews it.
+	//
+	// A recording that is lost cannot be made again, so the rule has a safety
+	// net (doRequest): a media request refused with 403 while the header is
+	// withheld is asked once more with it. If that works, one Warn is logged
+	// and this downloader sends the header to media hosts for the rest of its
+	// download. If it does not, the caller sees the first 403 exactly as it
+	// always did.
 	//
 	// nil is safe and means "send no Cookie header", as an empty string did.
 	CookieHeader func() string
@@ -579,6 +587,10 @@ type SegmentDownloader struct {
 	lastStreamStatusCheck atomicTime
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
+	// mediaHostNeedsCookies is set once a media host answered a request it
+	// had refused as soon as the session cookies were added (doRequest).
+	// Never cleared: the rest of this download sends them.
+	mediaHostNeedsCookies atomic.Bool
 
 	// delays is every wait the loops sleep on; defaultDelays() in production,
 	// fastDelays() in tests (see delays.go).
@@ -1764,17 +1776,89 @@ func (d *SegmentDownloader) cancelErr(ctx context.Context) error {
 // request), so the getter costs one cookie-jar RLock per request; no caller
 // holds a downloader lock across it.
 //
-// The `!= ""` guard is unchanged, so an empty value still sends no header at
-// all rather than an empty one. Nothing here inspects req.URL: which cookies
-// go to which host is the jar's business and is deliberately not re-decided
-// per request.
+// A request to a media host (isMediaHost) gets no Cookie header until a
+// refusal has shown this download needs one (doRequest, which all six
+// callers send the request through). Every other host gets the jar's header
+// as it is. An empty value sends no header at all rather than an empty one.
 func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	req.Header.Set("User-Agent", ua)
-	if d.opts.CookieHeader != nil {
-		if ch := d.opts.CookieHeader(); ch != "" {
-			req.Header.Set("Cookie", ch)
-		}
+	if isMediaHost(req.URL) && !d.mediaHostNeedsCookies.Load() {
+		return
 	}
+	if ch := d.cookieHeader(); ch != "" {
+		req.Header.Set("Cookie", ch)
+	}
+}
+
+// cookieHeader is the current Cookie header, "" when there is none to send.
+func (d *SegmentDownloader) cookieHeader() string {
+	if d.opts.CookieHeader == nil {
+		return ""
+	}
+	return d.opts.CookieHeader()
+}
+
+// isMediaHost reports whether u is on googlevideo.com or one of its
+// subdomains: the hosts that serve YouTube's segments, byte ranges and
+// manifests, and the only ones the session cookies are withheld from.
+func isMediaHost(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "googlevideo.com" || strings.HasSuffix(host, ".googlevideo.com")
+}
+
+// doRequest sends a request setCommonHeaders prepared and returns its answer.
+// It is engineHTTPClient.Do with one addition, the safety net behind
+// withholding the session cookies from media hosts.
+//
+// A 403 from a media host to a request that carried no Cookie header, while
+// the jar has one to send, is asked ONCE more with the header:
+//
+//   - A 2xx answer means the media host wanted the session after all. That
+//     answer is returned in place of the 403, one Warn is logged for the
+//     download, and from then on setCommonHeaders sends the header to media
+//     hosts for the rest of this downloader's life.
+//   - Anything else, a transport failure included, is dropped and the FIRST
+//     403 is returned unread, so the caller's own 403 handling (the head
+//     rules, OnCipherFailure, the in-process token and URL refresh) runs on
+//     the same answer it ran on before this existed.
+//
+// The second request is a clone on the first one's context, so it runs under
+// the same deadlines. Every request sent through here is a GET with no body.
+// The Warn names the host only: never the URL, which is signed, and never the
+// header.
+func (d *SegmentDownloader) doRequest(req *http.Request) (*http.Response, error) {
+	resp, err := engineHTTPClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusForbidden {
+		return resp, err
+	}
+	if req.Header.Get("Cookie") != "" || !isMediaHost(req.URL) {
+		return resp, nil
+	}
+	ch := d.cookieHeader()
+	if ch == "" {
+		return resp, nil
+	}
+	again := req.Clone(req.Context())
+	again.Header.Set("Cookie", ch)
+	withCookies, err := engineHTTPClient.Do(again)
+	if err != nil {
+		return resp, nil
+	}
+	if withCookies.StatusCode < 200 || withCookies.StatusCode > 299 {
+		io.Copy(io.Discard, io.LimitReader(withCookies.Body, maxDrainBytes))
+		withCookies.Body.Close()
+		return resp, nil
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+	resp.Body.Close()
+	if d.mediaHostNeedsCookies.CompareAndSwap(false, true) {
+		d.logger.Warn("[Downloader] media host needed session cookies; sending them for the rest of this download",
+			"host", req.URL.Hostname())
+	}
+	return withCookies, nil
 }
 
 // youtubeSegPathFormat is YouTube's per-segment path convention for

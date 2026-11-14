@@ -16,9 +16,11 @@ import (
 // every 30 minutes, so a snapshotted header was still being presented to the
 // last segment of the recording.
 //
-// They also pin what this change deliberately does NOT do: nothing filters the
-// header, re-scopes it by host, or otherwise changes which cookies go where.
-// For an unrotated jar the bytes on the wire are identical to before.
+// The header itself is never rewritten: a host that gets it gets the jar's own
+// string. Which hosts get it is pinned at the end of this file and, on the
+// wire, in downloader_media_cookie_test.go: every host but the media hosts
+// (googlevideo.com and its subdomains). The servers here are 127.0.0.1, which
+// is not one, so these tests see the header on every request.
 //
 // Every cookie value below is synthetic.
 
@@ -207,38 +209,53 @@ func TestUnrotatedJarSendsByteIdenticalHeader(t *testing.T) {
 	}
 }
 
-// TestCookieHeaderIsNotHostScoped pins the rejected alternative out of the
-// code, at the only place it could be reintroduced.
+// TestSessionCookiesAreWithheldFromMediaHosts pins which hosts the header is
+// kept from: googlevideo.com and its subdomains, however the host is spelled,
+// and no other. The media lives there, on a different site from youtube.com,
+// and a browser and yt-dlp send those hosts no session cookies. A host that
+// only looks like one still gets the jar's header verbatim, as every host did
+// before the rule.
 //
-// Dropping cookies for *.googlevideo.com rests on the unmeasured premise that
-// entitlement rides the signed URL rather than the session; if that premise is
-// wrong the failure lands on members-only and age-gated captures — the exact
-// content the cookie subsystem exists to serve. A wire test against a local
-// server cannot see such a gate, because the gate would key on the media host
-// and the test server is 127.0.0.1. So this asserts on setCommonHeaders
-// directly, with the real host in the request.
-func TestCookieHeaderIsNotHostScoped(t *testing.T) {
+// This replaces TestCookieHeaderIsNotHostScoped, which pinned the opposite
+// (owner ruling K6, 2026-11-13). What happens when a media host refuses a
+// request sent without the header is in downloader_media_cookie_test.go.
+//
+// Mutants: isMediaHost matching by substring (the two look-alikes lose the
+// header); comparing the host with its port, its case or its trailing dot
+// (those rows keep it).
+func TestSessionCookiesAreWithheldFromMediaHosts(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:      "https://rr5---sn-4g5ednds.googlevideo.com/videoplayback?expire=1&itag=248",
 		OutputFile:   "x",
 		CookieHeader: func() string { return unrotatedJarHeader },
 	})
 
-	for _, rawURL := range []string{
-		"https://rr5---sn-4g5ednds.googlevideo.com/videoplayback?expire=1&itag=248&sq=42",
-		"https://manifest.googlevideo.com/api/manifest/dash/sq/42",
-		"https://www.youtube.com/watch?v=x",
+	for _, tc := range []struct {
+		rawURL   string
+		withheld bool
+	}{
+		{"https://rr5---sn-4g5ednds.googlevideo.com/videoplayback?expire=1&itag=248&sq=42", true},
+		{"https://manifest.googlevideo.com/api/manifest/dash/sq/42", true},
+		{"https://googlevideo.com/videoplayback", true},
+		{"https://RR5---SN-4G5EDNDS.GoogleVideo.COM/videoplayback", true},
+		{"https://rr5---sn-4g5ednds.googlevideo.com:443/videoplayback", true},
+		{"https://rr5---sn-4g5ednds.googlevideo.com./videoplayback", true},
+		{"https://www.youtube.com/watch?v=x", false},
+		{"https://notgooglevideo.com/videoplayback", false},
+		{"https://googlevideo.com.example.test/videoplayback", false},
 	} {
-		req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		req, err := http.NewRequest(http.MethodGet, tc.rawURL, nil)
 		if err != nil {
-			t.Fatalf("build request for %s: %v", rawURL, err)
+			t.Fatalf("build request for %s: %v", tc.rawURL, err)
 		}
 		d.setCommonHeaders(req, uaWeb)
 
 		values := req.Header.Values("Cookie")
-		if !slices.Equal(values, []string{unrotatedJarHeader}) {
-			t.Errorf("Cookie for %s = %q, want exactly one header carrying the jar verbatim (%q) — "+
-				"which cookies reach which host is the jar's decision, not this function's",
+		switch {
+		case tc.withheld && len(values) != 0:
+			t.Errorf("request to %s carries %d Cookie header(s), want none: it is a media host", req.URL.Host, len(values))
+		case !tc.withheld && !slices.Equal(values, []string{unrotatedJarHeader}):
+			t.Errorf("Cookie for %s = %q, want exactly one header carrying the jar verbatim (%q)",
 				req.URL.Host, values, unrotatedJarHeader)
 		}
 	}

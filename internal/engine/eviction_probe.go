@@ -137,7 +137,7 @@ func (d *SegmentDownloader) probeSegment(parent context.Context, seq int) (int, 
 	}
 	d.setCommonHeaders(req, uaWeb)
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		// A transport error embeds the request URL, which carries the
