@@ -376,6 +376,9 @@ subscriber-only, or your cookies expired. (Age-restricted videos end in
 notification (*Cookies needed: …*) names the job. Fix the cookies (sign in
 again, or import a fresh `cookies.txt`) and the job resumes on its own;
 *Authentication Recovered* is sent when Moombox sees working cookies again.
+A parked job is retried automatically at most 3 times; if its error then says
+the cookies are not the cause, refreshing them again will not help, and
+**Resume** or **Reinitialize** is the way to try once more.
 If the account simply is not a member, refreshing the same account will not
 help. See [Cookies and sign-in](../guide/cookies.md).
 
