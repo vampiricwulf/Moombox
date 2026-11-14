@@ -181,8 +181,8 @@ func escalatedThenSignedIn(t *testing.T) (rs *RefreshService, t0 time.Time) {
 // them, fire whatever the window says, once.
 //
 // Mutations: drop `deadRun` from the window check (the third verdict stays
-// suppressed); drop the `last.Before(ep.runStart)` half (the fourth verdict
-// fires again, and so does every one after it).
+// suppressed); stop setting deadFired (the run fires again three verdicts
+// later, and every three after that).
 func TestDeadRunFiresInsideAnEscalatedWindow(t *testing.T) {
 	rs, t0 := escalatedThenSignedIn(t)
 	at := t0.Add(livenessRefireWindow + 10*time.Minute) // 50 minutes of window left
@@ -200,8 +200,55 @@ func TestDeadRunFiresInsideAnEscalatedWindow(t *testing.T) {
 	if out.cause.Trigger != RecoveryTriggerPage || out.cause.Attempt != 3 {
 		t.Errorf("cause = %+v, want the page trigger and attempt 3 of this episode", out.cause)
 	}
-	if due, _ := rs.recordLiveness("youtube", false, at.Add(livenessRunSpacing)); due {
-		t.Error("the run fired a second time — it is once per run, then the window")
+	for i := 1; i <= 2*livenessDeadRun; i++ {
+		if due, _ := rs.recordLiveness("youtube", false, at.Add(time.Duration(i)*livenessRunSpacing)); due {
+			t.Fatalf("the run fired a second time, %d verdicts on — it is once per run, then the window", i)
+		}
+	}
+}
+
+// TestDeadRunCountsFromTheVerdictThatFired: the session dies on the very
+// verdict that fires an escalated-window alarm. That verdict starts the
+// stretch of signed-out pages and stamps the decision at the same instant, and
+// the rule used to compare the two and never fire: the loss then waited out
+// the whole next window, up to a day, unless the API check failed too.
+//
+// Mutations: require the decision to predate the run again (nothing fires);
+// stop setting deadFired on the dead-run fire (it fires every three verdicts).
+func TestDeadRunCountsFromTheVerdictThatFired(t *testing.T) {
+	rs, t0 := escalatedThenSignedIn(t)
+	// The 1 h window from the second alarm has passed: this page fires, and
+	// the window becomes 2 h.
+	at := t0.Add(livenessRefireWindow + time.Hour)
+	if due, _ := rs.recordLiveness("youtube", false, at); !due {
+		t.Fatal("premise broken: a signed-out page after the window must warrant recovery")
+	}
+	for i := 1; i < livenessDeadRun; i++ {
+		if due, _ := rs.recordLiveness("youtube", false, at.Add(time.Duration(i)*livenessRunSpacing)); due {
+			t.Fatalf("signed-out verdict %d after the alarm warranted recovery", i)
+		}
+	}
+	dead := at.Add(livenessDeadRun * livenessRunSpacing)
+	if due, _ := rs.recordLiveness("youtube", false, dead); !due {
+		t.Fatalf("%d signed-out verdicts after an alarm, none signed in, did not warrant recovery — the 2 h window is hiding a dead session", livenessDeadRun)
+	}
+	for i := 1; i <= 2*livenessDeadRun; i++ {
+		if due, _ := rs.recordLiveness("youtube", false, dead.Add(time.Duration(i)*livenessRunSpacing)); due {
+			t.Fatalf("the dead run fired again %d verdicts later, inside the window", i)
+		}
+	}
+}
+
+// TestDeadRunStandsDownOnTheBaseWindow: a first loss re-alarms one base window
+// later by itself. The dead-session rule must not add an alarm inside it.
+//
+// Mutation: drop `escalated` from deadRun.
+func TestDeadRunStandsDownOnTheBaseWindow(t *testing.T) {
+	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
+	t0 := time.Now()
+	fires := driveDead(rs, "youtube", t0, livenessRefireWindow-time.Minute, livenessRunSpacing)
+	if len(fires) != 1 {
+		t.Fatalf("a first loss raised %d alarms inside the base window, want 1: %v", len(fires), fires)
 	}
 }
 

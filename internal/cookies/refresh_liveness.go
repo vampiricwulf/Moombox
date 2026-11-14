@@ -270,8 +270,8 @@ func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.
 		//
 		// It ends the run of signed-out verdicts, and that is all it does to
 		// the schedule.
-		if ep.run != 0 {
-			ep.run, ep.runStart, ep.runLast = 0, time.Time{}, time.Time{}
+		if ep.run != 0 || ep.deadFired {
+			ep.run, ep.runLast, ep.deadFired = 0, time.Time{}, false
 			rs.pageEpisodes[platform] = ep
 		}
 		return out
@@ -280,7 +280,7 @@ func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.
 	ep.lastSignedOut = now
 	switch {
 	case ep.run == 0:
-		ep.run, ep.runStart, ep.runLast = 1, now, now
+		ep.run, ep.runLast = 1, now
 	case now.Sub(ep.runLast) >= livenessRunSpacing:
 		ep.run++
 		ep.runLast = now
@@ -291,12 +291,16 @@ func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.
 	}
 
 	last, decided := rs.lastRecoveryDecided[platform]
-	// A dead session, not a flicker: the run is complete and no recovery
-	// (tier 1's or this signal's) has been decided since it began. Fires
-	// whatever the window says, once per run — the stamp below lands inside
-	// the run and turns this off until a signed-in verdict starts another.
-	deadRun := ep.run >= livenessDeadRun && (!decided || last.Before(ep.runStart))
-	if decided && now.Sub(last) < rs.livenessRefireWindowFor(platform) && !deadRun {
+	// A dead session, not a flicker: livenessDeadRun spaced signed-out
+	// verdicts since the last recovery decision, with no signed-in one between
+	// them. Fires whatever the window says, once per run of signed-out
+	// verdicts (deadFired), and only on an escalated window: a first loss
+	// re-alarms on the base window anyway, and firing here too would put two
+	// alarms inside it.
+	escalated := rs.livenessRefireWindowFor(platform) > livenessRefireWindow
+	inWindow := decided && now.Sub(last) < rs.livenessRefireWindowFor(platform)
+	deadRun := inWindow && escalated && !ep.deadFired && ep.run >= livenessDeadRun
+	if inWindow && !deadRun {
 		rs.pageEpisodes[platform] = ep
 		return out
 	}
@@ -311,6 +315,13 @@ func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.
 	// grow the window too, so the base re-alarm would never land at all.
 	rs.escalateLivenessRefire(platform)
 	ep.attempts++
+	// The count starts over at every decision: the verdict that fired is not
+	// evidence about the pass it asked for. A session still dead after that
+	// pass completes the run again and fires once more (deadFired).
+	if deadRun {
+		ep.deadFired = true
+	}
+	ep.run, ep.runLast = 0, time.Time{}
 	rs.pageEpisodes[platform] = ep
 	out.due = true
 	out.cause = RecoveryCause{
@@ -443,6 +454,12 @@ func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 		rs.lastRecoveryDecided = make(map[string]time.Time)
 	}
 	rs.lastRecoveryDecided[platform] = now
+	// Tier 1 is working on this loss: the run of signed-out pages it landed
+	// in does not fire the dead-session rule as well.
+	if ep, ok := rs.pageEpisodes[platform]; ok && ep.run > 0 {
+		ep.deadFired = true
+		rs.pageEpisodes[platform] = ep
+	}
 }
 
 // livenessObservedRecently reports whether any conclusive liveness observation

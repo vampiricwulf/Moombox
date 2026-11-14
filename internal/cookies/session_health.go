@@ -97,12 +97,15 @@ type RecoveryCause struct {
 type pageEpisode struct {
 	// lastSignedOut is the last signed-out page verdict.
 	lastSignedOut time.Time
-	// run counts consecutive signed-out verdicts at least livenessRunSpacing
-	// apart with no signed-in one between them; runStart is the first of the
-	// run and runLast the last one counted.
-	run      int
-	runStart time.Time
-	runLast  time.Time
+	// run counts the signed-out verdicts, at least livenessRunSpacing apart,
+	// since the later of the last signed-in verdict and the last recovery a
+	// page verdict fired; runLast is the last one counted. deadFired is set
+	// once the dead-session rule has fired, or tier 1 has decided a recovery,
+	// during the current stretch of signed-out verdicts, and cleared by the
+	// signed-in verdict that ends it.
+	run       int
+	runLast   time.Time
+	deadFired bool
 	// attempts counts the recoveries page verdicts fired this episode.
 	attempts int
 	// passAt is when the last page-triggered recovery pass verified, and

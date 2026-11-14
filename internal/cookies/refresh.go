@@ -107,9 +107,12 @@ const (
 	// livenessDeadRun and livenessRunSpacing keep an escalated window from
 	// hiding a real loss (owner ruling K4). A run of livenessDeadRun
 	// signed-out page verdicts with no signed-in one between them fires
-	// recovery whatever the window says, once per run, unless a recovery was
-	// already decided inside that run. A flicker breaks the run with a
-	// signed-in page; a dead session does not.
+	// recovery whatever an escalated window says. The count starts over at
+	// every recovery a page verdict fires, so a session that is still dead
+	// after the pass that verdict asked for fires once more; after that the
+	// window alone decides until a signed-in page ends the stretch. A recovery
+	// the API check decided inside the stretch stands the rule down for it. A
+	// flicker breaks the run with a signed-in page; a dead session does not.
 	//
 	// The run counts verdicts at least livenessRunSpacing apart. The
 	// membership probe delivers one verdict per channel within seconds, so
