@@ -819,8 +819,19 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 // finalizeMultiSegmentJob, and the writes made on a Finished row since), the
 // Muxing write keeps it, and a reset — the only way a live Twitch job is
 // recorded again — clears it (reinitResetFields). So a Muxing row with a
-// size was Finished when its mux began, and one without is a capture's
-// first finalize, or a re-run's, whose leftover row is an earlier archive's.
+// size has been Finished at some point since its last reset, and one without
+// is a capture's first finalize, or a re-run's, whose leftover row is an
+// earlier archive's.
+//
+// "At some point" is wider than "when its mux began": a Mux of a Finished
+// job that failed leaves the row in Error with its size, and a second Mux of
+// that row, interrupted by a restart, is a boot re-mux with a size too. The
+// archive is still the one recording and the row its own finalize left still
+// describes it, so keeping the row is right there as well. The same second
+// Mux that is not interrupted finds prior in Error and takes the other
+// branch in muxJob, which deletes the row when it plans nothing; the two
+// answers differ for that one path, and the boot's is the one that loses no
+// plan.
 func muxOfFinishedArchive(prior *database.Job, bootRemux bool) bool {
 	if prior == nil {
 		return false
