@@ -219,3 +219,26 @@ test("a resync snapshot re-reads the status a lost status_changed frame was abou
   await settle(h);
   assert.doesNotMatch(warnings(h), /sidecar down/, "the snapshot left the badge of a lost nudge in place");
 });
+
+// A socket's first snapshot follows onopen's own status read, so it asks for
+// none; only a later snapshot on the same socket is a resync.
+//
+// Mutant: onStatusChanged on every initial_state — each connect and
+// reconnect reads GET /api/status twice.
+test("a socket's first snapshot reads no status of its own, and a resync after it does", { skip }, async () => {
+  const h = await harness.makeApp({ routes: { "GET /api/status": () => ({}) } });
+  const ws = h.sockets[h.sockets.length - 1];
+  ws.readyState = 1;
+  const before = reads(h);
+  ws.onopen();
+  await settle(h);
+  assert.equal(reads(h) - before, 1, "onopen reads the status once");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await settle(h);
+  assert.equal(reads(h) - before, 1, "the first snapshot of a socket read the status onopen had just read");
+
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [] } });
+  await settle(h);
+  assert.equal(reads(h) - before, 2, "a resync snapshot on the open socket did not read the status");
+});
