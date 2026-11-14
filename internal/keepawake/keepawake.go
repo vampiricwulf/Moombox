@@ -32,7 +32,8 @@ func (h *Holder) Hold(on bool) bool {
 	return h.impl.hold(on)
 }
 
-// Close lets the host sleep again and ends the Holder. The request also ends
+// Close lets the host sleep again and ends the Holder and its thread: the
+// shutdown calls it once the hold has been released. The request also ends
 // with the process, however it exits.
 func (h *Holder) Close() {
 	h.impl.close()

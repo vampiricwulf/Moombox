@@ -168,7 +168,8 @@ func (s *runState) shutdown() bool {
 	stopService("DownloadWorker", func() { s.dlWorker.StopHurried(s.consoleEnd.marked()) })
 
 	// 2b. Nothing is capturing or muxing any more: Windows may sleep again
-	// (downloader.keep_awake). The request would end with the process too.
+	// (downloader.keep_awake), and the keep-awake thread ends. The request would end
+	// with the process too.
 	if s.keepAwake != nil {
 		stopService("KeepAwake", s.keepAwake.stop)
 	}

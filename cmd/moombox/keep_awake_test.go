@@ -174,6 +174,83 @@ func TestKeepAwakeIsRebuiltFromTheDatabase(t *testing.T) {
 	if reads != before {
 		t.Errorf("reconcile read the jobs %d time(s) where holding does nothing", reads-before)
 	}
+	k.seed()
+	k.jobsChanged(nil)
+	if reads != before {
+		t.Errorf("the seed and a bulk change read the jobs %d time(s) where holding does nothing", reads-before)
+	}
+}
+
+// keepAwakeWarnLog counts the warnings.
+type keepAwakeWarnLog struct {
+	keepAwakeTestLog
+	warns *int
+}
+
+func (l keepAwakeWarnLog) Warn(string, ...any) { *l.warns++ }
+
+// TestKeepAwakeWarnsOnceAboutARefusedHold: a hold the operating system turns
+// down is asked for again at every reconcile, and warned about once, not every
+// two minutes for the whole capture. A hold that then succeeds, or a spell
+// with nothing to hold, ends the refusal: the next one is warned about again.
+//
+// Mutants: warn on every refusal (three warnings after three reconciles); stop
+// asking after a refusal (the hold is never taken once the OS accepts); never
+// clear the flag (the second refusal is silent).
+func TestKeepAwakeWarnsOnceAboutARefusedHold(t *testing.T) {
+	k, calls := newTestKeepAwake(true)
+	warns, accept := 0, false
+	k.logger = keepAwakeWarnLog{warns: &warns}
+	k.hold = func(on bool) bool { *calls = append(*calls, on); return accept || !on }
+	rows := []*database.Job{awakeJob("a", database.StatusDownloading)}
+	k.allJobs = func() ([]*database.Job, error) { return rows, nil }
+
+	k.jobChanged(rows[0])
+	k.reconcile()
+	k.reconcile()
+	if want := []bool{true, true, true}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("a refused hold: OS calls %v, want %v (asked again each time)", *calls, want)
+	}
+	if warns != 1 {
+		t.Fatalf("%d warnings for one refused hold asked three times, want 1", warns)
+	}
+
+	accept = true
+	k.reconcile()
+	accept = false
+	k.setEnabled(false) // released
+	k.setEnabled(true)  // refused again
+	if warns != 2 {
+		t.Errorf("%d warnings after a hold succeeded and the next was refused, want 2", warns)
+	}
+
+	rows = nil
+	k.reconcile() // nothing to hold
+	rows = []*database.Job{awakeJob("b", database.StatusMuxing)}
+	k.reconcile()
+	if warns != 3 {
+		t.Errorf("%d warnings after a spell with nothing to hold and a new refusal, want 3", warns)
+	}
+}
+
+// TestKeepAwakeStopEndsTheHolder: the shutdown releases the hold and then
+// ends the holder, in that order, so its thread does not outlive the stop.
+//
+// Mutants: stop without the close; the close ahead of the release (the
+// release is asked of a closed holder, which refuses it).
+func TestKeepAwakeStopEndsTheHolder(t *testing.T) {
+	k, _ := newTestKeepAwake(true)
+	var order []string
+	k.hold = func(on bool) bool {
+		order = append(order, map[bool]string{true: "hold", false: "release"}[on])
+		return true
+	}
+	k.close = func() { order = append(order, "close") }
+	k.jobChanged(awakeJob("a", database.StatusDownloading))
+	k.stop()
+	if want := []string{"hold", "release", "close"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("stop with a hold taken: %v, want %v", order, want)
+	}
 }
 
 // TestKeepAwakeIsWiredToTheJobEvents drives the real subscriptions: a status
