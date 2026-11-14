@@ -1004,6 +1004,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		opts.PageCookieHeader = sp.yt.Auth.PageCookieHeader
 		// What a poll's reply renews is kept, so the next poll sends it.
 		opts.OfferReply = sp.yt.Auth.OfferReply
+		// The watch page a stale continuation is re-read off is offered with
+		// the verdict the page states, as setupChatDownloader wires it. Without
+		// the verdict the page is not offered at all.
+		opts.PageReplyVerdict = youtube.PageReplyVerdict
 		// Per poll as well, as setupChatDownloader wires it: the account's
 		// identity headers (Service.ChatSessionHeaders).
 		opts.SessionHeaders = sp.yt.ChatSessionHeaders
