@@ -456,12 +456,16 @@ func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 		rs.lastRecoveryDecided = make(map[string]time.Time)
 	}
 	rs.lastRecoveryDecided[platform] = now
-	// Tier 1 is working on this loss: the run of signed-out pages it landed
-	// in does not fire the dead-session rule as well.
-	if ep, ok := rs.pageEpisodes[platform]; ok && ep.run > 0 {
-		ep.deadFired = true
-		rs.pageEpisodes[platform] = ep
+	// Tier 1 is working on this loss: signed-out pages do not fire the
+	// dead-session rule for it as well, whether the run had started when the
+	// API check failed or starts after it. The next signed-in page verdict
+	// re-arms the rule (recordLiveness).
+	if rs.pageEpisodes == nil {
+		rs.pageEpisodes = make(map[string]pageEpisode)
 	}
+	ep := rs.pageEpisodes[platform]
+	ep.deadFired = true
+	rs.pageEpisodes[platform] = ep
 }
 
 // livenessObservedRecently reports whether any conclusive liveness observation

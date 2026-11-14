@@ -298,6 +298,34 @@ func TestDeadRunStandsDownForATierOneRecovery(t *testing.T) {
 	}
 }
 
+// TestDeadRunStandsDownForATierOneRecoveryDecidedFirst: the API check fails
+// before any page of the stretch renders signed out (the last page verdict was
+// signed in, so no run is counting). The signed-out pages that follow are the
+// same loss and must not fire a second recovery inside the window.
+//
+// Mutation: stand down only when a run is already counting (`ep.run > 0`).
+func TestDeadRunStandsDownForATierOneRecoveryDecidedFirst(t *testing.T) {
+	rs, t0 := escalatedThenSignedIn(t)
+	at := t0.Add(livenessRefireWindow + 10*time.Minute)
+	rs.noteRecoveryDecided("youtube", at)
+	for i := 1; i <= livenessDeadRun+1; i++ {
+		if due, _ := rs.recordLiveness("youtube", false, at.Add(time.Duration(i)*livenessRunSpacing)); due {
+			t.Fatalf("signed-out verdict %d fired the dead run for a loss tier 1 had already raised", i)
+		}
+	}
+	// A signed-in page ends the stretch and re-arms the rule.
+	next := at.Add(time.Duration(livenessDeadRun+2) * livenessRunSpacing)
+	rs.recordLiveness("youtube", true, next)
+	fired := false
+	for i := 1; i <= livenessDeadRun; i++ {
+		due, _ := rs.recordLiveness("youtube", false, next.Add(time.Duration(i)*livenessRunSpacing))
+		fired = fired || due
+	}
+	if !fired {
+		t.Fatal("the dead-session rule stayed off after a signed-in page ended the stretch tier 1 had claimed")
+	}
+}
+
 // TestRecoveryCauseSaysWhatAskedForIt pins the widened callback at both
 // producers that can be reached without a network seam: a page verdict carries
 // the page trigger with its attempt and next window.

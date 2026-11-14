@@ -111,7 +111,8 @@ const (
 	// every recovery a page verdict fires, so a session that is still dead
 	// after the pass that verdict asked for fires once more; after that the
 	// window alone decides until a signed-in page ends the stretch. A recovery
-	// the API check decided inside the stretch stands the rule down for it. A
+	// the API check decided, inside the stretch or just before it, stands the
+	// rule down until a signed-in page. A
 	// flicker breaks the run with a signed-in page; a dead session does not.
 	//
 	// The run counts verdicts at least livenessRunSpacing apart. The
