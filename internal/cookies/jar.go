@@ -348,6 +348,9 @@ func (j *CookieJar) Load(filePath string) error {
 			// maps), and skipping the bump would let a concurrent Load that
 			// captured an earlier generation wrongly believe, in its own
 			// post-block below, that nothing has installed since it did.
+			// Deleting cookies.txt logs Moombox out. A renewal still
+			// waiting to be written belongs to the session that is gone.
+			j.dropPendingRenewals()
 			j.mu.Lock()
 			j.filePath = filePath
 			j.youtube = make(map[string]cookieEntry)

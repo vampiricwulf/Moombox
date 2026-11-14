@@ -32,6 +32,7 @@ package cookies
 
 import (
 	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"slices"
@@ -46,8 +47,9 @@ import (
 const renewalFlushEvery = time.Minute
 
 // renewalWarnEvery is the least time between two Warn lines for the same
-// cleared auth cookie on the same endpoint and client. A dead session draws
-// the same deletion on every request, about a thousand a day.
+// cleared auth cookie on the same endpoint and client (a dead session draws
+// the same deletion on every request, about a thousand a day), and between
+// two Warn lines for a cookies.txt that cannot be written.
 const renewalWarnEvery = time.Hour
 
 // ReplyVerdict is what the caller read off a reply about the session.
@@ -148,6 +150,9 @@ type renewalState struct {
 	endpointNames map[string]map[string]bool
 	// warned is when each cleared-auth-cookie Warn was last logged.
 	warned map[string]time.Time
+	// lastFlushWarn is when a failed write of cookies.txt was last logged at
+	// Warn. The write is retried every minute; the Warn is not.
+	lastFlushWarn time.Time
 }
 
 // discardRenewalLogger is the logger a jar with none set logs to.
@@ -497,6 +502,10 @@ func (j *CookieJar) flushRenewalsLocked() {
 	case err == nil:
 		r.log().Debug("youtube session renewal: wrote renewed cookies to cookies.txt", "count", len(r.pending))
 		r.pending = nil
+	case errors.Is(err, fs.ErrNotExist):
+		// No cookies.txt: the operator deleted it, which is how Moombox is
+		// logged out. Nothing is written back.
+		r.pending = nil
 	case errors.Is(err, errCookieSessionReplaced):
 		r.log().Debug("youtube session renewal: cookies.txt now holds another session; its renewals were not written")
 		r.pending = nil
@@ -504,11 +513,24 @@ func (j *CookieJar) flushRenewalsLocked() {
 		// The renewals stay in the jar and are tried again with the next
 		// one. Name the deployment mistake that usually causes this: the
 		// write ends in a rename, and a rename cannot replace a single-file
-		// bind mount.
+		// bind mount. Once an hour at Warn: the write is retried every
+		// minute and fails the same way each time.
+		if !r.lastFlushWarn.IsZero() && time.Since(r.lastFlushWarn) < renewalWarnEvery {
+			r.log().Debug("youtube session renewal: failed to update cookie file again", "err", err)
+			return
+		}
+		r.lastFlushWarn = time.Now()
 		r.log().Warn("youtube session renewal: failed to update cookie file — renewed session cookies are in memory only and the file will go stale",
 			"err", err,
 			"hint", "if this is Docker, do not bind-mount cookies.txt as an individual file; put it inside the mounted /data directory so the atomic rename can replace it")
 	}
+}
+
+// dropPendingRenewals forgets the renewals waiting to be written.
+func (j *CookieJar) dropPendingRenewals() {
+	j.renew.mu.Lock()
+	j.renew.pending = nil
+	j.renew.mu.Unlock()
 }
 
 // FlushRenewals writes any waiting renewals into cookies.txt now. Shutdown

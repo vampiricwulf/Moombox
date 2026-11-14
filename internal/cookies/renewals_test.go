@@ -401,17 +401,25 @@ func TestRenewalLogsNeverCarryACookieValue(t *testing.T) {
 		"HSID=; Domain=.youtube.com",                                                    // emptied
 		"YSC="+sentinel+"\t10; Domain=.youtube.com",                                     // row-breaking
 	))
-	// A flush that fails: the file is gone, so the write path's own error
-	// and Warn are in the log too.
+	// A flush that fails, so the write path's own error and Warn are in the
+	// log too.
 	jar.renew.mu.Lock()
 	jar.renew.lastFlush = time.Now()
 	jar.renew.mu.Unlock()
 	jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/x", jar.GetCookieHeader(), 200,
 		"__Secure-1PSIDCC="+sentinel+"11; Domain=.youtube.com; Path=/; Max-Age=31536000"))
+	// cookies.txt becomes a directory: unreadable, but not absent.
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	jar.FlushRenewals()
+	jar.FlushRenewals() // the retry a minute later fails the same way
+	if n := len(log.containing("WARN", "failed to update cookie file")); n != 1 {
+		t.Errorf("a cookies.txt that cannot be written was warned about %d times in one hour, want 1", n)
+	}
 
 	out := log.all()
 	if len(log.containing("WARN", "cleared an auth cookie")) == 0 || len(log.containing("INFO", "renewed session cookies")) == 0 ||
@@ -464,5 +472,37 @@ func TestGuideReplyIsOfferedWithItsVerdict(t *testing.T) {
 				t.Errorf("want one Warn naming LOGIN_INFO, the guide and the WEB client, got %v", warns)
 			}
 		})
+	}
+}
+
+// Deleting cookies.txt is how an operator logs Moombox out. A renewal still
+// waiting to be written must not bring the file, or the session, back.
+func TestWaitingRenewalDoesNotOutliveADeletedCookieFile(t *testing.T) {
+	for _, reload := range []bool{true, false} {
+		jar, path, log := renewalJar(t)
+		jar.renew.mu.Lock()
+		jar.renew.lastFlush = time.Now() // so the renewal below waits
+		jar.renew.mu.Unlock()
+		jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/x", jar.GetCookieHeader(), 200, sidccRenewal))
+
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if reload {
+			if err := jar.Load(path); err != nil {
+				t.Fatal(err)
+			}
+			if !jar.IsEmpty() {
+				t.Errorf("the jar still holds cookies after cookies.txt was deleted")
+			}
+		}
+		jar.FlushRenewals()
+
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("reload=%v: the flush brought cookies.txt back (stat err = %v)", reload, err)
+		}
+		if warns := log.containing("WARN", ""); len(warns) != 0 {
+			t.Errorf("reload=%v: a deliberate delete was warned about: %v", reload, warns)
+		}
 	}
 }
