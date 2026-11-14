@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -24,7 +25,9 @@ import (
 //     useful. Trips when the user just-now used "refresh now" or a job-
 //     level recovery path triggered a refresh between ticks.
 //
-// Either condition skips the tick.
+// Either condition skips the tick. The daily visit (autocookies_daily.go) is
+// the one pass that does not ask: it runs when no pass has renewed the cookies
+// for 24 h, active job or not.
 func (s *AutoCookieService) shouldSkipPeriodicRefresh(interval time.Duration) bool {
 	if s.HasActiveJobs != nil && !s.HasActiveJobs() {
 		return true
@@ -268,6 +271,11 @@ func (s *AutoCookieService) StartProfileSeed(ctx context.Context) {
 // ticks where it returns false are skipped to avoid spawning a headless
 // browser when nothing needs authenticated YouTube/Twitch access.
 //
+// The same goroutine also asks once a minute whether the daily visit is due
+// (dailyVisitStep): a pass that runs when nothing has renewed the cookies for
+// 24 h, whether or not a job is active. One goroutine, so a tick and a daily
+// visit never run at the same time.
+//
 // The one-shot startup import used to live in here, which coupled it to
 // cookies.auto_enabled for no reason it could justify. It is StartProfileSeed
 // now, and main.go calls that unconditionally.
@@ -302,12 +310,21 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
+		s.visit = dailyVisit{started: time.Now(), jitter: rand.N(dailyVisitJitterMax)}
+		s.visit.sourceAsOf = s.lastRefreshTime()
+		_, s.visit.noSource = s.periodicPassStandsDown()
+		s.publishVisit()
+		daily := time.NewTicker(dailyVisitCheckEvery)
+		defer daily.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				s.runPeriodicTick(ctx, interval)
+			case <-daily.C:
+				s.runDailyVisitStep(ctx, interval)
 			}
 		}
 	}()
@@ -322,15 +339,36 @@ func (s *AutoCookieService) runPeriodicTick(ctx context.Context, interval time.D
 			s.logger.Error("panic in periodic cookie refresh tick", "panic", fmt.Sprintf("%v", r))
 		}
 	}()
-	s.periodicTick(ctx, interval)
+	s.periodicTick(ctx, interval, passTick)
 }
 
-// periodicTick is one tick of StartPeriodicRefresh's timer.
-func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Duration) {
+// periodicPassKind says which of the loop's two schedules asked for a pass.
+type periodicPassKind int
+
+const (
+	// passTick is the refresh_interval tick. It skips with no active job and
+	// soon after another refresh (shouldSkipPeriodicRefresh).
+	passTick periodicPassKind = iota
+	// passDailyVisit is the daily visit. dailyVisitStep has already decided
+	// it is due, so it does not ask shouldSkipPeriodicRefresh. Every other
+	// guard below applies to it unchanged.
+	passDailyVisit
+)
+
+// The reasons periodicPassStandsDown gives that are not an import verdict.
+const (
+	standDownNone      = ""
+	standDownNoProfile = "no browser profile directory yet"
+)
+
+// periodicPassStandsDown reports whether a pass of the loop asked for now
+// would be stood down before it launched or read anything, and why: no
+// managed profile, or the import guard's verdict. It is the one statement of
+// those two guards, for periodicTick and for the status, which names no next
+// daily visit while one of them stands.
+func (s *AutoCookieService) periodicPassStandsDown() (why string, stood bool) {
 	if !s.periodicRefreshHasSource() {
-		s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
-			"profile_dir", s.profileDir)
-		return
+		return standDownNoProfile, true
 	}
 	// THE RULE, at its second automatic site: a browser-free import
 	// runs only when there is no cookies.txt to lose.
@@ -354,16 +392,40 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	// and "no browser" three lines down.
 	if s.refreshBrowser(gateExempt) == nil || s.resolvedAcquisition() == AcquisitionProfile {
 		if v := s.automaticImportGuard(); v != autoImportOK {
-			s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
-				"may only run when there is nothing to lose", "reason", v.String())
-			return
+			return v.String(), true
 		}
 	}
-	if s.shouldSkipPeriodicRefresh(interval) {
-		s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
-		return
+	return standDownNone, false
+}
+
+// periodicTick is one pass of StartPeriodicRefresh's loop, for either
+// schedule. It reports whether a refresh pass ran; false means a guard stood
+// it down or the pass itself declined.
+func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Duration, kind periodicPassKind) bool {
+	why, stood := s.periodicPassStandsDown()
+	// This is the loop's goroutine, the only writer of s.visit.
+	s.visit.noSource = stood
+	switch why {
+	case standDownNone:
+	case standDownNoProfile:
+		s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
+			"profile_dir", s.profileDir)
+		return false
+	default:
+		s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
+			"may only run when there is nothing to lose", "reason", why)
+		return false
 	}
-	s.logger.Debug("periodic auto-cookie refresh triggered")
+	if kind == passDailyVisit {
+		s.logger.Info("daily cookie visit — no refresh has renewed the cookies in the last day, " +
+			"so one runs now whether or not a job is active")
+	} else {
+		if s.shouldSkipPeriodicRefresh(interval) {
+			s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
+			return false
+		}
+		s.logger.Debug("periodic auto-cookie refresh triggered")
+	}
 	refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
 	// Detailed, not the bool wrapper: only the full result carries
 	// Ran, and Ran is what decides whether anything was written.
@@ -406,4 +468,5 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	if result.Ran {
 		s.notePassCompleted(ctx, result)
 	}
+	return result.Ran
 }

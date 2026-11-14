@@ -1108,7 +1108,7 @@
                                 max="10080"
                                 label="Refresh Interval"
                                 placeholder="360"
-                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, range: 10–10080 = 7 days). Requires restart."
+                                help-text="How often the browser refreshes cookies while a job is active, in minutes (default: 360 = 6 hours, range: 10–10080 = 7 days). With no job active, one refresh runs once the cookies have gone a day without one. Requires restart."
                             ></sl-input>
 
                             <sl-divider></sl-divider>
@@ -1195,6 +1195,23 @@
                             <div
                                 id="auto-cookie-last-error"
                                 style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small)"
+                            ></div>
+                            <!--
+                                sessionHealthLines (utils.js): a session whose
+                                pages flicker, in words, with the time of the
+                                next automatic attempt. The header pill shows
+                                the same state as "YT~". Filled by app.js with
+                                the pills; hidden while no platform flickers.
+                            -->
+                            <div
+                                id="cookie-session-health"
+                                role="status"
+                                style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small); color: var(--sl-color-warning-700); white-space: pre-line"
+                            ></div>
+                            <!-- renewalLine (utils.js): what renews the session. Names and times only. -->
+                            <div
+                                id="auto-cookie-renewal"
+                                style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600)"
                             ></div>
                             <div id="auto-cookie-browser-selector" style="display: none; margin-top: 0.75em;">
                                 <sl-select

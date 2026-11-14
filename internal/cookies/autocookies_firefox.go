@@ -310,6 +310,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 
 	netscape, stats, err := readFirefoxCookies(s.profileDir)
 	s.logFirefoxReadStats(stats)
+	s.keepPassStamps(stats)
 	return netscape, allActed, err
 }
 
@@ -588,6 +589,9 @@ type firefoxReadStats struct {
 	droppedNoHost int   // NULL/empty host — no domain to attach the cookie to
 	defaulted     int   // rows where a NULL non-identity column was filled in
 	otherContext  int   // rows from a container or a partitioned third-party context
+	// stamps are the rows the renewal census reports: group, name, write stamp
+	// and expiry. Never a value (see cookieStamp).
+	stamps []cookieStamp
 }
 
 // unusable is the count of rows this read could not turn into a cookie.
@@ -694,8 +698,16 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 	// originAttributes says which browsing context a row belongs to (see
 	// firefoxCookieContext). Every Firefox Moombox can meet has the column;
 	// a schema without it has no containers either, so it reads as before.
-	hasContext := true
-	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure, originAttributes FROM moz_cookies")
+	//
+	// updateTime is the row's write stamp, which the renewal census reads
+	// (renewal_census.go). Only newer Firefox schemas have it; a store without
+	// it reads exactly as before and the census reports its rows as unknown.
+	hasContext, hasStamp := true, true
+	rows, err := db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure, originAttributes, updateTime FROM moz_cookies")
+	if err != nil && strings.Contains(err.Error(), "no such column") {
+		hasStamp = false
+		rows, err = db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure, originAttributes FROM moz_cookies")
+	}
 	if err != nil && strings.Contains(err.Error(), "no such column") {
 		hasContext = false
 		rows, err = db.Query("SELECT name, value, host, path, expiry, isHttpOnly, isSecure FROM moz_cookies")
@@ -721,10 +733,16 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 		// credentials is.
 		var name, value, host, cookiePath, originAttributes sql.NullString
 		var expiry, isHttpOnly, isSecure sql.NullInt64
+		// Scanned untyped: a stamp of a kind this build does not expect must
+		// read as "no stamp", never as a scan error that costs the cookie.
+		var updateTime any
 		stats.rows++
 		dest := []any{&name, &value, &host, &cookiePath, &expiry, &isHttpOnly, &isSecure}
 		if hasContext {
 			dest = append(dest, &originAttributes)
+		}
+		if hasStamp {
+			dest = append(dest, &updateTime)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			stats.scanErrors++
@@ -785,6 +803,19 @@ func queryFirefoxCookieDB(dbPath string) ([]string, firefoxReadStats, error) {
 			if schemaVersion >= firefoxMillisecondExpirySchema {
 				expirySeconds /= 1000
 			}
+		}
+
+		// The census keeps the name, the write stamp and the expiry of the
+		// rows it reports, and never the value.
+		if group, ok := censusGroupOf(name.String, host.String); ok {
+			st := cookieStamp{group: group, name: name.String}
+			if micros, isInt := updateTime.(int64); isInt {
+				st.updated = firefoxStampTime(micros)
+			}
+			if expirySeconds > 0 {
+				st.expires = time.Unix(expirySeconds, 0)
+			}
+			stats.stamps = append(stats.stamps, st)
 		}
 
 		collected = append(collected, extractedCookie{

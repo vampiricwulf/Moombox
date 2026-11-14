@@ -423,6 +423,7 @@ func TestB2UnscopedRotationReachesTheJar(t *testing.T) {
 		t.Fatalf("premise broken: auth=%v err=%v, want true/nil — the reply says logged_in=1", auth, err)
 	}
 
+	jar.FlushRenewals() // the write is the flush timer's; a test does not wait for it
 	// The row, on the domain the declared origin placed it on.
 	row := rowFor(t, readCookieRows(t, path), "SAPISID", ".youtube.com")
 	if row.value != "rotated-without-a-domain" {
@@ -475,7 +476,7 @@ func TestUnscopedDeletionFromTheWireStaysInsideTheOrigin(t *testing.T) {
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tfixture-youtube\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse("SAPISID=; Max-Age=0"), "")
+	rs.writeAdmittedSetCookies(setCookieResponse("SAPISID=; Max-Age=0"), "")
 
 	rows := readCookieRows(t, path)
 	for _, r := range rowsNamed(rows, "SAPISID") {
@@ -663,7 +664,7 @@ func TestUnscopedIsNotInsertedBesideAScopedSibling(t *testing.T) {
 			".google.com\tTRUE\t/\tTRUE\t2000000000\tSID\tfixture-google\n"
 		rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-		rs.processYouTubeSetCookies(setCookieResponse(
+		rs.writeAdmittedSetCookies(setCookieResponse(
 			"SID=; Domain=.google.com; Max-Age=0",
 			"SID=fresh; Path=/; Secure",
 		), "")

@@ -158,7 +158,10 @@ func (s *Service) FetchChapters(ctx context.Context, videoID, description string
 		// chapter markers.
 		"Cookie": s.Auth.PageCookieHeader(),
 	}
-	body, err := fetchYouTubePage(ctx, "watch page", watchPageURL(videoID), chapterPageTimeout, headers, utils.MaxFetchBodySize)
+	body, reply, err := fetchYouTubePageReply(ctx, "watch page", watchPageURL(videoID), chapterPageTimeout, headers, utils.MaxFetchBodySize)
+	if err == nil {
+		s.Auth.OfferReply(pageReply(reply, "watch page", body))
+	}
 	if err != nil {
 		s.logger.Debug("[YouTube] Chapter page not read; using the description's timestamps", "videoId", videoID, "error", err)
 	} else if out := ChaptersFromWatchPage(body, durationMs); len(out) > 0 {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -69,10 +70,15 @@ const livenessFetchTimeout = 20 * time.Second
 // disable membership discovery for that channel. That is the right trade for
 // the verdict (an anonymous page must never produce one), but anyone
 // tightening these rules is trading against discovery too and should say so.
-func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte, error) {
+//
+// The second result is the page's HTTP reply, for the caller to offer to the
+// cookie store (Auth.OfferReply) once it has read the page's verdict: a page
+// read as signed out must not have its Set-Cookie headers kept. It is the
+// zero value on an error.
+func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte, cookies.YouTubeReply, error) {
 	want, err := url.Parse(pageURL)
 	if err != nil {
-		return nil, fmt.Errorf("bad liveness page URL: %w", err)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("bad liveness page URL: %w", err)
 	}
 
 	// Refusing the empty case here is what lets the post-fetch check below be
@@ -82,7 +88,7 @@ func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte
 	// always carries PREF), so it cannot say whether there is a session to
 	// send.
 	if s.Auth.GetCookieHeader() == "" {
-		return nil, fmt.Errorf("no session cookies to send to %s", pageURL)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("no session cookies to send to %s", pageURL)
 	}
 
 	// The jar's cookies as a page carries them (Auth.PageCookieHeader): an
@@ -104,21 +110,25 @@ func (s *Service) fetchLivenessPage(ctx context.Context, pageURL string) ([]byte
 	resp, cancel, err := utils.FetchWithTimeout(ctx, pageURL, livenessFetchTimeout, headers)
 	if err != nil {
 		// A page we never received is not an observation of the session.
-		return nil, err
+		return nil, cookies.YouTubeReply{}, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 
 	if err := livenessResponseIsOurs(resp, want); err != nil {
 		io.Copy(io.Discard, resp.Body)
-		return nil, err
+		return nil, cookies.YouTubeReply{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, pageURL)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("HTTP %d from %s", resp.StatusCode, pageURL)
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, utils.MaxFetchBodySize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, utils.MaxFetchBodySize))
+	if err != nil {
+		return nil, cookies.YouTubeReply{}, err
+	}
+	return body, cookies.ReplyOf(resp), nil
 }
 
 // livenessResponseIsOurs returns nil only when resp can be read as an

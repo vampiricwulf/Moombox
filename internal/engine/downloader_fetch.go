@@ -418,7 +418,7 @@ func (d *SegmentDownloader) fetchSegment(parent context.Context, segURL string) 
 	}
 	d.setCommonHeaders(req, uaWeb)
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, fetchDeadlineError(ctx, idle, ceiling, nil, err)
@@ -809,7 +809,7 @@ func (d *SegmentDownloader) probeHeadAt(parent context.Context, probeSeq int) (i
 	}
 	d.setCommonHeaders(req, uaWeb)
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		return -1, redact.MediaError(err)
@@ -920,7 +920,7 @@ func (d *SegmentDownloader) probeFileSize(parent context.Context) (int64, int) {
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", "bytes=0-0")
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		return 0, 0
@@ -1228,7 +1228,7 @@ func (d *SegmentDownloader) fetchChunk(parent context.Context, start, end int64)
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		return nil, 0, fetchDeadlineError(ctx, idle, ceiling, nil, err)

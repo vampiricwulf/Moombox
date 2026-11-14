@@ -109,7 +109,7 @@ func TestRecoveryNotifiesThePlatformItWasInvokedFor(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s, sent := recoveryTestState(t)
-			s.runCookieRecovery(context.Background(), tc.platform,
+			s.runCookieRecovery(context.Background(), tc.platform, apiCheckCause,
 				stubRefresh(tc.yt, tc.tw), recoveryNotifier(sent))
 
 			if len(*sent) != 1 {
@@ -147,7 +147,7 @@ func TestRecoveryNotifiesThePlatformItWasInvokedFor(t *testing.T) {
 // sibling must not raise an alarm about a platform that verified.
 func TestRecoverySilentWhenTheTriggeringPlatformIsHealthy(t *testing.T) {
 	s, sent := recoveryTestState(t)
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		stubRefresh(cookies.RefreshOK, cookies.RefreshFailed), recoveryNotifier(sent))
 
 	if len(*sent) != 0 {
@@ -182,7 +182,7 @@ func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) 
 	for _, platform := range []string{"youtube", "twitch"} {
 		t.Run(platform+"/declined", func(t *testing.T) {
 			s, sent := recoveryTestState(t)
-			s.runCookieRecovery(context.Background(), platform, declined, recoveryNotifier(sent))
+			s.runCookieRecovery(context.Background(), platform, apiCheckCause, declined, recoveryNotifier(sent))
 
 			if len(*sent) != 0 {
 				t.Fatalf("a pass that declined to run notified the operator anyway — it did no work, "+
@@ -192,7 +192,7 @@ func TestRecoveryDeclineSaysNothingAndRanUnknownStaysNonCommittal(t *testing.T) 
 
 		t.Run(platform+"/ran without an answer", func(t *testing.T) {
 			s, sent := recoveryTestState(t)
-			s.runCookieRecovery(context.Background(), platform, ranUnknown, recoveryNotifier(sent))
+			s.runCookieRecovery(context.Background(), platform, apiCheckCause, ranUnknown, recoveryNotifier(sent))
 
 			if len(*sent) != 1 {
 				t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -251,11 +251,11 @@ func TestDeclinedRecoveryDoesNotSpendTheCooldown(t *testing.T) {
 	}
 
 	// 1. YouTube's pass claims the single-flight slot and reports the truth.
-	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, bothDead, notify)
 	// 2. Twitch's pass arrives while that one is still running: declined.
-	s.runCookieRecovery(context.Background(), "twitch", declined, notify)
+	s.runCookieRecovery(context.Background(), "twitch", apiCheckCause, declined, notify)
 	// 3. The next real attempt for Twitch completes and conclusively fails.
-	s.runCookieRecovery(context.Background(), "twitch", bothDead, notify)
+	s.runCookieRecovery(context.Background(), "twitch", apiCheckCause, bothDead, notify)
 
 	if len(*sent) != 2 {
 		t.Fatalf("sent %d notifications, want exactly 2 (one accurate one per platform): %+v", len(*sent), *sent)
@@ -294,15 +294,15 @@ func TestAuthFailureCooldownStillSuppressesARepeat(t *testing.T) {
 	notify, _ := withAuthFailureCooldown(recoveryNotifier(sent))
 	bothDead := stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed)
 
-	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
-	s.runCookieRecovery(context.Background(), "youtube", bothDead, notify)
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, bothDead, notify)
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, bothDead, notify)
 
 	if len(*sent) != 1 {
 		t.Fatalf("two conclusive failures for one platform sent %d notifications, want 1 — the cooldown "+
 			"is not suppressing anything, so nothing else about it can be concluded: %+v", len(*sent), *sent)
 	}
 	// And it is per platform, not global: the sibling must still get through.
-	s.runCookieRecovery(context.Background(), "twitch", bothDead, notify)
+	s.runCookieRecovery(context.Background(), "twitch", apiCheckCause, bothDead, notify)
 	if len(*sent) != 2 {
 		t.Fatalf("the cooldown suppressed a different platform's first notification: %+v", *sent)
 	}
@@ -316,7 +316,7 @@ func TestRecoveryErrorStillNotifies(t *testing.T) {
 	boom := func(context.Context) (cookies.RefreshResult, error) {
 		return cookies.RefreshResult{}, errors.New("browser exploded")
 	}
-	s.runCookieRecovery(context.Background(), "youtube", boom, recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, boom, recoveryNotifier(sent))
 
 	if len(*sent) != 1 {
 		t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -347,7 +347,7 @@ func TestRecoveryReportsUnreadableCookieFileWithoutSolicitingItsDestruction(t *t
 			"%w — refusing to merge or overwrite an existing cookies.txt that could not be read (%w)",
 			cookies.ErrCookieFileUnreadable, errors.New("permission denied (simulated)"))
 	}
-	s.runCookieRecovery(context.Background(), "youtube", unreadable, recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, unreadable, recoveryNotifier(sent))
 
 	if len(*sent) != 1 {
 		t.Fatalf("sent %d notifications, want exactly 1: %+v", len(*sent), *sent)
@@ -391,7 +391,7 @@ func TestRecoveryReportsUnreadableCookieFileWithoutSolicitingItsDestruction(t *t
 // invariant that lives in another package rather than a live path.
 func TestRecoveryFailureOnAnUnconfiguredPlatformDoesNotBlameCookies(t *testing.T) {
 	s, sent := recoveryTestState(t)
-	s.runCookieRecovery(context.Background(), "twitch",
+	s.runCookieRecovery(context.Background(), "twitch", apiCheckCause,
 		stubRefreshResult(cookies.RefreshResult{
 			Ran:     true,
 			YouTube: cookies.RefreshOK, YouTubeStored: true,
@@ -435,7 +435,7 @@ func TestRecoveryFailureOnAnUnconfiguredPlatformDoesNotBlameCookies(t *testing.T
 // question with its own junction, pinned in the test below.
 func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 	s, sent := recoveryTestState(t)
-	s.handleRecoveryNeeded("youtube", false,
+	s.handleRecoveryNeeded("youtube", apiCheckCause, false,
 		stubRefreshResult(cookies.RefreshResult{}), recoveryNotifier(sent))
 
 	if len(*sent) != 1 {
@@ -473,7 +473,7 @@ func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 	collect := func(platform string, refresh cookieRefresher) {
 		t.Helper()
 		sc, sentC := recoveryTestState(t)
-		sc.runCookieRecovery(context.Background(), platform, refresh, recoveryNotifier(sentC))
+		sc.runCookieRecovery(context.Background(), platform, apiCheckCause, refresh, recoveryNotifier(sentC))
 		for _, n := range *sentC {
 			refreshCopy = append(refreshCopy, strings.ToLower(n.desc))
 		}
@@ -531,7 +531,7 @@ func TestRecoveryNeededNotifiesWhenAutoRefreshIsDisabled(t *testing.T) {
 func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T) {
 	t.Run("disabled does not refresh", func(t *testing.T) {
 		s, sent := recoveryTestState(t)
-		s.handleRecoveryNeeded("youtube", false,
+		s.handleRecoveryNeeded("youtube", apiCheckCause, false,
 			func(context.Context) (cookies.RefreshResult, error) {
 				t.Error("RefreshCookiesDetailed was called with auto-cookies disabled — " +
 					"that launches the headless browser the operator turned off")
@@ -554,7 +554,7 @@ func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T
 		finished := make(chan struct{})
 		var gotTitle, gotDesc string
 		var gotType notifications.NotificationType
-		s.handleRecoveryNeeded("youtube", true,
+		s.handleRecoveryNeeded("youtube", apiCheckCause, true,
 			func(context.Context) (cookies.RefreshResult, error) {
 				close(called)
 				return cookies.RefreshResult{Ran: true, YouTube: cookies.RefreshFailed, YouTubeStored: true}, nil
@@ -607,7 +607,7 @@ func TestRecoveryNeededDoesNotRefreshWhenDisabledButDoesWhenEnabled(t *testing.T
 func TestRecoveryUnrecognisedPlatformDoesNotAssertFailure(t *testing.T) {
 	for _, platform := range []string{"", "kick"} {
 		s, sent := recoveryTestState(t)
-		s.runCookieRecovery(context.Background(), platform,
+		s.runCookieRecovery(context.Background(), platform, apiCheckCause,
 			stubRefresh(cookies.RefreshFailed, cookies.RefreshFailed), recoveryNotifier(sent))
 
 		if len(*sent) != 1 {
@@ -636,7 +636,7 @@ func countRecoveryPasses(t *testing.T, platform string, refresh cookieRefresher)
 	s, sent := recoveryTestState(t)
 	passes := 0
 	s.cookieRefresh.OnAuthChange = func(cookies.AuthStatus) { passes++ }
-	s.runCookieRecovery(context.Background(), platform, refresh, recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), platform, apiCheckCause, refresh, recoveryNotifier(sent))
 	return passes
 }
 
@@ -735,7 +735,7 @@ func TestRecoveryReportsAHeldProfileAsASkip(t *testing.T) {
 	s := &runState{log: log, cookieRefresh: cookies.NewRefreshService(cookies.NewCookieJar(), time.Hour, log)}
 	var sent []sentNotification
 
-	s.runCookieRecovery(context.Background(), "youtube", func(context.Context) (cookies.RefreshResult, error) {
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, func(context.Context) (cookies.RefreshResult, error) {
 		return cookies.RefreshResult{Mechanism: cookies.RefreshMechanismBrowser}, held
 	}, recoveryNotifier(&sent))
 

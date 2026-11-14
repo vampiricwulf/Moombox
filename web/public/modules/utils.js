@@ -602,9 +602,12 @@ export function parkedCookiePlatforms(jobs) {
  *
  * key at all and both titles degrade to exactly today's sentence.
  */
-export function cookieIndicatorState(platform, status, reloginRequired, parked) {
+export function cookieIndicatorState(platform, status, reloginRequired, parked, nowMs = Date.now()) {
   const meta = COOKIE_INDICATOR_PLATFORMS[platform];
   const state = cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked);
+  if (cookieFlickering(status, reloginRequired, parked, nowMs)) {
+    return { className: "indicator-warn", title: `${meta.name}: ${sessionHealthText(status, nowMs)}` };
+  }
   const reason = status?.[meta.errorKey];
   const cause = reason ? ` (${reason})` : "";
   switch (state) {
@@ -698,9 +701,186 @@ export function cookieCheckPending(...statuses) {
  * @param {object|null|undefined} status
  * @returns {string}
  */
-export function cookieIndicatorText(platform, status) {
+export function cookieIndicatorText(platform, status, flickering = false) {
   const code = COOKIE_INDICATOR_PLATFORMS[platform].code;
+  if (flickering) return `${code}~`;
   return cookieCheckState(status) === "checking" ? `${code}…` : code;
+}
+
+/**
+ * SESSION_QUIET_RESET_MS is how long after a page last rendered signed out the
+ * session still reads as flickering: Go's livenessQuietReset (24 h), which is
+ * also when the recovery back-off starts over.
+ */
+export const SESSION_QUIET_RESET_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * sessionHealth is the dashboard's twin of Go's cookies.SessionHealthOf (owner
+ * ruling KA-4), compared with it over
+ * web/tests/fixtures/session-health-parity.json. It is derived on every draw
+ * from the platform's status payload and never stored:
+ *
+ *   - "relogin": the API check concluded the stored cookies are refused.
+ *   - "flickering": a page rendered signed out less than 24 h ago and the API
+ *     check has not failed. Moombox keeps working and retries on its own
+ *     back-off; there is nothing for the operator to do.
+ *   - "ok": neither.
+ *
+ * `pageSignedOutAt` is an additive key: an older binary omits it and every
+ * session then reads "ok" or "relogin", as before.
+ * @param {object|null|undefined} status cookieStatus or twitchAuthStatus
+ * @param {number} nowMs
+ * @returns {"ok"|"flickering"|"relogin"}
+ */
+export function sessionHealth(status, nowMs) {
+  if (status?.found && status?.verification === "failed") return "relogin";
+  const signedOut = Date.parse(status?.pageSignedOutAt || "");
+  if (!Number.isNaN(signedOut) && nowMs - signedOut < SESSION_QUIET_RESET_MS) return "flickering";
+  return "ok";
+}
+
+/**
+ * cookieFlickering says the pill shows the flickering state: the badge would
+ * otherwise read healthy (COOKIE_BADGE_PRECEDENCE's "ok") and sessionHealth is
+ * "flickering". Every other badge state already says something the operator
+ * should act on or wait for, and keeps its own text.
+ * @returns {boolean}
+ */
+export function cookieFlickering(status, reloginRequired, parked, nowMs = Date.now()) {
+  return cookieBadgeState(cookieCheckState(status), !!reloginRequired, !!parked) === "ok"
+    && sessionHealth(status, nowMs) === "flickering";
+}
+
+/**
+ * sessionHealthText is the sentence for the flickering state, with the time
+ * of the next automatic attempt (`nextRecoveryAt`, the end of the current
+ * back-off window). A signed-out page asks for the attempt, so once the
+ * window is over the next one comes with the next such page.
+ * @returns {string}
+ */
+export function sessionHealthText(status, nowMs) {
+  const next = Date.parse(status?.nextRecoveryAt || "");
+  const when = !Number.isNaN(next) && next > nowMs
+    ? `no automatic attempt before ${formatAttemptTime(next, nowMs)}`
+    : "next automatic attempt when a page next renders signed out";
+  return `Signed in, but pages are intermittently signed out; ${when}`;
+}
+
+/**
+ * sessionHealthLines is the flickering state as visible text for the Settings
+ * cookie block: one line for each active platform whose pill reads "YT~" /
+ * "TW~", the platform's name and sessionHealthText's sentence with the time
+ * of the next automatic attempt. The pill has room for the short form only,
+ * and its tooltip is out of reach on a phone. Empty when no platform
+ * flickers. Worked out on every draw from the status payload, never stored.
+ * @param {Array<{platform: string, status: object, relogin: boolean, parked: boolean, active: boolean}>} platforms
+ * @param {number} nowMs
+ * @returns {string[]}
+ */
+export function sessionHealthLines(platforms, nowMs = Date.now()) {
+  const lines = [];
+  for (const p of platforms) {
+    if (!p.active || !cookieFlickering(p.status, p.relogin, p.parked, nowMs)) continue;
+    lines.push(`${COOKIE_INDICATOR_PLATFORMS[p.platform].name}: ${sessionHealthText(p.status, nowMs)}`);
+  }
+  return lines;
+}
+
+/**
+ * RENEWAL_GROUP_LABELS names the census groups of `renewalCensus` (Go's
+ * cookies.CensusGroup) the way Go's censusGroupLabel does.
+ */
+const RENEWAL_GROUP_LABELS = {
+  sid: "SID family",
+  sidcc: "SIDCC",
+  psidts: "PSIDTS pair",
+  login_info: "LOGIN_INFO",
+  google_account: "Google account",
+  twitch: "Twitch auth-token",
+};
+
+/** renewalSpan words a length of time in ms the way Go's renewalSpan does. */
+function renewalSpan(ms) {
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+  if (ms < MIN) return "under a minute";
+  if (ms < HOUR) return `${Math.floor(ms / MIN)} min`;
+  if (ms < 48 * HOUR) return `${Math.floor(ms / HOUR)} h`;
+  return `${Math.floor(ms / (24 * HOUR))} d`;
+}
+
+/**
+ * renewalLine is the dashboard's twin of Go's cookies.RenewalLine (owner
+ * ruling KA-5), compared with it over
+ * web/tests/fixtures/renewal-line-parity.json: when a YouTube reply last
+ * renewed a cookie, what the last browser pass renewed, and when the next
+ * daily visit is due. It reads three additive keys of
+ * GET /api/cookies/auto-status (`replyRenewedAt`, `renewalCensus`,
+ * `nextVisitDue`), which carry names and times only. "" when none is set, as
+ * from an older binary.
+ *  {object|null|undefined} status the auto-status payload
+ *  {number} nowMs
+ *  {string}
+ */
+export function renewalLine(status, nowMs) {
+  const ago = (ms) => `${renewalSpan(Math.max(nowMs - ms, 0))} ago`;
+  const label = (group) => RENEWAL_GROUP_LABELS[group] || String(group);
+  const parts = [];
+
+  const reply = Date.parse(status?.replyRenewedAt || "");
+  if (!Number.isNaN(reply)) parts.push(`YouTube replies renewed cookies ${ago(reply)}`);
+
+  const census = status?.renewalCensus;
+  const at = Date.parse(census?.at || "");
+  if (census && !Number.isNaN(at)) {
+    let part = `browser pass ${ago(at)}`;
+    if (!census.stamped) {
+      part += ", what it renewed is unknown";
+    } else {
+      const groups = Array.isArray(census.groups) ? census.groups : [];
+      const renewed = groups.filter((g) => g.renewed?.length > 0).map((g) => label(g.group));
+      part += renewed.length ? ` renewed ${renewed.join(", ")}` : " renewed nothing";
+      let oldest = null;
+      let oldestAt = NaN;
+      for (const g of groups) {
+        const t = Date.parse(g.renewedAt || "");
+        if (!Number.isNaN(t) && (oldest === null || t < oldestAt)) {
+          oldest = g;
+          oldestAt = t;
+        }
+      }
+      if (oldest && oldestAt < at) part += ` (oldest: ${label(oldest.group)}, ${ago(oldestAt)})`;
+    }
+    parts.push(part);
+  }
+
+  const due = Date.parse(status?.nextVisitDue || "");
+  if (!Number.isNaN(due)) {
+    parts.push(due > nowMs ? `next daily visit in ${renewalSpan(due - nowMs)}` : "daily visit due");
+  }
+  return parts.length ? `Renewal: ${parts.join("; ")}` : "";
+}
+
+/**
+ * formatClockTime is a local wall-clock time, "14:05", for a timestamp in ms.
+ */
+export function formatClockTime(ms) {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * formatAttemptTime is formatClockTime for a time ahead, with the weekday in
+ * front ("Sat 14:05") when it falls on another local day than nowMs: a
+ * back-off window can be a day long, and a bare clock time would then read
+ * as today's. The TUI's attemptClock words it the same way.
+ */
+export function formatAttemptTime(ms, nowMs) {
+  const d = new Date(ms);
+  const now = new Date(nowMs);
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const clock = formatClockTime(ms);
+  return sameDay ? clock : `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${clock}`;
 }
 
 /**

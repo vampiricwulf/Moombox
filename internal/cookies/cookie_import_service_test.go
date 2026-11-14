@@ -27,6 +27,7 @@ func importService(t *testing.T, seed string, verified bool) (*AutoCookieService
 		}
 	}
 	jar := NewCookieJar()
+	t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 	if err := jar.Load(path); err != nil {
 		t.Fatalf("jar.Load: %v", err)
 	}
@@ -274,6 +275,7 @@ func importServiceWithLog(t *testing.T, seed string) (*AutoCookieService, *argRe
 	}
 	log := &argRecordingLogger{}
 	jar := NewCookieJar()
+	t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 	if err := jar.Load(path); err != nil {
 		t.Fatalf("jar.Load: %v", err)
 	}

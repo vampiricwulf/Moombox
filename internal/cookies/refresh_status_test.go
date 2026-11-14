@@ -39,6 +39,7 @@ func jarWithAuth(t *testing.T) *CookieJar {
 		t.Fatal(err)
 	}
 	jar := NewCookieJar()
+	t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 	if err := jar.Load(path); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +76,14 @@ func pointYouTubeGuideAt(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	orig := youtubeGuideURL
 	youtubeGuideURL = srv.URL
+	// The renewal store keeps Set-Cookie headers from youtube.com over https
+	// only; the stand-in guide is an httptest server, so its host is let
+	// through for the length of the test.
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	AllowReplyHostForTesting(t, func(scheme, h string) bool { return scheme == "http" && h == host })
 	t.Cleanup(func() { youtubeGuideURL = orig })
 }
 
@@ -433,7 +442,7 @@ func TestTwitchSessionWithoutItsTokenFiresRecovery(t *testing.T) {
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.doRefresh(context.Background())
 
@@ -460,7 +469,7 @@ func TestNeverConfiguredPlatformsStaySilent(t *testing.T) {
 
 	rs := NewRefreshService(NewCookieJar(), 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.doRefresh(context.Background())
 

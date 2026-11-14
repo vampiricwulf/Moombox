@@ -644,6 +644,10 @@ func TestStatusBarCacheKeyCoversEveryInput(t *testing.T) {
 		{"width", func(m *StatusBarModel) { m.SetWidth(120) }},
 		{"yt cookie", func(m *StatusBarModel) { m.SetCookieStatus(CookieStatusRelogin, m.twCookie) }},
 		{"tw cookie", func(m *StatusBarModel) { m.SetCookieStatus(m.ytCookie, CookieStatusRelogin) }},
+		{"yt flicker", func(m *StatusBarModel) { m.ytSession = flickeringFacts(time.Time{}) }},
+		{"tw flicker", func(m *StatusBarModel) { m.twSession = flickeringFacts(time.Time{}) }},
+		{"yt next try", func(m *StatusBarModel) { m.ytSession = flickeringFacts(time.Now().Add(time.Hour)) }},
+		{"tw next try", func(m *StatusBarModel) { m.twSession = flickeringFacts(time.Now().Add(time.Hour)) }},
 		{"yt active", func(m *StatusBarModel) { m.SetActivePlatforms(false, m.twActive) }},
 		{"tw active", func(m *StatusBarModel) { m.SetActivePlatforms(m.ytActive, false) }},
 		{"job tally", func(m *StatusBarModel) {
@@ -677,6 +681,10 @@ func TestStatusBarCacheKeyCoversEveryInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := busyStatusBar()
 			m.SetWidth(200)
+			if strings.HasSuffix(tc.name, "next try") {
+				// The time is drawn only on a flickering badge.
+				m.ytSession, m.twSession = flickeringFacts(time.Time{}), flickeringFacts(time.Time{})
+			}
 			if tc.name == "backfill failed" {
 				// The retry note is drawn only while no scan is in flight, so
 				// the scan the busy bar starts with ends before the first frame.

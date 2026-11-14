@@ -130,7 +130,7 @@ func TestFetchLivenessPageRefusesAnAnonymousFetch(t *testing.T) {
 	if got := s.Auth.GetCookieHeader(); got != "" {
 		t.Fatal("precondition: expected an empty cookie header, got a non-empty one")
 	}
-	if _, err := s.fetchLivenessPage(t.Context(), srv.URL); err == nil {
+	if _, _, err := s.fetchLivenessPage(t.Context(), srv.URL); err == nil {
 		t.Error("expected an error when there are no session cookies to send")
 	}
 	if hits != 0 {

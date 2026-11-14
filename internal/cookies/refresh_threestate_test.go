@@ -308,7 +308,7 @@ func TestUnsignableJarIsReportedAsAFailureNotAnUnknown(t *testing.T) {
 
 	rs := NewRefreshService(jar, 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 	rs.doRefresh(context.Background())
 	got := rs.GetStatus()
 

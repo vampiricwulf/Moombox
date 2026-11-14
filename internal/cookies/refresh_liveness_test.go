@@ -146,108 +146,8 @@ func TestRecordLivenessRefireWindowDoublesAfterEachAlarm(t *testing.T) {
 	}
 }
 
-// TestRecordLivenessRefireWindowStopsAtTheCap is the CAP. Uncapped doubling
-// reaches a fortnight in eleven alarms, and a session that recovered two weeks
-// ago is still suppressed.
-//
-// Mutation: delete the `if next > livenessRefireCap` clamp — the window after
-// the sixth alarm is then 32 h.
-func TestRecordLivenessRefireWindowStopsAtTheCap(t *testing.T) {
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	now := time.Now()
-
-	// A full DAY between alarms is longer than every window on the way up, so
-	// each one fires and each one escalates: 30m, 1h, 2h, 4h, 8h, 16h, 24h,
-	// 24h — the eighth alarm lands on the cap too, since 24h*2=48h is clamped
-	// on the same pass and 32h is never stored.
-	for i := range 8 {
-		if due, _ := rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour)); !due {
-			t.Fatalf("alarm %d did not fire although a full day had passed — the schedule is not advancing", i)
-		}
-	}
-
-	rs.mu.RLock()
-	got := rs.livenessRefireBackoff["youtube"]
-	rs.mu.RUnlock()
-	if got != livenessRefireCap {
-		t.Errorf("the back-off settled at %v, want the %v cap", got, livenessRefireCap)
-	}
-
-	// The cap is a real window, not just a stored number.
-	last := now.Add(7 * 24 * time.Hour)
-	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap-time.Minute)); due {
-		t.Error("a verdict inside the capped window warranted recovery")
-	}
-	if due, _ := rs.recordLiveness("youtube", false, last.Add(livenessRefireCap)); !due {
-		t.Error("a verdict a full cap later did not warrant recovery — the schedule latched at the cap")
-	}
-}
-
-// TestRecordLivenessRefireResetsWhenAuthReturns is the RESET. A session that
-// died, escalated for a day, was repaired and died again is a NEW loss;
-// reporting it on the old schedule holds the alarm for up to 24 hours.
-//
-// The reset touches the ESCALATION only — lastRecoveryDecided is left standing
-// (see recordLiveness), so this also states that boundary. The final verdict of
-// the first half is therefore placed exactly one BASE window after the second
-// alarm's stamp: the base schedule fires there and the escalated one (2x base)
-// does not, which is the only interval that tells the two apart.
-//
-// Mutation: drop resetLivenessRefire from the loggedIn branch.
-//
-// The second half pins the boundary the first half only implies: dead (fires,
-// stamps) -> healthy a moment later (resets) -> dead again well INSIDE the
-// base window, which must stay suppressed. If the reset also cleared
-// lastRecoveryDecided, that map would hold no entry for the platform and the
-// verdict would find nothing to suppress it against — firing 2 seconds after
-// the alarm it was supposed to still be deduped against. The direct map read
-// closes the gap a "due" check alone leaves: it pins that the SURVIVING stamp
-// is the untouched one, not merely that some stamp exists.
-//
-// Mutant M-A: resetLivenessRefire also does
-// delete(rs.lastRecoveryDecided, platform).
-func TestRecordLivenessRefireResetsWhenAuthReturns(t *testing.T) {
-	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
-	t0 := time.Now()
-
-	if due, _ := rs.recordLiveness("youtube", false, t0); !due {
-		t.Fatal("premise broken: the first logged-out verdict must warrant recovery")
-	}
-	// Stamps at t0+base and escalates the window to 2x base.
-	if due, _ := rs.recordLiveness("youtube", false, t0.Add(livenessRefireWindow)); !due {
-		t.Fatal("premise broken: the first re-alarm must land one base window later")
-	}
-
-	// Auth comes back a minute later. Silent, and it moves no stamp — only the
-	// escalation.
-	if due, _ := rs.recordLiveness("youtube", true, t0.Add(livenessRefireWindow+time.Minute)); due {
-		t.Fatal("a logged-in observation warranted recovery")
-	}
-
-	// One BASE window after the last stamp. On the base schedule that fires;
-	// on the escalated one it is still half a window short.
-	secondAlarm := t0.Add(2 * livenessRefireWindow)
-	if due, _ := rs.recordLiveness("youtube", false, secondAlarm); !due {
-		t.Error("the re-alarm after a repair still wanted the escalated window — a fresh loss must be reported on the base schedule")
-	}
-
-	// Second half: dead (stamps secondAlarm, above) -> healthy a second later
-	// (resets the escalation only) -> dead again 2 seconds after the alarm,
-	// well inside even the base window.
-	if due, _ := rs.recordLiveness("youtube", true, secondAlarm.Add(time.Second)); due {
-		t.Fatal("a logged-in observation warranted recovery")
-	}
-	if due, _ := rs.recordLiveness("youtube", false, secondAlarm.Add(2*time.Second)); due {
-		t.Error("a verdict 2 seconds after the last alarm warranted recovery — the reset must have cleared lastRecoveryDecided along with the escalation")
-	}
-
-	rs.mu.RLock()
-	stamp, ok := rs.lastRecoveryDecided["youtube"]
-	rs.mu.RUnlock()
-	if !ok || !stamp.Equal(secondAlarm) {
-		t.Errorf("lastRecoveryDecided[\"youtube\"] = %v (present=%v), want the untouched %v — the reset clears the escalation only", stamp, ok, secondAlarm)
-	}
-}
+// The CAP and the RESET are pinned in refresh_liveness_backoff_test.go, with
+// the rest of owner ruling KA-4's schedule.
 
 // TestRecordLivenessRefireBackoffIsPerPlatform: the schedule is keyed like the
 // three maps beside it. TestRecordLivenessSeparatesPlatforms pins the same
@@ -259,11 +159,10 @@ func TestRecordLivenessRefireBackoffIsPerPlatform(t *testing.T) {
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	now := time.Now()
 
-	for i := range 6 {
-		rs.recordLiveness("youtube", false, now.Add(time.Duration(i)*24*time.Hour))
-	}
+	// A YouTube session dead for two days: its window is at the cap.
+	driveDead(rs, "youtube", now, 2*24*time.Hour, 10*time.Minute)
 
-	last := now.Add(5 * 24 * time.Hour)
+	last := now.Add(2 * 24 * time.Hour)
 	if due, _ := rs.recordLiveness("twitch", false, last); !due {
 		t.Fatal("twitch's first logged-out verdict did not warrant recovery")
 	}
@@ -332,7 +231,7 @@ func TestLivenessRecoveryPilotIsArmed(t *testing.T) {
 	// zero below cannot be explained by a window some earlier call consumed.
 	healthy := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	var healthyFired []string
-	healthy.OnRecoveryNeeded = func(platform string) { healthyFired = append(healthyFired, platform) }
+	healthy.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { healthyFired = append(healthyFired, platform) }
 	healthy.ObserveLiveness("youtube", true)
 	if len(healthyFired) != 0 {
 		t.Errorf("OnRecoveryNeeded fired %v for a SIGNED-IN verdict — positive evidence must never page an operator", healthyFired)
@@ -350,7 +249,7 @@ func TestLivenessRecoveryPilotIsArmed(t *testing.T) {
 	rec := &capturingLogger{}
 	rs := NewRefreshService(jarWithAuth(t), 0, rec)
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.ObserveLiveness("youtube", false)
 
@@ -816,7 +715,7 @@ func TestTierOneRecoveryStampsTheLivenessDedupe(t *testing.T) {
 
 	rs := NewRefreshService(jarWithAuth(t), 0, nopLogger{})
 	var fired []string
-	rs.OnRecoveryNeeded = func(platform string) { fired = append(fired, platform) }
+	rs.OnRecoveryNeeded = func(platform string, _ RecoveryCause) { fired = append(fired, platform) }
 
 	rs.doRefresh(context.Background())
 

@@ -65,9 +65,15 @@ func livenessRecordOf(loggedIn bool) livenessRecord {
 //   - The per-platform back-off recordLiveness computes. The first re-alarm
 //     lands livenessRefireWindow (30 min) after the first alarm; every alarm
 //     after that multiplies the window by livenessRefireFactor, up to
-//     livenessRefireCap (24 h); only a conclusive signed-in verdict puts the
-//     platform back on the base (resetLivenessRefire). A session that reads
+//     livenessRefireCap (24 h). The platform goes back on the base only after
+//     livenessQuietReset (24 h) with no signed-out page, or on an operator's
+//     setup, import or manual refresh (ClearRecoveryEscalation). A signed-in
+//     verdict alone no longer resets it (owner ruling KA-4, 2026-11-13): a
+//     flickering session produces one every few minutes. A session that reads
 //     dead forever therefore pages on a decaying schedule, not 48 times a day.
+//   - The dead-session run. livenessDeadRun signed-out verdicts in a row, with
+//     no signed-in one between them, fire once whatever the window says, so an
+//     escalated window cannot hide a session that died outright.
 //   - The tier-1 stamp. Both tier-1 fire paths — refresh's status block and
 //     NoteTwitchAuthLoss — call noteRecoveryDecided, which writes
 //     lastRecoveryDecided, the same map recordLiveness consults. So tier 2
@@ -98,7 +104,7 @@ const livenessRecoveryArmed = true
 // TwitchFallbackLiveness probe. The first is why the dedupe is not optional —
 // one dead session must raise one alarm, not one per channel.
 func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
-	due, notable := rs.recordLiveness(platform, loggedIn, time.Now())
+	out := rs.foldLiveness(platform, loggedIn, time.Now())
 
 	// This line is the record of what the signal DID, written whether or not
 	// the verdict goes on to fire, so the level is chosen to keep every line
@@ -122,16 +128,33 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 	// The line carries the verdict and the two decisions — never anything read
 	// off the page the verdict came from.
 	logAt := rs.logger.Debug
-	if notable {
+	if out.notable {
 		logAt = rs.logger.Info
 	}
 	logAt("liveness observation",
 		"platform", platform,
 		"loggedIn", loggedIn,
-		"wouldFireRecovery", due,
+		"wouldFireRecovery", out.due,
 		"armed", livenessRecoveryArmed)
 
-	if !livenessRecoveryArmed || !due {
+	// One Warn per pass, not per verdict: the first signed-out page after a
+	// page-triggered recovery pass that verified says the pass did not settle
+	// it. The verdicts that follow are on the Info line above.
+	if out.stillOutAfterPass {
+		rs.logger.Warn("a page still renders signed out after the automatic recovery pass — the API check passes and pages do not agree",
+			"platform", platform,
+			"attempts", out.health.Attempts,
+			"nextAttemptAt", formatLogTime(out.health.NextAttempt),
+			"replyRenewedAt", formatLogTime(rs.jar.lastRenewalTime()))
+	}
+
+	// The UIs draw the session health from these facts. Outside rs.mu, as
+	// every OnAuthChange call is.
+	if out.healthMoved && rs.OnAuthChange != nil {
+		rs.OnAuthChange(out.status)
+	}
+
+	if !livenessRecoveryArmed || !out.due {
 		return
 	}
 	if fn := rs.OnRecoveryNeeded; fn != nil {
@@ -140,30 +163,63 @@ func (rs *RefreshService) ObserveLiveness(platform string, loggedIn bool) {
 		// channel-independent fallbacks — and cannot tell which sent this
 		// verdict. This is the line that pages an operator, so it must not
 		// name a mechanism it cannot know.
-		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery", "platform", platform)
-		fn(platform)
+		rs.logger.Warn("a liveness observation reports this platform is signed out, triggering recovery",
+			"platform", platform,
+			"attempt", out.cause.Attempt,
+			"nextAttemptAfter", out.cause.NextWindow.String(),
+			"replyRenewedAt", formatLogTime(rs.jar.lastRenewalTime()))
+		fn(platform, out.cause)
 	}
 }
 
-// recordLiveness folds one conclusive observation into the liveness maps and
-// reports two independent things about it:
+// formatLogTime is a timestamp for a log line, "" for the zero time.
+func formatLogTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// livenessOutcome is everything one folded observation decided.
+type livenessOutcome struct {
+	// due: signed out and cleared the dedupe, so it warrants firing
+	// OnRecoveryNeeded with cause.
+	due   bool
+	cause RecoveryCause
+	// notable: worth an operator-visible log line — signed out, a change from
+	// this platform's previous verdict, or the first observation of the
+	// process. See ObserveLiveness for why the distinction exists.
+	notable bool
+	// stillOutAfterPass: the first signed-out page since a page-triggered
+	// recovery pass verified.
+	stillOutAfterPass bool
+	// healthMoved: the page facts the UIs draw changed; status is the
+	// snapshot to push and health this platform's facts after the fold.
+	healthMoved bool
+	health      PageHealth
+	status      AuthStatus
+}
+
+// recordLiveness is foldLiveness reduced to its two oldest answers, for the
+// callers and tests that ask only those.
+func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) (recoveryDue, notable bool) {
+	out := rs.foldLiveness(platform, loggedIn, now)
+	return out.due, out.notable
+}
+
+// foldLiveness folds one conclusive observation into the liveness maps and
+// reports what it decided (livenessOutcome).
 //
-//   - recoveryDue: it is signed out and cleared the dedupe, so it warrants
-//     firing OnRecoveryNeeded.
-//   - notable: it is worth an operator-visible log line — signed out, or a
-//     change from this platform's previous verdict, or the first observation
-//     of the process. See ObserveLiveness for why the distinction exists.
-//
-// Split out of ObserveLiveness so both decisions are testable on their own,
+// Split out of ObserveLiveness so the decisions are testable on their own,
 // upstream of the pilot gate and of the callback it guards.
 //
 // `now` is a parameter so a test can drive the windows without sleeping
 // through them.
 //
-// The lock is released before ObserveLiveness invokes the callback, following
-// doRefresh's convention: OnRecoveryNeeded reaches out into cmd/moombox and
-// must not run under this service's mutex.
-func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now time.Time) (recoveryDue, notable bool) {
+// The lock is released before ObserveLiveness invokes a callback, following
+// doRefresh's convention: OnRecoveryNeeded and OnAuthChange reach out into
+// cmd/moombox and must not run under this service's mutex.
+func (rs *RefreshService) foldLiveness(platform string, loggedIn bool, now time.Time) (out livenessOutcome) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -173,34 +229,82 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 	if rs.lastLivenessKnown == nil {
 		rs.lastLivenessKnown = make(map[string]livenessRecord)
 	}
+	if rs.pageEpisodes == nil {
+		rs.pageEpisodes = make(map[string]pageEpisode)
+	}
+
+	before := rs.pageHealthLocked(platform)
+	defer func() {
+		out.health = rs.pageHealthLocked(platform)
+		if out.healthMoved = pageHealthMoved(before, out.health, now); out.healthMoved {
+			out.status = rs.statusLocked()
+		}
+	}()
 
 	// Read what was last known BEFORE this observation overwrites it. The
 	// missing entry reads as livenessNever, which differs from both verdicts,
 	// so a platform's first observation is notable on its own: it is the
 	// record that the signal started producing.
 	record := livenessRecordOf(loggedIn)
-	notable = !loggedIn || rs.lastLivenessKnown[platform] != record
+	out.notable = !loggedIn || rs.lastLivenessKnown[platform] != record
 
 	// Both directions. This map answers "did anything tell us recently", and
 	// a healthy answer settles that question exactly as well as a dead one.
 	rs.lastLivenessObserved[platform] = now
 	rs.lastLivenessKnown[platform] = record
 
+	// THE RESET (owner ruling KA-4): livenessQuietReset with no signed-out page
+	// puts the platform back on the base, whichever verdict is the first to
+	// find the quiet. A signed-in verdict by itself does not: during a
+	// flicker one arrives every few minutes, and resetting on it re-ran the
+	// base window forever. A dead session never reaches this, because its
+	// signed-out verdicts keep arriving between the re-alarms.
+	ep := rs.pageEpisodes[platform]
+	if !ep.lastSignedOut.IsZero() && now.Sub(ep.lastSignedOut) >= livenessQuietReset {
+		rs.resetLivenessRefire(platform)
+		ep = pageEpisode{}
+	}
+
 	if loggedIn {
 		// Positive evidence is silent, and must not touch lastRecoveryDecided:
 		// stamping it here would let a healthy verdict swallow a dead one
 		// arriving a moment later from another channel in the same cycle.
 		//
-		// It DOES clear the back-off. "Auth came back" is the reset condition
-		// the owner named, and a session that dies again after a repair is a
-		// new loss to report on the base schedule rather than yesterday's
-		// escalated one. See resetLivenessRefire for why this is the
-		// escalation only and not the stamp.
-		rs.resetLivenessRefire(platform)
-		return false, notable
+		// It ends the run of signed-out verdicts, and that is all it does to
+		// the schedule.
+		if ep.run != 0 || ep.deadFired {
+			ep.run, ep.runLast, ep.deadFired = 0, time.Time{}, false
+			rs.pageEpisodes[platform] = ep
+		}
+		return out
 	}
-	if last, ok := rs.lastRecoveryDecided[platform]; ok && now.Sub(last) < rs.livenessRefireWindowFor(platform) {
-		return false, notable
+
+	ep.lastSignedOut = now
+	switch {
+	case ep.run == 0:
+		ep.run, ep.runLast = 1, now
+	case now.Sub(ep.runLast) >= livenessRunSpacing:
+		ep.run++
+		ep.runLast = now
+	}
+	if !ep.passAt.IsZero() && !ep.passWarned && now.After(ep.passAt) {
+		ep.passWarned = true
+		out.stillOutAfterPass = true
+	}
+
+	last, decided := rs.lastRecoveryDecided[platform]
+	// A dead session, not a flicker: livenessDeadRun spaced signed-out
+	// verdicts since the last recovery decision, with no signed-in one between
+	// them. Fires whatever the window says, once per run of signed-out
+	// verdicts (deadFired), and only on an escalated window: a first loss
+	// re-alarms on the base window anyway, and firing here too would put two
+	// alarms inside it.
+	escalated := rs.livenessRefireWindowFor(platform) > livenessRefireWindow
+	inWindow := decided && now.Sub(last) < rs.livenessRefireWindowFor(platform)
+	deadRun := inWindow && escalated && !ep.deadFired && ep.run >= livenessDeadRun
+	if inWindow && !deadRun {
+		rs.pageEpisodes[platform] = ep
+		return out
 	}
 	if rs.lastRecoveryDecided == nil {
 		rs.lastRecoveryDecided = make(map[string]time.Time)
@@ -212,7 +316,22 @@ func (rs *RefreshService) recordLiveness(platform string, loggedIn bool, now tim
 	// the window meant for the one after it — and a SUPPRESSED verdict would
 	// grow the window too, so the base re-alarm would never land at all.
 	rs.escalateLivenessRefire(platform)
-	return true, notable
+	ep.attempts++
+	// The count starts over at every decision: the verdict that fired is not
+	// evidence about the pass it asked for. A session still dead after that
+	// pass completes the run again and fires once more (deadFired).
+	if deadRun {
+		ep.deadFired = true
+	}
+	ep.run, ep.runLast = 0, time.Time{}
+	rs.pageEpisodes[platform] = ep
+	out.due = true
+	out.cause = RecoveryCause{
+		Trigger:    RecoveryTriggerPage,
+		Attempt:    ep.attempts,
+		NextWindow: rs.livenessRefireWindowFor(platform),
+	}
+	return out
 }
 
 // livenessRefireWindowFor returns how long must pass since this platform's last
@@ -248,19 +367,23 @@ func (rs *RefreshService) escalateLivenessRefire(platform string) {
 	rs.livenessRefireBackoff[platform] = next
 }
 
-// resetLivenessRefire puts one platform back on the base schedule.
+// resetLivenessRefire puts one platform back on the base schedule and forgets
+// its signed-out pages.
 //
-// One caller — recordLiveness's conclusive-LoggedIn branch — and it clears the
+// Two callers: foldLiveness, once livenessQuietReset has passed with no
+// signed-out page, and ClearRecoveryEscalation, the operator's gestures. Never
+// a signed-in verdict by itself, and never an automatic pass that verified
+// (owner ruling KA-4). It clears the
 // ESCALATION only. Clearing lastRecoveryDecided here would let a healthy
 // verdict from one channel swallow a dead verdict from the next in the same
 // cycle, which is the whole reason those are two maps.
 //
 // A tier-1 recovery does NOT reach here: noteRecoveryDecided stamps the dedupe
-// and nothing else, by the one-directional rule it has always followed. On an
-// install with channels the membership probe delivers a conclusive LoggedIn
-// within one feed cycle of auth returning. Callers hold rs.mu for writing.
+// and nothing else, by the one-directional rule it has always followed.
+// Callers hold rs.mu for writing.
 func (rs *RefreshService) resetLivenessRefire(platform string) {
 	delete(rs.livenessRefireBackoff, platform)
+	delete(rs.pageEpisodes, platform)
 }
 
 // recordInconclusiveLiveness folds a fallback probe that learned NOTHING into
@@ -281,8 +404,9 @@ func (rs *RefreshService) resetLivenessRefire(platform string) {
 //     for as long as it keeps failing, which is backwards.
 //   - not lastRecoveryDecided, because that window belongs to real signed-out
 //     verdicts and consuming it here would swallow the next one.
-//   - not livenessRefireBackoff, because "inconclusive" is not the reset
-//     condition — only a conclusive signed-in verdict is (recordLiveness).
+//   - not livenessRefireBackoff or pageEpisodes, because "inconclusive" is
+//     not the reset condition — only livenessQuietReset without a signed-out
+//     page is (foldLiveness), and silence is not a page that stayed signed in.
 //     Resetting the back-off here would let an install stuck behind a
 //     captive portal, proxy or rate limit — inconclusive on EVERY cycle —
 //     clear its own escalation every cycle too, so tier 2 would page every
@@ -332,6 +456,16 @@ func (rs *RefreshService) noteRecoveryDecided(platform string, now time.Time) {
 		rs.lastRecoveryDecided = make(map[string]time.Time)
 	}
 	rs.lastRecoveryDecided[platform] = now
+	// Tier 1 is working on this loss: signed-out pages do not fire the
+	// dead-session rule for it as well, whether the run had started when the
+	// API check failed or starts after it. The next signed-in page verdict
+	// re-arms the rule (recordLiveness).
+	if rs.pageEpisodes == nil {
+		rs.pageEpisodes = make(map[string]pageEpisode)
+	}
+	ep := rs.pageEpisodes[platform]
+	ep.deadFired = true
+	rs.pageEpisodes[platform] = ep
 }
 
 // livenessObservedRecently reports whether any conclusive liveness observation

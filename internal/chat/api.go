@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -117,7 +118,18 @@ type ChatAPI struct {
 	// calls keep cookieHeader: they are Innertube, whose context states the
 	// language itself.
 	pageCookieHeader func() string
-	generateAuth     func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
+	// offerReply hands a youtube.com reply's Set-Cookie headers to the
+	// cookie store (youtube.Auth.OfferReply), so the session cookies a chat
+	// poll or its watch page renews are the ones the next request sends.
+	// nil = the replies are not offered (no jar: a cookieless capture).
+	offerReply func(cookies.YouTubeReply)
+	// pageVerdict reads the session verdict off a watch page body
+	// (youtube.PageReplyVerdict), so a page that rendered signed out has its
+	// cookies refused like every other page fetched with the session. nil =
+	// the watch page is not offered at all: without a verdict its cookies
+	// could be a signed-out render's.
+	pageVerdict  func(body []byte) cookies.ReplyVerdict
+	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	// sessionHeaders returns the signed-in account's identity headers —
 	// X-Goog-AuthUser, and X-Goog-PageId for a brand account — and
 	// X-Youtube-Bootstrap-Logged-In while its page said LOGGED_IN, re-read per
@@ -222,6 +234,18 @@ func freshContinuationWatchURL(videoID string) string {
 	return fmt.Sprintf("%s/watch?v=%s&bpctr=9999999999&has_verified=1", youtubeBase, videoID)
 }
 
+// offer hands a chat poll's Set-Cookie headers to the cookie store. An
+// Innertube chat reply states no session verdict, so none is given; the store
+// itself keeps only what a 2xx youtube.com reply sent to a request that
+// carried the jar's session. The watch page is offered with its own verdict
+// (FetchFreshContinuation).
+func (api *ChatAPI) offer(resp *http.Response, endpoint, client string) {
+	if api.offerReply == nil {
+		return
+	}
+	api.offerReply(cookies.ReplyOf(resp).From(endpoint, client, cookies.ReplyNoVerdict))
+}
+
 // FetchFreshContinuation fetches a chat continuation token from the watch page.
 func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) (continuation string, isReplay bool, err error) {
 	url := freshContinuationWatchURL(videoID)
@@ -280,6 +304,14 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWatchPageBytes))
 	if err != nil {
 		return "", false, err
+	}
+	// Offered here and not when the reply arrived: past the consent wall and
+	// the status check, and with the verdict the page itself states. A page
+	// that rendered signed out does not get its cookies kept.
+	if api.offerReply != nil && api.pageVerdict != nil {
+		if reply := cookies.ReplyOf(resp); !reply.Empty() {
+			api.offerReply(reply.From("chat watch page", "web page", api.pageVerdict(body)))
+		}
 	}
 
 	return ExtractChatContinuation(body)
@@ -357,6 +389,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, err
 	}
 	defer resp.Body.Close()
+	api.offer(resp, "live chat", constants.WebClient.ClientName)
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)

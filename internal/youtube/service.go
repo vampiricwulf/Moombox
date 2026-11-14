@@ -153,10 +153,11 @@ func (s *Service) fetchHomepage(ctx context.Context) (string, error) {
 		"User-Agent": constants.UserAgents.Web,
 		"Cookie":     s.Auth.PageCookieHeader(),
 	}
-	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
+	body, resp, err := utils.FetchBodyAndResponse(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
 	if err != nil {
 		return "", err
 	}
+	s.Auth.OfferReply(pageReply(cookies.ReplyOf(resp), "homepage", body))
 	return string(body), nil
 }
 

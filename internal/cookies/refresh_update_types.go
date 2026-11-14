@@ -26,7 +26,7 @@ type cookieUpdate struct {
 	Expiry   int64
 	HTTPOnly bool // Set-Cookie carried the HttpOnly attribute -> "#HttpOnly_" row prefix
 	// Delete marks a deletion request: Max-Age<=0, or an Expires at or before
-	// now. The row is removed, not rewritten empty — see processYouTubeSetCookies.
+	// now. The row is removed, not rewritten empty — see admitSetCookie. The renewal store never applies one (renewals.go).
 	Delete bool
 }
 

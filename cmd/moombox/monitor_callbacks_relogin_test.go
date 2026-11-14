@@ -38,7 +38,7 @@ func TestDisabledRecoveryRaisesTheReloginPrompt(t *testing.T) {
 	s, sent := recoveryTestState(t)
 	svc := withAutoCookieService(t, s)
 
-	s.handleRecoveryNeeded("youtube", false, nil, recoveryNotifier(sent))
+	s.handleRecoveryNeeded("youtube", apiCheckCause, false, nil, recoveryNotifier(sent))
 
 	relogin := svc.ReloginStatus()
 	if !relogin["youtube"] {
@@ -78,7 +78,7 @@ func TestRecoveryThatCouldNotRunRaisesTheReloginPrompt(t *testing.T) {
 	noBrowser := func(context.Context) (cookies.RefreshResult, error) {
 		return cookies.RefreshResult{}, cookies.ErrNoBrowserFound
 	}
-	s.runCookieRecovery(context.Background(), "youtube", noBrowser, recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, noBrowser, recoveryNotifier(sent))
 
 	relogin := svc.ReloginStatus()
 	if !relogin["youtube"] {
@@ -108,7 +108,7 @@ func TestUnreadableCookieFileDoesNotRaiseTheReloginPrompt(t *testing.T) {
 	unreadable := func(context.Context) (cookies.RefreshResult, error) {
 		return cookies.RefreshResult{}, fmt.Errorf("%w — simulated", cookies.ErrCookieFileUnreadable)
 	}
-	s.runCookieRecovery(context.Background(), "youtube", unreadable, recoveryNotifier(sent))
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause, unreadable, recoveryNotifier(sent))
 
 	if svc.ReloginStatus()["youtube"] {
 		t.Error("an unreadable cookies.txt raised the re-login prompt. Nothing was read, nothing was " +
@@ -124,7 +124,7 @@ func TestSuccessfulRecoveryRaisesNoReloginPrompt(t *testing.T) {
 	s, sent := recoveryTestState(t)
 	svc := withAutoCookieService(t, s)
 
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		stubRefresh(cookies.RefreshOK, cookies.RefreshOK), recoveryNotifier(sent))
 
 	if svc.ReloginStatus()["youtube"] {
@@ -140,7 +140,7 @@ func TestSuccessfulRecoveryRaisesNoReloginPrompt(t *testing.T) {
 // The mutation: dropping the nil guard.
 func TestRecoveryWithNoAutoCookieServiceDoesNotPanic(t *testing.T) {
 	s, sent := recoveryTestState(t) // no autoCookieSvc
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		func(context.Context) (cookies.RefreshResult, error) {
 			return cookies.RefreshResult{}, errors.New("simulated")
 		}, recoveryNotifier(sent))
@@ -161,7 +161,7 @@ func TestAuthFailureGuidanceNamesTheDashboardImport(t *testing.T) {
 	s, sent := recoveryTestState(t)
 	withAutoCookieService(t, s)
 
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		stubRefresh(cookies.RefreshFailed, cookies.RefreshOK), recoveryNotifier(sent))
 
 	if len(*sent) != 1 {

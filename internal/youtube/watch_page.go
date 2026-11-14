@@ -16,6 +16,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -161,6 +162,12 @@ const (
 // extracted at parse time so the response body can be GC'd as soon as
 // FetchWatchPage returns.
 type WatchPageResult struct {
+	// reply is the page's HTTP reply with this page's own session verdict,
+	// for the caller that fetched it with the jar's session to offer to the
+	// cookie store (Auth.OfferReply). It holds the cookies the page renewed
+	// behind a pointer and prints as counts (cookies.YouTubeReply).
+	reply cookies.YouTubeReply
+
 	Ytcfg *YtcfgData
 	// FetchedAt is when this page's bytes arrived. It is what bounds the age
 	// of the chat continuation the page carried (ChatSource.Usable): stamping
@@ -257,7 +264,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 		headers["Cookie"] = cookieHeader
 	}
 
-	body, err := fetchYouTubePage(ctx, "watch page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
+	body, reply, err := fetchYouTubePageReply(ctx, "watch page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
 	if err != nil {
 		return nil, err
 	}
@@ -281,6 +288,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	attestationChallenge, attestationReason := extractAttestationChallenge(body)
 
 	return &WatchPageResult{
+		reply:                reply.From("watch page", pageReplyClient, replyVerdict(sessionAuth)),
 		Ytcfg:                ytcfg,
 		FetchedAt:            fetchedAt,
 		SessionAuth:          sessionAuth,
@@ -1024,6 +1032,10 @@ func extractEncryptedHostFlags(html string) string {
 
 // EmbedPageResult contains data extracted from a YouTube embed page.
 type EmbedPageResult struct {
+	// reply is the page's HTTP reply, for the caller to offer to the cookie
+	// store (Auth.OfferReply). The embed page states no session verdict.
+	reply cookies.YouTubeReply
+
 	EncryptedHostFlags string
 	// PlayerURL is the player the embed page names, on the main variant
 	// (pagePlayerURL), or "". yt-dlp reads the player URL off this same page's
@@ -1085,13 +1097,14 @@ func FetchEmbedPage(ctx context.Context, videoID, cookieHeader string) (*EmbedPa
 		headers["Cookie"] = cookieHeader
 	}
 
-	body, err := fetchYouTubePage(ctx, "embed page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
+	body, reply, err := fetchYouTubePageReply(ctx, "embed page", url, 30*time.Second, headers, utils.MaxFetchBodySize)
 	if err != nil {
 		return nil, err
 	}
 
 	html := string(body)
 	return &EmbedPageResult{
+		reply:              reply.From("embed page", pageReplyClient, cookies.ReplyNoVerdict),
 		EncryptedHostFlags: extractEncryptedHostFlags(html),
 		PlayerURL:          pagePlayerURL(html),
 	}, nil

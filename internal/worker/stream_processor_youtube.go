@@ -947,8 +947,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	// One-shot call, so a snapshot is correct here; the chat downloader below
 	// gets a live getter. The page header, as setupChatDownloader's.
 	cookieHeader := ""
+	var auth *youtube.Auth
 	if sp.yt != nil && sp.yt.Auth != nil {
-		cookieHeader = sp.yt.Auth.PageCookieHeader()
+		auth = sp.yt.Auth
+		cookieHeader = auth.PageCookieHeader()
 	}
 
 	// This site is usually called with a ProbeVideoStatus info (ANDROID_VR, no
@@ -956,7 +958,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	// behaves exactly as before. When the caller does hold a freshly parsed
 	// page (a full fetch's VideoInfo), the carried source saves the second
 	// 1-5 MB download.
-	src, err := chatSourceFor(ctx, info, job.VideoID, cookieHeader)
+	src, err := chatSourceFor(ctx, info, job.VideoID, cookieHeader, auth)
 	if err != nil {
 		sp.logger.Debug("failed to fetch watch page for early chat", "err", err, "videoID", job.VideoID)
 		return nil, nil
@@ -1000,6 +1002,12 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		// leaves the field nil, which the API reads as "no Cookie header".
 		opts.CookieHeader = sp.yt.Auth.GetCookieHeader
 		opts.PageCookieHeader = sp.yt.Auth.PageCookieHeader
+		// What a poll's reply renews is kept, so the next poll sends it.
+		opts.OfferReply = sp.yt.Auth.OfferReply
+		// The watch page a stale continuation is re-read off is offered with
+		// the verdict the page states, as setupChatDownloader wires it. Without
+		// the verdict the page is not offered at all.
+		opts.PageReplyVerdict = youtube.PageReplyVerdict
 		// Per poll as well, as setupChatDownloader wires it: the account's
 		// identity headers (Service.ChatSessionHeaders).
 		opts.SessionHeaders = sp.yt.ChatSessionHeaders

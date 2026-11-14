@@ -251,7 +251,13 @@ func TestRefreshCookiesDetailedCallersAreEnumerated(t *testing.T) {
 // caller with the rule hand-copied into it is invisible to it and lands here.
 // Neither half covers the other's blind spot.
 func TestAutomaticImportGuardHasExactlyItsTwoAutomaticCallers(t *testing.T) {
-	want := []string{"decideStartupSeed", "periodicTick"} // sorted
+	// The second site is the loop's. Its guard is stated once, in
+	// periodicPassStandsDown, which periodicTick asks before every pass and
+	// which the daily visit's schedule also reads so the status names no next
+	// visit while the guard stands (it launches and imports nothing there).
+	// Re-pinned from "periodicTick" when the guard moved into that one
+	// function; it is still the same automatic site.
+	want := []string{"decideStartupSeed", "periodicPassStandsDown"} // sorted
 	got := callersOf(t, "automaticImportGuard")
 
 	if len(got) == 0 {

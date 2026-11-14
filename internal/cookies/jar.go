@@ -131,6 +131,9 @@ type CookieJar struct {
 	// WRONGLY, a file that is present and unreadable. Written under j.mu by
 	// Load and cleared by parseInto's install.
 	lastLoadErr string
+	// renew holds the session cookies YouTube's replies renewed since the
+	// last write of cookies.txt. It has its own lock; see renewals.go.
+	renew renewalState
 }
 
 // Essential YouTube cookies needed for authentication.
@@ -345,6 +348,9 @@ func (j *CookieJar) Load(filePath string) error {
 			// maps), and skipping the bump would let a concurrent Load that
 			// captured an earlier generation wrongly believe, in its own
 			// post-block below, that nothing has installed since it did.
+			// Deleting cookies.txt logs Moombox out. A renewal still
+			// waiting to be written belongs to the session that is gone.
+			j.dropPendingRenewals()
 			j.mu.Lock()
 			j.filePath = filePath
 			j.youtube = make(map[string]cookieEntry)
@@ -532,6 +538,20 @@ func (j *CookieJar) loadFrom(data []byte, filePath string) {
 // same jar) landed after this one, and must not be skippable by a caller
 // that does not care about the memo.
 func (j *CookieJar) parseInto(data []byte, filePath string) int {
+	// Renewals YouTube sent that are not in the file yet are applied over the
+	// bytes read, so a reload between two flushes does not put the jar back
+	// on the older values (overlayRenewalsLocked). The renewal lock is held
+	// across the install, so a renewal kept meanwhile is either in these
+	// bytes or installed after them, never lost behind them.
+	j.renew.mu.Lock()
+	defer j.renew.mu.Unlock()
+	return j.parseRows(j.overlayRenewalsLocked(data), filePath)
+}
+
+// parseRows is parseInto without the renewal overlay: it installs exactly
+// the rows data holds. The renewal store calls it with bytes it has already
+// applied its pending renewals to.
+func (j *CookieJar) parseRows(data []byte, filePath string) int {
 	// Snapshot logger once; the field is protected by the mutex.
 	j.mu.RLock()
 	logger := j.logger
@@ -1038,7 +1058,7 @@ func authCookieNamesFor(p Platform) []string {
 //
 // Per-platform rather than YouTube-only, and that matters most on the Twitch
 // side. RefreshService rotates YouTube credentials in-process
-// (checkAndRefreshYouTube / processYouTubeSetCookies); for Twitch it only has
+// (checkAndRefreshYouTube / CookieJar.OfferYouTubeReply); for Twitch it only has
 // checkTwitchAuth, a check with no refresh, so this count is the earliest
 // warning that a Twitch credential is running out. And a dead Twitch auth-token
 // does not error — it downgrades chat capture to anonymous and quietly loses

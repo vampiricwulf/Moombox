@@ -397,7 +397,7 @@ func TestLivenessPagesCarryThePageCookies(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			s := jarServiceFromCookieFile(t, cookieFileRows(tc.jar...))
-			if _, err := s.fetchLivenessPage(t.Context(), srv.URL); err != nil {
+			if _, _, err := s.fetchLivenessPage(t.Context(), srv.URL); err != nil {
 				t.Fatalf("fetchLivenessPage: %v", err)
 			}
 			if got := rec.of("page"); len(got) != 1 || got[0] != tc.want {

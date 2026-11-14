@@ -129,15 +129,25 @@ func FetchWithTimeout(parent context.Context, url string, timeout time.Duration,
 // A body longer than MaxFetchBodySize is an ERROR, not a truncated success:
 // silently handing back half a page let callers parse it as a whole one.
 func FetchBody(ctx context.Context, url string, timeout time.Duration, headers map[string]string) ([]byte, error) {
+	body, _, err := FetchBodyAndResponse(ctx, url, timeout, headers)
+	return body, err
+}
+
+// FetchBodyAndResponse is FetchBody that also hands back the response the
+// body was read from, for a caller that needs its headers or the request
+// that was finally answered. The response's body is already read and closed.
+// The response is nil when no reply arrived; on any other error it is the
+// reply that failed.
+func FetchBodyAndResponse(ctx context.Context, url string, timeout time.Duration, headers map[string]string) ([]byte, *http.Response, error) {
 	resp, cancel, err := FetchWithTimeout(ctx, url, timeout, headers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer cancel()
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+		return nil, resp, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
 	// Read ONE byte past the ceiling so an over-long body is DETECTABLE.
@@ -148,10 +158,10 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 	// indistinguishable from a real extraction failure.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchBodyLimit+1))
 	if err != nil {
-		return nil, err
+		return nil, resp, err
 	}
 	if int64(len(body)) > fetchBodyLimit {
-		return nil, fmt.Errorf("%s: response exceeds MaxFetchBodySize (%d bytes)", url, fetchBodyLimit)
+		return nil, resp, fmt.Errorf("%s: response exceeds MaxFetchBodySize (%d bytes)", url, fetchBodyLimit)
 	}
-	return body, nil
+	return body, resp, nil
 }

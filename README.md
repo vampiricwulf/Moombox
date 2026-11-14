@@ -776,8 +776,9 @@ Moombox does not re-read the profile on a timer once you have cookies,
 deliberately: nothing on the host side of the mount changes it, so a timer
 would re-read identical bytes over credentials that may still be working. When
 the session ages out, refresh the profile and press the button. Between
-imports the in-process refresh keeps the imported YouTube session alive on its
-own.
+imports Moombox keeps the session cookies YouTube renews on its own replies
+(the same ones a browser would keep), in memory at once and in `cookies.txt`
+within a minute, so the imported session stays current with no browser.
 
 Copy the profile with Firefox **closed**, and bring `cookies.sqlite-wal` along
 with `cookies.sqlite` if you copy the files individually — recent cookies live

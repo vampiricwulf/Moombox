@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -595,6 +596,12 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// "not a member" into "Login required" (Auth.PageCookieHeader).
 	account := p.auth.Identity()
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.PageCookieHeader())
+	if err == nil {
+		// The page was fetched with the jar's session, so what it renewed is
+		// the jar's to keep. The public cascade's page (the consent cookies
+		// alone) is not offered.
+		p.auth.OfferWatchPage(wp)
+	}
 	pageFetched := err == nil
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
@@ -1634,6 +1641,11 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	if fetchEmbedPage {
 		var err error
 		embedResult, err = FetchEmbedPage(ctx, videoID, p.embedPageCookieHeader())
+		if err == nil {
+			// Kept only when the page was fetched with the jar's session
+			// (embedPageCookieHeader): the store reads that off the request.
+			p.auth.OfferReply(embedResult.reply)
+		}
 		if err != nil {
 			p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
 			// Continue without encryptedHostFlags — it may still work
@@ -1989,6 +2001,9 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 			lastErr = err
 			continue
 		}
+		// The player reply states no session verdict of its own. A client
+		// whose request carried no cookies offers nothing the store keeps.
+		p.auth.OfferReply(cookies.ReplyOf(resp).From("player", clientLabel, cookies.ReplyNoVerdict))
 
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		resp.Body.Close()

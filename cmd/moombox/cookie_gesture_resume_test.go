@@ -189,13 +189,13 @@ func TestCookieRecoveryResumesTheJobsItVerified(t *testing.T) {
 	seed("yt_parked", "youtube", database.ParkReasonAuth, false)
 	notify := func(string, string, string, notifications.NotificationType) {}
 
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		stubRefreshResult(cookies.RefreshResult{YouTube: cookies.RefreshOK}), notify)
 	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusCookies {
 		t.Fatalf("yt_parked = %s after a recovery pass that did not run, want it still parked", got)
 	}
 
-	s.runCookieRecovery(context.Background(), "youtube",
+	s.runCookieRecovery(context.Background(), "youtube", apiCheckCause,
 		stubRefresh(cookies.RefreshOK, cookies.RefreshUnknown), notify)
 	if got := statusOf(t, s.db, "yt_parked"); got != database.StatusUpcoming {
 		t.Errorf("yt_parked = %s after a recovery that verified YouTube, want it resumed", got)

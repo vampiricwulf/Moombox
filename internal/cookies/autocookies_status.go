@@ -35,6 +35,21 @@ type AutoCookieStatus struct {
 	LastRefresh           *string                   `json:"lastRefresh"`
 	LastError             *string                   `json:"lastError"`
 	NeedsManualRelogin    AutoCookieReloginRequired `json:"needsManualRelogin"`
+
+	// The renewal facts (owner ruling KA-5). Machine fields only: times and
+	// cookie names, never a value and never a label. All three are held in
+	// memory and absent until they have something to say.
+	//
+	// ReplyRenewedAt is when a YouTube reply last renewed a session cookie
+	// Moombox kept (renewals.go).
+	ReplyRenewedAt *time.Time `json:"replyRenewedAt,omitempty"`
+	// RenewalCensus is what the last browser pass renewed, by group.
+	RenewalCensus *RenewalCensus `json:"renewalCensus,omitempty"`
+	// NextVisitDue is when the daily visit next runs when nothing renews the
+	// cookies sooner. Absent while the periodic refresh is not running, and
+	// while a visit would launch nothing (no managed profile yet, or a
+	// browser-free pass the import guard stands down).
+	NextVisitDue *time.Time `json:"nextVisitDue,omitempty"`
 }
 
 // GetStatus returns the current auto-cookie status.
@@ -47,6 +62,9 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	if s.ConfiguredBrowserOverride != nil {
 		cfgPath, cfgType = s.ConfiguredBrowserOverride()
 	}
+
+	// The jar has its own lock; read it before taking ours.
+	replyRenewedAt := s.jar.LastRenewalAt()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,6 +100,9 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 		// s.mu — a concurrent map read+write is a fatal runtime throw that
 		// RecoveryMiddleware cannot catch.
 		NeedsManualRelogin: maps.Clone(s.needsRelogin),
+		ReplyRenewedAt:     replyRenewedAt,
+		RenewalCensus:      s.lastCensus,
+		NextVisitDue:       s.nextVisitDueLocked(time.Now()),
 	}
 }
 
@@ -154,4 +175,15 @@ func (s *AutoCookieService) LogProfileDirVerdict() {
 		return
 	}
 	s.logger.Error("auto-cookie profile dir rejected at construction", "err", s.profileDirErr)
+}
+
+// nextVisitDueLocked is nextVisitDue over the published schedule, as the
+// status carries it. Callers hold s.mu.
+func (s *AutoCookieService) nextVisitDueLocked(now time.Time) *time.Time {
+	due, ok := nextVisitDue(now, s.lastRefresh, s.visitPub)
+	if !ok {
+		return nil
+	}
+	due = due.UTC()
+	return &due
 }

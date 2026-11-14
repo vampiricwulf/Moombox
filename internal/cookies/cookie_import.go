@@ -384,6 +384,12 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		return ImportResult{}, errors.New("no cookie file is configured — set cookies.cookie_file")
 	}
 
+	// One writer of cookies.txt at a time: the renewals YouTube's replies
+	// have sent are written before the file is read, and none is written
+	// under the import. A file the import leaves holding another session
+	// does not get the old session's renewals. See CookieJar.HoldRenewalFlush.
+	defer s.jar.HoldRenewalFlush()()
+
 	var existing string
 	data, readErr := readCookieFile(s.cookiePath)
 	switch {

@@ -231,3 +231,34 @@ func exprText(expr ast.Expr) string {
 		return "a computed expression"
 	}
 }
+
+// TestDailyVisitIsToldWhenTheDeviceIsOffline pins the wiring of
+// AutoCookieService.IsOnline (owner ruling KA-3).
+//
+// The field is nil-safe by contract — nil means "assume online" — so dropping
+// the assignment breaks nothing a behaviour test in internal/cookies can see:
+// every test there passes, and an offline install launches a browser against
+// an error page once the daily visit comes due, then waits out a back-off it
+// did not earn. Asserted as structure because the wiring is the only thing
+// that can be wrong here.
+func TestDailyVisitIsToldWhenTheDeviceIsOffline(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "services.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse services.go: %v", err)
+	}
+	wired := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		if exprText(assign.Lhs[0]) == "autoCookieSvc.IsOnline" && exprText(assign.Rhs[0]) == "s.connMon.IsOnline" {
+			wired = true
+		}
+		return true
+	})
+	if !wired {
+		t.Error("services.go no longer assigns autoCookieSvc.IsOnline = s.connMon.IsOnline, so the " +
+			"daily cookie visit runs while the device is offline")
+	}
+}

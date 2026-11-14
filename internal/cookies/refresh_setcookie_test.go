@@ -209,7 +209,7 @@ func TestProcessSetCookiesDeletesRowOnPastExpires(t *testing.T) {
 				".youtube.com\tTRUE\t/\tTRUE\t2000000000\tYSC\tfixture-ysc\n"
 			rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-			rs.processYouTubeSetCookies(setCookieResponse(tc.header), "")
+			rs.writeAdmittedSetCookies(setCookieResponse(tc.header), "")
 
 			rows := readCookieRows(t, path)
 			if got := rowsNamed(rows, "LOGIN_INFO"); len(got) != 0 {
@@ -235,7 +235,7 @@ func TestProcessSetCookiesDeletionOfEssentialLogsInfo(t *testing.T) {
 	log := &captureLogger{}
 	rs, _, _ := newSetCookieFixture(t, log, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse(
+	rs.writeAdmittedSetCookies(setCookieResponse(
 		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	if n := log.infoContaining("deleted an essential cookie"); n != 1 {
@@ -287,7 +287,7 @@ func TestProcessSetCookiesDeletionIsDomainScoped(t *testing.T) {
 		".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tfixture-youtube\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse(
+	rs.writeAdmittedSetCookies(setCookieResponse(
 		"SAPISID=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	rows := readCookieRows(t, path)
@@ -380,7 +380,7 @@ func TestProcessSetCookiesDeletionClearsIdentity(t *testing.T) {
 		t.Fatal("fixture precondition failed: SAPISID + LOGIN_INFO must produce an identity")
 	}
 
-	rs.processYouTubeSetCookies(setCookieResponse(
+	rs.writeAdmittedSetCookies(setCookieResponse(
 		"LOGIN_INFO=; Domain=.youtube.com; Expires=Thu, 01-Jan-1970 00:00:00 GMT; Path=/"), "")
 
 	if after := jar.YouTubeIdentity(); after != "" {
@@ -543,7 +543,7 @@ func TestProcessSetCookiesRefreshDoesNotCrossPlatforms(t *testing.T) {
 		".twitch.tv\tTRUE\t/\tTRUE\t2000000000\tlogin\tfixture-twitch-login\n"
 	rs, _, path := newSetCookieFixture(t, nopLogger{}, initial)
 
-	rs.processYouTubeSetCookies(setCookieResponse("login=youtube-value; Domain=.youtube.com; Path=/"), "")
+	rs.writeAdmittedSetCookies(setCookieResponse("login=youtube-value; Domain=.youtube.com; Path=/"), "")
 
 	rows := readCookieRows(t, path)
 	twitch := rowFor(t, rows, "login", ".twitch.tv")

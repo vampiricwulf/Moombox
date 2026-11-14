@@ -223,6 +223,23 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 		mechanism = RefreshMechanismBrowser
 	}
 
+	// From here to the end of the pass this is the one writer of cookies.txt.
+	// The hold writes the renewals YouTube's replies have sent so far into the
+	// file, so the merge below reads them and the profile's values win over
+	// them by name, as they always have. A renewal that arrives after this
+	// point (while the browser runs, or during the merge, the verify or a
+	// rollback) stays in the jar across every reload below and is written
+	// over the result when the hold ends: the pass does not put the session
+	// back on an older value than YouTube has since sent, and neither does
+	// its rollback. See CookieJar.HoldRenewalFlush.
+	defer s.jar.HoldRenewalFlush()()
+
+	// passStart is what the renewal census measures against: a profile row
+	// written at or after it was renewed by this pass. Any stamps an earlier,
+	// aborted pass left behind are dropped here.
+	passStart := time.Now()
+	s.takePassStamps()
+
 	var netscapeCookies string
 	var err error
 	// browserActed answers the question this function used to get wrong: did
@@ -407,6 +424,13 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	if err != nil {
 		s.setError(err.Error())
 		return refreshAborted(), err
+	}
+
+	// What the browser renewed, by name (owner ruling KA-5): one Info line per
+	// pass, and the same facts on the status. A pass that read nothing out of
+	// the browser has no census.
+	if netscapeCookies != "" {
+		s.recordCensus(passStart, netscapeCookies)
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity.

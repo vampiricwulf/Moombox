@@ -114,3 +114,47 @@ func TestChatDownloadersGetThePageCookieGetter(t *testing.T) {
 		}
 	}
 }
+
+// TestChatDownloadersOfferTheWatchPageWithItsVerdict: a chat downloader built
+// without PageReplyVerdict does not offer its fresh-continuation watch page to
+// the cookie store at all (ChatAPI.FetchFreshContinuation), so what that page
+// renews is lost. Both sites that build one set it. internal/chat's
+// api_cookie_test covers the downloader's side.
+//
+// Mutant: either site leaving PageReplyVerdict unset.
+func TestChatDownloadersOfferTheWatchPageWithItsVerdict(t *testing.T) {
+	for _, site := range []struct{ file, fn string }{
+		{"orchestrator_chat.go", "setupChatDownloader"},
+		{"stream_processor_youtube.go", "tryStartEarlyChat"},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), site.file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", site.file, err)
+		}
+		found := false
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != site.fn {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				assign, ok := n.(*ast.AssignStmt)
+				if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+					return true
+				}
+				lhs, ok := assign.Lhs[0].(*ast.SelectorExpr)
+				rhs, ok2 := assign.Rhs[0].(*ast.SelectorExpr)
+				if !ok || !ok2 || lhs.Sel.Name != "PageReplyVerdict" || rhs.Sel.Name != "PageReplyVerdict" {
+					return true
+				}
+				if pkg, ok := rhs.X.(*ast.Ident); ok && pkg.Name == "youtube" {
+					found = true
+				}
+				return true
+			})
+		}
+		if !found {
+			t.Errorf("%s (%s) does not set opts.PageReplyVerdict to youtube.PageReplyVerdict", site.fn, site.file)
+		}
+	}
+}

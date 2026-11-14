@@ -567,7 +567,7 @@ func (d *SegmentDownloader) streamDirectOnce(parent context.Context) (int, bool,
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
 
-	resp, err := engineHTTPClient.Do(req)
+	resp, err := d.doRequest(req)
 	if err != nil {
 		reportFetchFailure(parent, "engine/fetch")
 		return 0, true, idleFetchError(ctx, idle, fmt.Errorf("download: %w", redact.MediaError(err)))

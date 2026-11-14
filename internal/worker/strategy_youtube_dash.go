@@ -350,8 +350,13 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Get cookie header for authenticated downloads. Method value, not a
 	// snapshot: a DASH capture runs for the length of the broadcast while the
 	// in-process refresh rotates the jar every ~30 minutes, so a header read
-	// here would still be presented to the last segment hours later.
+	// here would still be presented to the last segment hours later. The
+	// downloader keeps it from the media hosts and sends it only after one
+	// refused a request for want of it (engine.DownloaderOptions.CookieHeader).
 	var dashCookieHeader func() string
+	// One for the job: the video and audio downloaders learn together whether
+	// the media hosts want the cookies.
+	mediaCookies := &engine.MediaCookieState{}
 	if job.YT != nil {
 		dashCookieHeader = job.YT.GetCookieHeader
 	}
@@ -387,6 +392,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			InitURL:             videoStream.Initialization,
 			PoToken:             dashPoToken,
 			CookieHeader:        dashCookieHeader,
+			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
 			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
@@ -429,6 +435,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			InitURL:             audioStream.Initialization,
 			PoToken:             dashPoToken,
 			CookieHeader:        dashCookieHeader,
+			MediaCookies:        mediaCookies,
 			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
 			SegmentWorkers:      job.Config.SegmentWorkers,
 			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),

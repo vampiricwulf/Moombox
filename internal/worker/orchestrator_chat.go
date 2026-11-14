@@ -35,7 +35,11 @@ var fetchWatchPageForChat = youtube.FetchWatchPage
 // in-process hand-off slot with no other reader (VideoInfo.Chat, `json:"-"`),
 // which is what makes clearing it a local act rather than a mutation anyone
 // else can observe.
-func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookieHeader string) (youtube.ChatSource, error) {
+//
+// auth is the jar the fallback page was fetched with (nil when cookieHeader
+// is not the jar's): what that page's reply renewed is offered to its cookie
+// store, as every other request with the session does.
+func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookieHeader string, auth *youtube.Auth) (youtube.ChatSource, error) {
 	if info != nil && info.Chat.Usable() {
 		src := info.Chat
 		info.Chat = youtube.ChatSource{}
@@ -45,6 +49,7 @@ func chatSourceFor(ctx context.Context, info *youtube.VideoInfo, videoID, cookie
 	if err != nil {
 		return youtube.ChatSource{}, err
 	}
+	auth.OfferWatchPage(wp)
 	// The page's own stamp when it has one — same rule as withAttestation's
 	// (close-review Finding 10); a test seam that synthesizes a result has
 	// none, so the fetch instant here stands in.
@@ -75,8 +80,10 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	// header (Auth.PageCookieHeader): a watch page, so it carries the
 	// consent and language cookies every YouTube page is fetched with.
 	cookieHeader := ""
+	var auth *youtube.Auth
 	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
-		cookieHeader = jobCtx.YT.Auth.PageCookieHeader()
+		auth = jobCtx.YT.Auth
+		cookieHeader = auth.PageCookieHeader()
 	}
 
 	// Chat continuation, replay flag and visitor data are extracted at
@@ -87,7 +94,7 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	// extractors read it in place, and the token json.Unmarshal produced does
 	// not alias the page — so neither the info nor a fallback result retains
 	// those bytes and the page is collectable by the time this runs.
-	src, err := chatSourceFor(ctx, videoInfo, jobCtx.Job.VideoID, cookieHeader)
+	src, err := chatSourceFor(ctx, videoInfo, jobCtx.Job.VideoID, cookieHeader, auth)
 	if err != nil {
 		o.logger.Warn("failed to fetch watch page for chat", "err", err, "videoID", jobCtx.Job.VideoID)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
@@ -129,6 +136,11 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		// The watch page a stale continuation is re-read off is a page, and
 		// gets the page header, as the fallback fetch above does.
 		opts.PageCookieHeader = jobCtx.YT.Auth.PageCookieHeader
+		// What a poll's reply renews is kept, so the next poll sends it.
+		opts.OfferReply = jobCtx.YT.Auth.OfferReply
+		// The watch page a stale continuation is re-read off is offered with
+		// the verdict the page states, as every other page is.
+		opts.PageReplyVerdict = youtube.PageReplyVerdict
 		// Method value again: the account's identity (X-Goog-AuthUser,
 		// X-Goog-PageId) is read per poll off the session the probes carry,
 		// never snapshotted off the page this source came from, so a capture

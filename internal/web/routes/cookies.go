@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -182,14 +183,14 @@ func cookieSetupOutcome(result cookies.SetupResult) map[string]any {
 //     same terms as the keys above: the frontend tests `checked === false`, so
 //     against an older binary that omits the key it behaves as it always did.
 func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
-	return map[string]any{
+	return withPageHealth(map[string]any{
 		"checked":       status.Checked,
 		"found":         status.HasYouTubeCookies,
 		"authenticated": status.YouTubeAuthenticated,
 		"verification":  status.YouTubeVerification.String(),
 		"youtubeError":  status.YouTubeError,
 		"fileError":     status.CookieFileError,
-	}
+	}, status.YouTubePages)
 }
 
 // TwitchAuthStatusPayload is CookieStatusPayload's Twitch counterpart. See
@@ -197,14 +198,37 @@ func CookieStatusPayload(status cookies.AuthStatus) map[string]any {
 // makes `twitchError` safe to render — ; `found` is new on this side because
 // AuthStatus had no HasTwitchCookies to project until this arc.
 func TwitchAuthStatusPayload(status cookies.AuthStatus) map[string]any {
-	return map[string]any{
+	return withPageHealth(map[string]any{
 		"checked":       status.Checked,
 		"found":         status.HasTwitchCookies,
 		"authenticated": status.TwitchAuthenticated,
 		"verification":  status.TwitchVerification.String(),
 		"twitchError":   status.TwitchError,
 		"fileError":     status.CookieFileError,
+	}, status.TwitchPages)
+}
+
+// withPageHealth adds the two keys the session health is derived from (owner
+// ruling KA-4) to a platform's status payload. Machine fields only, RFC 3339
+// UTC, and each is present only when it has a value:
+//
+//   - pageSignedOutAt — when a page last rendered signed out. With `found` and
+//     `verification` it is everything cookies.SessionHealthOf reads; the
+//     dashboard's sessionHealth (web/public/modules/utils.js) mirrors that
+//     predicate, so the derived state itself is not sent.
+//   - nextRecoveryAt — the end of the current recovery back-off window, the
+//     earliest a signed-out page can ask for the next automatic attempt.
+//
+// ADDITIVE on the same terms as the keys above: an older frontend ignores
+// them, and against an older binary the new frontend reads no flicker.
+func withPageHealth(payload map[string]any, pages cookies.PageHealth) map[string]any {
+	if !pages.LastSignedOut.IsZero() {
+		payload["pageSignedOutAt"] = pages.LastSignedOut.UTC().Format(time.RFC3339)
 	}
+	if !pages.NextAttempt.IsZero() {
+		payload["nextRecoveryAt"] = pages.NextAttempt.UTC().Format(time.RFC3339)
+	}
+	return payload
 }
 
 // The `cause` values the two browser-read sentinels reach the frontend as.
@@ -723,6 +747,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		// that pass (up to 45 s, then a pass of its own) would hold the request
 		// for a refresh that did nothing.
 		if result.Ran {
+			// The operator's own refresh: the recovery back-off starts over
+			// (owner ruling KA-4). Never done for an automatic pass.
+			refreshSvc.ClearRecoveryEscalation()
 			refreshSvc.CheckNowAfterWrite(req.Context())
 			cookiesVerified(result.YouTube, result.Twitch, "the browser refresh")
 		} else {
@@ -804,6 +831,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (KA-4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "a cookie file import")
 		}()
@@ -1006,6 +1034,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			}
 			recheckCtx, cancel := context.WithTimeout(context.Background(), cookies.RecheckAfterWriteBudget)
 			defer cancel()
+			refreshSvc.ClearRecoveryEscalation() // an operator gesture (KA-4)
 			refreshSvc.CheckNowAfterWrite(recheckCtx)
 			cookiesVerified(result.YouTube, result.Twitch, "the cookie setup")
 		}()

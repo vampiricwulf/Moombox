@@ -1478,6 +1478,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return stats.ActiveCount > 0
 	}
 
+	// The daily visit (owner ruling KA-3) is the one pass that runs with no
+	// active job: when no pass has renewed the cookies for 24 h. It waits
+	// while the device is offline, because a browser launched offline renews
+	// nothing.
+	autoCookieSvc.IsOnline = s.connMon.IsOnline
+
 	// The two credential-writing paths with no caller outside internal/cookies
 	// — the periodic timer and the boot profile seed — share this one injected
 	// re-check seam. Everything else calls recheckAfterCookieWrite directly.
