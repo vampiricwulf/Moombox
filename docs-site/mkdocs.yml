@@ -1,0 +1,111 @@
+site_name: Moombox
+site_description: YouTube and Twitch live stream archiver — a single binary with a web dashboard and a terminal UI.
+site_url: https://vampiricwulf.github.io/Moombox/
+repo_url: https://github.com/vampiricwulf/Moombox
+repo_name: vampiricwulf/Moombox
+edit_uri: edit/main/docs-site/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/favicon.svg
+  favicon: assets/favicon.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: info
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - First run: getting-started/first-run.md
+      - Docker: getting-started/docker.md
+      - Updating: getting-started/updating.md
+  - User guide:
+      - Channels and monitoring: guide/channels.md
+      - Jobs and their lifecycle: guide/jobs.md
+      - Web dashboard: guide/web-dashboard.md
+      - Player and chat replay: guide/player.md
+      - Chapters: guide/chapters.md
+      - Terminal UI: guide/terminal-ui.md
+      - Cookies and sign-in: guide/cookies.md
+      - YouTube: guide/youtube.md
+      - Twitch: guide/twitch.md
+      - Notifications: guide/notifications.md
+      - Storage, files and disk: guide/storage.md
+      - Statistics: guide/statistics.md
+      - yt-dlp plugin: guide/ytdlp-plugin.md
+  - Configuration:
+      - configuration/index.md
+      - Network and access: configuration/network.md
+      - Paths and logs: configuration/paths-and-logs.md
+      - Monitors: configuration/monitors.md
+      - Downloader: configuration/downloader.md
+      - Cookies: configuration/cookies.md
+      - Disk, memory and connectivity: configuration/disk-memory-connectivity.md
+      - Updates, sidecar and Twitch: configuration/updates-bgutils-twitch.md
+      - Channels: configuration/channels.md
+      - Notifications: configuration/notifications.md
+  - Reference:
+      - Command line and environment: reference/cli.md
+      - Security and remote access: reference/security.md
+      - REST API: reference/api.md
+      - Keyboard shortcuts: reference/shortcuts.md
+  - Help:
+      - Troubleshooting: help/troubleshooting.md
+      - FAQ: help/faq.md

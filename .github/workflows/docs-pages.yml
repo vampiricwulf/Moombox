@@ -1,0 +1,77 @@
+name: Docs site
+
+# Builds the user documentation in docs-site/ with MkDocs Material and
+# publishes it to GitHub Pages (https://vampiricwulf.github.io/Moombox/).
+#
+#   push to main   build + deploy, when docs-site/ or this file changed
+#   pull request   build only (`mkdocs build --strict`), so a broken link,
+#                  a missing nav page or a bad anchor fails before merge
+#   Run workflow   build + deploy by hand (from main)
+#
+# The settings reference under docs-site/docs/configuration/ is also checked
+# by the Go suite: internal/docs/settings_reference_test.go fails CI when a
+# config.toml key has no heading there, so a new setting cannot ship
+# undocumented.
+#
+# One-time repository setup: Settings → Pages → Build and deployment →
+# Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs-pages.yml"
+  pull_request:
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: docs-site/requirements.txt
+
+      - name: Install MkDocs Material
+        run: pip install -r docs-site/requirements.txt
+
+      - name: Build (strict)
+        working-directory: docs-site
+        run: mkdocs build --strict
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs-site/site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
