@@ -138,8 +138,8 @@ connection down it could not be delivered.
 
 | Event | Typical title | When it is sent |
 |---|---|---|
-| `disk_warning` (Disk Warning) | *Disk Space Warning*, *Disk Monitoring Failed* | The output drive reached the warning threshold, or its free space could not be read. |
-| `disk_critical` (Disk Critical) | *Disk Space Critical* | The output drive reached the critical threshold. |
+| `disk_warning` (Disk Warning) | *Disk Space Warning*, *Disk Monitoring Failed* | The output drive (or the staging drive, when it is a different and fuller one) reached the warning threshold, or free space could not be read. |
+| `disk_critical` (Disk Critical) | *Disk Space Critical* | The output drive (or the staging drive, when it is a different and fuller one) reached the critical threshold. |
 | `disk_ok` (Disk Recovered) | *Disk Space Recovered*, *Disk Monitoring Recovered* | The incident above is over. |
 | `update_available` (Update Available) | *Update Available* | A new Moombox version was published. |
 | `update_applied` (Update Applied) | *Update Applied* | Moombox restarted on a new version; says whether the web dashboard came back. |

@@ -338,7 +338,7 @@ line says why it is waiting:
 |---|---|
 | *Waiting in queue...* | Nothing holds it; its channel's archive slots are in use. It is admitted when one frees up. |
 | *Held: offline* | Moombox thinks the internet is down. Nothing is admitted until it is back. |
-| *Held: disk full* | The output disk reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Admission resumes once usage is 2 points below it. |
+| *Held: disk full* | The output disk, or the staging disk when it is a different and fuller one, reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Admission resumes once usage is 2 points below it. |
 | *Held: YouTube rate limit until 14:05* | YouTube rate-limited the session. YouTube backlog waits for an hour. |
 | *Retry 2 of 3 at 14:05* | This backlog job failed (or found the disk full) and went back to `Queued`; it is admitted again at the time shown. |
 
@@ -475,7 +475,7 @@ The cookie guide has its own table of messages:
 
 | Notification | Meaning |
 |---|---|
-| *Disk Space Warning* | The output drive passed [`disk_warn_percent`](../configuration/disk-memory-connectivity.md#diskdisk_warn_percent) (90 %). Repeated at most every 30 minutes. |
+| *Disk Space Warning* | The output drive (or the staging drive, when it is a different and fuller one; the alert names which) passed [`disk_warn_percent`](../configuration/disk-memory-connectivity.md#diskdisk_warn_percent) (90 %). Repeated at most every 30 minutes. |
 | *Disk Space Critical* | It passed [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent) (95 %). Backlog jobs stop being admitted (*Held: disk full*); live and running downloads are **not** paused. |
 | *Disk Space Recovered* | Usage is back at least 2 points below the warning threshold. |
 | *Disk Monitoring Failed* | Disk checks failed twice in a row (*volume offline or I/O error*); low-disk alerts are suspended until *Disk Monitoring Recovered*. Check that the output drive or network share is mounted. |

@@ -70,7 +70,7 @@ both UIs. The first hold that applies is shown, in this order:
 | Line | Why | Ends when |
 |---|---|---|
 | `Held: offline` | Moombox's connectivity check says the internet is unreachable. Nothing is admitted. | Connectivity returns. |
-| `Held: disk full` | The output disk reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Nothing is admitted. | Usage falls **2 points** below the critical threshold. |
+| `Held: disk full` | The output disk, or the staging disk when it is a different and fuller one, reached [`disk_critical_percent`](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). Nothing is admitted. | Usage falls **2 points** below the critical threshold. |
 | `Held: YouTube rate limit until 14:05` | YouTube rate-limited the session. No **YouTube** backlog is admitted (Twitch backlog still is). | The hour runs out. |
 | `Retry 2 of 3 at 14:05` | This video's last attempt failed in a way worth retrying, and it was sent back to `Queued`. | The backoff runs out. |
 | `Waiting in queue...` | Nothing holds it; it waits for a free archive slot. | A slot frees up. |

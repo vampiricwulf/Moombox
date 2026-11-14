@@ -347,8 +347,8 @@ once. Live and upcoming streams and newly published videos never wait in
 The scheduler admits nothing:
 
 - while Moombox is offline;
-- while the output disk is at or above its critical threshold, until usage
-  is 2 points below it;
+- while the output disk (or a separate, fuller staging disk) is at or above
+  its critical threshold, until usage is 2 points below it;
 - for an hour after YouTube rate-limits the session (YouTube backlog only);
 - for a disabled channel.
 

@@ -217,8 +217,11 @@ IDs, dropping the oldest first.
 
 Moombox measures the disk that holds the output directory at startup, every
 6 minutes after that, and at once when you save a change to the output
-directory or the thresholds. The dashboard shows a disk gauge and the TUI
-shows usage in its status bar.
+directory, the staging directory or the thresholds. The dashboard shows a
+disk gauge and the TUI shows usage in its status bar. When the staging
+directory is on a different disk, that disk is measured too: the alerts and
+the backlog hold below go by the fuller of the two, while the gauge and the
+status bar keep showing the output disk.
 
 | Usage | What happens |
 |---|---|
