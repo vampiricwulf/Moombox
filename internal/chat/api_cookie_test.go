@@ -393,25 +393,31 @@ func TestChatContextIsEnglishAndUTC(t *testing.T) {
 // Mutants: fetchChat or FetchFreshContinuation not offering its reply;
 // NewChatDownloader not wiring OfferReply.
 func TestChatRepliesRenewTheJar(t *testing.T) {
+	watchPage := func(t *testing.T, cd *ChatDownloader, srv *httptest.Server) {
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cd.api.client = &http.Client{Transport: redirectTransport{target: target, base: http.DefaultTransport}}
+		if _, _, err := cd.api.FetchFreshContinuation(context.Background(), "abc12345678"); err != nil {
+			t.Fatalf("FetchFreshContinuation: %v", err)
+		}
+	}
 	for _, tc := range []struct {
-		name    string
-		request func(t *testing.T, cd *ChatDownloader, srv *httptest.Server)
+		name     string
+		page     string // prepended to the body the server sends
+		request  func(t *testing.T, cd *ChatDownloader, srv *httptest.Server)
+		wantKept bool
 	}{
-		{"a poll", func(t *testing.T, cd *ChatDownloader, srv *httptest.Server) {
+		{"a poll", "", func(t *testing.T, cd *ChatDownloader, srv *httptest.Server) {
 			// The reply is offered before its body is parsed; the page body
 			// the server sends is not a chat reply and the error is expected.
 			_, _ = cd.api.fetchChat(context.Background(), srv.URL, "cont")
-		}},
-		{"the watch page", func(t *testing.T, cd *ChatDownloader, srv *httptest.Server) {
-			target, err := url.Parse(srv.URL)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cd.api.client = &http.Client{Transport: redirectTransport{target: target, base: http.DefaultTransport}}
-			if _, _, err := cd.api.FetchFreshContinuation(context.Background(), "abc12345678"); err != nil {
-				t.Fatalf("FetchFreshContinuation: %v", err)
-			}
-		}},
+		}, true},
+		{"the watch page, signed in", `<script>ytcfg.set({"LOGGED_IN":true});</script>`, watchPage, true},
+		// A page that rendered signed out (the flicker) is not the session's
+		// to take cookies from, as on every other page fetch.
+		{"the watch page, signed out", `<script>ytcfg.set({"LOGGED_IN":false});</script>`, watchPage, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "cookies.txt")
@@ -423,15 +429,16 @@ func TestChatRepliesRenewTheJar(t *testing.T) {
 				t.Fatal(err)
 			}
 			jar := cookies.NewCookieJar()
+			t.Cleanup(jar.FlushRenewals) // no flush timer writes into a removed TempDir
 			if err := jar.Load(path); err != nil {
 				t.Fatalf("load jar: %v", err)
 			}
-			jar.SetReplyHostCheckForTesting(func(_, host string) bool { return host == "127.0.0.1" })
+			cookies.AllowReplyHostForTesting(t, func(_, host string) bool { return host == "127.0.0.1" })
 			auth := youtube.NewAuth(jar, chatNopLogger{})
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Add("Set-Cookie", "__Secure-1PSIDCC=sidcc-renewed; Domain=.youtube.com; Path=/; Max-Age=31536000")
-				fmt.Fprint(w, watchPageHTML("fresh-token"))
+				fmt.Fprint(w, tc.page+watchPageHTML("fresh-token"))
 			}))
 			t.Cleanup(srv.Close)
 
@@ -442,11 +449,12 @@ func TestChatRepliesRenewTheJar(t *testing.T) {
 				CookieHeader:     auth.GetCookieHeader,
 				PageCookieHeader: auth.PageCookieHeader,
 				OfferReply:       auth.OfferReply,
+				PageReplyVerdict: youtube.PageReplyVerdict,
 			})
 			tc.request(t, cd, srv)
 
-			if got := auth.GetCookieHeader(); !strings.Contains(got, "__Secure-1PSIDCC=sidcc-renewed") {
-				t.Errorf("the next Cookie header does not carry the renewed value")
+			if kept := strings.Contains(auth.GetCookieHeader(), "__Secure-1PSIDCC=sidcc-renewed"); kept != tc.wantKept {
+				t.Errorf("the next Cookie header carries the renewed value = %v, want %v", kept, tc.wantKept)
 			}
 		})
 	}

@@ -138,6 +138,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		opts.PageCookieHeader = jobCtx.YT.Auth.PageCookieHeader
 		// What a poll's reply renews is kept, so the next poll sends it.
 		opts.OfferReply = jobCtx.YT.Auth.OfferReply
+		// The watch page a stale continuation is re-read off is offered with
+		// the verdict the page states, as every other page is.
+		opts.PageReplyVerdict = youtube.PageReplyVerdict
 		// Method value again: the account's identity (X-Goog-AuthUser,
 		// X-Goog-PageId) is read per poll off the session the probes carry,
 		// never snapshotted off the page this source came from, so a capture

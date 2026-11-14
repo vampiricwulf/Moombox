@@ -124,10 +124,11 @@ type ChatDownloaderOptions struct {
 	InitialContinuation string
 	ApiKey              string
 	VisitorData         string
-	CookieHeader        func() string              // Returns the CURRENT Cookie header, re-read per request (nil = send none)
-	PageCookieHeader    func() string              // The same for the watch page a fresh continuation is read off, with the page's consent and language cookies (nil = CookieHeader)
-	OfferReply          func(cookies.YouTubeReply) // Hands each reply's Set-Cookie headers to the cookie store, so renewed session cookies are kept (nil = not offered)
-	GenerateAuth        func() string              // Returns SAPISIDHASH Authorization header for member-gated chat
+	CookieHeader        func() string                          // Returns the CURRENT Cookie header, re-read per request (nil = send none)
+	PageCookieHeader    func() string                          // The same for the watch page a fresh continuation is read off, with the page's consent and language cookies (nil = CookieHeader)
+	OfferReply          func(cookies.YouTubeReply)             // Hands each reply's Set-Cookie headers to the cookie store, so renewed session cookies are kept (nil = not offered)
+	PageReplyVerdict    func(body []byte) cookies.ReplyVerdict // Reads the signed-in or signed-out verdict off a watch page, for the reply offered with it (nil = the watch page's reply is not offered)
+	GenerateAuth        func() string                          // Returns SAPISIDHASH Authorization header for member-gated chat
 	IsReplay            bool
 	IsLiveOrUpcoming    bool
 	StreamStartTime     string
@@ -430,6 +431,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
 	api.pageCookieHeader = opts.PageCookieHeader
 	api.offerReply = opts.OfferReply
+	api.pageVerdict = opts.PageReplyVerdict
 	api.generateAuth = opts.GenerateAuth
 	api.sessionHeaders = opts.SessionHeaders
 

@@ -127,6 +127,14 @@ func replyVerdict(state SessionAuthState) cookies.ReplyVerdict {
 	return cookies.ReplyNoVerdict
 }
 
+// PageReplyVerdict is the session verdict a watch page body states, as the
+// cookie store reads it. It is for a caller outside this package that fetches
+// a watch page with the jar's page cookies itself (the chat's fresh-
+// continuation fetch).
+func PageReplyVerdict(body []byte) cookies.ReplyVerdict {
+	return replyVerdict(watchPageSessionAuth(body))
+}
+
 // pageReply is the reply of an HTML page fetched with the jar's page cookies,
 // with the verdict read off its body. The body is scanned only when the reply
 // carried a Set-Cookie header at all.
