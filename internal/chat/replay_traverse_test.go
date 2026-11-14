@@ -673,9 +673,10 @@ func TestStopEndsAnOfflineWait(t *testing.T) {
 // TestAnAnswerMetOfflineSpendsTheBudget: only a fetch that never reached the
 // chat API waits on the connectivity probe. The probe can say offline with the
 // network up (the monitor dials only probe_targets and, when none answers,
-// www.youtube.com and gql.twitch.tv, which a firewall can block), and the chat waited on ANY failure while it did — a 500 included —
-// so for as long as the probe was wrong the capture asked for nothing. An
-// answer proves the network up: it spends the budget as it always did.
+// www.youtube.com and gql.twitch.tv, which a firewall can block), and the chat
+// waited on ANY failure while it did — a 500 included — so for as long as the
+// probe was wrong the capture asked for nothing. An answer proves the network
+// up: it spends the budget as it always did.
 //
 // Mutant killed: handleFetchError's isTransportFailure check dropped → the
 // 500 waits on the probe, which never comes back, and Start runs to the
