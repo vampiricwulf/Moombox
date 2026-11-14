@@ -79,10 +79,11 @@ first archive is written. Nothing appears in the output directory until a
 recording is muxed: FFmpeg writes the archive straight from staging.
 
 !!! note "Which output directory a job uses"
-    A job found by a channel monitor records the output directory — the
-    channel's own, or the global one — when it is created. Changing
-    `paths.output_directory` later applies to jobs created after the
-    change.
+    A job found by a channel monitor uses the output directory (the
+    channel's own, or the global one) that is set when its download starts.
+    Changing `paths.output_directory` or a channel's folder therefore also
+    reaches jobs still waiting in `Upcoming` or `Queued`. A job that has
+    started or finished keeps the directory it started with.
 
 ### Files written beside each archive
 
@@ -98,7 +99,7 @@ recording is muxed: FFmpeg writes the archive straight from staging.
 | `<name>.description` | The video's description as plain text, when it has one. |
 | `<name> - part1.mp4`, `<name> - part2.mp4`, … | Instead of one `<name>.mp4`, when a live recording had to be split into parts (each part is muxed as soon as it ends). The chat, raw chat, thumbnail and description of a split recording are written once, under the plain `<name>` the parts share. A recording that ends with only one part is renamed to the plain `<name>.mp4`. |
 | `<name>.chapters.json` | The chapter list of a split recording (its parts carry none of their own), or a chapter list you imported (see [Chapters](chapters.md)). |
-| `<name>.restart-<timestamp>.mp4` | A set-aside recording that was recovered into its own file (see [Jobs](jobs.md)). It overlaps the start of the archive. |
+| `<name>.restart-<timestamp>.mp4` | One of two things (see [Jobs](jobs.md)): a set-aside recording that was recovered into its own file, which overlaps the start of the archive; or the complete earlier archive of a job you reinitialized, which the reset keeps under this name and never replaces. |
 | `trim/<video id> [<start>s-<end>s].mp4` | Trims, in a `trim` folder beside the archive (see [Player and chat replay](player.md)). |
 
 Deleting a job does **not** remove any of these files; they become orphans
@@ -210,8 +211,8 @@ is refused with a message asking you to refresh.
 **Orphaned History Entries** lists videos that Moombox remembers as already
 processed but that no longer have a job — usually jobs you deleted. While an
 entry remains, the monitors do not pick that video up again; delete the
-entry to let them archive it again. The history keeps up to 10,000 video
-IDs, dropping the oldest first.
+entry to let them archive it again. History entries are never dropped for
+their age: an entry stays until you delete it here.
 
 ## Disk space
 
