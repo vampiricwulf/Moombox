@@ -85,8 +85,9 @@ var chatOnlinePoll = 5 * time.Second
 // chatOfflineRetryFloor is the longest a fetch loop parked on a connectivity
 // outage waits for the probe before it asks for the same continuation again
 // anyway — the worker's offlineProbeFloor. The probe can report offline with
-// the network up (the connectivity monitor dials only probe_targets, which a
-// firewall can block, and nothing the platforms answer brings it back), and a
+// the network up (the connectivity monitor dials only probe_targets and, when none
+// answers, www.youtube.com and gql.twitch.tv, which a firewall can block, and
+// nothing the platforms answer brings it back), and a
 // wait that ended only on its word stopped the capture for as long as it was
 // wrong. During a real outage the fetch fails as it did and the wait starts
 // again, the budget untouched. A var so tests need not wait it out.

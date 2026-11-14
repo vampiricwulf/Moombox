@@ -101,9 +101,9 @@ func (w *DownloadWorker) outageCalled(ctx context.Context, err error) bool {
 // networkWaitFloor is the longest waitForNetwork waits on the connectivity
 // monitor before it lets the caller try its fetch anyway — the waiting
 // loops' offlineProbeFloor, for the same reason: the monitor can report
-// offline while the platforms answer (its probe dials only probe_targets,
-// which a firewall can block, and a successful platform request does not
-// bring it back online), and a wait that ended only on its word stranded the
+// offline while the platforms answer (its probe dials only probe_targets and,
+// when none answers, www.youtube.com and gql.twitch.tv, which a firewall can
+// block, and a successful platform request does not bring it back online), and a wait that ended only on its word stranded the
 // job for as long as it was wrong. During a real outage the fetch fails as
 // fast as it did, and the wait starts again. A var so tests need not wait it
 // out.
@@ -246,8 +246,9 @@ func (w *DownloadWorker) waitOutSetupOutage(ctx context.Context, job *database.J
 // The wait follows a failed fetch; the monitor's word alone never starts one.
 // Stream processing used to be held before its first fetch while the monitor
 // reported offline, and the monitor can say that with the network up (its
-// probe dials only probe_targets, which a firewall can block, and nothing the
-// platforms answer brings it back): every job processJob ran — a manual add,
+// probe dials only probe_targets and, when none answers, www.youtube.com and
+// gql.twitch.tv, which a firewall can block, and nothing the platforms answer
+// brings it back): every job processJob ran — a manual add,
 // every row re-enqueued at boot, an interrupted live capture among them —
 // waited under the wait's progress line for as long as the monitor was
 // wrong, and nothing was ever fetched. A fetch made during a real outage

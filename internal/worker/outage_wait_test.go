@@ -190,8 +190,8 @@ func TestOfflineBootShutdownLeavesTheRowToResume(t *testing.T) {
 
 // TestWronglyOfflineMonitorDoesNotHoldTheFirstFetch: the connectivity monitor
 // can report offline with the network up — its probe dials only
-// probe_targets, which a firewall can block, and nothing the platforms answer
-// brings it back. Stream processing used to wait on its word before the first
+// probe_targets and, when none answers, www.youtube.com and gql.twitch.tv,
+// which a firewall can block, and nothing the platforms answer brings it back. Stream processing used to wait on its word before the first
 // fetch, so every job processJob ran (here an interrupted capture re-enqueued
 // at boot) sat under the wait's progress line for as long as the monitor was
 // wrong, with nothing ever fetched. A wait now follows a failed fetch only:
