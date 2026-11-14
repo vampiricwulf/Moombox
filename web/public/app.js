@@ -977,6 +977,10 @@ export class MoomboxApp {
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
+        // Settings' "Last refresh" and renewal lines describe the pass before
+        // this one until they are read again. Not awaited: it reports its
+        // own failure.
+        this.settings?.loadAutoCookieStatus();
         // Five branches where there were three. Three independent facts come
         // back and each can disagree with the others: `ran` (did this pass do
         // any work), `verdict` (what it concluded, if anything) and `renewed`
@@ -1677,6 +1681,10 @@ export class MoomboxApp {
         // Safe to re-run on every reconnect: _consumeJobHash clears the hash
         // before it looks anything up, so the second call finds nothing.
         this._consumeJobHash();
+        // A snapshot sent as a resync stands in for frames this tab lost,
+        // and a status_changed nudge may be one of them: the snapshot
+        // carries no status, so it is read again.
+        this.onStatusChanged();
         break;
       }
 

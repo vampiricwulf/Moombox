@@ -753,7 +753,9 @@ func (hub *WebSocketHub) flushResync(client *wsClient) {
 // hideFinishedAgeDays), so substituting it loses nothing for those types. The
 // two broadcast types it does NOT carry, disk_status and update_available,
 // are recovered on the next reconnect or the next daily check rather than
-// immediately — acceptable against a ghost row that never goes away.
+// immediately — acceptable against a ghost row that never goes away. A lost
+// status_changed nudge costs nothing: the tab reads its status again on
+// every snapshot (app.js, the initial_state case).
 //
 // Returns false when the client is gone (its queue closed by detachClient).
 // Audit reports/web.md C-7.
