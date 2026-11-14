@@ -311,6 +311,9 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 		return SetupResult{}, err
 	}
 
+	// One writer of cookies.txt at a time; see CookieJar.HoldRenewalFlush.
+	defer s.jar.HoldRenewalFlush()()
+
 	existingData, readErr := readCookieFile(s.cookiePath)
 	switch {
 	case readErr == nil:

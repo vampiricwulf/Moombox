@@ -539,6 +539,9 @@ func (j *CookieJar) FlushRenewals() {
 // file still holds the same session. Which renewals are waiting is known in
 // memory only; after a restart the profile wins.
 func (j *CookieJar) HoldRenewalFlush() (release func()) {
+	if j == nil {
+		return func() {}
+	}
 	r := &j.renew
 	r.mu.Lock()
 	if r.timer != nil {
