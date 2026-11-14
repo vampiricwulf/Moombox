@@ -731,9 +731,11 @@ func cdpCookieReadOutcome(read cdpCookieRead) error {
 }
 
 // cdpRelevantRows projects one tier's answer onto the rows Moombox would
-// actually KEEP. deduplicateAndFormat applies isRelevantDomain +
-// isEssentialCookie, so this is the same predicate readFirefoxCookies judges an
-// empty profile by, and the one ErrNoCookiesInProfile's own wording claims.
+// actually KEEP. deduplicateAndFormat applies isRelevantDomain and then
+// isEssentialCookie or, since owner ruling KA-7, wwwYouTubeRow (a row
+// www.youtube.com is sent, under any name), so this is the same predicate
+// readFirefoxCookies judges an empty profile by, and the one
+// ErrNoCookiesInProfile's own wording claims.
 //
 // The raw CDP count cannot stand in for it. Judged raw, a profile is "empty"
 // only when the browser holds no cookie for ANY site — and both callers
@@ -744,7 +746,8 @@ func cdpCookieReadOutcome(read cdpCookieRead) error {
 //
 // Be precise about what that does and does not change, because the obvious
 // reading is wrong in one direction: an anonymous YouTube visit sets YSC and
-// VISITOR_INFO1_LIVE, both of which ARE on the keep list, so such a profile is
+// VISITOR_INFO1_LIVE, both of which ARE on the keep list (and since KA-7
+// every other "/" cookie youtube.com set is kept too), so such a profile is
 // not empty under either predicate. The rows that diverge are a browser used
 // only for other sites, and a signed-out Twitch profile — whose unique_id and
 // server_session_id are not in essentialTwitchCookies. The point of this
