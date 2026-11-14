@@ -5,7 +5,7 @@ description: Use when adding, modifying, or renaming a configuration setting —
 
 # Settings Workflow
 
-Adding a setting touches 7+ files across config, API, Web UI, and TUI. Missing any step means an incomplete or broken feature.
+Adding a setting touches 7+ files across config, API, Web UI, TUI, and the docs site. Missing any step means an incomplete or broken feature.
 
 ## Checklist
 
@@ -78,6 +78,9 @@ Some keys are deliberately `config.toml`-only: no Settings row in either UI, abs
 - Add every key the migration reads from the raw map to `legacyKeys` (same file). A key in the file that the struct does not decode and `legacyKeys` does not name is logged at boot as not recognised (`UnknownOnLoad`); `TestLegacyKeysAreNotReportedUnknown` holds every entry.
 - Removing a released key without a migration: add it to `legacyKeys` too (silent), or to `retiredKeys` when the operator should be told it is no longer used.
 
+### 10. Docs site reference
+Every key has one heading on the GitHub Pages site, under `docs-site/docs/configuration/`, written as its dotted path in backticks (`### `downloader.segment_workers``; arrays of tables take `[]`: `### `channels[].archive_slots``). Give its default, range, when it takes effect and where it sits in each UI, then what it does. `TestSettingsReferenceCoversEveryConfigKey` (`internal/docs/settings_reference_test.go`) fails when a key has no heading, a heading names a key that is gone, or a key is documented twice — so a rename moves the heading too. Format: `docs-site/CONTRIBUTING-DOCS.md`.
+
 ## Restart-Required Fields
 
 Both UIs check if changed fields require restart. The two lists are `RESTART_REQUIRED_FIELDS` (`web/public/modules/settings.js`) and `restartRequiredKeys` (`internal/tui/settings.go`), pinned equal by `TestRestartRequiredListsAgree`. Current list (17): `network.{port,network_access,https_enabled,tls_cert_path,tls_key_path}`, `paths.{database_path,log_file_path}`, `logs.{log_max_file_size,log_max_files}`, `cookies.{cookie_file,refresh_interval,auto_enabled,browser_profile_dir}`, `connectivity.probe_targets`, `memory.sidecar_hard_limit_mb`, `bgutils.use_sidecar`, `twitch.client_id`.
@@ -90,3 +93,4 @@ Both UIs check if changed fields require restart. The two lists are `RESTART_REQ
 - Not adding to `RESTART_REQUIRED_FIELDS` for fields that need restart
 - Missing default in `Defaults()` — zero value may cause unexpected behavior
 - Using raw `int` for a time-based field instead of `FlexDuration`
+- No heading for the key under `docs-site/docs/configuration/` — `go test ./internal/docs/` fails
