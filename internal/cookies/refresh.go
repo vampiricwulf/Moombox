@@ -118,8 +118,11 @@ const (
 	// The run counts verdicts at least livenessRunSpacing apart. The
 	// membership probe delivers one verdict per channel within seconds, so
 	// without the spacing one feed cycle on a three-channel install would
-	// complete the run by itself. With it the run takes three separate cycles.
-	livenessDeadRun    = 3
+	// complete the run by itself. With it the run takes six separate cycles, at
+	// least 25 minutes: a flicker at the 26% signed-out share seen in the
+	// October 2026 log completes three in a row by chance several times a day
+	// and six about once in a few months.
+	livenessDeadRun    = 6
 	livenessRunSpacing = 5 * time.Minute
 
 	// livenessFreshWindow bounds how old the last conclusive liveness
