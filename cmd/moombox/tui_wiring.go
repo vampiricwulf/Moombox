@@ -364,7 +364,7 @@ func (s *runState) runTUI() {
 		})
 		var out []tui.SetAsideArchiveEntry
 		for _, a := range worker.ScanSetAsideArchives(job, outputDir, template) {
-			out = append(out, tui.SetAsideArchiveEntry{Name: a.Name, Size: a.Size})
+			out = append(out, tui.SetAsideArchiveEntry{Name: a.Name, Path: a.Path, Size: a.Size})
 		}
 		return out
 	}
