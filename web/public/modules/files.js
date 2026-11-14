@@ -3,6 +3,18 @@
  */
 import { formatBytes, formatRelativeTime } from "./utils.js";
 
+/**
+ * How many history rows a DELETE /api/history/orphaned answer says went. The
+ * answer's `deleted` echoes the requested IDs; `removed` is the count, lower
+ * when an ID had no row or its video has a job by now. An older binary sends
+ * no `removed`, and its echo was the count.
+ * @param {{removed?: number, deleted?: string[]}|null|undefined} result
+ * @returns {number}
+ */
+function historyRemovedCount(result) {
+  return typeof result?.removed === "number" ? result.removed : (result?.deleted?.length ?? 0);
+}
+
 export class FilesController {
   constructor(app) {
     this.app = app;
@@ -297,8 +309,11 @@ export class FilesController {
       });
       if (!resp.ok) throw new Error("Failed to delete");
       const result = await resp.json();
-      if (result.deleted && result.deleted.length > 0) {
+      // `removed` is what was deleted; `deleted` only echoes the request.
+      if (historyRemovedCount(result) > 0) {
         this.app.showToast("History entry removed", "success");
+      } else {
+        this.app.showToast("History entry kept: the video has a job now", "primary");
       }
       await this.fetchOrphanedHistory();
     } catch (err) {
@@ -325,7 +340,7 @@ export class FilesController {
       });
       if (!resp.ok) throw new Error("Failed to delete");
       const result = await resp.json();
-      const n = result.deleted ? result.deleted.length : 0;
+      const n = historyRemovedCount(result);
       this.app.showToast(`Removed ${n} entr${n === 1 ? "y" : "ies"}`, "success");
       await this.fetchOrphanedHistory();
     } catch (err) {
