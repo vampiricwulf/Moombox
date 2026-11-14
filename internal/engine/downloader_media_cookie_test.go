@@ -134,6 +134,13 @@ var mediaPaths = []mediaPath{
 // writes (streamDirectOnce).
 func newMediaDownloader(t *testing.T, direct bool, logger DownloaderLogger) *SegmentDownloader {
 	t.Helper()
+	return newMediaDownloaderSharing(t, direct, logger, nil)
+}
+
+// newMediaDownloaderSharing is newMediaDownloader given the MediaCookies
+// option the worker's strategies set (nil: a state of its own).
+func newMediaDownloaderSharing(t *testing.T, direct bool, logger DownloaderLogger, state *MediaCookieState) *SegmentDownloader {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "media.mp4")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -145,6 +152,7 @@ func newMediaDownloader(t *testing.T, direct bool, logger DownloaderLogger) *Seg
 		IsDirectURL:  direct,
 		Logger:       logger,
 		CookieHeader: func() string { return sessionCookieSentinel },
+		MediaCookies: state,
 	})
 	d.outputFile = f
 	t.Cleanup(func() { d.outputFile.Close() })

@@ -17,9 +17,9 @@ func TestJobDownloadersShareTheMediaCookieState(t *testing.T) {
 	serveEngineInMemory(t, host)
 	logger := &secretLogger{}
 	shared := &MediaCookieState{}
-	video := newMediaDownloader(t, false, logger)
-	audio := newMediaDownloader(t, false, logger)
-	video.mediaCookies, audio.mediaCookies = shared, shared
+	// Through the option, as DownloadDash and DownloadManifestlessDash hand it.
+	video := newMediaDownloaderSharing(t, false, logger, shared)
+	audio := newMediaDownloaderSharing(t, false, logger, shared)
 
 	if _, _, err := video.fetchSegment(t.Context(), video.buildSegmentURL(1)); err != nil {
 		t.Fatalf("video fetchSegment: %v", err)
@@ -37,18 +37,5 @@ func TestJobDownloadersShareTheMediaCookieState(t *testing.T) {
 	}
 	if hits := logger.containing("refusedWithoutCookies1"); len(hits) != 1 {
 		t.Errorf("the Warn does not count the one request refused without cookies: %q", logger.containing("served when asked again"))
-	}
-}
-
-// The option is what the worker's strategies set; a downloader given none has
-// a state of its own.
-func TestMediaCookiesOptionIsTheDownloadersState(t *testing.T) {
-	shared := &MediaCookieState{}
-	d := NewSegmentDownloader(DownloaderOptions{BaseURL: mediaBase, OutputFile: "x", MediaCookies: shared})
-	if d.mediaCookies != shared {
-		t.Error("the downloader did not take the state its options named")
-	}
-	if own := NewSegmentDownloader(DownloaderOptions{BaseURL: mediaBase, OutputFile: "x"}); own.mediaCookies == nil || own.mediaCookies == shared {
-		t.Error("a downloader given no state must have one of its own")
 	}
 }
