@@ -1,6 +1,10 @@
 package worker
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
+)
 
 // runRecord is a job run's record of what holds for the whole run however
 // many times its strategies are set up again: every mid-stream refresh of a
@@ -36,6 +40,22 @@ type runRecord struct {
 	// no switch. The switch back gives that one use back (markSwitchedBack,
 	// owner decision PE-3).
 	fallbackKey string
+	// media is what the run has learned about whether its media hosts want
+	// the session cookies (mediaCookieState; owner ruling KA-6): one for
+	// the run, so a refresh or a part split, which builds new downloaders,
+	// does not start again with the cookies withheld, pay one more refused
+	// request and log the Warn again.
+	media engine.MediaCookieState
+}
+
+// mediaCookieState is the state every downloader of the run shares
+// (engine.DownloaderOptions.MediaCookies). A nil record gives each setup one
+// of its own, shared by that setup's video and audio downloader only.
+func (r *runRecord) mediaCookieState() *engine.MediaCookieState {
+	if r == nil {
+		return &engine.MediaCookieState{}
+	}
+	return &r.media
 }
 
 // switchBackKey is the run's one switch back to the from-start path

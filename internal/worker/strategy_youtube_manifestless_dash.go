@@ -349,9 +349,10 @@ func DownloadManifestlessDash(
 	// it from the media hosts and sends it only after one refused a request for
 	// want of it (engine.DownloaderOptions.CookieHeader).
 	var cookieHeader, mediaCookieHeader func() string
-	// One for the job: the video and audio downloaders learn together whether
-	// the media hosts want the cookies.
-	mediaCookies := &engine.MediaCookieState{}
+	// One for the run (runRecord.mediaCookieState): the video and audio
+	// downloaders learn together whether the media hosts want the cookies,
+	// and the downloaders a refresh or a part split builds already know.
+	mediaCookies := job.Run.mediaCookieState()
 	if job.YT != nil {
 		cookieHeader = job.YT.GetCookieHeader
 		mediaCookieHeader = job.YT.MediaCookieHeader
