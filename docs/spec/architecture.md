@@ -239,7 +239,7 @@ After all services are created, `main.go` wires the event callbacks:
 - `db.OnJobAdded` / `db.OnTrimsChanged` -> `wsHub.BroadcastJobUpdate()` for the one job; `db.OnJobDeleted` -> `onJobDeleted` (clear the job's log buffer + `BroadcastJobDeleted`)
 - `db.OnJobsChange` (the two bulk writers only) -> `wsHub.BroadcastJobsUpdate()` (full job list) and the notifier's `RetainJobs`; per-job log routing is left alone (the channel prune drops its deleted rows' logs itself, under the write lock)
 - `log.SetLineRouter(db.RouteLogToJobs)` (per-job log buffers) — synchronous, inside every log call, so a line logged before a status write is routed before the write can untrack its job — and `log.SubscribeLines()` -> `wsHub.BroadcastLog(text, seq)` (`wireLogForwarding`), each frame numbered as the logger's ring numbered the line
-- `cookieRefresh.OnRecoveryNeeded` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown)
+- `cookieRefresh.OnRecoveryNeeded(platform, cause)` -> `runCookieRecovery()` in a background goroutine: `autoCookieSvc.RefreshCookiesDetailed()`, then notifies on the triggering platform's own verdict (OK / Failed / Unknown). The cause says whether a failed API check or a signed-out page asked; only the first may log that the recovery succeeded
 
 All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer func() { if r := recover() }()` for panic isolation.
 
