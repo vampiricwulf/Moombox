@@ -166,6 +166,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			}
 		}
 
+		// The session and token this browser held are gone, and a socket is
+		// checked only when it opens: another tab's would stay open on them.
+		// Other browsers reconnect on their own credentials.
+		deps.closeAuthenticatedSockets()
+
 		clearSessionCookie(rw, req)
 		clearClientCookie(rw, req)
 		jsonResponse(rw, map[string]any{"success": true})

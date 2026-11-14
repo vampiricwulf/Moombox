@@ -387,6 +387,12 @@ func TestAuthLogoutInvalidatesSession(t *testing.T) {
 	if !hasClear {
 		t.Error("expected logout to clear the moombox_session cookie")
 	}
+
+	// Another tab of this browser holds a socket opened on the session that
+	// just ended. Mutant: drop closeAuthenticatedSockets from the handler.
+	if f.socketCloses != 1 {
+		t.Errorf("authenticated sockets closed %d times, want 1", f.socketCloses)
+	}
 }
 
 // --- /api/auth/set-password ---
