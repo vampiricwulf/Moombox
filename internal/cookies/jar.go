@@ -265,6 +265,31 @@ func keepsYouTubeRow(name, domain, path string) bool {
 	return namedYouTubeRow(name, domain) || wwwYouTubeRow(name, domain, path)
 }
 
+// youTubeRowRank orders two rows of one name inside the YouTube jar ahead of
+// compareCookieDomains; the lower rank holds the jar's one slot for the name.
+//
+//   - 0, a row kept by name (namedYouTubeRow). A row kept only for its scope
+//     never takes the slot from one: the jar sent the named row before owner
+//     ruling KA-7, and the ruling lets nothing it sent stop being sent. The
+//     case is a google.com auth name outside the essential list (the
+//     __Secure-1P and __Secure-3P families) that a youtube.com row also
+//     carries. Ranked by domain alone the youtube.com row won the slot, left
+//     the media header, and left every header once it expired.
+//   - 1, a row kept only for its scope whose expiry has not passed.
+//   - 2, one whose expiry has passed. The header never sends it, so it must
+//     not hold the slot against a live row of the name on another host
+//     (.youtube.com expired beside www.youtube.com live): yt-dlp sends the
+//     live one.
+func youTubeRowRank(name, domain string, expiry, now int64) int {
+	switch {
+	case namedYouTubeRow(name, domain):
+		return 0
+	case !(cookieEntry{expiry: expiry}).expiredAt(now):
+		return 1
+	}
+	return 2
+}
+
 // cookieNameToken reports whether name is an RFC 6265 cookie-name (an RFC
 // 7230 token): visible ASCII with no separator. A name kept only because of
 // where its row is scoped (wwwYouTubeRow) is written into the Cookie header
@@ -630,6 +655,7 @@ func (j *CookieJar) parseRows(data []byte, filePath string) int {
 
 	youtube := make(map[string]cookieEntry)
 	twitch := make(map[string]cookieEntry)
+	now := time.Now().Unix()
 
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -699,6 +725,7 @@ func (j *CookieJar) parseRows(data []byte, filePath string) int {
 		// Suffix-anchored matchers throughout, so a hand-edited or malicious row
 		// on ".fakegoogle.com.evil.tld" is not treated as google.com.
 		var dest map[string]cookieEntry
+		isYouTube := false
 		switch {
 		case isYouTubeDomain(domain) || isGoogleDomain(domain):
 			// A row www.youtube.com is sent is kept under any name (owner
@@ -710,6 +737,7 @@ func (j *CookieJar) parseRows(data []byte, filePath string) int {
 				continue
 			}
 			dest = youtube
+			isYouTube = true
 		case isTwitchDomain(domain):
 			if !essentialTwitchCookies[name] {
 				continue
@@ -731,8 +759,23 @@ func (j *CookieJar) parseRows(data []byte, filePath string) int {
 		// duplicates: those keep today's last-wins behaviour. The property this
 		// buys is permutation-invariance of a SET of rows, not a reordering of
 		// duplicate-identical ones.
-		if existing, exists := dest[name]; exists && compareCookieDomains(existing.domain, domain) < 0 {
-			continue
+		//
+		// In the YouTube jar a row kept by NAME is settled ahead of that
+		// order against a row kept only for its scope, and of two rows kept
+		// only for their scope a live one against an expired one
+		// (youTubeRowRank). The rank is the first key of the same total
+		// order, so a set of rows still loads the same under any permutation.
+		if existing, exists := dest[name]; exists {
+			order := 0
+			if isYouTube {
+				order = youTubeRowRank(name, existing.domain, existing.expiry, now) - youTubeRowRank(name, domain, expiry, now)
+			}
+			if order == 0 {
+				order = compareCookieDomains(existing.domain, domain)
+			}
+			if order < 0 {
+				continue
+			}
 		}
 
 		dest[name] = cookieEntry{value: value, domain: domain, expiry: expiry}

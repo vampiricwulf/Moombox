@@ -234,3 +234,82 @@ func TestPlainSIDCCIsRenewedFromAReply(t *testing.T) {
 		})
 	}
 }
+
+// A row kept only for its scope never takes the jar's slot from a row kept
+// by name: a google.com auth row outside the essential list was sent before
+// KA-7 and is still sent, in both headers, whatever youtube.com row shares
+// its name and in whichever order the file holds them. Of two rows kept only
+// for their scope, an expired one does not hold the slot against a live one.
+//
+// Mutants: youTubeRowRank returning one rank for every row (the youtube.com
+// twin wins on its domain: the named cases send nothing or the twin's value,
+// and the expired .youtube.com row shadows the live www one); parseRows
+// reading the rank after compareCookieDomains (the same).
+func TestAScopeKeptRowNeverShadowsANamedRow(t *testing.T) {
+	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	sapisid := cookieRow(".youtube.com", "0", "SAPISID", "s")
+	for _, tc := range []struct {
+		name      string
+		rows      []string
+		want      string
+		wantMedia string
+	}{
+		{"an expired youtube.com twin of a google.com auth row", []string{
+			cookieRow(".google.com", "0", "__Secure-1PFOO", "google"),
+			cookieRow(".youtube.com", "1000", "__Secure-1PFOO", "twin"),
+		}, "SAPISID=s; __Secure-1PFOO=google", "SAPISID=s; __Secure-1PFOO=google"},
+		{"a live youtube.com twin of a google.com auth row", []string{
+			cookieRow(".google.com", "0", "__Secure-3PFOO", "google"),
+			cookieRow(".youtube.com", future, "__Secure-3PFOO", "twin"),
+		}, "SAPISID=s; __Secure-3PFOO=google", "SAPISID=s; __Secure-3PFOO=google"},
+		{"an expired .youtube.com row beside a live www.youtube.com one", []string{
+			cookieRow(".youtube.com", "1000", "SIDCC", "stale"),
+			cookieRow("www.youtube.com", future, "SIDCC", "live"),
+		}, "SAPISID=s; SIDCC=live", "SAPISID=s"},
+	} {
+		for _, order := range []string{"as listed", "reversed"} {
+			t.Run(tc.name+", "+order, func(t *testing.T) {
+				rows := []string{sapisid, tc.rows[0], tc.rows[1]}
+				if order == "reversed" {
+					rows = []string{tc.rows[1], tc.rows[0], sapisid}
+				}
+				jar := loadRows(t, rows)
+				if got := jar.GetCookieHeader(); got != tc.want {
+					t.Errorf("the header does not carry the row the rule keeps")
+				}
+				if got := jar.GetYouTubeMediaCookieHeader(); got != tc.wantMedia {
+					t.Errorf("the media header does not carry the row the rule keeps")
+				}
+			})
+		}
+	}
+}
+
+// The browser export writes a youtube.com row kept only for its scope beside
+// a row of another platform, or a google.com auth row, that has its name; it
+// never takes that row's place and is never dropped for it.
+//
+// Mutants: deduplicateAndFormat keyed by bare name again (one row of each
+// pair is lost); the scope-kept row sharing the named rows' platform slot
+// (the google.com auth row is evicted).
+func TestBrowserExportKeepsARowAScopeKeptRowSharesANameWith(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other extractedCookie
+	}{
+		{"a Twitch credential", extractedCookie{domain: ".twitch.tv", path: "/", name: "auth-token", value: "twitch"}},
+		{"a google.com auth row", extractedCookie{domain: ".google.com", path: "/", name: "__Secure-1PSIDRTS", value: "google"}},
+	} {
+		scoped := extractedCookie{domain: ".youtube.com", path: "/", name: tc.other.name, value: "youtube"}
+		for _, in := range [][]extractedCookie{{tc.other, scoped}, {scoped, tc.other}} {
+			t.Run(tc.name+", "+in[0].domain+" first", func(t *testing.T) {
+				file := strings.Join(deduplicateAndFormat(in), "\n") + "\n"
+				for _, c := range in {
+					if !strings.Contains(file, c.domain+"\tTRUE\t/\tFALSE\t0\t"+c.name+"\t"+c.value+"\n") {
+						t.Errorf("the %s row is not in the export", c.domain)
+					}
+				}
+			})
+		}
+	}
+}
