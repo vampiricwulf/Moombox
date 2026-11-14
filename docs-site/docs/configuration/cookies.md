@@ -80,7 +80,8 @@ cookie_file = "D:/Moombox/private/cookies.txt"
 |---|---|---|---|
 | `false` | `true`, `false` | The refresh timer: restart. The automatic attempt after a lost login, and what the manual refresh does: as soon as you save. | Dashboard: Settings → Cookies → **Enable the headless-browser refresh timer**. TUI: Settings → Cookies → **Auto-cookie**. |
 
-Turns on two automatic uses of a browser:
+Turns on two automatic uses of a browser (the daily visit below is part of
+the timer):
 
 1. **The refresh timer.** Every
    [`refresh_interval`](#cookiesrefresh_interval), Moombox re-opens its own
@@ -92,9 +93,18 @@ Turns on two automatic uses of a browser:
    a restart). On a host with no browser, or with
    [`acquisition`](#cookiesacquisition) = `profile`, a tick reads the profile
    instead, and only while `cookies.txt` is missing or holds no cookie rows.
-2. **One automatic attempt after a lost login.** When Moombox finds that a
-   platform is no longer signed in, or a job stops in `COOKIES?`, it runs one
-   refresh to try to repair it.
+   The timer also runs a pass **at least once a day**, with or without an
+   active job, when nothing else has renewed the cookies for 24 hours, so an
+   idle install still visits the sites daily. A daily visit that renewed
+   nothing is tried again after 30 minutes, then less often, up to once a
+   day; it never runs while Moombox is offline or in the first five minutes
+   after start.
+2. **Automatic attempts after a lost login.** When Moombox finds that a
+   platform is no longer signed in, or a job stops in `COOKIES?`, it runs a
+   refresh to try to repair it. A parked job is retried this way up to 3
+   times; after that it stays parked, with an error saying the cookies are
+   not the cause, until you resume it or a day has passed since the last
+   retry. See [Cookies and sign-in](../guide/cookies.md#the-cookies-status).
 
 With it off, nothing automatic launches a browser. Moombox flags the platform
 for re-login and sends a "Cookie Re-Authentication Required" notification
@@ -128,7 +138,10 @@ auto_enabled = true
 
 How often the headless-browser refresh timer runs, in minutes. It only
 matters when [`auto_enabled`](#cookiesauto_enabled) is on. It does not change
-the in-process check, which always runs every 30 minutes.
+the in-process check, which always runs every 30 minutes. A tick runs only
+while a job is recording; with none, the once-a-day visit described under
+`auto_enabled` covers it, and this setting does not change how often that
+visit runs.
 
 Each timer pass starts a browser in the background, which costs a few seconds
 of CPU and some memory, so there is little reason to go below an hour. YouTube

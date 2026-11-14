@@ -249,6 +249,7 @@ The cookie indicators appear only for the platforms enabled in
 | Indicator | Meaning | What to do |
 |---|---|---|
 | green `YT` / `TW` | Cookies are configured and authenticate. | Nothing. |
+| orange `YT~` / `TW~` (`YT~ pages flicker, retry after 14:05` on a wide bar) | Flickering: the cookies authenticate, but a page came back signed out in the last 24 hours. | Nothing; Moombox retries by itself at the time shown. `R C` spells it out at any width. |
 | yellow `YT` | No YouTube cookies configured. | Optional; see [Cookies](cookies.md). |
 | dim `TW` | No Twitch cookies configured (or no check yet). | Optional. |
 | orange `YT: Unknown` | The last check could not reach a conclusion (network error, unexpected answer). | Usually nothing; it is re-checked. |
@@ -258,7 +259,7 @@ The cookie indicators appear only for the platforms enabled in
 
 On a narrow terminal the bar drops detail step by step: labels shorten
 (`D:45% 120G`, `▶3`, `3 sel`, `BF:videos p4`), chord names go, and finally only
-alerts remain (`OFF`, `POT`, `YT!`, `YT?`, `D:96%`). The alerts are the last
+alerts remain (`OFF`, `POT`, `YT!`, `YT?`, `YT~`, `D:96%`). The alerts are the last
 thing removed.
 
 ## Feedback line
