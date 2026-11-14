@@ -322,6 +322,8 @@ still staged. See [Installation](../getting-started/installation.md).
 - **Did a *Channel Not Responding* notification arrive?** It means every
   monitor covering that channel failed repeatedly (*it may be renamed, banned,
   or misconfigured, and its streams are being missed*). Check the channel ID.
+  If the alert says the feed keeps answering 404, that is common when YouTube
+  is busy and usually clears by itself; check the ID only if it lasts.
   A *Channel Responding Again* follows when it recovers.
 - **Was Moombox offline?** See [Internet outages](#internet-outages) below.
 

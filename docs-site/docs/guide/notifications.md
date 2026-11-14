@@ -145,7 +145,7 @@ connection down it could not be delivered.
 | `update_applied` (Update Applied) | *Update Applied* | Moombox restarted on a new version; says whether the web dashboard came back. |
 | `update_failed` (Update Failed) | *Previous Update Failed* | A failed self-update was found at startup and needs your attention. |
 | `crash_recovered` (Crash Recovered) | *Recovered From Crash* | Moombox crashed and was restarted automatically. Names the cause from the crash output where there is one, and the file that kept it. |
-| `channel_unhealthy` (Channel Unhealthy) | *Channel Not Responding* | A channel failed 20 checks in a row on every monitor watching it — it may be renamed, banned or misconfigured, and its streams are being missed. |
+| `channel_unhealthy` (Channel Unhealthy) | *Channel Not Responding* | A channel failed 20 checks in a row on every monitor watching it — it may be renamed, banned or misconfigured, and its streams are being missed. When the cause is the YouTube feed answering 404, the alert says so: that is common when YouTube is busy and usually clears by itself. |
 | `channel_healthy` (Channel Recovered) | *Channel Responding Again* | That channel answers again. |
 | `sidecar_down` (Sidecar Down) | *BotGuard Sidecar Down* | The BotGuard sidecar has been unhealthy for 60 seconds and could not be restarted. Until it returns, YouTube downloads lose PO tokens and some signature solving. |
 | `sidecar_restored` (Sidecar Restored) | *BotGuard Sidecar Restored* | The sidecar is healthy again. |

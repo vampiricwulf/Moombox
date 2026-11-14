@@ -423,13 +423,16 @@ twitch_gap_fill_ad_breaks = true
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `false` | `true` or `false` | Next hourly backlog run | Dashboard: Add/Edit Channel → **Queue past VODs, highlights & uploads (Twitch only)** (badge **Past VODs**). TUI: channel editor → **Queue past VODs (Twitch only)**. |
+| `false` | `true` or `false` | On save (within 5 minutes if a run just finished; a save in the first two minutes after start waits for the first run), then hourly | Dashboard: Add/Edit Channel → **Queue past VODs, highlights & uploads (Twitch only)** (badge **Past VODs**). TUI: channel editor → **Queue past VODs (Twitch only)**. |
 
 Archive the channel's past videos, not just its live streams. Once an hour
 (the first run is two minutes after Moombox starts) Moombox lists the
 channel's newest 100 videos of every type (past broadcasts, highlights and
 uploads) and queues each one it has not archived before as a `Queued`
-backlog job, paced by [archive slots](#channelsarchive_slots).
+backlog job, paced by [archive slots](#channelsarchive_slots). Saving a
+channel also starts a run at once, so a channel you just switched this on for
+is listed without waiting for the hour, and a run that came due while Moombox
+was offline happens when the connection returns.
 
 Skipped:
 
