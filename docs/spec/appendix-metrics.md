@@ -2,7 +2,7 @@
 
 > **Last verified:** 2026-11-12
 >
-> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, and on 2026-11-09 `internal/jobverbs` and `internal/jobstate`, each with its row and its share of the Totals and of the Test Baseline's package count. Every row and the Totals were regenerated again on 2026-11-09, and again on 2026-11-10 after the improvement sweep, whose file splits account for most of the new source files (`internal/worker` 79 to 83, three of them `worker_verbs.go`, `worker_failure.go` and `worker_staging_claims.go`; `internal/tui` 49 to 70; `cmd/moombox` 36 to 39). On 2026-11-12 `internal/keepawake` was added with its row, and the Totals, the Test Baseline's package count and the rows of the packages that arc touched (`worker`, `monitor`, `config`, `logger`, `connectivity`, `disk`, `keepawake`) were regenerated; the other rows are as of 2026-11-10.
+> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, and on 2026-11-09 `internal/jobverbs` and `internal/jobstate`, each with its row and its share of the Totals and of the Test Baseline's package count. Every row and the Totals were regenerated again on 2026-11-09, and again on 2026-11-10 after the improvement sweep, whose file splits account for most of the new source files (`internal/worker` 79 to 83, three of them `worker_verbs.go`, `worker_failure.go` and `worker_staging_claims.go`; `internal/tui` 49 to 70; `cmd/moombox` 36 to 39). On 2026-11-12 `internal/keepawake` was added with its row, and the Totals, the Test Baseline's package count and the rows of the packages that arc touched (`worker`, `monitor`, `config`, `logger`, `connectivity`, `disk`, `keepawake`) were regenerated; the other rows are as of 2026-11-10. On 2026-11-14 the Key Dependencies versions were set from `go.mod`.
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -34,13 +34,13 @@
 | Library | Version | Purpose |
 |---------|---------|---------|
 | go-chi/chi/v5 | v5.5.0 | HTTP router |
-| charm.land/bubbletea/v2 | v2.1.0 | TUI framework |
+| charm.land/bubbletea/v2 | v2.1.1 | TUI framework |
 | charm.land/bubbles/v2 | v2.2.1 | TUI components |
 | charm.land/huh/v2 | v2.0.3 | TUI forms |
-| charm.land/lipgloss/v2 | v2.0.6 | TUI styling |
+| charm.land/lipgloss/v2 | v2.1.0 | TUI styling |
 | charm.land/glamour/v2 | v2.0.1 | Markdown rendering (release notes) |
 | dop251/goja | v0.0.0-20260915 | JS engine |
-| modernc.org/sqlite | v1.61.0 | SQLite driver |
+| modernc.org/sqlite | v1.62.0 | SQLite driver |
 | coder/websocket | v1.8.15 | WebSocket (was nhooyr.io/websocket — upstream moved) |
 | BurntSushi/toml | v1.6.0 | Config parsing |
 
