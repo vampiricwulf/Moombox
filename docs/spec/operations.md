@@ -330,6 +330,21 @@ Six steps in four groups, each run even when an earlier one failed:
 
 Deliberately not a step in ci.yml: an advisory is published on the database's schedule, not on a commit, and would turn an unrelated pull request red. A failed scheduled run is emailed by GitHub to whoever last changed the workflow's schedule.
 
+### Docs Site Workflow
+
+**File:** `.github/workflows/docs-pages.yml`
+**Trigger:** push to main and pull request, each only when `docs-site/**` or the workflow file changed, plus `workflow_dispatch`
+**Permissions:** `contents: read` (the deploy job adds `pages: write` and `id-token: write`)
+
+Builds the user documentation in `docs-site/` (MkDocs Material, pinned in `docs-site/requirements.txt`) with `mkdocs build --strict`, so a broken internal link, a bad anchor or a page missing from the nav fails the run.
+
+- **Pull request:** build only. Nothing is uploaded or deployed.
+- **Push to main, or a manual run from main:** build, upload the Pages artifact, deploy to GitHub Pages.
+
+One-time repository setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
+
+The settings reference under `docs-site/docs/configuration/` is also checked by the Go suite: `internal/docs/settings_reference_test.go` fails when a `config.toml` key has no heading there. `.github/dependabot.yml` has a weekly `pip` entry for `/docs-site`.
+
 ---
 
 ## Release Process
@@ -1014,7 +1029,7 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 
 **Docker Image**
 
-- The guidance is `/data/README-docker.txt`, not comments in `config.toml`: The seed and the guidance are covered by `internal/config/docker_seed_test.go` (the seed through `Load`, then the first boot's saves) and `internal/config/docker_entrypoint_test.go` (the entrypoint itself, run under `sh` with a stub binary); nothing in CI builds or starts the image.
+- The guidance is `/data/README-docker.txt`, not comments in `config.toml`: The seed and the guidance are covered by `internal/config/docker_seed_test.go` (the seed through `Load`, then the first boot's saves) and `internal/config/docker_entrypoint_test.go` (the entrypoint itself, run under `sh` with a stub binary); `ci.yml` does not build or start the image, and the release workflow's Docker job starts it once (see Build-and-start check above, owner ruling R2-O3).
 
 **Browser Cookie Acquisition (Platform Differences)**
 
