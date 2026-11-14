@@ -747,7 +747,12 @@ func (j *CookieJar) scheduleFlushLocked() {
 	if !r.lastFlush.IsZero() {
 		wait = max(renewalFlushEvery-time.Since(r.lastFlush), 0)
 	}
-	r.timer = time.AfterFunc(wait, func() {
+	// A timer that Stop was too late for still runs its func, after whoever
+	// stopped it lets go of r.mu. By then r.timer is nil or a newer timer, and
+	// the late func must touch neither: it would clear the newer timer and
+	// write inside the minute. So each func acts only while it is r.timer.
+	var own *time.Timer
+	own = time.AfterFunc(wait, func() {
 		defer func() {
 			if rec := recover(); rec != nil {
 				r.mu.Lock()
@@ -758,11 +763,15 @@ func (j *CookieJar) scheduleFlushLocked() {
 		}()
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if r.timer != own {
+			return
+		}
 		r.timer = nil
 		if r.held == 0 {
 			j.flushRenewalsLocked()
 		}
 	})
+	r.timer = own
 }
 
 // flushRenewalsLocked writes the waiting renewals into cookies.txt through

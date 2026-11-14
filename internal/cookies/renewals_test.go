@@ -544,3 +544,45 @@ func TestWaitingRenewalDoesNotOutliveADeletedCookieFile(t *testing.T) {
 		}
 	}
 }
+
+// A flush timer that has already fired when it is stopped still runs its
+// func once the lock is free. It must leave the timer armed after it alone
+// and write nothing: the next write is that newer timer's, a minute on.
+func TestALateFlushTimerLeavesTheNextOneAlone(t *testing.T) {
+	jar, path, _ := renewalJar(t)
+	offer := func(v string) {
+		jar.OfferYouTubeReply(replyTo(t, "https://www.youtube.com/x", jar.GetCookieHeader(), 200,
+			"__Secure-1PSIDCC="+v+"; Domain=.youtube.com; Path=/; Max-Age=31536000"))
+	}
+	offer("sidcc-first")
+	jar.FlushRenewals()
+	offer("sidcc-second") // waiting, its timer a minute away
+
+	r := &jar.renew
+	r.mu.Lock()
+	r.timer.Stop()
+	r.timer = nil
+	r.lastFlush = time.Time{}
+	jar.scheduleFlushLocked() // due now: it fires and its func waits for r.mu
+	time.Sleep(200 * time.Millisecond)
+	late := r.timer.Stop()
+	r.timer = nil
+	r.lastFlush = time.Now()
+	jar.scheduleFlushLocked()
+	next := r.timer
+	r.mu.Unlock()
+	if late {
+		t.Skip("the due timer had not fired after 200 ms, so there is no late func to test")
+	}
+
+	time.Sleep(200 * time.Millisecond) // the late func runs now
+	r.mu.Lock()
+	armed := r.timer
+	r.mu.Unlock()
+	if armed != next {
+		t.Errorf("the late timer func replaced or cleared the timer armed after it")
+	}
+	if got := fileText(t, path); strings.Contains(got, "sidcc-second") {
+		t.Errorf("the late timer func wrote cookies.txt inside the minute:\n%s", got)
+	}
+}
