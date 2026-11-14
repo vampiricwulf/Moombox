@@ -370,10 +370,12 @@ func (s *AutoCookieService) recordCensus(passStart time.Time, netscape string) {
 // nextVisitDue is when the daily visit next runs, from the schedule the loop
 // last published: the later of the start hold, 24 h (plus jitter) after the
 // last renewing pass, and a running retry wait. A time in the past means the
-// next check runs it. ok is false when no loop is running. A last pass
-// stamped in the future counts as never, as it does for dailyVisitOverdue.
+// next check runs it. ok is false when no loop is running, and when a visit
+// asked for now would launch nothing (dailyVisit.noSource): the status must
+// not promise a visit that will not happen. A last pass stamped in the future
+// counts as never, as it does for dailyVisitOverdue.
 func nextVisitDue(now time.Time, last *time.Time, v dailyVisit) (due time.Time, ok bool) {
-	if v.started.IsZero() {
+	if v.started.IsZero() || v.noSource {
 		return time.Time{}, false
 	}
 	due = v.started.Add(dailyVisitStartHold)

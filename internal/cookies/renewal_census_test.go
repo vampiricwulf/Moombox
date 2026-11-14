@@ -421,7 +421,7 @@ func TestRenewalLineParity(t *testing.T) {
 
 // TestNextVisitDue: the status's next daily visit is the later of the start
 // hold, a day (plus jitter) after the last renewing pass and a running retry
-// wait; nothing while no loop runs; a last pass stamped in the future counts
+// wait; nothing while no loop runs or a visit would launch nothing; a last pass stamped in the future counts
 // as none, as it does for the visit itself.
 func TestNextVisitDue(t *testing.T) {
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
@@ -431,6 +431,9 @@ func TestNextVisitDue(t *testing.T) {
 
 	if _, ok := nextVisitDue(now, at(-time.Hour), dailyVisit{}); ok {
 		t.Error("no loop, no due time")
+	}
+	if _, ok := nextVisitDue(now, at(-time.Hour), dailyVisit{started: started, noSource: true}); ok {
+		t.Error("a visit that would launch nothing has no due time")
 	}
 	cases := []struct {
 		name string

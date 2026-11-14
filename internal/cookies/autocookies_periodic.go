@@ -311,6 +311,8 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 		defer ticker.Stop()
 
 		s.visit = dailyVisit{started: time.Now(), jitter: rand.N(dailyVisitJitterMax)}
+		s.visit.sourceAsOf = s.lastRefreshTime()
+		_, s.visit.noSource = s.periodicPassStandsDown()
 		s.publishVisit()
 		daily := time.NewTicker(dailyVisitCheckEvery)
 		defer daily.Stop()
@@ -353,14 +355,20 @@ const (
 	passDailyVisit
 )
 
-// periodicTick is one pass of StartPeriodicRefresh's loop, for either
-// schedule. It reports whether a refresh pass ran; false means a guard stood
-// it down or the pass itself declined.
-func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Duration, kind periodicPassKind) bool {
+// The reasons periodicPassStandsDown gives that are not an import verdict.
+const (
+	standDownNone      = ""
+	standDownNoProfile = "no browser profile directory yet"
+)
+
+// periodicPassStandsDown reports whether a pass of the loop asked for now
+// would be stood down before it launched or read anything, and why: no
+// managed profile, or the import guard's verdict. It is the one statement of
+// those two guards, for periodicTick and for the status, which names no next
+// daily visit while one of them stands.
+func (s *AutoCookieService) periodicPassStandsDown() (why string, stood bool) {
 	if !s.periodicRefreshHasSource() {
-		s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
-			"profile_dir", s.profileDir)
-		return false
+		return standDownNoProfile, true
 	}
 	// THE RULE, at its second automatic site: a browser-free import
 	// runs only when there is no cookies.txt to lose.
@@ -384,13 +392,32 @@ func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Dura
 	// and "no browser" three lines down.
 	if s.refreshBrowser(gateExempt) == nil || s.resolvedAcquisition() == AcquisitionProfile {
 		if v := s.automaticImportGuard(); v != autoImportOK {
-			s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
-				"may only run when there is nothing to lose", "reason", v.String())
-			return false
+			return v.String(), true
 		}
 	}
+	return standDownNone, false
+}
+
+// periodicTick is one pass of StartPeriodicRefresh's loop, for either
+// schedule. It reports whether a refresh pass ran; false means a guard stood
+// it down or the pass itself declined.
+func (s *AutoCookieService) periodicTick(ctx context.Context, interval time.Duration, kind periodicPassKind) bool {
+	why, stood := s.periodicPassStandsDown()
+	// This is the loop's goroutine, the only writer of s.visit.
+	s.visit.noSource = stood
+	switch why {
+	case standDownNone:
+	case standDownNoProfile:
+		s.logger.Debug("periodic auto-cookie refresh skipped — no browser profile directory yet",
+			"profile_dir", s.profileDir)
+		return false
+	default:
+		s.logger.Debug("periodic auto-cookie refresh skipped — a browser-free import "+
+			"may only run when there is nothing to lose", "reason", why)
+		return false
+	}
 	if kind == passDailyVisit {
-		s.logger.Info("daily cookie visit — no refresh has renewed the cookies for a day, " +
+		s.logger.Info("daily cookie visit — no refresh has renewed the cookies in the last day, " +
 			"so one runs now whether or not a job is active")
 	} else {
 		if s.shouldSkipPeriodicRefresh(interval) {

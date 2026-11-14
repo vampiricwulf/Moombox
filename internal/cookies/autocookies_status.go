@@ -46,7 +46,9 @@ type AutoCookieStatus struct {
 	// RenewalCensus is what the last browser pass renewed, by group.
 	RenewalCensus *RenewalCensus `json:"renewalCensus,omitempty"`
 	// NextVisitDue is when the daily visit next runs when nothing renews the
-	// cookies sooner. Absent while the periodic refresh is not running.
+	// cookies sooner. Absent while the periodic refresh is not running, and
+	// while a visit would launch nothing (no managed profile yet, or a
+	// browser-free pass the import guard stands down).
 	NextVisitDue *time.Time `json:"nextVisitDue,omitempty"`
 }
 

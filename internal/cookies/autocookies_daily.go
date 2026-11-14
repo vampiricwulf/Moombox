@@ -55,6 +55,23 @@ type dailyVisit struct {
 	backoff time.Duration
 	// offlineNoted keeps the "waiting, offline" line to one per offline spell.
 	offlineNoted bool
+	// noSource says a visit asked for now would launch nothing: there is no
+	// managed profile yet, or the pass would be a browser-free import over a
+	// cookies.txt that has something to lose (periodicPassStandsDown). The
+	// status then names no next visit. The loop still asks on schedule,
+	// because either can change at runtime. Worked out when the loop starts,
+	// whenever lastRefresh has moved, and by each pass that is asked for.
+	noSource bool
+	// sourceAsOf is the lastRefresh noSource was last worked out against.
+	sourceAsOf *time.Time
+}
+
+// sameTime reports whether two optional times are both absent or equal.
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
 }
 
 // dailyVisitOverdue reports whether the last renewing pass is 24 h (plus this
@@ -116,6 +133,13 @@ func (s *AutoCookieService) dailyVisitStep(ctx context.Context, now func() time.
 	v := &s.visit
 	t := now()
 	last := s.lastRefreshTime()
+	// A refresh that renewed the cookies (an import, a setup) may have
+	// changed whether a visit has anything to launch. Asked only then, so a
+	// minute in which nothing moved still costs no stat.
+	if !sameTime(v.sourceAsOf, last) {
+		v.sourceAsOf = last
+		_, v.noSource = s.periodicPassStandsDown()
+	}
 	if !dailyVisitOverdue(t, last, v.jitter) {
 		// Something renewed the cookies: a tick, a manual refresh, a setup or
 		// a recovery. Whatever retry wait was running is over.

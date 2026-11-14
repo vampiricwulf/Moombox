@@ -225,6 +225,7 @@ func TestDailyVisitNotDueCostsNothing(t *testing.T) {
 //     runs and the second assertion fails.
 //   - Once cookies.txt exists, a browser-free daily visit stands down on the
 //     import guard exactly as a tick does: nothing to lose is still the rule.
+//     The status then names no next visit.
 //
 // It is also the leak test for the visit's log lines: no cookie value from
 // the profile may appear in anything logged.
@@ -239,6 +240,13 @@ func TestDailyVisitPassIgnoresTheIdleSkipAndKeepsTheImportGuard(t *testing.T) {
 	s.VerifyYouTubeAuth = func(context.Context) (bool, error) { verified.Add(1); return true, nil }
 	s.VerifyTwitchAuth = func(context.Context) (bool, error) { return false, nil }
 	s.HasActiveJobs = func() bool { return false }
+	// A loop that has been up for an hour, so the status has a schedule to
+	// read a next visit from.
+	s.visit = dailyVisit{started: time.Now().Add(-time.Hour)}
+	nextVisit := func() *time.Time {
+		s.publishVisit()
+		return s.GetStatus().NextVisitDue
+	}
 
 	if ran := s.periodicTick(t.Context(), 6*time.Hour, passTick); ran || verified.Load() != 0 {
 		t.Fatalf("the 6-hourly tick ran with no active job (ran=%v, verifications=%d) — its rule must not change",
@@ -251,6 +259,9 @@ func TestDailyVisitPassIgnoresTheIdleSkipAndKeepsTheImportGuard(t *testing.T) {
 		t.Fatal("a daily visit that imported and verified did not stamp lastRefresh, so the schedule " +
 			"would treat it as a visit that renewed nothing")
 	}
+	if nextVisit() == nil {
+		t.Error("the status names no next visit although the one just asked for ran")
+	}
 
 	before := verified.Load()
 	if ran := s.periodicTick(t.Context(), 6*time.Hour, passDailyVisit); ran || verified.Load() != before {
@@ -258,6 +269,11 @@ func TestDailyVisitPassIgnoresTheIdleSkipAndKeepsTheImportGuard(t *testing.T) {
 	}
 	if !strings.Contains(log.all(), guardSkipped) {
 		t.Error("the second daily visit did not stand down on the import guard")
+	}
+	// Mutant: leave noSource out of nextVisitDue. The status would go on
+	// naming a visit that the guard stands down every time it is asked for.
+	if due := nextVisit(); due != nil {
+		t.Errorf("the status promises a daily visit at %v that the import guard will stand down", due)
 	}
 
 	logged := log.all()
@@ -269,39 +285,32 @@ func TestDailyVisitPassIgnoresTheIdleSkipAndKeepsTheImportGuard(t *testing.T) {
 }
 
 // TestPeriodicLoopAsksForTheDailyVisit: StartPeriodicRefresh's loop runs the
-// daily check on its own ticker, and not before the start hold is over.
+// daily check on its own ticker. (That it holds off for the start hold is
+// TestDailyVisitDue's, on a clock; a loop test of it could only sleep.)
 //
 // The observable is the "no browser profile directory yet" line. With a 1 h
 // interval the tick never fires in this test, so only a daily visit that was
 // due (nothing has ever renewed) can reach the guard that logs it.
 //
-// Mutants: drop the `daily.C` case from the loop — the first half fails;
-// ignore the start hold in dailyVisitDue — the second half fails.
+// The install has no managed profile, so the status names no next visit from
+// the moment the loop starts.
+//
+// Mutants: drop the `daily.C` case from the loop; leave noSource unset when
+// the loop starts.
 func TestPeriodicLoopAsksForTheDailyVisit(t *testing.T) {
 	const noProfile = "periodic auto-cookie refresh skipped — no browser profile directory yet"
-	start := func(t *testing.T, hold time.Duration) *recordingCookieLogger {
-		t.Helper()
-		oldEvery, oldHold := dailyVisitCheckEvery, dailyVisitStartHold
-		t.Cleanup(func() { dailyVisitCheckEvery, dailyVisitStartHold = oldEvery, oldHold })
-		dailyVisitCheckEvery, dailyVisitStartHold = 5*time.Millisecond, hold
-		log := &recordingCookieLogger{}
-		s := NewAutoCookieService(filepath.Join(t.TempDir(), "no-profile-yet"),
-			filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
-		startJoinedPeriodicRefresh(t, s, time.Hour)
-		return log
-	}
+	oldEvery, oldHold := dailyVisitCheckEvery, dailyVisitStartHold
+	t.Cleanup(func() { dailyVisitCheckEvery, dailyVisitStartHold = oldEvery, oldHold })
+	dailyVisitCheckEvery, dailyVisitStartHold = 5*time.Millisecond, 0
+	log := &recordingCookieLogger{}
+	s := NewAutoCookieService(filepath.Join(t.TempDir(), "no-profile-yet"),
+		filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), log)
+	startJoinedPeriodicRefresh(t, s, time.Hour)
 
-	t.Run("due once the start hold is over", func(t *testing.T) {
-		log := start(t, 0)
-		if !waitFor(func() bool { return log.count(noProfile) > 0 }, 10*time.Second) {
-			t.Fatal("the loop never asked for a daily visit that was due")
-		}
-	})
-	t.Run("held just after start", func(t *testing.T) {
-		log := start(t, time.Hour)
-		time.Sleep(60 * time.Millisecond)
-		if n := log.count(noProfile); n != 0 {
-			t.Errorf("%d daily visits were asked for inside the start hold, want 0", n)
-		}
-	})
+	if due := s.GetStatus().NextVisitDue; due != nil {
+		t.Errorf("the status promises a daily visit at %v on an install with no managed profile", due)
+	}
+	if !waitFor(func() bool { return log.count(noProfile) > 0 }, 10*time.Second) {
+		t.Fatal("the loop never asked for a daily visit that was due")
+	}
 }
