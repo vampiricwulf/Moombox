@@ -313,7 +313,9 @@ export class FilesController {
       if (historyRemovedCount(result) > 0) {
         this.app.showToast("History entry removed", "success");
       } else {
-        this.app.showToast("History entry kept: the video has a job now", "primary");
+        // 0 has two causes the answer does not tell apart: the row was
+        // already gone (another tab, the TUI), or its video has a job now.
+        this.app.showToast("No history entry removed: it is already gone, or the video has a job now", "primary");
       }
       await this.fetchOrphanedHistory();
     } catch (err) {

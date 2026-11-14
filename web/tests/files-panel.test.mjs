@@ -150,6 +150,8 @@ test("a Delete All 409 counts the paths that failed for another reason", { skip 
 // DELETE /api/history/orphaned keeps a row whose video has a job by now, and
 // says how many rows went in `removed`; `deleted` only echoes the request.
 // Both toasts counted the echo, so a row that was kept read as removed.
+// 0 also comes back for an ID with no history row left, so the single
+// delete's toast names both causes.
 //
 // Mutant: count `deleted.length` again — "History entry removed" and
 // "Removed 2 entries" come back.
@@ -166,7 +168,7 @@ test("the history toasts count the rows that went, not the IDs that were asked f
 
   await h.app.files.deleteOrphanedHistory("aaaaaaaaaaa");
   await h.flush();
-  assert.ok(texts().includes("History entry kept: the video has a job now"), `toasts: ${JSON.stringify(texts())}`);
+  assert.ok(texts().includes("No history entry removed: it is already gone, or the video has a job now"), `toasts: ${JSON.stringify(texts())}`);
   assert.ok(!texts().includes("History entry removed"));
 
   removed = 1;
