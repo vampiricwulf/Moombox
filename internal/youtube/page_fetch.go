@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -131,6 +132,16 @@ func pageRetryable(err error) bool {
 // with its own error (retryExitErr); one that lapsed keeps the page's. The
 // final error says how many attempts it took when there was more than one.
 func fetchYouTubePage(ctx context.Context, what, pageURL string, timeout time.Duration, headers map[string]string, maxBytes int64) ([]byte, error) {
+	body, _, err := fetchYouTubePageReply(ctx, what, pageURL, timeout, headers, maxBytes)
+	return body, err
+}
+
+// fetchYouTubePageReply is fetchYouTubePage that also returns the reply the
+// body came from, for a caller that fetched the page with the jar's session
+// and offers what it renewed to the cookie store (Auth.OfferReply). It is the
+// reply of the attempt that succeeded, after its redirects (a Set-Cookie on a
+// redirect hop is not seen); the zero value on an error.
+func fetchYouTubePageReply(ctx context.Context, what, pageURL string, timeout time.Duration, headers map[string]string, maxBytes int64) ([]byte, cookies.YouTubeReply, error) {
 	retryBy := time.Now().Add(timeout)
 	if deadline, ok := ctx.Deadline(); ok {
 		if share := time.Now().Add(time.Until(deadline) / pageRetryShare); share.Before(retryBy) {
@@ -141,7 +152,7 @@ func fetchYouTubePage(ctx context.Context, what, pageURL string, timeout time.Du
 	attempts := 0
 	for attempt := range pageFetchAttempts {
 		if err := ctx.Err(); err != nil {
-			return nil, retryExitErr(err, lastErr)
+			return nil, cookies.YouTubeReply{}, retryExitErr(err, lastErr)
 		}
 		attemptCtx, endAttempt := ctx, context.CancelFunc(func() {})
 		if attempt > 0 {
@@ -150,29 +161,29 @@ func fetchYouTubePage(ctx context.Context, what, pageURL string, timeout time.Du
 				break
 			}
 			if err := utils.Sleep(ctx, delay); err != nil {
-				return nil, retryExitErr(err, lastErr)
+				return nil, cookies.YouTubeReply{}, retryExitErr(err, lastErr)
 			}
 			attemptCtx, endAttempt = context.WithDeadline(ctx, retryBy)
 		}
 		attempts++
-		body, err := fetchYouTubePageOnce(attemptCtx, what, pageURL, timeout, headers, maxBytes)
+		body, reply, err := fetchYouTubePageOnce(attemptCtx, what, pageURL, timeout, headers, maxBytes)
 		cutShort := attempt > 0 && attemptCtx.Err() != nil && ctx.Err() == nil
 		endAttempt()
 		if err == nil {
-			return body, nil
+			return body, reply, nil
 		}
 		if cutShort {
 			break
 		}
 		lastErr = err
 		if !pageRetryable(err) {
-			return nil, err
+			return nil, cookies.YouTubeReply{}, err
 		}
 	}
 	if attempts > 1 {
-		return nil, fmt.Errorf("%w (%d attempts)", lastErr, attempts)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("%w (%d attempts)", lastErr, attempts)
 	}
-	return nil, lastErr
+	return nil, cookies.YouTubeReply{}, lastErr
 }
 
 // fetchYouTubePageOnce is one attempt of fetchYouTubePage.
@@ -180,25 +191,25 @@ func fetchYouTubePage(ctx context.Context, what, pageURL string, timeout time.Du
 // pageGet (utils.FetchWithTimeout, not FetchBody) so the FINAL post-redirect
 // URL is inspectable — the consent interstitial answers 200, so status-code
 // checks alone can never see it.
-func fetchYouTubePageOnce(ctx context.Context, what, pageURL string, timeout time.Duration, headers map[string]string, maxBytes int64) ([]byte, error) {
+func fetchYouTubePageOnce(ctx context.Context, what, pageURL string, timeout time.Duration, headers map[string]string, maxBytes int64) ([]byte, cookies.YouTubeReply, error) {
 	resp, cancel, err := pageGet(ctx, pageURL, timeout, headers)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch %s: %w", what, err)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("failed to fetch %s: %w", what, err)
 	}
 	defer cancel()
 	defer resp.Body.Close()
 
 	if isConsentRedirect(resp) {
 		io.Copy(io.Discard, resp.Body)
-		return nil, &consentWallError{what: what, host: resp.Request.URL.Host}
+		return nil, cookies.YouTubeReply{}, &consentWallError{what: what, host: resp.Request.URL.Host}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, resp.Body)
-		return nil, &pageStatusError{what: what, status: resp.StatusCode, url: pageURL}
+		return nil, cookies.YouTubeReply{}, &pageStatusError{what: what, status: resp.StatusCode, url: pageURL}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch %s: %w", what, err)
+		return nil, cookies.YouTubeReply{}, fmt.Errorf("failed to fetch %s: %w", what, err)
 	}
-	return body, nil
+	return body, cookies.ReplyOf(resp), nil
 }

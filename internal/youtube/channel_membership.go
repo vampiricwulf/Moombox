@@ -149,7 +149,7 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	// login or consent page that explicitly stamps "LOGGED_IN":false, which is
 	// what an off-origin redirect delivers. The shared helper is what refuses
 	// those pages; see its doc comment.
-	body, err := s.fetchLivenessPage(ctx, pageURL)
+	body, reply, err := s.fetchLivenessPage(ctx, pageURL)
 	if err != nil {
 		// A page we never received — or one that did not come from our own
 		// credentialed request — is not an observation of the session.
@@ -161,6 +161,7 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 	// consent shell that carries a bootstrap but no login key reads as unknown
 	// instead of as a dead session.
 	verdict := livenessVerdict(body)
+	s.Auth.OfferReply(reply.From("membership page", pageReplyClient, replyVerdict(verdict)))
 
 	// Parse straight off the response bytes — no string(body)/[]byte(raw) copies
 	// of the ~1MB payload. json.Unmarshal copies any strings it keeps, so the

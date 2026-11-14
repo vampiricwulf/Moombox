@@ -107,6 +107,10 @@ func ReplyOf(resp *http.Response) YouTubeReply {
 	}
 }
 
+// Empty reports whether r carries no Set-Cookie header, so there is nothing
+// to offer and no reason to work out a verdict for it.
+func (r YouTubeReply) Empty() bool { return len(r.setCookies) == 0 }
+
 // From returns r with its endpoint, client and verdict set.
 func (r YouTubeReply) From(endpoint, client string, verdict ReplyVerdict) YouTubeReply {
 	r.Endpoint, r.Client, r.Verdict = endpoint, client, verdict

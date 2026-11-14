@@ -87,6 +87,56 @@ func (a *Auth) ConsentCookieHeader() string {
 	return a.jar.YouTubeConsentCookieHeader()
 }
 
+// pageReplyClient names an HTML page fetch as the client that drew a reply,
+// beside the Innertube client names, in the cookie store's log lines.
+const pageReplyClient = "web page"
+
+// OfferReply offers one youtube.com reply's Set-Cookie headers to the cookie
+// store (cookies.CookieJar.OfferYouTubeReply, which says what is kept). Every
+// request this package sends with the jar's session offers its reply here, so
+// the next request carries what YouTube last sent, as a browser's would.
+// Safe on a nil Auth and with a zero reply.
+func (a *Auth) OfferReply(reply cookies.YouTubeReply) {
+	if a == nil {
+		return
+	}
+	a.jar.OfferYouTubeReply(reply)
+}
+
+// OfferWatchPage offers the reply a watch page came from, with the page's
+// own session verdict, for a caller outside this package that fetched the
+// page with the jar's page cookies (FetchWatchPage). Safe on a nil Auth and
+// a nil page.
+func (a *Auth) OfferWatchPage(wp *WatchPageResult) {
+	if wp == nil {
+		return
+	}
+	a.OfferReply(wp.reply)
+}
+
+// replyVerdict is a page's session verdict as the cookie store reads it: a
+// page read as signed out has its renewals refused, and one with no verdict
+// either way is treated as a reply that states none.
+func replyVerdict(state SessionAuthState) cookies.ReplyVerdict {
+	switch state {
+	case SessionAuthLoggedIn:
+		return cookies.ReplySignedIn
+	case SessionAuthLoggedOut:
+		return cookies.ReplySignedOut
+	}
+	return cookies.ReplyNoVerdict
+}
+
+// pageReply is the reply of an HTML page fetched with the jar's page cookies,
+// with the verdict read off its body. The body is scanned only when the reply
+// carried a Set-Cookie header at all.
+func pageReply(reply cookies.YouTubeReply, endpoint string, body []byte) cookies.YouTubeReply {
+	if reply.Empty() {
+		return reply
+	}
+	return reply.From(endpoint, pageReplyClient, replyVerdict(watchPageSessionAuth(body)))
+}
+
 // SyncCookies reloads cookies from the file.
 func (a *Auth) SyncCookies() error {
 	return a.jar.Reload()

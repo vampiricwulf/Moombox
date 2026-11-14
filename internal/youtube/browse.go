@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // This file is the InnerTube /browse continuation client for the feed-history
@@ -455,6 +456,8 @@ func (s *Service) browsePost(ctx context.Context, reqBody map[string]any, visito
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// A browse reply states no session verdict of its own.
+	s.Auth.OfferReply(cookies.ReplyOf(resp).From("browse", constants.WebClient.ClientName, cookies.ReplyNoVerdict))
 
 	if resp.StatusCode != http.StatusOK {
 		// Read a bounded body rather than discarding it: YouTube explains a
