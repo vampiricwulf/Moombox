@@ -278,12 +278,17 @@ type DownloaderOptions struct {
 	// A recording that is lost cannot be made again, so the rule has a safety
 	// net (doRequest): a media request refused with 403 while the header is
 	// withheld is asked once more with it. If that works, one Warn is logged
-	// and this downloader sends the header to media hosts for the rest of its
-	// download. If it does not, the caller sees the first 403 exactly as it
-	// always did.
+	// and the header goes to media hosts for the rest of the download. If it
+	// does not, the caller sees the first 403 exactly as it always did.
 	//
 	// nil is safe and means "send no Cookie header", as an empty string did.
 	CookieHeader func() string
+
+	// MediaCookies is the safety net's state for one download. A job that
+	// runs two downloaders (video and audio) hands both the same one, so the
+	// job pays for one refused request and logs one Warn, not one per
+	// stream. nil gives the downloader a state of its own.
+	MediaCookies *MediaCookieState
 	IsHls        bool
 	IsDirectURL  bool // Direct URL download (not segmented)
 	MaxRetries   int
@@ -587,10 +592,9 @@ type SegmentDownloader struct {
 	lastStreamStatusCheck atomicTime
 	logger                DownloaderLogger
 	cipherFailureFired    atomic.Bool
-	// mediaHostNeedsCookies is set once a media host answered a request it
-	// had refused as soon as the session cookies were added (doRequest).
-	// Never cleared: the rest of this download sends them.
-	mediaHostNeedsCookies atomic.Bool
+	// mediaCookies is opts.MediaCookies, or this downloader's own when the
+	// caller shared none. Never nil.
+	mediaCookies *MediaCookieState
 
 	// delays is every wait the loops sleep on; defaultDelays() in production,
 	// fastDelays() in tests (see delays.go).
@@ -1070,9 +1074,13 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	}
 
 	d := &SegmentDownloader{
-		opts:   opts,
-		logger: logger,
-		delays: defaultDelays(),
+		opts:         opts,
+		logger:       logger,
+		delays:       defaultDelays(),
+		mediaCookies: opts.MediaCookies,
+	}
+	if d.mediaCookies == nil {
+		d.mediaCookies = &MediaCookieState{}
 	}
 	d.currentSeq.Store(int64(opts.StartSeq))
 	d.headSeq.Store(-1)
@@ -1782,12 +1790,26 @@ func (d *SegmentDownloader) cancelErr(ctx context.Context) error {
 // as it is. An empty value sends no header at all rather than an empty one.
 func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	req.Header.Set("User-Agent", ua)
-	if isMediaHost(req.URL) && !d.mediaHostNeedsCookies.Load() {
+	if isMediaHost(req.URL) && !d.mediaCookies.send.Load() {
 		return
 	}
 	if ch := d.cookieHeader(); ch != "" {
 		req.Header.Set("Cookie", ch)
 	}
+}
+
+// MediaCookieState is what one download has learned about whether its media
+// hosts want the session cookies (doRequest). The zero value is ready to use:
+// cookies withheld. Share one between a job's downloaders through
+// DownloaderOptions.MediaCookies.
+type MediaCookieState struct {
+	// send is set once a media host served, with the session cookies, a
+	// request it had just refused without them. Never cleared: the rest of
+	// the download sends them.
+	send atomic.Bool
+	// refused counts the media requests refused with 403 while the cookies
+	// were withheld, the one that set send included.
+	refused atomic.Int64
 }
 
 // cookieHeader is the current Cookie header, "" when there is none to send.
@@ -1816,10 +1838,13 @@ func isMediaHost(u *url.URL) bool {
 // A 403 from a media host to a request that carried no Cookie header, while
 // the jar has one to send, is asked ONCE more with the header:
 //
-//   - A 2xx answer means the media host wanted the session after all. That
-//     answer is returned in place of the 403, one Warn is logged for the
-//     download, and from then on setCommonHeaders sends the header to media
-//     hosts for the rest of this downloader's life.
+//   - A 2xx answer is returned in place of the 403, one Warn is logged for
+//     the download, and from then on setCommonHeaders sends the header to
+//     media hosts for the rest of the download (MediaCookieState, shared by
+//     a job's video and audio downloaders). It does not prove the host
+//     wanted the session: a refusal that would have cleared on any second
+//     ask looks the same, and the Warn says so. The header stays on all the
+//     same, because the other mistake loses a recording.
 //   - Anything else, a transport failure included, is dropped and the FIRST
 //     403 is returned unread, so the caller's own 403 handling (the head
 //     rules, OnCipherFailure, the in-process token and URL refresh) runs on
@@ -1841,6 +1866,7 @@ func (d *SegmentDownloader) doRequest(req *http.Request) (*http.Response, error)
 	if ch == "" {
 		return resp, nil
 	}
+	refused := d.mediaCookies.refused.Add(1)
 	again := req.Clone(req.Context())
 	again.Header.Set("Cookie", ch)
 	withCookies, err := engineHTTPClient.Do(again)
@@ -1854,9 +1880,10 @@ func (d *SegmentDownloader) doRequest(req *http.Request) (*http.Response, error)
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	resp.Body.Close()
-	if d.mediaHostNeedsCookies.CompareAndSwap(false, true) {
-		d.logger.Warn("[Downloader] media host needed session cookies; sending them for the rest of this download",
-			"host", req.URL.Hostname())
+	if d.mediaCookies.send.CompareAndSwap(false, true) {
+		d.logger.Warn("[Downloader] a refused media request was served when asked again with the session cookies; sending them to media hosts for the rest of this download (a refusal that would have passed on any second ask looks the same)",
+			"host", req.URL.Hostname(),
+			"refusedWithoutCookies", refused)
 	}
 	return withCookies, nil
 }

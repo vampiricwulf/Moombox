@@ -202,7 +202,7 @@ func TestMediaRequestsCarryNoSessionCookies(t *testing.T) {
 // value, not the URL's signature.
 //
 // Mutants: a path left on engineHTTPClient.Do (its row fails with the 403);
-// doRequest not setting mediaHostNeedsCookies (the follow-up request is
+// doRequest not setting MediaCookieState.send (the follow-up request is
 // refused first: four requests, not three); the Warn outside the
 // CompareAndSwap (two Warn lines); the Warn logging req.URL (the signature is
 // found).
@@ -236,8 +236,8 @@ func TestRefusedMediaRequestIsAskedOnceWithCookies(t *testing.T) {
 			if n := warnings(logger); n != 1 {
 				t.Errorf("%d Warn line(s), want exactly one for the download", n)
 			}
-			if hits := logger.containing("media host needed session cookies"); len(hits) != 1 {
-				t.Errorf("lines saying the media host needed session cookies = %q, want one", hits)
+			if hits := logger.containing("served when asked again with the session cookies"); len(hits) != 1 {
+				t.Errorf("lines saying a refused media request was served with the session cookies = %q, want one", hits)
 			}
 			for _, secret := range []string{"sentinel-session-value", "synthetic-signature"} {
 				if hits := logger.containing(secret); len(hits) != 0 {
@@ -264,7 +264,7 @@ func TestRefusedMediaRequestIsAskedOnceWithCookies(t *testing.T) {
 // carries none).
 //
 // Mutants: doRequest retrying twice (the request count is off); setting
-// mediaHostNeedsCookies on a failed retry (later requests carry the header,
+// MediaCookieState.send on a failed retry (later requests carry the header,
 // so the cookie-less list is short, and a Warn appears); a failed cookie
 // retry's answer ending the fetch without the refresh (the first scenario
 // ends in an error with no refresh).
@@ -408,7 +408,7 @@ func TestRefusalIsNotRepeatedWhenCookiesWereSent(t *testing.T) {
 				OutputFile:   "x",
 				CookieHeader: func() string { return sessionCookieSentinel },
 			})
-			d.mediaHostNeedsCookies.Store(tc.sticky)
+			d.mediaCookies.send.Store(tc.sticky)
 
 			if _, status, _ := d.fetchSegment(t.Context(), d.buildSegmentURL(1)); status != http.StatusForbidden {
 				t.Fatalf("status = %d, want the 403", status)
