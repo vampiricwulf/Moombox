@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-    RETENTION_MS, _setStoreDirForTest, rawHash, readPrepared, writePrepared, sweepStore,
+    _setStoreDirForTest, rawHash, readPrepared, writePrepared, sweepStore,
 } from "../src/player-store.js";
 
 const EJS12 = fs.readFileSync(new URL("../vendor/ejs/VERSION", import.meta.url), "utf8").slice(0, 12);
@@ -65,12 +65,33 @@ test("a damaged header is removed", () => {
     assert.equal(fs.existsSync(f), false);
 });
 
-test("write failure is not fatal", () => {
+// The temp file is written and the rename onto the target fails (a directory
+// sits at the target's name): the write answers false, says so once, and
+// leaves no temp file behind.
+//
+// Mutants: the temp file left after a failed rename; the failure thrown; the
+// warn dropped or repeated.
+test("a write that fails at the rename warns once and leaves no temp file", () => {
     const dir = tmp();
-    const file = path.join(dir, "regular");
-    fs.writeFileSync(file, "x");
-    _setStoreDirForTest(file);
-    assert.equal(writePrepared("p1", rawHash("x"), "src"), false);
+    const target = `p1.${EJS12}.js`;
+    fs.mkdirSync(path.join(dir, target));
+    const lines = [];
+    const orig = process.stderr.write;
+    process.stderr.write = (chunk) => {
+        lines.push(String(chunk));
+        return true;
+    };
+    let wrote;
+    try {
+        wrote = writePrepared("p1", rawHash("x"), "src");
+    } finally {
+        process.stderr.write = orig;
+    }
+    assert.equal(wrote, false);
+    assert.equal(lines.length, 1, `want one warn line, got ${JSON.stringify(lines)}`);
+    assert.ok(lines[0].startsWith("[bgutil-sidecar:warn] player-store: write p1: "), lines[0]);
+    assert.deepEqual(fs.readdirSync(dir), [target], "a temp file was left behind");
+    assert.deepEqual(fs.readdirSync(path.join(dir, target)), []);
 });
 
 test("sweep removes other ejs versions and old files, keeps fresh ones", () => {
@@ -92,5 +113,4 @@ test("a read touches mtime", () => {
     assert.ok(readPrepared("p1"));
     assert.equal(sweepStore(Date.now() + 2 * DAY), 0);
     assert.ok(fs.existsSync(f));
-    assert.ok(RETENTION_MS > 6 * DAY);
 });

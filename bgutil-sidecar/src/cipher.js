@@ -119,12 +119,17 @@ function loadPlayer(playerID, playerJS) {
     if (!result.preprocessed_player) {
         throw new Error("ejs preprocess: no preprocessed_player in result");
     }
-    // ejs hands back a rope of the player's pieces, and each solve flattened
-    // a fresh copy of it on V8's heap. The round trip through a Buffer is ===
-    // the original for every JS string and always flat. (Flattening in place
-    // was measured to fail once the function is optimized.)
-    const flat = Buffer.from(result.preprocessed_player, "utf16le").toString("utf16le");
-    return addEntry(playerID, flat, false);
+    return addEntry(playerID, flatCopy(result.preprocessed_player), false);
+}
+
+// flatCopy is the form a prepared player is held in. ejs hands back a rope of
+// the player's pieces, and each solve flattened a fresh copy of it on V8's
+// heap; the store hands back a slice of the file's text, on the heap and
+// holding the whole of it. The round trip through a Buffer is === the
+// original for every JS string, always flat, and held off V8's heap.
+// (Flattening in place was measured to fail once the function is optimized.)
+function flatCopy(s) {
+    return Buffer.from(s, "utf16le").toString("utf16le");
 }
 
 // addEntry caches a prepared player. fromDisk marks one read back from the
@@ -276,7 +281,7 @@ export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges, fo
         if (rec && playerJS && rawHash(playerJS) !== rec.rawHash) {
             removePrepared(playerID);
         } else if (rec) {
-            entry = addEntry(playerID, rec.source, true);
+            entry = addEntry(playerID, flatCopy(rec.source), true);
         }
     }
     if (!entry) {

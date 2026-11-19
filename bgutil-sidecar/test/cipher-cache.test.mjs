@@ -180,24 +180,59 @@ const BUNDLE = new URL("../vendor/ejs.bundle.js", import.meta.url);
 // The ejs result is a rope of the player's pieces; held as is, every later
 // solve flattens a copy of it on V8's heap. The entry must hold a flat string.
 //
-// Mutant: the Buffer round trip dropped (%StringIsFlat is false).
-test("an entry is stored flat", (t) => {
+// A copy read back from the store is a slice of the file's text: flat already,
+// but on V8's heap and holding the whole text. It gets the same copy, which
+// Node holds outside the heap, so loading it grows process.memoryUsage()'s
+// external figure by the copy (a byte or two a character) and not by nothing.
+//
+// Mutants: the Buffer round trip dropped after a preprocess (%StringIsFlat is
+// false); dropped on the disk path (external does not grow).
+test("an entry is stored flat, and off the heap when reloaded from disk", (t) => {
     if (!fs.existsSync(BUNDLE) || !fs.existsSync(FIXTURE)) {
         t.skip("ejs bundle or player_cb017549.js fixture absent");
         return;
     }
     const cipherURL = new URL("../src/cipher.js", import.meta.url).href;
     const storeURL = new URL("../src/player-store.js", import.meta.url).href;
-    const script = [
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cipher-flat-"));
+    const head = [
         `import fs from "node:fs";`,
-        `import { solveCipher, _entryForTest } from ${JSON.stringify(cipherURL)};`,
+        `import { solveCipher, _entryForTest, _resetCacheForTest } from ${JSON.stringify(cipherURL)};`,
         `import { _setStoreDirForTest } from ${JSON.stringify(storeURL)};`,
-        `_setStoreDirForTest("");`,
+        `_setStoreDirForTest(${JSON.stringify(dir)});`,
+    ];
+    const run = (lines) =>
+        JSON.parse(
+            execFileSync(
+                process.execPath,
+                ["--allow-natives-syntax", "--expose-gc", "--input-type=module", "-e", [...head, ...lines].join("\n")],
+                { encoding: "utf8" },
+            ),
+        );
+    // One process preprocesses the player and writes the store.
+    const fresh = run([
         `solveCipher({ playerID: "cb017549", playerJS: fs.readFileSync(new URL(${JSON.stringify(FIXTURE.href)}), "utf8") });`,
-        `process.stdout.write(String(%StringIsFlat(_entryForTest("cb017549").preprocessed)));`,
-    ].join("\n");
-    const out = execFileSync(process.execPath, ["--allow-natives-syntax", "--input-type=module", "-e", script], { encoding: "utf8" });
-    assert.equal(out, "true");
+        `process.stdout.write(JSON.stringify({ flat: %StringIsFlat(_entryForTest("cb017549").preprocessed) }));`,
+    ]);
+    assert.equal(fresh.flat, true, "the preprocessed copy is not flat");
+    // A second one reloads it twice and measures the second load: the first
+    // read of the file in a process leaves external memory of its own behind.
+    const reloaded = run([
+        `solveCipher({ playerID: "cb017549" });`,
+        `_resetCacheForTest();`,
+        `gc(); gc();`,
+        `const before = process.memoryUsage().external;`,
+        `solveCipher({ playerID: "cb017549" });`,
+        `const entry = _entryForTest("cb017549");`,
+        `gc(); gc();`,
+        `const grown = process.memoryUsage().external - before;`,
+        `process.stdout.write(JSON.stringify({ fromDisk: entry.fromDisk, externalPerChar: grown / entry.preprocessed.length }));`,
+    ]);
+    assert.equal(reloaded.fromDisk, true, "the second process did not load from the store");
+    assert.ok(
+        reloaded.externalPerChar > 0.5,
+        `the reloaded copy is on V8's heap (external grew ${reloaded.externalPerChar} bytes a character)`,
+    );
 });
 
 // Mutant: the disk read skipped (a second "player" call).
@@ -357,11 +392,86 @@ test("sweepIdle drops only idle entries", () => {
     assert.ok(!stub.calls.includes("player"));
 });
 
-test("sweep never drops an entry used in this tick", () => {
-    tmpStore();
+// The Go side sends an evicted player's solves without its JS, one after the
+// other: the first reloads the prepared copy, the second finds it in RAM.
+//
+// Mutants: the reloaded entry not put back in the cache (the second solve
+// reads the file again, and a store that lost the file answers
+// PLAYER_NOT_LOADED); the reload cached under another key (two RAM entries).
+test("two solves in a row for an evicted player both answer from the one reloaded entry", () => {
+    const dir = tmpStore();
+    const stub = stubEjs((_, c) => c.toUpperCase());
+    solveCipher({ playerID: "p1", playerJS: "js", nChallenges: [CHALLENGE] });
+    assert.equal(sweepIdle(Date.now() + IDLE_EVICT_MS + 1), 1);
+    stub.calls.length = 0;
+
+    const first = solveCipher({ playerID: "p1", nChallenges: ["aaaaaaaaaaa"] });
+    assert.deepEqual(first.nResults, { aaaaaaaaaaa: "AAAAAAAAAAA" });
+    const reloaded = _entryForTest("p1");
+    for (const name of fs.readdirSync(dir)) fs.rmSync(path.join(dir, name));
+    const second = solveCipher({ playerID: "p1", nChallenges: ["bbbbbbbbbbb"] });
+    assert.deepEqual(second.nResults, { bbbbbbbbbbb: "BBBBBBBBBBB" });
+
+    assert.ok(!stub.calls.includes("player"), `no preprocess for an evicted player, got ${stub.calls}`);
+    assert.equal(_entryForTest("p1"), reloaded, "the second solve did not use the reloaded entry");
+    assert.equal(_cacheStats().players, 1);
+});
+
+// The idle window is exclusive: an entry used exactly IDLE_EVICT_MS ago stays.
+//
+// Mutant: > written as >= (the entry at the boundary is dropped).
+test("an entry idle for exactly the window is kept, one millisecond longer is dropped", () => {
     stubEjs((_, c) => c.toUpperCase());
     solveCipher({ playerID: "p1", playerJS: "js", nChallenges: [CHALLENGE] });
-    assert.equal(sweepIdle(Date.now()), 0);
+    const t0 = _entryForTest("p1").lastUsed;
+    assert.equal(sweepIdle(t0 + IDLE_EVICT_MS), 0);
+    assert.notEqual(_entryForTest("p1"), undefined);
+    assert.equal(sweepIdle(t0 + IDLE_EVICT_MS + 1), 1);
+    assert.equal(_entryForTest("p1"), undefined);
+});
+
+// A store that cannot be written (its directory is a regular file) costs the
+// disk copy, never the solve: the player answers, and goes on answering from
+// RAM. What the store logs about it differs by platform and is not pinned.
+//
+// Mutant: a failed write thrown out of solveCipher, or the entry dropped with it.
+test("a store that cannot be written does not stop solving", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cipher-cache-"));
+    const file = path.join(dir, "regular");
+    fs.writeFileSync(file, "x");
+    _setStoreDirForTest(file);
+    const stub = stubEjs((_, c) => c.toUpperCase());
+    const first = captureWarn(() => solveCipher({ playerID: "p1", playerJS: "js", nChallenges: ["aaaaaaaaaaa"] }));
+    assert.equal(first.error, undefined);
+    assert.deepEqual(first.result.nResults, { aaaaaaaaaaa: "AAAAAAAAAAA" });
+    stub.calls.length = 0;
+    const second = captureWarn(() => solveCipher({ playerID: "p1", nChallenges: ["bbbbbbbbbbb"] }));
+    assert.equal(second.error, undefined);
+    assert.deepEqual(second.result.nResults, { bbbbbbbbbbb: "BBBBBBBBBBB" });
+    assert.ok(!stub.calls.includes("player"), "the second solve preprocessed again instead of using RAM");
+    assert.equal(fs.readFileSync(file, "utf8"), "x");
+});
+
+// A player ID that is not a plain token never reaches the store, and solves
+// like any other from RAM.
+//
+// Mutant: solveCipher refusing a player the store refuses.
+test("a player ID the store refuses still solves, from RAM only", () => {
+    // The store is a directory inside the temp one, so "../x" would land in a
+    // directory this test owns.
+    const parent = tmpStore();
+    const store = path.join(parent, "store");
+    fs.mkdirSync(store);
+    _setStoreDirForTest(store);
+    const stub = stubEjs((_, c) => c.toUpperCase());
+    const first = solveCipher({ playerID: "../x", playerJS: "js", nChallenges: ["aaaaaaaaaaa"] });
+    assert.deepEqual(first.nResults, { aaaaaaaaaaa: "AAAAAAAAAAA" });
+    stub.calls.length = 0;
+    const second = solveCipher({ playerID: "../x", nChallenges: ["bbbbbbbbbbb"] });
+    assert.deepEqual(second.nResults, { bbbbbbbbbbb: "BBBBBBBBBBB" });
+    assert.ok(!stub.calls.includes("player"));
+    assert.deepEqual(fs.readdirSync(store), [], "the store holds a file for an unsafe player ID");
+    assert.deepEqual(fs.readdirSync(parent), ["store"], "a file was written beside the store");
 });
 
 // Mutant: an evicted player answered from anywhere but RAM, disk or attached JS.
