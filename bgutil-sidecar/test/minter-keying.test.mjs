@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 process.stdin.resume();
 
-const { getOrCreateMinter } = await import("../src/server.js");
+const { getOrCreateMinter, invalidateIT } = await import("../src/server.js");
 
 // A fake minter whose generation we control, so we can hold generations open
 // and interleave callers deterministically.
@@ -178,11 +178,8 @@ function clientEntry(expiresAt) {
     return e;
 }
 
-// invalidateIT nulls the cache, so the entry it held is unreachable from the
-// cache when the next generation replaces it; its client must still be shut
-// down. (The test drives an expired cache, which leaves the cache set: it
-// pins the replacement path, not the invalidate path specifically.)
-test("replacing the cached minter retires the previous live entry, even after invalidateIT nulled the cache", async () => {
+// Mutant: the replaced entry not retired (its client is never shut down).
+test("a generation that replaces an expired cached minter shuts the old client down", async () => {
     const first = clientEntry(Date.now() - 1);
     await getOrCreateMinter(null, "key-retire", true, async () => first);
     const second = clientEntry(Date.now() + 3_600_000);
@@ -191,4 +188,31 @@ test("replacing the cached minter retires the previous live entry, even after in
     assert.equal(first.shutdowns, 1, "the replaced client was not shut down");
     assert.equal(second.shutdowns, 0, "the live client was shut down");
     assert.equal(second.retired, false);
+});
+
+// invalidateIT empties the cache, so the entry it held is unreachable from
+// the cache when the next generation replaces it. Its client must still be
+// shut down, and the interpreter global it ran under freed when the new
+// generation's name differs.
+//
+// Mutant: the replaced entry taken from the cache instead of the live entry
+// (after an invalidate there is none: no shutdown, and the old global stays).
+test("after invalidateIT the next generation still retires the old entry and frees its interpreter global", async () => {
+    const first = clientEntry(Date.now() + 3_600_000);
+    first.globalName = "vmBeforeInvalidate";
+    globalThis.vmBeforeInvalidate = {};
+    try {
+        await getOrCreateMinter(null, "key-invalidate", true, async () => first);
+        invalidateIT();
+        const second = clientEntry(Date.now() + 3_600_000);
+        second.globalName = "vmAfterInvalidate";
+        const got = await getOrCreateMinter(null, null, false, async () => second);
+        assert.equal(got.m, second, "a mint after invalidateIT reused the invalidated minter");
+        await ticks(2);
+        assert.equal(first.shutdowns, 1, "the invalidated client was not shut down");
+        assert.equal(second.shutdowns, 0, "the live client was shut down");
+        assert.equal("vmBeforeInvalidate" in globalThis, false, "the old interpreter global was left on globalThis");
+    } finally {
+        delete globalThis.vmBeforeInvalidate;
+    }
 });

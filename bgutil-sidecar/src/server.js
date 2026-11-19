@@ -670,6 +670,15 @@ export async function mintWith(entry, binding) {
 // still retired when the next generation replaces it.
 let liveEntry = null;
 
+// invalidateIT drops the cached minter, so the next mint builds a new one.
+// The entry stays liveEntry until that replacement retires it. sessions also
+// zeroes the session counter (the invalidateCaches RPC).
+export function invalidateIT(sessions = false) {
+    cachedMinter = null;
+    stats.cachedMinters = 0;
+    if (sessions) stats.cachedSessions = 0;
+}
+
 // In-flight dedup + serialization for minter regeneration.
 //
 // At most one generateMinter() call ever actually executes at a time: it's a
@@ -755,11 +764,13 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
         if (!freshMinter && cachedMinter && Date.now() < cachedMinter.expiresAt) {
             return { m: cachedMinter, reused: true };
         }
-        const prev = cachedMinter;
         const m = await minterFactory(challenge);
+        // The entry this one replaces: liveEntry, not cachedMinter, which
+        // invalidateIT may have cleared since it was installed.
+        const prev = liveEntry !== m ? liveEntry : null;
         cachedMinter = m;
-        if (liveEntry && liveEntry !== m) retire(liveEntry);
         liveEntry = m;
+        if (prev) retire(prev);
         // Free the previous interpreter's VM when YouTube rotates globalName.
         // generateMinter runs `new Function(interpJS)()`, which attaches the VM
         // under globalThis[globalName], unless the same body already did under
@@ -769,13 +780,14 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
         // once no mint uses it) and its minter's mintCallback closure reference
         // the VM directly, not via globalThis, so deleting the stale property is
         // safe even for an in-flight mint that captured the old minter.
+        // (lastInterp needs no reset: shouldRunInterpreter checks that the
+        // global is still there.)
         if (prev && prev.globalName && prev.globalName !== m.globalName) {
             try {
                 delete globalThis[prev.globalName];
             } catch (e) {
                 logWarn(`could not free stale interpreter global: ${e?.message ?? e}`);
             }
-            if (lastInterp?.globalName === prev.globalName) lastInterp = null;
         }
         stats.cachedMinters = 1;
         return { m, reused: false };
@@ -913,14 +925,11 @@ async function dispatch(req) {
             }
 
             case "invalidateCaches":
-                cachedMinter = null;
-                stats.cachedMinters = 0;
-                stats.cachedSessions = 0;
+                invalidateIT(true);
                 return writeResponse({ id, result: "ok" });
 
             case "invalidateIT":
-                cachedMinter = null;
-                stats.cachedMinters = 0;
+                invalidateIT();
                 return writeResponse({ id, result: "ok" });
 
             case "getStats":
