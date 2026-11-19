@@ -56,8 +56,9 @@ try {
     process.exit(1);
 }
 
-// vendor/ejs/VERSION (the pinned upstream ejs commit) is not read at runtime.
-// It rides along so internal/bgutils/embed's test can tell a tarball built
+// vendor/ejs/VERSION (the pinned upstream ejs commit) is read at runtime by
+// src/player-store.js: its first 12 chars name the prepared-player files.
+// It also lets internal/bgutils/embed's test tell a tarball built
 // before an ejs re-pin from one built after: the bundle itself is generated
 // and cannot be compared against the source tree.
 const productionEntries = ["package.json", "package-lock.json", "src", "node_modules", "vendor/ejs.bundle.js", "vendor/ejs/VERSION"];

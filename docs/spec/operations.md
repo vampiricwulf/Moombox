@@ -185,7 +185,7 @@ Moombox bounds steady-state memory for both the Go process and the embedded BotG
 ```toml
 [memory]
 go_soft_limit_mb = 256        # Go runtime soft cap (debug.SetMemoryLimit)
-sidecar_soft_limit_mb = 200   # RSS threshold to fire sidecar GC
+sidecar_soft_limit_mb = 200   # RSS threshold: one GC, then a restart when idle
 sidecar_hard_limit_mb = 512   # V8 --max-old-space-size for the sidecar
 ```
 
@@ -197,16 +197,17 @@ Default 256 MB sits ~10% above the observed p99 active-download Sys (~238 MB), s
 
 ### Sidecar (V8)
 
-V8 has no soft-limit primitive, so the sidecar combines a hard ceiling with proactive GC triggers:
+V8 has no soft-limit primitive, so the sidecar combines a hard ceiling with proactive GC triggers and, as a last resort, a restart:
 
 1. **Hard ceiling**: launched with `--max-old-space-size=<SidecarHardLimitMB>`. Hitting this OOM-aborts the sidecar (V8 has no graceful soft stop). The launcher auto-respawns it on the next call, but in-flight requests get errors. Set `0` to use V8's default (~512–1500 MB depending on host).
-2. **Proactive GC**: launched with `--expose-gc`. The 2-minute memory-log loop in `cmd/moombox/main.go` reads sidecar RSS via `Sidecar.MemoryStats()` and, when RSS exceeds `SidecarSoftLimitMB`, fires `Sidecar.TriggerGC()` (a `triggerGC` JSON-RPC method that runs `globalThis.gc()` and returns before/after stats). Set `0` to disable.
+2. **Proactive GC and idle recycle**: launched with `--expose-gc`. The 2-minute stats ticker in `cmd/moombox/main.go` reads sidecar RSS via `Sidecar.MemoryStats()` and hands it to `sidecarMemGuard` (`cmd/moombox/sidecar_memory.go`). When RSS crosses `SidecarSoftLimitMB` the guard fires `Sidecar.TriggerGC()` (a `triggerGC` JSON-RPC method that runs `globalThis.gc()` and returns before/after stats) once per episode over the limit, and logs once; it fires again only when RSS has grown a further 10% of the limit over its lowest reading since the last GC (`memGrowStepPct`), and logs one line when RSS falls back under. If RSS stays over the limit for 5 ticks after the episode's first GC (about 10 minutes, `memSustainTicks`) while no job is Live, Downloading or Muxing (`jobstate.KeepsHostAwake`) and the sidecar reports no loaded player, no generation in flight and no pending request, the guard asks `Supervisor.Recycle` to restart the sidecar, at most once every 6 hours (`memRecycleSpacing`). Calls that arrive during the restart wait in `Sidecar.call` for the new child (a few seconds). A limit below what a fresh sidecar needs is detected (the child a quiet recycle started is over the limit at its first reading with no player loaded, no generation in flight and no request pending; a reading under the limit settles it the other way) and stops further quiet recycles until the limit changes. Set `0` to disable the soft limit.
+3. **Hard-limit recycle**: when the V8 heap (`heapUsed`) reaches 80% of the hard limit the child was started with (`memForcedHeapPct`; `runState.bgSidecarHardMB`, not the live setting, which is restart-required), the guard acts at the next tick at which no request is pending and no generation is in flight, instead of waiting for V8 to OOM-abort it: it asks for a GC first, since `heapUsed` counts uncollected garbage, and recycles the sidecar only if the heap is still at or over the threshold afterwards (or the GC failed). Running jobs do not hold this off. Both recycle lines (`[Memory] recycled idle sidecar: …` at INFO, `[Memory] recycled sidecar: V8 heap near the hard limit` at WARN) are logged once the new child is up; a refused recycle logs at DEBUG.
 
 Default 200 MB soft / 512 MB hard. The soft sits above the post-mint plateau (~150 MB) so GC fires only when something is genuinely growing; the hard sits above the historical peak observed during BotGuard processing bursts (~544 MB during the leak that prompted these limits, ~400-500 MB normally) so legitimate work doesn't trigger an OOM.
 
 ### Tuning
 
-Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes visible (look for `[Memory] sidecar soft limit hit; ran GC` log lines repeatedly reclaiming little). The hard sidecar cap should always sit above the soft cap by a comfortable margin — 2x is a good rule of thumb. Setting the hard cap below observed BotGuard peaks (~500 MB) will manifest as the sidecar process restarting under load.
+Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes visible (look for `[Memory] sidecar soft limit hit; ran GC` log lines repeatedly reclaiming little, or `[Memory] recycled idle sidecar: memory stayed over the soft limit`, which means a GC did not bring the sidecar back under). The hard sidecar cap should always sit above the soft cap by a comfortable margin — 2x is a good rule of thumb. Setting the hard cap below observed BotGuard peaks (~500 MB) will manifest as the sidecar process restarting under load.
 
 ---
 

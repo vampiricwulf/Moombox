@@ -1511,7 +1511,7 @@
                                 max="65536"
                                 label="Sidecar soft limit (MB)"
                                 placeholder="200"
-                                help-text="RSS threshold. When the sidecar exceeds this, Moombox tells it to run a full V8 GC. 0 disables. Default: 200."
+                                help-text="When the sidecar stays above this, Moombox runs one V8 GC and, if it is still above it while idle, restarts the sidecar. 0 disables. Default: 200."
                             ></sl-input>
                             <sl-input
                                 id="cfg-memory-sidecar-hard-limit-mb"

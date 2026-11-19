@@ -634,6 +634,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var prevHeapMB float64
 		diskCheckCounter := 0
 		diskAlerter := newDiskAlerts(notifyMgr, log)
+		memGuard := newSidecarMemGuard(log)
 		// Before the boot reading below, so a disk alert a previous run left
 		// open is closed by the first reading that clears it.
 		diskAlerter.restoreFrom(s.openAlerts)
@@ -748,28 +749,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 							float64(sideStats.HeapTotal)/1048576,
 						)
 						// Soft sidecar memory limit: V8 has no native soft
-						// cap, so when RSS exceeds the configured threshold
-						// we ask the sidecar to run global.gc(). Combined
-						// with --max-old-space-size as a hard ceiling, this
-						// gives soft-limit semantics without OOM aborts.
-						var sidecarSoftMB int
-						s.configStore.Read(func(c *config.MoomboxConfig) {
-							sidecarSoftMB = c.Memory.SidecarSoftLimitMB
-						})
-						if sidecarSoftMB > 0 && sideStats.RSS >= int64(sidecarSoftMB)<<20 {
-							gcCtx, gcCancel := context.WithTimeout(ctx, 5*time.Second)
-							gcResult, gcErr := s.bgSidecar.TriggerGC(gcCtx)
-							gcCancel()
-							if gcErr != nil {
-								log.Debug("[Memory] sidecar TriggerGC failed", slog.String("err", gcErr.Error()))
-							} else {
-								reclaimed := gcResult.Before.RSS - gcResult.After.RSS
-								log.Info("[Memory] sidecar soft limit hit; ran GC",
-									slog.Int("threshold_mb", sidecarSoftMB),
-									slog.Float64("reclaimed_mb", float64(reclaimed)/1048576),
-								)
-							}
-						}
+						// cap, so the guard asks for a full GC once per
+						// episode over the threshold (again only on real
+						// growth), recycles an idle child that stays over
+						// it, and recycles one whose V8 heap nears the
+						// --max-old-space-size ceiling before it aborts.
+						s.guardSidecarMemory(ctx, memGuard, sideStats)
 					} else {
 						line += " | Sidecar: stats unavailable"
 					}

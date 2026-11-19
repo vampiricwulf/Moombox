@@ -126,6 +126,11 @@ type Sidecar struct {
 	nextReqID atomic.Uint64
 	pendingMu sync.Mutex
 	pending   map[uint64]chan rpcResponse
+	// recycleGate is non-nil while a deliberate recycle runs (BeginRecycle):
+	// call waits on it before registering a request, and it is closed when
+	// the recycle ends. Guarded by pendingMu, so "nothing pending" and
+	// "admission closed" are decided together.
+	recycleGate chan struct{}
 
 	// Health.
 	healthy atomic.Bool
@@ -222,6 +227,14 @@ const wedgeProbeTimeout = 30 * time.Second
 // terminal — cmd/moombox only calls it from the shutdown path — so a
 // supervisor restart that races shutdown must not bring the child back.
 var ErrStopped = errors.New("sidecar: stopped")
+
+// ErrRecycleBusy is Supervisor.Recycle's answer when the sidecar has a
+// request pending or a recycle already running: nothing was restarted.
+var ErrRecycleBusy = errors.New("sidecar: busy, not recycled")
+
+// errRecycleGate is roundTrip's answer when a recycle began between call's
+// wait and the request's registration: call goes back to waiting.
+var errRecycleGate = errors.New("sidecar: recycle gate")
 
 // New constructs a Sidecar. Does not start the subprocess; call Start.
 func New(cfg Config) *Sidecar {
@@ -397,7 +410,8 @@ func (s *Sidecar) startLocked(ctx context.Context) error {
 	if proxyNote != "" {
 		s.cfg.Logger.Warn("sidecar: "+proxyNote+", while Moombox's own requests use it", "audit", "G22")
 	}
-	cmd.Env = env
+	// Where the child keeps the players it has prepared (player-store.js).
+	cmd.Env = append(env, "MOOMBOX_SIDECAR_PLAYER_DIR="+filepath.Join(cacheDir, "players"))
 	// Parent-death cleanup, pre-start half: Linux sets PR_SET_PDEATHSIG
 	// here (must be configured before fork); Windows is a no-op because
 	// the Job Object assigned after Start covers it.
@@ -725,7 +739,73 @@ func (s *Sidecar) Restart(ctx context.Context) error {
 // child died), after a stdin write stalled past RequestTimeout (the child
 // stopped reading — see writeRequest), or after a wedge probe's ping went
 // unanswered (the child's event loop is stuck — see probeWedge).
-func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
+//
+// True throughout a deliberate recycle (BeginRecycle), even while the old
+// child is down: a consumer that gates on it goes on into call, which waits
+// for the new child, instead of failing fast or falling back.
+func (s *Sidecar) IsHealthy() bool {
+	if s.healthy.Load() {
+		return true
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	return s.recycleGate != nil
+}
+
+// Generation is the number of children this handle has spawned.
+func (s *Sidecar) Generation() uint64 { return s.childGen.Load() }
+
+// PendingCount is the number of requests waiting on the child's answer.
+func (s *Sidecar) PendingCount() int {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	return len(s.pending)
+}
+
+// BeginRecycle closes admission for a deliberate recycle: from now on call
+// waits instead of reaching the child. ok is false, and nothing changes, when
+// a request is pending, a recycle is already running, or the child is down
+// (its death is the supervisor's to repair, and a recycle on top of it would
+// start a second child). end reopens admission and releases the waiters; it
+// may be called more than once.
+func (s *Sidecar) BeginRecycle() (end func(), ok bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if len(s.pending) > 0 || s.recycleGate != nil || !s.healthy.Load() {
+		return nil, false
+	}
+	gate := make(chan struct{})
+	s.recycleGate = gate
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.pendingMu.Lock()
+			if s.recycleGate == gate {
+				s.recycleGate = nil
+			}
+			s.pendingMu.Unlock()
+			close(gate)
+		})
+	}, true
+}
+
+// awaitRecycle waits out a recycle in progress, if any. A caller whose
+// context ends first gets the error call gives on a down sidecar.
+func (s *Sidecar) awaitRecycle(ctx context.Context) error {
+	for {
+		s.pendingMu.Lock()
+		gate := s.recycleGate
+		s.pendingMu.Unlock()
+		if gate == nil {
+			return nil
+		}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return errors.New("sidecar: unhealthy")
+		}
+	}
+}
 
 // Recoverable reports whether a handle that is down now is one a caller may
 // wait for: its child has come up at least once and Stop has not been called,
@@ -887,14 +967,20 @@ func (s *Sidecar) TriggerGC(ctx context.Context) (TriggerGCResult, error) {
 }
 
 // Stats holds the sidecar's internal counters as getStats reports them.
-// Nothing in production reads them today — the tests exercise the
-// round-trip — and CachedSessions is always 0: server.js keeps no session
+// Production reads PlayersLoaded and GenerationsInFlight (cmd/moombox's
+// memory guard, before it recycles the child); the rest are diagnostics the
+// tests round-trip. CachedSessions is always 0: server.js keeps no session
 // cache (that layer lives in PotProvider) and only ever resets the counter.
 type Stats struct {
 	CachedMinters  int `json:"cachedMinters"`
 	CachedSessions int `json:"cachedSessions"`
 	MintsTotal     int `json:"mintsTotal"`
 	MintsErrored   int `json:"mintsErrored"`
+	// PlayersLoaded is how many prepared players the child holds in RAM.
+	PlayersLoaded int `json:"playersLoaded"`
+	// GenerationsInFlight is how many BotGuard client generations a mint
+	// is still building.
+	GenerationsInFlight int `json:"generationsInFlight"`
 }
 
 // GetStats fetches the sidecar's internal counters.
@@ -999,9 +1085,40 @@ func (s *Sidecar) ping(ctx context.Context) error {
 
 // call sends a JSON-RPC request and waits for the matching response.
 // Decodes the response.Result into `into` if non-nil.
+//
+// While a deliberate recycle runs (BeginRecycle) it first waits for the new
+// child, or for ctx to end.
 func (s *Sidecar) call(ctx context.Context, method string, params map[string]any, into any) error {
+	for {
+		if err := s.awaitRecycle(ctx); err != nil {
+			return err
+		}
+		err := s.callOnce(ctx, method, params, into, true)
+		if !errors.Is(err, errRecycleGate) {
+			return err
+		}
+	}
+}
+
+// callOnce is one attempt of call. gated makes roundTrip refuse to register
+// while a recycle runs (errRecycleGate); callRaw passes false.
+func (s *Sidecar) callOnce(ctx context.Context, method string, params map[string]any, into any, gated bool) error {
 	if !s.healthy.Load() {
-		return errors.New("sidecar: unhealthy")
+		// A recycle that began after call's wait has taken the child down:
+		// wait for the new one rather than report the old one gone.
+		if gated {
+			s.pendingMu.Lock()
+			recycling := s.recycleGate != nil
+			s.pendingMu.Unlock()
+			if recycling {
+				return errRecycleGate
+			}
+		}
+		// Read again: a recycle that ended between the two reads above has
+		// left a healthy child and no gate.
+		if !s.healthy.Load() {
+			return errors.New("sidecar: unhealthy")
+		}
 	}
 
 	// Bound every RPC with RequestTimeout. Callers pass long-lived job
@@ -1022,7 +1139,7 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 	}
 	gen := s.childGen.Load()
 
-	written, err := s.roundTrip(ctx, method, params, into)
+	written, err := s.roundTrip(ctx, method, params, into, gated)
 	if written && s.cfg.RequestTimeout > 0 && parent.Err() == nil &&
 		errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		s.probeWedge(gen)
@@ -1061,7 +1178,7 @@ func (s *Sidecar) probeWedge(gen uint64) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.wedgeProbeTimeout)
 		defer cancel()
-		written, err := s.roundTrip(ctx, "ping", nil, nil)
+		written, err := s.roundTrip(ctx, "ping", nil, nil, false)
 		if !written || !errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
@@ -1071,11 +1188,17 @@ func (s *Sidecar) probeWedge(gen uint64) {
 
 // roundTrip writes one request and waits for its response under ctx alone:
 // call adds RequestTimeout on top, the wedge probe brings its own deadline.
-// written reports whether the request line reached the child's stdin.
-func (s *Sidecar) roundTrip(ctx context.Context, method string, params map[string]any, into any) (written bool, err error) {
+// written reports whether the request line reached the child's stdin. A gated
+// request is not registered while a recycle runs: it returns errRecycleGate
+// and call waits again. The wedge probe and the shutdown RPC are not gated.
+func (s *Sidecar) roundTrip(ctx context.Context, method string, params map[string]any, into any, gated bool) (written bool, err error) {
 	id := s.nextReqID.Add(1)
 	ch := make(chan rpcResponse, 1)
 	s.pendingMu.Lock()
+	if gated && s.recycleGate != nil {
+		s.pendingMu.Unlock()
+		return false, errRecycleGate
+	}
 	s.pending[id] = ch
 	s.pendingMu.Unlock()
 	defer func() {
@@ -1104,9 +1227,10 @@ func (s *Sidecar) roundTrip(ctx context.Context, method string, params map[strin
 	}
 }
 
-// callRaw is like call but ignores the response payload. Used for shutdown.
+// callRaw is like call but ignores the response payload. Used for shutdown,
+// which a recycle's own teardown sends, so it bypasses the recycle gate.
 func (s *Sidecar) callRaw(ctx context.Context, method string, params map[string]any) error {
-	return s.call(ctx, method, params, nil)
+	return s.callOnce(ctx, method, params, nil, false)
 }
 
 // lockWrite takes the stdin write slot, or gives up when ctx ends first. The

@@ -37,7 +37,10 @@ type SupervisorConfig struct {
 	// Backoff is the delay before each attempt; the LAST entry repeats for
 	// every attempt past it. Nil uses DefaultSupervisorBackoff.
 	Backoff []time.Duration
-	Logger  Logger
+	// BeginRecycle closes the sidecar's admission for a deliberate recycle
+	// (Sidecar.BeginRecycle in production). Only Recycle uses it.
+	BeginRecycle func() (end func(), ok bool)
+	Logger       Logger
 }
 
 // Supervisor restarts a Sidecar whose child process died.
@@ -213,6 +216,46 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 		// behind a snapshot that still read Healthy: true.
 		return true
 	}
+}
+
+// Recycle replaces a healthy child on purpose, to hand back the memory it has
+// grown. Callers that arrive meanwhile wait in Sidecar.call for the new child.
+// It refuses with ErrRecycleBusy while a request is pending. It is not an
+// outage: it logs no death, publishes no health and leaves the restart count
+// and ladder alone. A start that fails is handed to the death path (Notify),
+// so the restart ladder brings the sidecar back; ErrStopped, and the error of
+// a start cut short by ctx ending, are returned as they are.
+func (s *Supervisor) Recycle(ctx context.Context) error {
+	if s.cfg.BeginRecycle == nil {
+		return errors.New("sidecar: supervisor has no BeginRecycle")
+	}
+	end, ok := s.cfg.BeginRecycle()
+	if !ok {
+		return ErrRecycleBusy
+	}
+	defer end()
+
+	startCtx, cancel := context.WithTimeout(ctx, s.cfg.StartTimeout)
+	err := s.cfg.Restart(startCtx)
+	cancel()
+	if errors.Is(err, ErrStopped) {
+		return err
+	}
+	if err != nil && ctx.Err() != nil {
+		// Cut short by the caller (Moombox shutting down): not a death.
+		return err
+	}
+	if err != nil {
+		// Release the waiters first: they find the sidecar down and take the
+		// ordinary outage paths while the ladder restarts it.
+		end()
+		s.Notify("recycle failed: " + err.Error())
+		return err
+	}
+	if fn := s.onUp.Load(); fn != nil {
+		s.callOnUp(*fn)
+	}
+	return nil
 }
 
 // callOnUp isolates a faulty re-wiring callback: the sidecar is already back,

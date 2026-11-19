@@ -11,6 +11,7 @@
 //      don't repeat the V8 round-trip.
 
 import ejsMain from "../vendor/ejs.bundle.js";
+import { rawHash, readPrepared, removePrepared, sweepStore, writePrepared } from "./player-store.js";
 
 // ejs is the solver entry point loadPlayer and solveMany call: ejsMain, save
 // under the sidecar's own tests, which stand a stub in for it
@@ -74,7 +75,7 @@ function runEjs(input) {
 const MAX_PLAYERS = 10;
 const MAX_CHALLENGES_PER_PLAYER = 1000;
 
-// playerID -> { preprocessed, sigCache, nCache, lastUsed }
+// playerID -> { preprocessed, sigCache, nCache, lastUsed, fromDisk, proven }
 const playerCache = new Map();
 
 function evictIfNeeded() {
@@ -118,15 +119,46 @@ function loadPlayer(playerID, playerJS) {
     if (!result.preprocessed_player) {
         throw new Error("ejs preprocess: no preprocessed_player in result");
     }
+    return addEntry(playerID, flatCopy(result.preprocessed_player), false);
+}
+
+// flatCopy is the form a prepared player is held in. ejs hands back a rope of
+// the player's pieces, and each solve flattened a fresh copy of it on V8's
+// heap; the store hands back a slice of the file's text, on the heap and
+// holding the whole of it. The round trip through a Buffer is === the
+// original for every JS string, always flat, and held off V8's heap.
+// (Flattening in place was measured to fail once the function is optimized.)
+function flatCopy(s) {
+    return Buffer.from(s, "utf16le").toString("utf16le");
+}
+
+// addEntry caches a prepared player. fromDisk marks one read back from the
+// prepared-player store; proven is set once an ejs call on it has succeeded.
+function addEntry(playerID, preprocessed, fromDisk) {
     const entry = {
-        preprocessed: result.preprocessed_player,
+        preprocessed,
         sigCache: new Map(),
         nCache: new Map(),
         lastUsed: Date.now(),
+        fromDisk,
+        proven: false,
     };
     playerCache.set(playerID, entry);
     evictIfNeeded();
     return entry;
+}
+
+// loadAndStore preprocesses playerJS and writes the prepared copy to the store.
+function loadAndStore(playerID, playerJS) {
+    const entry = loadPlayer(playerID, playerJS);
+    writePrepared(playerID, rawHash(playerJS), entry.preprocessed);
+    return entry;
+}
+
+function playerNotLoaded() {
+    const err = new Error("player not loaded");
+    err.code = "PLAYER_NOT_LOADED";
+    return err;
 }
 
 function solveMany(entry, type, challenges) {
@@ -215,6 +247,7 @@ function solveMany(entry, type, challenges) {
             throw new Error("ejs solve n: no solutions (exception sentinel)");
         }
     }
+    entry.proven = true;
     for (const challenge of misses) {
         const solved = response.data[challenge];
         if (cache.size >= MAX_CHALLENGES_PER_PLAYER) {
@@ -233,24 +266,50 @@ export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges, fo
     // forceReload: caller has detected stale-JS errors against a cached
     // entry (Moombox cipher.ErrPlayerJSStale path). Drop our cache and
     // re-load from the attached playerJS so the next solve runs against
-    // the rotated player.
-    if (forceReload && playerCache.has(playerID)) {
+    // the rotated player. The prepared copy on disk goes too.
+    if (forceReload) {
         playerCache.delete(playerID);
+        removePrepared(playerID);
     }
+    // Load order: RAM; the prepared copy on disk (used even with playerJS
+    // attached, since a player ID names one script, unless that JS hashes
+    // differently from what the copy was prepared from); a preprocess of the
+    // attached JS; else PLAYER_NOT_LOADED, and the Go side re-sends the JS.
     let entry = playerCache.get(playerID);
     if (!entry) {
-        if (!playerJS) {
-            const err = new Error("player not loaded");
-            err.code = "PLAYER_NOT_LOADED";
-            throw err;
+        const rec = readPrepared(playerID);
+        if (rec && playerJS && rawHash(playerJS) !== rec.rawHash) {
+            removePrepared(playerID);
+        } else if (rec) {
+            entry = addEntry(playerID, flatCopy(rec.source), true);
         }
-        entry = loadPlayer(playerID, playerJS);
+    }
+    if (!entry) {
+        if (!playerJS) throw playerNotLoaded();
+        entry = loadAndStore(playerID, playerJS);
     }
     entry.lastUsed = Date.now();
 
-    const sigResults = solveMany(entry, "sig", sigChallenges || []);
-    const nResults = solveMany(entry, "n", nChallenges || []);
-    return { sigResults, nResults };
+    const solveBoth = (e) => ({
+        sigResults: solveMany(e, "sig", sigChallenges || []),
+        nResults: solveMany(e, "n", nChallenges || []),
+    });
+    try {
+        return solveBoth(entry);
+    } catch (e) {
+        // Self-heal: a copy read from disk that fails its first ejs call in
+        // any way (a throw, or an error ejs returns) is discarded, so a bad
+        // file never becomes a permanent solve failure. A genuine failure
+        // then costs one extra preprocess before the Go side's stale-JS path
+        // runs. Once a copy has answered, its failures are the player's.
+        if (!entry.fromDisk || entry.proven) throw e;
+        if (playerCache.get(playerID) === entry) playerCache.delete(playerID);
+        removePrepared(playerID);
+        process.stderr.write(`[bgutil-sidecar:warn] cipher: discarded a bad prepared copy of ${playerID}\n`);
+        if (!playerJS) throw playerNotLoaded();
+        entry = loadAndStore(playerID, playerJS);
+        return solveBoth(entry);
+    }
 }
 
 // For tests / diagnostics.
@@ -264,6 +323,60 @@ export function _cacheStats() {
             lastUsed: e.lastUsed,
         })),
     };
+}
+
+// An entry unused this long leaves RAM; its prepared copy stays on disk, so
+// its next solve is a file read, not a re-send and a preprocess.
+export const IDLE_EVICT_MS = 15 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 60 * 1000;
+const STORE_SWEEP_EVERY_TICKS = 60;
+
+// sweepIdle drops every entry idle longer than IDLE_EVICT_MS and returns how
+// many it dropped. Solving is synchronous, so a sweep never runs mid-solve,
+// and solveCipher refreshes the requested entry's lastUsed before solving.
+// After a drop it runs one last-resort major GC, when gc is exposed, so the
+// compiled code of the dropped players goes too.
+export function sweepIdle(now = Date.now()) {
+    let dropped = 0;
+    for (const [id, entry] of playerCache) {
+        if (now - entry.lastUsed > IDLE_EVICT_MS) {
+            playerCache.delete(id);
+            dropped++;
+        }
+    }
+    if (dropped > 0 && typeof globalThis.gc === "function") {
+        try {
+            globalThis.gc({ type: "major", execution: "sync", flavor: "last-resort" });
+        } catch {
+            globalThis.gc();
+        }
+    }
+    return dropped;
+}
+
+let sweepTimer = null;
+
+// startSweepTimer sweeps the prepared-player store now and every hour, and
+// idle players every minute. The timer is unref'd and a second call is a
+// no-op.
+export function startSweepTimer() {
+    if (sweepTimer) return;
+    sweepStore();
+    let ticks = 0;
+    sweepTimer = setInterval(() => {
+        sweepIdle();
+        ticks++;
+        if (ticks % STORE_SWEEP_EVERY_TICKS === 0) sweepStore();
+    }, SWEEP_INTERVAL_MS);
+    sweepTimer.unref();
+}
+
+export function playersLoaded() {
+    return playerCache.size;
+}
+
+export function _entryForTest(playerID) {
+    return playerCache.get(playerID);
 }
 
 export function _resetCacheForTest() {

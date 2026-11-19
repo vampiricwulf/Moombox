@@ -66,6 +66,13 @@ type runState struct {
 	twService   *twitch.Service
 	potProvider *bgutils.PotProvider
 	bgSidecar   *sidecar.Sidecar
+	// bgSupervisor restarts the sidecar after a death and recycles it on
+	// purpose for the stats ticker's memory guard. Nil when use_sidecar is off.
+	bgSupervisor *sidecar.Supervisor
+	// bgSidecarHardMB is the sidecar_hard_limit_mb the sidecar was started with
+	// (its --max-old-space-size). The setting is read once at startup, so
+	// this, not the live config, is the ceiling the running child has.
+	bgSidecarHardMB int
 
 	// --- Worker + notifications ---
 	notifyMgr notifications.Notifier
