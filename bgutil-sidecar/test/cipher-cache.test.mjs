@@ -181,12 +181,15 @@ const BUNDLE = new URL("../vendor/ejs.bundle.js", import.meta.url);
 // solve flattens a copy of it on V8's heap. The entry must hold a flat string.
 //
 // A copy read back from the store is a slice of the file's text: flat already,
-// but on V8's heap and holding the whole text. It gets the same copy, which
-// Node holds outside the heap, so loading it grows process.memoryUsage()'s
-// external figure by the copy (a byte or two a character) and not by nothing.
+// but under the pinned Node (24) that text is a string on V8's heap, two bytes
+// a character, and the slice holds all of it. The reload gets the same copy,
+// which Node holds outside the heap, so a reloaded player adds next to nothing
+// to heapUsed. (Node 26 decodes a file this size off the heap by itself, so
+// there the reload half passes either way.)
 //
 // Mutants: the Buffer round trip dropped after a preprocess (%StringIsFlat is
-// false); dropped on the disk path (external does not grow).
+// false); dropped on the disk path (heapUsed grows two bytes a character under
+// Node 24).
 test("an entry is stored flat, and off the heap when reloaded from disk", (t) => {
     if (!fs.existsSync(BUNDLE) || !fs.existsSync(FIXTURE)) {
         t.skip("ejs bundle or player_cb017549.js fixture absent");
@@ -197,7 +200,7 @@ test("an entry is stored flat, and off the heap when reloaded from disk", (t) =>
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cipher-flat-"));
     const head = [
         `import fs from "node:fs";`,
-        `import { solveCipher, _entryForTest, _resetCacheForTest } from ${JSON.stringify(cipherURL)};`,
+        `import { solveCipher, _entryForTest } from ${JSON.stringify(cipherURL)};`,
         `import { _setStoreDirForTest } from ${JSON.stringify(storeURL)};`,
         `_setStoreDirForTest(${JSON.stringify(dir)});`,
     ];
@@ -215,23 +218,23 @@ test("an entry is stored flat, and off the heap when reloaded from disk", (t) =>
         `process.stdout.write(JSON.stringify({ flat: %StringIsFlat(_entryForTest("cb017549").preprocessed) }));`,
     ]);
     assert.equal(fresh.flat, true, "the preprocessed copy is not flat");
-    // A second one reloads it twice and measures the second load: the first
-    // read of the file in a process leaves external memory of its own behind.
+    // A second one reloads it. The header match leaves the file's text in the
+    // regexp engine's last-match state; another match lets go of it, as the
+    // next solve would.
     const reloaded = run([
-        `solveCipher({ playerID: "cb017549" });`,
-        `_resetCacheForTest();`,
         `gc(); gc();`,
-        `const before = process.memoryUsage().external;`,
+        `const before = process.memoryUsage().heapUsed;`,
         `solveCipher({ playerID: "cb017549" });`,
         `const entry = _entryForTest("cb017549");`,
+        `/x/.exec("x");`,
         `gc(); gc();`,
-        `const grown = process.memoryUsage().external - before;`,
-        `process.stdout.write(JSON.stringify({ fromDisk: entry.fromDisk, externalPerChar: grown / entry.preprocessed.length }));`,
+        `const grown = process.memoryUsage().heapUsed - before;`,
+        `process.stdout.write(JSON.stringify({ fromDisk: entry.fromDisk, heapPerChar: grown / entry.preprocessed.length }));`,
     ]);
     assert.equal(reloaded.fromDisk, true, "the second process did not load from the store");
     assert.ok(
-        reloaded.externalPerChar > 0.5,
-        `the reloaded copy is on V8's heap (external grew ${reloaded.externalPerChar} bytes a character)`,
+        reloaded.heapPerChar < 0.5,
+        `the reloaded copy is on V8's heap (heapUsed grew ${reloaded.heapPerChar} bytes a character)`,
     );
 });
 
