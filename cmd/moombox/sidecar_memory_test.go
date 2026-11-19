@@ -155,6 +155,23 @@ func TestSidecarMemLimitZeroAndLimitChange(t *testing.T) {
 		t.Errorf("limit 0 ran quiet() %d times", h.quiets)
 	}
 
+	// Set to 0 in the middle of an episode: the episode ends without a word,
+	// and nothing is asked of the sidecar.
+	h = newMemHarness()
+	h.tick(250)
+	h.soft = 0
+	for i := 0; i < 6; i++ {
+		if got := h.tick(250); got != memNone {
+			t.Fatalf("limit set to 0 mid-episode, tick %d = %v, want memNone", i, got)
+		}
+	}
+	if n := h.log.count(h.log.infos, "back under soft limit"); n != 0 {
+		t.Errorf("limit set to 0 mid-episode logged back-under %d times", n)
+	}
+	if h.quiets != 0 {
+		t.Errorf("limit set to 0 mid-episode ran quiet() %d times", h.quiets)
+	}
+
 	// Raising the limit above RSS closes the episode.
 	h = newMemHarness()
 	h.q = sidecarMemQuiet{JobsWorking: true}
