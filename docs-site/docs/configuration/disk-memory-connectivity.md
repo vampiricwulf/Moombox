@@ -230,8 +230,10 @@ used: they leave RAM after 15 minutes unused and reload from the `players`
 folder in the sidecar's cache directory, and files there unused for 7 days
 are deleted.
 
-`0` turns all of this off. The check only runs while the sidecar is up and
-answering.
+`0` turns the garbage collection and the idle restart off; players still
+leave memory after 15 minutes unused, and the restart near the
+[hard limit](#memorysidecar_hard_limit_mb) does not depend on this setting. The
+check only runs while the sidecar is up and answering.
 
 Validation: both UIs refuse values outside 0–65536, and a soft limit at or
 above a non-zero hard limit. In a hand-edited file a negative value becomes
