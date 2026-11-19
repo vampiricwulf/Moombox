@@ -109,13 +109,13 @@ const potTestMPD = `<?xml version="1.0"?>
 // live-path policy: the manifest's recorded client decides, by the same rule
 // the VOD path uses (youtube.GvsTokenRequired). A WEB-family manifest is
 // minted for and carries the token on the manifest path and both segment
-// downloaders; a tv, web_embedded, visionos or android_vr manifest —
+// downloaders; a tv, visionos or android_vr manifest —
 // clients upstream fetches no GVS token for — is not minted for at all, and
 // neither is a manifest whose client was never recorded.
 //
 // Mutant: dropping the GvsTokenRequired gate fails every bare row (a mint,
 // a /pot/ path, a token on both downloaders, no skip line); gating on the
-// old WebPO-client list fails the tv_auth, tv_public and web_embedded rows.
+// old WebPO-client list fails the tv_auth and tv_public rows.
 func TestDownloadDashAttachesTokenOnlyWhereRequired(t *testing.T) {
 	for _, tc := range []struct {
 		source  string
@@ -125,7 +125,7 @@ func TestDownloadDashAttachesTokenOnlyWhereRequired(t *testing.T) {
 		{source: "web_safari", wantPot: true},
 		{source: "tv_auth"},
 		{source: "tv_public"},
-		{source: "web_embedded"},
+		{source: "web_embedded", wantPot: true}, // web-family policies since yt-dlp ee2559128
 		{source: "visionos"},
 		{source: "android_vr_dash_fallback"},
 		{source: ""},

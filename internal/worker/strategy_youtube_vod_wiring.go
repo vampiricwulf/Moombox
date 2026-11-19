@@ -73,7 +73,7 @@ var errNoGvsMinter = errors.New("no PO token provider")
 // client gets no WebPO.
 //
 // Such a URL reaches the whole-file path as a missing_pot copy, or as the
-// token-free copy a refresh finds of a tv or web_embedded stream whose own
+// token-free copy a refresh finds of a tv stream whose own
 // client no longer returns the file (sameVodFile reads a web-family winner's
 // TokenFreeAlternate, and the cookieless chain answers nothing else). The
 // token fallback never puts a token on one: it skips its first step for a
@@ -256,7 +256,7 @@ func vodURLRefresh(ctx context.Context, job *JobContext, videoInfo *youtube.Vide
 // stream the fresh pool does not serve is looked for in the cookieless chain
 // too, where DownloadVod's missing_pot re-extract found it.
 //
-// The token fallback. A token-free stream — tv, web_embedded, a missing_pot
+// The token fallback. A token-free stream — tv, a missing_pot
 // copy — whose URL is refused long before its expiry was not refused for the
 // expiry. The field case's tv_auth URLs were refused at their very first
 // request, every fresh one too, for a signed-in account without Premium,

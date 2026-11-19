@@ -656,23 +656,8 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
-	// Try web_embedded first — yt-dlp's lead authenticated client since
-	// 2026.08.19 (_DEFAULT_AUTHED_CLIENTS = web_embedded, tv_samsung, web —
-	// tv_downgraded held the TV slot before #17805). It needs no PO token and supports cookies, so it keeps serving
-	// formats when POT enforcement or the account experiment bites the
-	// others. Lightweight shape (no embed-page fetch — encryptedHostFlags is
-	// only needed on the age-restricted path below). Purely a format-pool /
-	// DASH contributor: TV below remains the playability/status authority,
-	// because web_embedded reports "unavailable" for any embedding-disabled
-	// channel and must never drive classification.
-	authEmb, authEmbErr := tally.note(p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, false))
-	if authEmbErr != nil {
-		p.logger.Debug("[PlayerApi] web_embedded (authed cascade) failed", slog.String("error", authEmbErr.Error()))
-	} else {
-		collectFormats(&formatPool, authEmb.Formats, "web_embedded", AuthLevelWebEmbedded)
-	}
-
-	// Try TV client
+	// Try TV client first — yt-dlp's lead authenticated client
+	// (_DEFAULT_AUTHED_CLIENTS = tv_samsung, web_embedded, web).
 	result, err := tally.note(p.fetchWithClient(ctx, videoID, constants.TVSamsungClient, ytcfg, sts))
 	tvFailed := err != nil // read by the age-gate retry below (ageGateRetryWitness)
 	if err != nil {
@@ -701,9 +686,26 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			"playability", string(result.PlayabilityError))
 	}
 
+	// Then web_embedded — second of yt-dlp's authenticated clients
+	// (_DEFAULT_AUTHED_CLIENTS = tv_samsung, web_embedded, web since
+	// ee2559128, #18051, which moved it behind tv; it led from 2026.08.19).
+	// Upstream gives it the web family's PO token policies in the same
+	// commit, so its URLs take the GVS token (GvsTokenRequired). Lightweight
+	// shape (no embed-page fetch — encryptedHostFlags is only needed on the
+	// age-restricted path below). Purely a format-pool / DASH contributor:
+	// TV above remains the playability/status authority, because
+	// web_embedded reports "unavailable" for any embedding-disabled channel
+	// and must never drive classification.
+	authEmb, authEmbErr := tally.note(p.fetchWithEmbedded(ctx, videoID, ytcfg, sts, false))
+	if authEmbErr != nil {
+		p.logger.Debug("[PlayerApi] web_embedded (authed cascade) failed", slog.String("error", authEmbErr.Error()))
+	} else {
+		collectFormats(&formatPool, authEmb.Formats, "web_embedded", AuthLevelWebEmbedded)
+	}
+
 	// Owner decision O-I, read once here so every gate below agrees. It is
 	// derived from the TV result because TV is this path's playability/status
-	// AUTHORITY — the same result the log line above names.
+	// AUTHORITY — the same result the "TV client result" log line names.
 	waitingRoom := tvSaysWaitingRoom(result)
 
 	// Try web_safari client for DASH manifest (preferred over web)

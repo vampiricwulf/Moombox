@@ -137,8 +137,9 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	//
 	// Only a manifest from a client whose URLs require the GVS token takes
 	// one (youtube.GvsTokenRequired on the source the extraction recorded —
-	// the same rule the VOD path uses): a WEB-family manifest is tokenised;
-	// a tv, web_embedded, visionos or android_vr manifest rides bare, as
+	// the same rule the VOD path uses): a WEB-family manifest (web_embedded's
+	// among them) is tokenised; a tv, visionos or android_vr manifest rides
+	// bare, as
 	// upstream does — a token on an android_vr URL is the 2026-08-15 403
 	// cause the AuthLevel block in internal/youtube/types.go names. Both
 	// downloaders below follow.

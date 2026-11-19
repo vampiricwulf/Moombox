@@ -670,7 +670,7 @@ func TestUpcomingPollSkipsTheFormatHuntingFallbacksAuthenticated(t *testing.T) {
 	if info.StreamStatus != StreamUpcoming {
 		t.Fatalf("StreamStatus = %q, want upcoming", info.StreamStatus)
 	}
-	if got, want := strings.Join(tr.calls, ","), "56,7,1"; got != want {
+	if got, want := strings.Join(tr.calls, ","), "7,56,1"; got != want {
 		t.Errorf("calls = [%s], want [%s] — a waiting-room poll must not go format hunting", got, want)
 	}
 }

@@ -126,7 +126,7 @@ func partitionManifestlessFormats(formats []youtube.Format) (video, audio []Dash
 //     (gvsBinding, resolved at extraction and carried on videoInfo), via
 //     the cached /att/get minter — only for a stream whose format came
 //     from a client that requires the GVS token (youtube.GvsTokenRequired);
-//     a tv, web_embedded, visionos or android_vr stream rides bare. A stream
+//     a tv, visionos or android_vr stream rides bare. A stream
 //     whose token is mandatory and cannot be minted is never fetched bare:
 //     the selection re-runs over the token-free pool, or the setup fails
 //     with errMissingPot (manifestlessMissingPot; the mint block says how).

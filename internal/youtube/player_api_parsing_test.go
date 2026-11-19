@@ -1599,17 +1599,21 @@ func TestDeduplicateFormatsKeepsATokenFreeShadowOfAWebFamilyWinner(t *testing.T)
 		{"web_creator winner, visionos loser", []string{"web_creator", "visionos"}, "web_creator", "visionos"},
 		{"visionos listed first still loses and shadows", []string{"visionos", "web_creator"}, "web_creator", "visionos"},
 		{"tv_public wins outright and carries no shadow", []string{"web_creator", "tv_public", "visionos"}, "tv_public", ""},
-		// web_embedded (1) leads the authed tier outright, so the shadow-slot
+		// tv_auth (1) leads the authed tier outright, so the shadow-slot
 		// ranking between token-free losers is only reachable under a
-		// WEB-family winner with no web_embedded copy: web (6) over tv_auth
-		// (2) is impossible, so the losers here are the cookieless tier.
-		{"web_embedded wins outright over web and carries no shadow", []string{"web", "visionos", "web_embedded"}, "web_embedded", ""},
-		{"web_embedded wins outright whatever its position", []string{"visionos", "web", "web_embedded"}, "web_embedded", ""},
+		// token-requiring winner with no tv copy: web (6) over tv_auth (1)
+		// is impossible, so the losers here are the cookieless tier.
+		// web_embedded (2) takes the GVS token since yt-dlp ee2559128, so it
+		// carries the token-free shadow like the rest of the web family.
+		{"web_embedded wins over web and shadows visionos", []string{"web", "visionos", "web_embedded"}, "web_embedded", "visionos"},
+		{"web_embedded wins whatever its position", []string{"visionos", "web", "web_embedded"}, "web_embedded", "visionos"},
 		{"tv_auth wins outright over web and carries no shadow", []string{"web", "tv_auth", "visionos"}, "tv_auth", ""},
-		{"web_creator loses to web_embedded outright", []string{"web_creator", "visionos", "web_embedded"}, "web_embedded", ""},
+		{"web_creator loses to web_embedded", []string{"web_creator", "visionos", "web_embedded"}, "web_embedded", "visionos"},
+		{"tv_auth wins outright over web_embedded and carries no shadow", []string{"web_embedded", "visionos", "tv_auth"}, "tv_auth", ""},
 		{"visionos beats android_vr for the shadow slot", []string{"android_vr", "web_creator", "visionos"}, "web_creator", "visionos"},
 		{"a lone web_creator has no shadow", []string{"web_creator"}, "web_creator", ""},
-		{"a token-free winner keeps no shadow of a web_creator loser", []string{"web_creator", "web_embedded"}, "web_embedded", ""},
+		{"a token-free winner keeps no shadow of a web_creator loser", []string{"web_creator", "tv_auth"}, "tv_auth", ""},
+		{"a web_embedded winner keeps no shadow of a web_creator loser", []string{"web_creator", "web_embedded"}, "web_embedded", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := make([]Format, 0, len(tc.sources))

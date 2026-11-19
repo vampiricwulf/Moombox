@@ -105,12 +105,13 @@ https://manifest.googlevideo.com/api/manifest/hls_playlist/id/abc/itag/95/index.
 // playlist's recorded client decides, by youtube.GvsTokenRequired, whether a
 // GVS token is minted and carried on the master path, the variant path and
 // the downloader. VISIONOS serves live as HLS only, so a visionos master is
-// the common bare case; tv and web_embedded masters ride bare too, as
-// upstream fetches no GVS token for them.
+// the common bare case; tv masters ride bare too, as upstream fetches no GVS
+// token for them. web_embedded takes the web family's policies since yt-dlp
+// ee2559128.
 //
 // Mutant: dropping the GvsTokenRequired gate fails every bare row (a mint, a
 // /pot/ master path, a token, no skip line); gating on the old WebPO-client
-// list fails the tv_auth, tv_public and web_embedded rows.
+// list fails the tv_auth and tv_public rows.
 func TestDownloadHlsAttachesTokenOnlyWhereRequired(t *testing.T) {
 	for _, tc := range []struct {
 		source  string
@@ -120,7 +121,7 @@ func TestDownloadHlsAttachesTokenOnlyWhereRequired(t *testing.T) {
 		{source: "watch_page", wantPot: true},
 		{source: "tv_auth"},
 		{source: "tv_public"},
-		{source: "web_embedded"},
+		{source: "web_embedded", wantPot: true}, // web-family policies since yt-dlp ee2559128
 		{source: "visionos"},
 		{source: "android_vr"},
 		{source: ""},

@@ -16,7 +16,7 @@ func TestGvsTokenRequired(t *testing.T) {
 		{"web", true},
 		{"web_safari", true},
 		{"web_creator", true},
-		{"web_embedded", false},
+		{"web_embedded", true},
 		{"tv_auth", false},
 		{"tv_public", false},
 		{"visionos", false},

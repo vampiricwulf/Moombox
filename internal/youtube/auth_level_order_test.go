@@ -7,14 +7,14 @@ import (
 
 // The same-itag tie-break follows yt-dlp's requested-client order, where the
 // two can be matched: its first-seen stream id wins, and the authed tuple is
-// (web_embedded, tv_samsung, web), the public one (tv_samsung, visionos, web)
-// (owner decision, 2026-10-14). The cookieless clients stay last on both,
+// (tv_samsung, web_embedded, web) since yt-dlp ee2559128 (#18051), the public
+// one (tv_samsung, visionos, web) (owner decision, 2026-10-14). The cookieless clients stay last on both,
 // against the public tuple's visionos — the 2026-08-15 incident.
 //
-// Mutants: tv back ahead of web_embedded on the authed path (every cookied
-// recording moves onto the Samsung-identity TV URLs, an identity upstream
-// ranks second and calls a workaround); a web-family level ahead of tv; a
-// cookieless level ahead of any cookied one.
+// Mutants: web_embedded back ahead of tv on the authed path (every cookied
+// recording moves onto web_embedded URLs, which take the GVS token since
+// ee2559128, where upstream asks tv first); a web-family level ahead of tv;
+// a cookieless level ahead of any cookied one.
 func TestSameItagTieFollowsUpstreamsClientOrder(t *testing.T) {
 	order := func(name string, sources ...string) {
 		t.Helper()
@@ -40,6 +40,6 @@ func TestSameItagTieFollowsUpstreamsClientOrder(t *testing.T) {
 			}
 		}
 	}
-	order("authed", "web_embedded", "tv_auth", "watch_page_auth", "web_safari", "web", "web_creator", "visionos", "android_vr")
+	order("authed", "tv_auth", "web_embedded", "watch_page_auth", "web_safari", "web", "web_creator", "visionos", "android_vr")
 	order("public", "tv_public", "watch_page_public", "visionos", "android_vr")
 }

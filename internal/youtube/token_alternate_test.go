@@ -54,7 +54,8 @@ func TestDeduplicateFormatsKeepsATokenCarryingShadowOfATokenFreeWinner(t *testin
 	}{
 		{"a tv_auth winner keeps the watch page's copy", []string{"tv_auth", "watch_page"}, "tv_auth", "watch_page", ""},
 		{"the lowest-level copy of the class, wherever it is listed", []string{"web_safari", "tv_auth", "web", "watch_page"}, "tv_auth", "watch_page", ""},
-		{"a web_embedded winner keeps web_creator's copy", []string{"web_creator", "web_embedded", "visionos"}, "web_embedded", "web_creator", ""},
+		{"a tv_auth winner keeps web_embedded's copy", []string{"web_embedded", "tv_auth", "visionos"}, "tv_auth", "web_embedded", ""},
+		{"a web_embedded winner carries the token-free shadow only", []string{"web_creator", "web_embedded", "visionos"}, "web_embedded", "", "visionos"},
 		{"a tv_public winner with only a token-free loser has none", []string{"visionos", "tv_public"}, "tv_public", "", ""},
 		{"a lone tv_auth has none", []string{"tv_auth"}, "tv_auth", "", ""},
 		{"a web-family winner carries the token-free shadow only", []string{"web_safari", "watch_page", "visionos"}, "watch_page", "", "visionos"},

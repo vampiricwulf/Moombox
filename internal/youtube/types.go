@@ -129,7 +129,7 @@ type VideoInfo struct {
 	// Every extraction site that records a manifest URL records its client
 	// too, because the live strategies attach a GVS PO token only when
 	// GvsTokenRequired says the manifest's client requires one — a tv,
-	// web_embedded, visionos or android_vr manifest rides bare, as upstream
+	// visionos or android_vr manifest rides bare, as upstream
 	// does. An empty source reads as not required: no token, the safe
 	// default.
 	DashManifestSource string `json:"dashManifestSource,omitempty"`
@@ -637,18 +637,20 @@ type YtcfgData struct {
 // Actual preference comes from the ORDER of the requested-client tuple,
 // because player responses are appended in that order and the first-seen
 // stream_id wins. The tuples, as yt-dlp master's _video.py has them since
-// #17805 ("Set tv_samsung as a default client", 2026-10-10):
+// #17805 ("Set tv_samsung as a default client", 2026-10-10) and ee2559128
+// (#18051, 2026-11-14, which moved web_embedded behind tv_samsung and gave
+// it the web family's PO token policies):
 //
 //	_DEFAULT_CLIENTS         = (tv_samsung, visionos, web)
 //	_DEFAULT_JSLESS_CLIENTS  = (visionos,)
-//	_DEFAULT_AUTHED_CLIENTS  = (web_embedded, tv_samsung, web)
+//	_DEFAULT_AUTHED_CLIENTS  = (tv_samsung, web_embedded, web)
 //	_DEFAULT_PREMIUM_CLIENTS = (web_creator, tv_samsung, web)
 //
 // A Premium subscriber gets the premium tuple ("Premium does not require
 // POT (except for subtitles)"), else a signed-in session the authed one,
 // else an install with no JS runtime the jsless one, else the default; a
 // signed-in session also drops every client that does not support cookies.
-// So upstream leads with tv_samsung signed out, web_embedded signed in and
+// So upstream leads with tv_samsung signed out and signed in, and
 // web_creator for Premium; visionos leads only the no-JS-runtime fallback.
 //
 // The ranking follows that tuple order where the two paths can be matched
@@ -656,9 +658,9 @@ type YtcfgData struct {
 // Moombox POOLS every client's formats and dedups by itag, so the ranking
 // has to say which copy of a stream is best, and the answer is the copy
 // upstream's first-seen rule would have kept. The authed cascade follows
-// _DEFAULT_AUTHED_CLIENTS: web_embedded leads, tv second, then the web
-// family — the watch page IS the web client, and web_safari is the variant
-// Moombox asks first. The public cascade follows _DEFAULT_CLIENTS: tv leads.
+// _DEFAULT_AUTHED_CLIENTS: tv leads, web_embedded second, then the rest of
+// the web family — the watch page IS the web client, and web_safari is the
+// variant Moombox asks first. The public cascade follows _DEFAULT_CLIENTS: tv leads.
 // The two cascades never share a pool, so the two tv levels only need to sit
 // right within their own. web_creator is the premium tuple's lead; Moombox
 // fetches it for a Premium session (VideoInfo.IsPremium) as a contributor to
@@ -671,17 +673,16 @@ type YtcfgData struct {
 // refused for signed-in sessions (constants.TVSamsungClient) and returned no
 // formats, so every cookied recording came from the watch page's copy with
 // a minted token. With TV answering again, tv-first would have moved every
-// cookied install onto URLs from an identity upstream ranks second and
-// calls a workaround; web_embedded-first is the path upstream's cookied
-// users download from daily, and its URLs need no GVS token either — so a
-// web_embedded winner carries no token-free shadow (below), and nor does a
-// tv one: both outrank the whole web family, so a web-family winner, the
-// only kind that carries a token-free shadow, is a stream neither returned,
-// and its shadow is a cookieless copy. In practice the order decides VODs:
-// a live broadcast is rarely embeddable, and web_embedded answers
-// "unavailable" with no formats, so a live recording's winner is the tv
-// copy — for Moombox and for yt-dlp alike (verified 2026-10-14 on a cookied
-// live extraction: 13 of 14 winners tv_auth).
+// cookied install onto URLs from an identity upstream then ranked second;
+// so web_embedded led from 2026-10-14 until upstream's ee2559128
+// (2026-11-14) moved it behind tv and gave it the web family's GVS token
+// policy, which this ranking follows. A tv winner carries no token-free
+// shadow (below): it outranks the whole web family, web_embedded included,
+// so a winner that carries a token-free shadow is a stream tv did not
+// return, and its shadow is a cookieless copy. A live broadcast is rarely
+// embeddable — web_embedded answers "unavailable" with no formats — so a
+// live recording's winner was already the tv copy (verified 2026-10-14 on a
+// cookied live extraction: 13 of 14 winners tv_auth).
 //
 // Where the tuple order is NOT followed: visionos. By first-seen it would
 // rank second on the public path, behind tv and ahead of web; here the
@@ -713,26 +714,26 @@ type YtcfgData struct {
 // would be gone. So when a stream's winner here comes from a client that
 // requires the token (GvsTokenRequired), deduplicateFormats also keeps the
 // lowest-level token-free copy of that stream as the winner's shadow, and the
-// VOD missing_pot degrade swaps to it. A token-free winner — tv or
-// web_embedded — carries no token-free shadow (it carries the token-carrying
-// one, below), and either outranks the whole web family wherever it
+// VOD missing_pot degrade swaps to it. A token-free winner — tv — carries no
+// token-free shadow (it carries the token-carrying one, below), and it
+// outranks the whole web family (web_embedded included) wherever it
 // returned the stream, save one case: deduplicateFormats lets a copy a
 // whole-file GET cannot fetch (Format.Segmented; a live adaptive one only
 // outside live processing) lose to one that can, whatever their levels, and
 // ranks each class's shadow the same way. So a web-family winner's shadow is
-// a cookieless (visionos, android_vr) copy, or — where tv or web_embedded
-// listed the stream segmented, the web family as a file, and no token-free
+// a cookieless (visionos, android_vr) copy, or — where tv listed the stream
+// segmented, the web family as a file, and no token-free
 // client as one — that segmented copy, which the VOD path's whole-file
 // re-filter leaves out again, failing the job clearly when no other file of
 // the stream is left (DownloadVod). The shadow never changes which copy
 // wins.
 //
 // The token-carrying shadow (Format.TokenAlternate) is its mirror. When a
-// stream's winner comes from a client that needs no token — tv or
-// web_embedded, the usual winner on both cascades — deduplicateFormats keeps
-// the lowest-level copy of that stream from a client that DOES need one
-// (the watch page's, web_safari's or web's, whichever the cascade fetched
-// with a URL) as the winner's TokenAlternate. It is for the VOD URL
+// stream's winner comes from a client that needs no token — tv, the usual
+// winner on both cascades — deduplicateFormats keeps the lowest-level copy
+// of that stream from a client that DOES need one (web_embedded's, the
+// watch page's, web_safari's or web's, whichever the cascade fetched with a
+// URL) as the winner's TokenAlternate. It is for the VOD URL
 // refresh's token fallback: a token-free stream whose URLs are refused long
 // before their expiry is, after a fresh token-free URL with a minted token
 // has been refused too — or at once, when its fresh token-free copy is
@@ -750,13 +751,18 @@ const (
 	// Public cascade: tv leads, as in _DEFAULT_CLIENTS. Its URLs need no GVS
 	// token (GvsTokenRequired is false).
 	AuthLevelTVPublic = 0
-	// Authed cascade: web_embedded leads, tv second, as in
-	// _DEFAULT_AUTHED_CLIENTS. Neither needs a GVS token, so neither carries
-	// a token-free shadow — each carries the token-carrying one instead, when
-	// a web-family client returned the stream too — and both outrank the web
-	// family.
-	AuthLevelWebEmbedded = 1
-	AuthLevelTVAuth      = 2
+	// Authed cascade: tv leads, web_embedded second, as in
+	// _DEFAULT_AUTHED_CLIENTS (tv_samsung, web_embedded, web since yt-dlp
+	// ee2559128, #18051). tv needs no GVS token, so it carries no token-free
+	// shadow — it carries the token-carrying one instead, when a web-family
+	// client returned the stream too — and it outranks the web family.
+	AuthLevelTVAuth = 1
+	// web_embedded shares the web family's PO token policies since yt-dlp
+	// ee2559128: its URLs need the GVS token (GvsTokenRequired), so a
+	// web_embedded winner carries a token-free shadow like any web-family
+	// one. It still ranks ahead of the rest of the family, as upstream asks
+	// it before web.
+	AuthLevelWebEmbedded = 2
 	// The web family. The watch page IS the web client; web_safari is the
 	// variant asked first, web the fallback. Their URLs need the GVS token.
 	AuthLevelWatchPagePublic = 3
@@ -787,7 +793,7 @@ const (
 // (references/yt-dlp/yt_dlp/extractor/youtube/_base.py, WEB_PO_TOKEN_POLICIES
 // and the per-client entries), label by label:
 //
-//   - watch_page, web, web_safari, web_creator: true. The WEB family's
+//   - watch_page, web, web_safari, web_creator, web_embedded: true. The WEB family's
 //     HTTPS and DASH policy is required=True, recommended=True,
 //     not_required_for_premium=True, so the token is attached whenever one
 //     is minted — for a Premium session too, whose waiver only lets a
@@ -795,9 +801,11 @@ const (
 //     web client. Its HLS policy is recommended rather than required, and
 //     yt-dlp fetches and attaches a token there too, so the HLS gate asks
 //     this same question.
-//   - tv_auth, tv_public, web_embedded: false. tv and web_embedded have no
-//     GVS_PO_TOKEN_POLICY entry upstream, so the default applies
-//     (required=False) and yt-dlp fetches no GVS token for them.
+//     web_embedded joined the family's policies in yt-dlp ee2559128
+//     (#18051, closing #17989); it had had no entry before.
+//   - tv_auth, tv_public: false. tv has no GVS_PO_TOKEN_POLICY entry
+//     upstream, so the default applies (required=False) and yt-dlp fetches
+//     no GVS token for it.
 //   - visionos: false, for the same reason — no policy entry — and it is
 //     not a WEBPO client either, so upstream never sends it a WebPO.
 //   - android_vr, android_vr_dash_fallback: false. android_vr's policy is
@@ -809,7 +817,7 @@ const (
 // to a client that requires the token gets none.
 func GvsTokenRequired(source string) bool {
 	switch source {
-	case "watch_page", "web", "web_safari", "web_creator":
+	case "watch_page", "web", "web_safari", "web_creator", "web_embedded":
 		return true
 	}
 	return false

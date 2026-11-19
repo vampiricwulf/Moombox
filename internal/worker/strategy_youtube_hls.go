@@ -98,9 +98,9 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// Only a master playlist from a client whose URLs require the GVS token
 	// takes one (youtube.GvsTokenRequired on the source the extraction
 	// recorded) — the same rule as the DASH mint block. VISIONOS serves live
-	// as HLS only, so its master is the common bare case here; a tv or
-	// web_embedded master rides bare too, as upstream does, and so do the
-	// variant URL and the downloader.
+	// as HLS only, so its master is the common bare case here; a tv master
+	// rides bare too, as upstream does, and so do the variant URL and the
+	// downloader.
 	//
 	// HLS is never missing_pot: the web family's HLS policy is recommended,
 	// not required (_base.py:85-88), so a master whose token none could be

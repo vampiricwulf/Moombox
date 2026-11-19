@@ -433,7 +433,7 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 // TestRefreshGvsCredentialsSkipsTokenFreeStream is the 403-recovery half of
 // the live-path policy. The live strategies leave a stream bare at setup
 // when its client needs no GVS token upstream (youtube.GvsTokenRequired:
-// tv_auth, tv_public, web_embedded, visionos, android_vr*); without this
+// tv_auth, tv_public, visionos, android_vr*); without this
 // gate the first 403 on that stream would re-mint a token here and the
 // engine would SetPoToken it onto the very URL the setup gate kept clean.
 // The refresh reads the refreshed itag's own client from the setup formats
@@ -443,7 +443,7 @@ func TestRefreshGvsCredentialsMintsBeforeSlowURLFetch(t *testing.T) {
 //
 // Mutant: dropping the gate fails every row (the fake is called and the
 // token comes back); gating on the old WebPO-client list instead fails the
-// tv_auth, tv_public and web_embedded rows.
+// tv_auth and tv_public rows.
 func TestRefreshGvsCredentialsSkipsTokenFreeStream(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -452,7 +452,6 @@ func TestRefreshGvsCredentialsSkipsTokenFreeStream(t *testing.T) {
 	}{
 		{name: "tv_auth", source: "tv_auth", itag: 140},
 		{name: "tv_public", source: "tv_public", itag: 140},
-		{name: "web_embedded", source: "web_embedded", itag: 140},
 		{name: "visionos", source: "visionos", itag: 140},
 		{name: "android_vr", source: "android_vr", itag: 140},
 		{name: "android_vr_dash_fallback", source: "android_vr_dash_fallback", itag: 140},
