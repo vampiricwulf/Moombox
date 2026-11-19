@@ -221,7 +221,7 @@ If the sidecar stays over the limit for about 10 minutes while no stream is
 Live, Downloading or Muxing and the sidecar itself is idle, Moombox restarts
 it (the log says *recycling idle sidecar*), at most once every 6 hours.
 Requests that arrive during the restart wait a few seconds for the new
-sidecar. If a freshly restarted sidecar is already over the limit, the limit
+sidecar. If a freshly restarted sidecar is over the limit while it is idle, the limit
 is below what the sidecar needs; Moombox logs a warning and stops restarting
 it until you change the limit.
 

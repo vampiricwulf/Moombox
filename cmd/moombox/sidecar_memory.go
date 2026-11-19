@@ -74,13 +74,19 @@ type sidecarMemGuard struct {
 	lastFireRSS int64 // the lowest RSS since the last GC
 	ticks       int   // over-limit ticks since the episode's first GC
 
-	// belowBaseline is set when a child is over the soft limit on its first
-	// reading after a quiet recycle: the limit is below what a fresh sidecar
-	// needs, so quiet recycles stop until the limit changes.
+	// belowBaseline is set when the child a quiet recycle started is over the
+	// soft limit at its first quiet reading: the limit is below what a fresh
+	// sidecar needs, so quiet recycles stop until the limit changes.
 	belowBaseline bool
 	// quietRecycled: the last action was a quiet recycle whose new child has
 	// not been read yet.
 	quietRecycled bool
+	// baselineOpen: the child being read is the one a quiet recycle started,
+	// and it has not yet been read under the limit, nor quiet and over it.
+	// A reading over the limit with players loaded, a generation in flight or
+	// a request pending answers nothing: the first mint after a restart is a
+	// cold BotGuard generation.
+	baselineOpen bool
 	recycledEver  bool
 	lastRecycle   time.Time
 }
@@ -94,24 +100,22 @@ func newSidecarMemGuard(log interface {
 	return &sidecarMemGuard{log: log}
 }
 
-// decide answers one reading. quiet is called only when a recycle is in
-// question, and at most once.
+// decide answers one reading. quiet is called only when a recycle or the
+// below-baseline question is open, and at most once.
 func (g *sidecarMemGuard) decide(r sidecarMemReading, quiet func() sidecarMemQuiet, now time.Time) sidecarMemAction {
 	limit := int64(r.SoftMB) << 20
 	over := r.SoftMB > 0 && r.RSS >= limit
 
 	if g.seen && r.Gen != g.lastGen {
 		g.closeEpisode()
-		if g.quietRecycled && over && !g.belowBaseline {
-			g.belowBaseline = true
-			g.log.Warn("[Memory] sidecar is over its soft limit right after a restart; sidecar_soft_limit_mb is below its baseline",
-				"rss_mb", float64(r.RSS)/1048576, "threshold_mb", r.SoftMB)
-		}
+		// Only the child the quiet recycle started answers the question; one
+		// that replaced it after a death does not inherit it.
+		g.baselineOpen = g.quietRecycled
 		g.quietRecycled = false
 	}
 	if g.seen && r.SoftMB != g.lastSoftMB {
 		g.closeEpisode()
-		g.belowBaseline = false
+		g.belowBaseline, g.baselineOpen = false, false
 	}
 	g.seen, g.lastGen, g.lastSoftMB = true, r.Gen, r.SoftMB
 
@@ -122,6 +126,16 @@ func (g *sidecarMemGuard) decide(r sidecarMemReading, quiet func() sidecarMemQui
 			q = &v
 		}
 		return *q
+	}
+
+	if g.baselineOpen {
+		if !over {
+			g.baselineOpen = false
+		} else if v := askQuiet(); v.PlayersLoaded == 0 && v.GenerationsInFlight == 0 && v.Pending == 0 {
+			g.baselineOpen, g.belowBaseline = false, true
+			g.log.Warn("[Memory] sidecar is over its soft limit right after a restart; sidecar_soft_limit_mb is below its baseline",
+				"rss_mb", float64(r.RSS)/1048576, "threshold_mb", r.SoftMB)
+		}
 	}
 
 	if r.HardMB > 0 && r.HeapUsed >= int64(r.HardMB)<<20*memForcedHeapPct/100 {

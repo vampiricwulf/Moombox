@@ -269,7 +269,7 @@ func TestSidecarMemQuietRecycle(t *testing.T) {
 }
 
 // latchAfterQuietRecycle records a quiet recycle and feeds the new child's
-// first reading over the limit, which sets the below-baseline latch.
+// first reading, idle and over the limit, which sets the below-baseline latch.
 func latchAfterQuietRecycle(t *testing.T, h *memHarness) {
 	t.Helper()
 	h.tick(250)
@@ -301,6 +301,64 @@ func TestSidecarMemBelowBaselineStopsQuietRecycles(t *testing.T) {
 	h.heap = 512 * mb * 80 / 100
 	if got := h.tick(250); got != memRecycleForced {
 		t.Errorf("heap at 80%% of the hard limit under the latch = %v, want memRecycleForced", got)
+	}
+}
+
+// TestSidecarMemBelowBaselineWaitsForAQuietReading: the first mint after a
+// restart is a cold BotGuard generation, so a new child read over the limit
+// while it is working says nothing about the limit. Only a quiet reading over
+// it latches, and a reading under it settles the question the other way.
+func TestSidecarMemBelowBaselineWaitsForAQuietReading(t *testing.T) {
+	recycleThenRead := func(q sidecarMemQuiet) *memHarness {
+		h := newMemHarness()
+		h.tick(250)
+		h.g.recycled(h.now, false)
+		h.gen++
+		h.q = q
+		h.tick(250)
+		return h
+	}
+	for name, q := range map[string]sidecarMemQuiet{
+		"GenerationsInFlight": {GenerationsInFlight: 1},
+		"PlayersLoaded":       {PlayersLoaded: 1},
+		"Pending":             {Pending: 1},
+	} {
+		h := recycleThenRead(q)
+		if n := len(h.log.warns); n != 0 {
+			t.Errorf("%s: a loaded first reading over the limit warned %d times", name, n)
+		}
+		h.q = sidecarMemQuiet{}
+		h.tick(250)
+		if n := h.log.count(h.log.warns, "below its baseline"); n != 1 {
+			t.Errorf("%s: the next quiet reading over the limit warned %d times, want 1", name, n)
+		}
+	}
+
+	// Loaded and over, then under, then quiet and over: the child fits under
+	// the limit, so nothing latches and it is recycled again in its turn.
+	h := recycleThenRead(sidecarMemQuiet{GenerationsInFlight: 1})
+	h.q = sidecarMemQuiet{}
+	h.tick(150)
+	h.tick(250) // GC
+	h.now = h.now.Add(7 * time.Hour)
+	var got sidecarMemAction
+	for i := 0; i < 5; i++ {
+		got = h.tick(250)
+	}
+	if n := len(h.log.warns); n != 0 {
+		t.Errorf("a child read under the limit warned %d times", n)
+	}
+	if got != memRecycleQuiet {
+		t.Errorf("fifth steady tick after an under-limit reading = %v, want memRecycleQuiet", got)
+	}
+
+	// A child that dies with the question open hands nothing to its successor.
+	h = recycleThenRead(sidecarMemQuiet{GenerationsInFlight: 1})
+	h.q = sidecarMemQuiet{}
+	h.gen++
+	h.tick(250)
+	if n := len(h.log.warns); n != 0 {
+		t.Errorf("the successor of a crashed replacement warned %d times", n)
 	}
 }
 
