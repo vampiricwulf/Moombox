@@ -19,7 +19,7 @@ import { BotGuardClient } from "bgutils-js/botguard";
 import { WebPoMinter } from "bgutils-js/webpo";
 import { USER_AGENT, buildURL, getHeaders } from "bgutils-js/utils";
 import { createInterface } from "node:readline";
-import { solveCipher } from "./cipher.js";
+import { solveCipher, startSweepTimer } from "./cipher.js";
 import { extractYtcfg, extractHomepageChallenge } from "./homepage.js";
 
 // ---------------------------------------------------------------------------
@@ -962,4 +962,8 @@ process.on("uncaughtException", (err) => {
 // time after the jsdom 27→29 bump in v2.6.14 (module load + DOM construction
 // can exceed 5s on Windows even with a warm filesystem cache). Notifications
 // are distinguished from JSON-RPC responses by the absence of an `id` field.
+//
+// Just before it, the prepared-player store is swept (and then hourly) and
+// the idle-player sweep starts (every minute, on an unref'd timer).
+startSweepTimer();
 process.stdout.write('{"event":"ready"}\n');
