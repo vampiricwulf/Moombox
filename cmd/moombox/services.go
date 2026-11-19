@@ -904,10 +904,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 			OnUnhealthy: func(reason string) { sup.Notify(reason) },
 		})
 		sup = sidecar.NewSupervisor(sidecar.SupervisorConfig{
-			Restart: bgSidecar.Restart,
-			Logger:  log,
+			Restart:      bgSidecar.Restart,
+			BeginRecycle: bgSidecar.BeginRecycle,
+			Logger:       log,
 		})
 		bgSupervisor = sup
+		s.bgSupervisor = sup
 		// Stored UNCONDITIONALLY, unlike before: the supervisor can bring the
 		// child up minutes after a failed first start, and shutdown.go's Stop
 		// must reach whatever is running by then. Stop on a never-started

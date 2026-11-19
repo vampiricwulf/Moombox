@@ -66,6 +66,9 @@ type runState struct {
 	twService   *twitch.Service
 	potProvider *bgutils.PotProvider
 	bgSidecar   *sidecar.Sidecar
+	// bgSupervisor restarts the sidecar after a death and recycles it on
+	// purpose for the stats ticker's memory guard. Nil when use_sidecar is off.
+	bgSupervisor *sidecar.Supervisor
 
 	// --- Worker + notifications ---
 	notifyMgr notifications.Notifier
