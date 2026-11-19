@@ -24,7 +24,12 @@
 # fetched (apt keeps finished packages and partials in its cache). choco
 # gets no per-attempt limit (cutting an install off half-way is worse than
 # waiting), so a hung attempt is never retried: the waiting step's
-# timeout-minutes is its bound, and the bound of the whole.
+# timeout-minutes is its bound, and the bound of the whole. What retry.sh
+# retries on Windows is "choco installed it AND ffmpeg and ffprobe run"
+# (--choco): choco has exited 0 with "installed 0/0 packages" after its feed
+# answered 503, which ended the retries with nothing installed and failed
+# three shards of one run. Five attempts, so a feed outage of a couple of
+# minutes is outlasted.
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -58,7 +63,7 @@ install() {
 			sudo chmod -R a+rX "$debs"
 		;;
 	Windows)
-		bash "$here/retry.sh" 3 0 choco install ffmpeg -y --no-progress
+		bash "$here/retry.sh" 5 0 bash "$0" --choco
 		;;
 	*)
 		echo "install-ffmpeg.sh: no installer for ${RUNNER_OS:-$(uname -s)}" >&2
@@ -71,6 +76,12 @@ install() {
 case ${1:-} in
 "")
 	install
+	;;
+--choco)
+	# One retried attempt (see the header): the install, then proof of it.
+	choco install ffmpeg -y --no-progress &&
+		ffmpeg -version >/dev/null &&
+		ffprobe -version >/dev/null
 	;;
 --start)
 	rm -rf "$state"
@@ -110,7 +121,7 @@ case ${1:-} in
 	exit "$status"
 	;;
 *)
-	echo "usage: install-ffmpeg.sh [--start | --wait]" >&2
+	echo "usage: install-ffmpeg.sh [--start | --wait | --choco]" >&2
 	exit 2
 	;;
 esac
