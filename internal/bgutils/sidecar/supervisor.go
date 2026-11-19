@@ -223,7 +223,8 @@ func (s *Supervisor) restartLoop(ctx context.Context, reason string, startAttemp
 // It refuses with ErrRecycleBusy while a request is pending. It is not an
 // outage: it logs no death, publishes no health and leaves the restart count
 // and ladder alone. A start that fails is handed to the death path (Notify),
-// so the restart ladder brings the sidecar back; ErrStopped is returned as is.
+// so the restart ladder brings the sidecar back; ErrStopped, and the error of
+// a start cut short by ctx ending, are returned as they are.
 func (s *Supervisor) Recycle(ctx context.Context) error {
 	if s.cfg.BeginRecycle == nil {
 		return errors.New("sidecar: supervisor has no BeginRecycle")
@@ -238,6 +239,10 @@ func (s *Supervisor) Recycle(ctx context.Context) error {
 	err := s.cfg.Restart(startCtx)
 	cancel()
 	if errors.Is(err, ErrStopped) {
+		return err
+	}
+	if err != nil && ctx.Err() != nil {
+		// Cut short by the caller (Moombox shutting down): not a death.
 		return err
 	}
 	if err != nil {

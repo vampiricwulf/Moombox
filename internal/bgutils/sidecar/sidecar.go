@@ -764,12 +764,14 @@ func (s *Sidecar) PendingCount() int {
 
 // BeginRecycle closes admission for a deliberate recycle: from now on call
 // waits instead of reaching the child. ok is false, and nothing changes, when
-// a request is pending or a recycle is already running. end reopens
-// admission and releases the waiters; it may be called more than once.
+// a request is pending, a recycle is already running, or the child is down
+// (its death is the supervisor's to repair, and a recycle on top of it would
+// start a second child). end reopens admission and releases the waiters; it
+// may be called more than once.
 func (s *Sidecar) BeginRecycle() (end func(), ok bool) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	if len(s.pending) > 0 || s.recycleGate != nil {
+	if len(s.pending) > 0 || s.recycleGate != nil || !s.healthy.Load() {
 		return nil, false
 	}
 	gate := make(chan struct{})
@@ -965,8 +967,9 @@ func (s *Sidecar) TriggerGC(ctx context.Context) (TriggerGCResult, error) {
 }
 
 // Stats holds the sidecar's internal counters as getStats reports them.
-// Nothing in production reads them today — the tests exercise the
-// round-trip — and CachedSessions is always 0: server.js keeps no session
+// Production reads PlayersLoaded and GenerationsInFlight (cmd/moombox's
+// memory guard, before it recycles the child); the rest are diagnostics the
+// tests round-trip. CachedSessions is always 0: server.js keeps no session
 // cache (that layer lives in PotProvider) and only ever resets the counter.
 type Stats struct {
 	CachedMinters  int `json:"cachedMinters"`
@@ -1111,7 +1114,11 @@ func (s *Sidecar) callOnce(ctx context.Context, method string, params map[string
 				return errRecycleGate
 			}
 		}
-		return errors.New("sidecar: unhealthy")
+		// Read again: a recycle that ended between the two reads above has
+		// left a healthy child and no gate.
+		if !s.healthy.Load() {
+			return errors.New("sidecar: unhealthy")
+		}
 	}
 
 	// Bound every RPC with RequestTimeout. Callers pass long-lived job

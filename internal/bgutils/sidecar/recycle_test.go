@@ -76,6 +76,16 @@ func TestBeginRecycleRefusesWhileARequestIsPending(t *testing.T) {
 	} else {
 		end2()
 	}
+
+	// A child that is already down is the supervisor's to restart: a recycle
+	// begun on top of its death would start a second child.
+	s.healthy.Store(false)
+	if end, ok := s.BeginRecycle(); ok || end != nil {
+		t.Error("BeginRecycle began a recycle on a child that is down")
+	}
+	if s.IsHealthy() {
+		t.Error("a refused BeginRecycle left a gate installed")
+	}
 }
 
 // TestACallArrivingDuringARecycleWaitsThenRunsOnTheNewChild: a caller that
@@ -266,10 +276,9 @@ func TestAFailedRecycleStartHandsOverToTheDeathPath(t *testing.T) {
 	default:
 		t.Error("a failed recycle queued no notice")
 	}
-	if end, ok := s.BeginRecycle(); !ok {
+	// The child is down, so IsHealthy is true only while a gate is installed.
+	if s.IsHealthy() {
 		t.Error("the gate was left installed after a failed recycle")
-	} else {
-		end()
 	}
 	select {
 	case err := <-done:
@@ -278,6 +287,35 @@ func TestAFailedRecycleStartHandsOverToTheDeathPath(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a call was left waiting after a failed recycle")
+	}
+}
+
+// TestARecycleCutShortByShutdownIsNotADeath: Moombox shutting down cancels the
+// recycle's context before Stop latches; the start error that follows is not
+// an outage for the supervisor to announce and repair.
+func TestARecycleCutShortByShutdownIsNotADeath(t *testing.T) {
+	resetHealth(t)
+	s, _, _ := newProbeSidecar(5*time.Second, time.Minute, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	sup := NewSupervisor(SupervisorConfig{
+		Restart: func(startCtx context.Context) error {
+			s.healthy.Store(false)
+			cancel()
+			<-startCtx.Done()
+			return startCtx.Err()
+		},
+		BeginRecycle: s.BeginRecycle,
+		Logger:       silentLogger{},
+	})
+
+	if err := sup.Recycle(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Recycle = %v, want context.Canceled", err)
+	}
+	if len(sup.notices) != 0 {
+		t.Error("a recycle cut short by shutdown queued a death notice")
+	}
+	if s.IsHealthy() {
+		t.Error("the gate was left installed after a cancelled recycle")
 	}
 }
 
