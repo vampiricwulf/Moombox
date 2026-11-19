@@ -17,12 +17,12 @@ const ProjectRepoURL = "https://github.com/vampiricwulf/Moombox"
 // =============================================================================
 
 // Chrome-major window for the randomized desktop Web UA. Keep in lockstep
-// with yt-dlp's random_user_agent() range (utils/_utils.py — 145-151 as of
-// 2026-07) so live Google/Twitch endpoints never see an implausibly stale or
-// not-yet-released browser. Bump both bounds when yt-dlp's window moves.
+// with yt-dlp's random_user_agent() range (utils/networking.py — 151-157 as
+// of 2026-11, d432ab874) so live Google/Twitch endpoints never see an
+// implausibly stale or not-yet-released browser. Bump both bounds when yt-dlp's window moves.
 const (
-	chromeMajorMin = 145
-	chromeMajorMax = 151
+	chromeMajorMin = 151
+	chromeMajorMax = 157
 )
 
 // randomizedWebUA builds the desktop Web UA with a Chrome major picked
