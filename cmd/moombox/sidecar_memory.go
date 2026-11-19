@@ -87,8 +87,8 @@ type sidecarMemGuard struct {
 	// a request pending answers nothing: the first mint after a restart is a
 	// cold BotGuard generation.
 	baselineOpen bool
-	recycledEver  bool
-	lastRecycle   time.Time
+	recycledEver bool
+	lastRecycle  time.Time
 }
 
 func newSidecarMemGuard(log interface {
@@ -138,7 +138,7 @@ func (g *sidecarMemGuard) decide(r sidecarMemReading, quiet func() sidecarMemQui
 		}
 	}
 
-	if r.HardMB > 0 && r.HeapUsed >= int64(r.HardMB)<<20*memForcedHeapPct/100 {
+	if r.HardMB > 0 && r.HeapUsed >= memForcedHeapBytes(r.HardMB) {
 		if v := askQuiet(); v.Pending == 0 && v.GenerationsInFlight == 0 {
 			return memRecycleForced
 		}
@@ -175,6 +175,12 @@ func (g *sidecarMemGuard) decide(r sidecarMemReading, quiet func() sidecarMemQui
 	return memNone
 }
 
+// memForcedHeapBytes is the V8 heap in use at which a child under hardMB is
+// recycled without waiting for the host to be idle.
+func memForcedHeapBytes(hardMB int) int64 {
+	return int64(hardMB) << 20 * memForcedHeapPct / 100
+}
+
 func (g *sidecarMemGuard) closeEpisode() {
 	g.episode, g.lastFireRSS, g.ticks = false, 0, 0
 }
@@ -201,11 +207,13 @@ func (g *sidecarMemGuard) recycled(now time.Time, forced bool) {
 // guardSidecarMemory runs the guard on one healthy reading of the sidecar and
 // carries out what it decides. The stats ticker is its only caller.
 func (s *runState) guardSidecarMemory(ctx context.Context, g *sidecarMemGuard, stats sidecar.MemoryStats) {
-	var softMB, hardMB int
+	var softMB int
 	s.configStore.Read(func(c *config.MoomboxConfig) {
 		softMB = c.Memory.SidecarSoftLimitMB
-		hardMB = c.Memory.SidecarHardLimitMB
 	})
+	// The hard limit the child runs under, not the configured one: the
+	// setting takes effect at the next start of Moombox.
+	hardMB := s.bgSidecarHardMB
 	now := time.Now()
 	r := sidecarMemReading{
 		RSS:      stats.RSS,
@@ -230,18 +238,39 @@ func (s *runState) guardSidecarMemory(ctx context.Context, g *sidecarMemGuard, s
 			return
 		}
 		forced := action == memRecycleForced
+		heapUsed := stats.HeapUsed
 		if forced {
-			g.log.Warn("[Memory] recycling sidecar: V8 heap near the hard limit",
-				"heap_mb", float64(stats.HeapUsed)/1048576, "hard_limit_mb", hardMB)
-		} else {
-			g.log.Info("[Memory] recycling idle sidecar: memory stayed over the soft limit",
-				"rss_mb", float64(stats.RSS)/1048576, "threshold_mb", softMB)
+			// heapUsed counts garbage V8 has not collected yet. Ask for a GC
+			// first and keep a child it brings back under the threshold; a
+			// GC that fails changes nothing, and the child is recycled.
+			gcCtx, gcCancel := context.WithTimeout(ctx, 5*time.Second)
+			res, err := s.bgSidecar.TriggerGC(gcCtx)
+			gcCancel()
+			if err == nil {
+				heapUsed = res.After.HeapUsed
+				if heapUsed < memForcedHeapBytes(hardMB) {
+					g.log.Debug("[Memory] sidecar V8 heap was near the hard limit; a GC brought it back",
+						"heap_before_mb", float64(res.Before.HeapUsed)/1048576,
+						"heap_mb", float64(heapUsed)/1048576, "hard_limit_mb", hardMB)
+					return
+				}
+			}
 		}
 		err := s.bgSupervisor.Recycle(ctx)
 		switch {
 		case err == nil:
 			g.recycled(now, forced)
-		case errors.Is(err, sidecar.ErrRecycleBusy), errors.Is(err, sidecar.ErrStopped):
+			// Logged once the new child is up: a recycle that was refused
+			// did not happen.
+			if forced {
+				g.log.Warn("[Memory] recycled sidecar: V8 heap near the hard limit",
+					"heap_mb", float64(heapUsed)/1048576, "hard_limit_mb", hardMB)
+			} else {
+				g.log.Info("[Memory] recycled idle sidecar: memory stayed over the soft limit",
+					"rss_mb", float64(stats.RSS)/1048576, "threshold_mb", softMB)
+			}
+		case errors.Is(err, sidecar.ErrRecycleBusy), errors.Is(err, sidecar.ErrStopped), ctx.Err() != nil:
+			// Busy, stopped, or cut short by Moombox shutting down.
 			g.log.Debug("[Memory] sidecar recycle skipped", "err", err.Error())
 		default:
 			g.log.Warn("[Memory] sidecar recycle failed", "err", err.Error())

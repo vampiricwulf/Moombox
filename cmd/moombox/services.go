@@ -911,6 +911,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		})
 		bgSupervisor = sup
 		s.bgSupervisor = sup
+		s.bgSidecarHardMB = cfg.Memory.SidecarHardLimitMB
 		// Stored UNCONDITIONALLY, unlike before: the supervisor can bring the
 		// child up minutes after a failed first start, and shutdown.go's Stop
 		// must reach whatever is running by then. Stop on a never-started

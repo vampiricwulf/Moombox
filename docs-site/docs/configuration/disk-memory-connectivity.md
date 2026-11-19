@@ -219,7 +219,7 @@ logs one line when memory drops back under it.
 
 If the sidecar stays over the limit for about 10 minutes while no stream is
 Live, Downloading or Muxing and the sidecar itself is idle, Moombox restarts
-it (the log says *recycling idle sidecar*), at most once every 6 hours.
+it (the log says *recycled idle sidecar*), at most once every 6 hours.
 Requests that arrive during the restart wait a few seconds for the new
 sidecar. If a freshly restarted sidecar is over the limit while it is idle, the limit
 is below what the sidecar needs; Moombox logs a warning and stops restarting
@@ -260,7 +260,8 @@ terminal) while it is down. If it stays down for 60 seconds you get a
 Sidecar Restored** follows when it is back.
 
 Moombox does not wait for that abort: when the heap reaches 80% of this
-limit, it restarts the sidecar at the next moment no request is pending.
+limit and a garbage collection does not bring it back under, it restarts the
+sidecar at the next moment no request is pending.
 
 Keep it comfortably above the soft limit: BotGuard bursts of 400–500 MB are
 normal, and the default 512 sits just above them. If your log shows repeated
