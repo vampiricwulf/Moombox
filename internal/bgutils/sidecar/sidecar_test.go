@@ -171,6 +171,10 @@ func TestSidecarOnTheEmbeddedPayload(t *testing.T) {
 		if stats.CachedMinters != 0 {
 			t.Errorf("expected CachedMinters=0, got %d", stats.CachedMinters)
 		}
+		if stats.PlayersLoaded != 0 || stats.GenerationsInFlight != 0 {
+			t.Errorf("expected PlayersLoaded=0 GenerationsInFlight=0, got %d %d",
+				stats.PlayersLoaded, stats.GenerationsInFlight)
+		}
 	})
 
 	// Multiple pings in parallel: the reqID multiplexer must route each
