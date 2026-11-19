@@ -233,7 +233,7 @@ test("an entry is stored flat, and off the heap when reloaded from disk", (t) =>
     ]);
     assert.equal(reloaded.fromDisk, true, "the second process did not load from the store");
     assert.ok(
-        reloaded.heapPerChar < 0.5,
+        reloaded.heapPerChar < 1.0, // an uncopied reload measures about 2.0; the slack is for other platforms
         `the reloaded copy is on V8's heap (heapUsed grew ${reloaded.heapPerChar} bytes a character)`,
     );
 });
