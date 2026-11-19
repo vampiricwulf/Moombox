@@ -133,6 +133,26 @@ func TestACallWhoseContextEndsWhileWaitingOutARecycleGetsTheUnhealthyError(t *te
 	}
 }
 
+// TestACallThatPassedTheWaitBeforeARecycleBeganWaitsAgain: a caller past
+// the wait that finds the child already torn down by a recycle goes back to
+// waiting instead of reporting the sidecar down.
+func TestACallThatPassedTheWaitBeforeARecycleBeganWaitsAgain(t *testing.T) {
+	s, _, _ := newProbeSidecar(5*time.Second, time.Minute, true)
+	end, ok := s.BeginRecycle()
+	if !ok {
+		t.Fatal("BeginRecycle refused")
+	}
+	defer end()
+	s.healthy.Store(false) // the old child's teardown
+
+	if err := s.callOnce(context.Background(), "ping", nil, nil, true); !errors.Is(err, errRecycleGate) {
+		t.Errorf("a gated attempt on a recycling, down sidecar = %v, want errRecycleGate", err)
+	}
+	if err := s.callOnce(context.Background(), "shutdown", nil, nil, false); err == nil || err.Error() != "sidecar: unhealthy" {
+		t.Errorf("an ungated attempt on a down sidecar = %v, want sidecar: unhealthy", err)
+	}
+}
+
 // TestIsHealthyIsTrueThroughoutARecycle: consumers that gate on IsHealthy go
 // on into call and wait there, instead of failing fast or falling to goja.
 func TestIsHealthyIsTrueThroughoutARecycle(t *testing.T) {

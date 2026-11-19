@@ -1101,6 +1101,16 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 // while a recycle runs (errRecycleGate); callRaw passes false.
 func (s *Sidecar) callOnce(ctx context.Context, method string, params map[string]any, into any, gated bool) error {
 	if !s.healthy.Load() {
+		// A recycle that began after call's wait has taken the child down:
+		// wait for the new one rather than report the old one gone.
+		if gated {
+			s.pendingMu.Lock()
+			recycling := s.recycleGate != nil
+			s.pendingMu.Unlock()
+			if recycling {
+				return errRecycleGate
+			}
+		}
 		return errors.New("sidecar: unhealthy")
 	}
 
