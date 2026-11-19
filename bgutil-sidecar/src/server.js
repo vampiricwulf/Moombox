@@ -19,7 +19,7 @@ import { BotGuardClient } from "bgutils-js/botguard";
 import { WebPoMinter } from "bgutils-js/webpo";
 import { USER_AGENT, buildURL, getHeaders } from "bgutils-js/utils";
 import { createInterface } from "node:readline";
-import { solveCipher, startSweepTimer } from "./cipher.js";
+import { playersLoaded, solveCipher, startSweepTimer } from "./cipher.js";
 import { extractYtcfg, extractHomepageChallenge } from "./homepage.js";
 
 // ---------------------------------------------------------------------------
@@ -157,7 +157,9 @@ function budgetSignal(deadline, capMs) {
 // sidecar caches at most one minter; that minter mints PoTokens for every
 // content binding until it expires.
 // ---------------------------------------------------------------------------
-let cachedMinter = null; // { minter, expiresAt, webPoSignalOutput }
+// The entry generateMinter returns: { minter, bgClient, expiresAt,
+// webPoSignalOutput, globalName, minterSource, ytcfgPaired, inUse, retired }.
+let cachedMinter = null;
 const stats = {
     cachedMinters: 0,
     cachedSessions: 0,
@@ -539,8 +541,13 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
     // 3. Install the interpreter into globalThis. `new Function(...)()` runs
     // the script in module-isolated scope but with globalThis access -- which
     // is exactly what BotGuard needs to attach its `vm` object under
-    // challenge.globalName.
-    new Function(interpJS)();
+    // challenge.globalName. The fetch and the host gate above run on every
+    // generation; only a body that already installed the same, still-present
+    // global is not run again, since each run builds another interpreter VM.
+    if (shouldRunInterpreter(lastInterp, interpJS, challenge.globalName, globalThis)) {
+        new Function(interpJS)();
+        lastInterp = { body: interpJS, globalName: challenge.globalName };
+    }
 
     // 4. Spin up the BotGuard client, take its snapshot.
     // Re-assert the JSDOM page (installDomGlobals) and the ytcfg binding:
@@ -560,42 +567,108 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
         globalName: challenge.globalName,
         globalObject: globalThis,
     });
-    const webPoSignalOutput = [];
-    const botguardResponse = await bgClient.snapshot({ webPoSignalOutput });
+    // From here on a failure shuts the client down: nothing else holds it.
+    try {
+        const webPoSignalOutput = [];
+        const botguardResponse = await bgClient.snapshot({ webPoSignalOutput });
 
-    // 5. POST the snapshot to GenerateIT to receive an integrity token.
-    const [
-        integrityToken,
-        estimatedTtlSecs,
-        mintRefreshThreshold,
-        websafeFallbackToken,
-    ] = await fetchIntegrityToken(botguardResponse, deadline);
-    if (!integrityToken) {
-        throw new Error(
-            `GenerateIT empty integrityToken (websafeFallback=${!!websafeFallbackToken})`,
+        // 5. POST the snapshot to GenerateIT to receive an integrity token.
+        const [
+            integrityToken,
+            estimatedTtlSecs,
+            mintRefreshThreshold,
+            websafeFallbackToken,
+        ] = await fetchIntegrityToken(botguardResponse, deadline);
+        if (!integrityToken) {
+            throw new Error(
+                `GenerateIT empty integrityToken (websafeFallback=${!!websafeFallbackToken})`,
+            );
+        }
+
+        // 6. Build the per-binding minter once; reuse for every binding until expiry.
+        const minter = await WebPoMinter.create(
+            { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
+            webPoSignalOutput,
         );
+        return {
+            minter,
+            // Shut down by retire() once this entry is replaced and no mint
+            // is using it.
+            bgClient,
+            expiresAt: Date.now() + estimatedTtlSecs * 1000,
+            webPoSignalOutput,
+            // Tracked so getOrCreateMinter can free the stale interpreter VM when
+            // YouTube rotates globalName between regenerations (see below).
+            globalName: challenge.globalName,
+            minterSource,
+            // Whether a homepage ytcfg (EVENT_ID) was paired into this minter.
+            // minterSource alone no longer says: a non-homepage source can still
+            // have had one injected in principle, and the whole point of the
+            // provenance line is diagnosing a 403 months from now.
+            ytcfgPaired: ytObj !== null,
+            inUse: 0,
+            retired: false,
+        };
+    } catch (e) {
+        shutdownClient(bgClient);
+        throw e;
     }
-
-    // 6. Build the per-binding minter once; reuse for every binding until expiry.
-    const minter = await WebPoMinter.create(
-        { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
-        webPoSignalOutput,
-    );
-    return {
-        minter,
-        expiresAt: Date.now() + estimatedTtlSecs * 1000,
-        webPoSignalOutput,
-        // Tracked so getOrCreateMinter can free the stale interpreter VM when
-        // YouTube rotates globalName between regenerations (see below).
-        globalName: challenge.globalName,
-        minterSource,
-        // Whether a homepage ytcfg (EVENT_ID) was paired into this minter.
-        // minterSource alone no longer says: a non-homepage source can still
-        // have had one injected in principle, and the whole point of the
-        // provenance line is diagnosing a 403 months from now.
-        ytcfgPaired: ytObj !== null,
-    };
 }
+
+// Whether generateMinter must run the interpreter body: false only when the
+// same body last ran under the same global name and that global is still
+// there (getOrCreateMinter deletes a rotated-away one).
+export function shouldRunInterpreter(last, body, globalName, globalObj) {
+    return !(last && last.body === body && last.globalName === globalName && globalObj[globalName] != null);
+}
+
+// The body and global name of the interpreter last run, or null.
+let lastInterp = null;
+
+// Shut a BotGuard client down once, in the background. bgutils' shutdown can
+// reject (no shutdownFunction, or its 3 s timeout); that is logged, never
+// thrown, and no caller awaits it.
+const shutDownClients = new WeakSet();
+function shutdownClient(client) {
+    if (!client || shutDownClients.has(client)) return;
+    shutDownClients.add(client);
+    client.shutdown().catch((e) => logWarn(`botguard shutdown: ${e?.message ?? e}`));
+}
+
+// A replaced entry is shut down on the next macrotask unless a mint is using
+// it, in which case the last mint to finish shuts it down (mintWith). The
+// setImmediate lets a mint that picked the entry up in the same turn count
+// itself in first.
+function retire(entry) {
+    entry.retired = true;
+    setImmediate(() => {
+        if (!entry.inUse) shutdownClient(entry.bgClient);
+    });
+}
+
+export function _retireForTest(entry) {
+    retire(entry);
+}
+
+// Mint with an entry, counting the mint so a retired entry's client is not
+// shut down under it.
+export async function mintWith(entry, binding) {
+    entry.inUse = (entry.inUse ?? 0) + 1;
+    try {
+        return await entry.minter.mintAsWebsafeString(binding);
+    } finally {
+        if (--entry.inUse === 0 && entry.retired) {
+            setImmediate(() => {
+                if (!entry.inUse) shutdownClient(entry.bgClient);
+            });
+        }
+    }
+}
+
+// The entry most recently installed as cachedMinter. Unlike cachedMinter it
+// is not cleared by invalidateIT/invalidateCaches, so the entry they drop is
+// still retired when the next generation replaces it.
+let liveEntry = null;
 
 // In-flight dedup + serialization for minter regeneration.
 //
@@ -685,20 +758,24 @@ export async function getOrCreateMinter(challenge, challengeKey, freshMinter, mi
         const prev = cachedMinter;
         const m = await minterFactory(challenge);
         cachedMinter = m;
+        if (liveEntry && liveEntry !== m) retire(liveEntry);
+        liveEntry = m;
         // Free the previous interpreter's VM when YouTube rotates globalName.
         // generateMinter runs `new Function(interpJS)()`, which attaches the VM
-        // under globalThis[globalName]. A stable name is overwritten in place (the
-        // old VM becomes GC-eligible), but a ROTATED name leaves globalThis[oldName]
-        // pinned forever — one leaked VM per rotation over a days-long run. The live
-        // minter keeps its own VM reachable via the mintCallback closure (not via
-        // globalThis), so deleting the stale property is safe even for an in-flight
-        // mint that captured the old minter.
+        // under globalThis[globalName], unless the same body already did under
+        // the same name, in which case the VM is reused. A ROTATED name would
+        // leave globalThis[oldName] pinned forever — one leaked VM per rotation
+        // over a days-long run. The old entry's client (retired above, shut down
+        // once no mint uses it) and its minter's mintCallback closure reference
+        // the VM directly, not via globalThis, so deleting the stale property is
+        // safe even for an in-flight mint that captured the old minter.
         if (prev && prev.globalName && prev.globalName !== m.globalName) {
             try {
                 delete globalThis[prev.globalName];
             } catch (e) {
                 logWarn(`could not free stale interpreter global: ${e?.message ?? e}`);
             }
+            if (lastInterp?.globalName === prev.globalName) lastInterp = null;
         }
         stats.cachedMinters = 1;
         return { m, reused: false };
@@ -755,7 +832,7 @@ async function generatePoToken(binding, challengeJSON, freshMinter) {
         }
     }
     const { m, fresh } = await getOrCreateMinter(challenge, challengeKey, !!freshMinter);
-    const poToken = await m.minter.mintAsWebsafeString(binding);
+    const poToken = await mintWith(m, binding);
     if (!poToken) {
         throw new Error("WebPoMinter returned empty poToken");
     }
@@ -847,7 +924,10 @@ async function dispatch(req) {
                 return writeResponse({ id, result: "ok" });
 
             case "getStats":
-                return writeResponse({ id, result: { ...stats } });
+                return writeResponse({
+                    id,
+                    result: { ...stats, playersLoaded: playersLoaded(), generationsInFlight: minterInflight.size },
+                });
 
             case "solveCipher": {
                 const params = req.params || {};

@@ -157,3 +157,38 @@ test("a fresh caller does not join a generation that may reuse the cache", async
     assert.equal(c.fresh, true);
     assert.notEqual(c.m, a.m, "the fresh caller got the earlier generation's minter");
 });
+
+// A minter entry carrying a counting BotGuard client.
+function clientEntry(expiresAt) {
+    const e = {
+        minter: { mintAsWebsafeString: async () => "tok" },
+        expiresAt,
+        webPoSignalOutput: [],
+        globalName: "g",
+        minterSource: "att_get",
+        inUse: 0,
+        retired: false,
+        shutdowns: 0,
+    };
+    e.bgClient = {
+        shutdown: async () => {
+            e.shutdowns++;
+        },
+    };
+    return e;
+}
+
+// invalidateIT nulls the cache, so the entry it held is unreachable from the
+// cache when the next generation replaces it; its client must still be shut
+// down. (The test drives an expired cache, which leaves the cache set: it
+// pins the replacement path, not the invalidate path specifically.)
+test("replacing the cached minter retires the previous live entry, even after invalidateIT nulled the cache", async () => {
+    const first = clientEntry(Date.now() - 1);
+    await getOrCreateMinter(null, "key-retire", true, async () => first);
+    const second = clientEntry(Date.now() + 3_600_000);
+    await getOrCreateMinter(null, null, false, async () => second);
+    await ticks(2);
+    assert.equal(first.shutdowns, 1, "the replaced client was not shut down");
+    assert.equal(second.shutdowns, 0, "the live client was shut down");
+    assert.equal(second.retired, false);
+});
