@@ -765,7 +765,7 @@ Bounds steady-state memory for the Go process and the embedded BotGuard sidecar.
 | Field | Type | Default | TOML Key | Notes |
 |-------|------|---------|----------|-------|
 | GoSoftLimitMB | int | 256 | `go_soft_limit_mb` | `debug.SetMemoryLimit`. Soft cap — Go GC ramps up near the limit but allocations succeed beyond it. 0 disables. Hot-reloadable: re-applied on save (`0` clears the limit via `math.MaxInt64`). |
-| SidecarSoftLimitMB | int | 200 | `sidecar_soft_limit_mb` | RSS threshold. When sidecar RSS crosses, Moombox calls `triggerGC` JSON-RPC. 0 disables. |
+| SidecarSoftLimitMB | int | 200 | `sidecar_soft_limit_mb` | RSS threshold. When sidecar RSS crosses, Moombox calls `triggerGC` JSON-RPC once, again only on a further 10% of growth; if RSS stays over it about 10 minutes while the host is idle, the sidecar is restarted (at most every 6 h). 0 disables. |
 | SidecarHardLimitMB | int | 512 | `sidecar_hard_limit_mb` | V8 `--max-old-space-size`. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above SidecarSoftLimitMB. 0 uses V8's default (~512–1500 MB depending on host). **Restart-required** (the sidecar is started with it once); both settings UIs mark it so. |
 
 #### [bgutils]

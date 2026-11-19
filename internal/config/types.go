@@ -465,7 +465,9 @@ type UpdatesConfig struct {
 //
 // V8 has no soft-limit primitive, so the sidecar gets a hard ceiling
 // (--max-old-space-size = SidecarHardLimitMB) plus manual GC triggers
-// fired from Moombox when the sidecar's RSS exceeds SidecarSoftLimitMB.
+// fired from Moombox when the sidecar's RSS exceeds SidecarSoftLimitMB, and
+// a restart of the sidecar when it stays over that while the host is idle or
+// its heap nears the hard limit.
 // Set SidecarHardLimitMB high enough above SidecarSoftLimitMB that a
 // transient allocation spike doesn't OOM-abort the sidecar.
 type MemoryConfig struct {
@@ -473,7 +475,8 @@ type MemoryConfig struct {
 	// 0 disables (Go uses its default unbounded behaviour). Default 256.
 	GoSoftLimitMB int `toml:"go_soft_limit_mb" json:"go_soft_limit_mb"`
 	// SidecarSoftLimitMB is the RSS threshold at which Moombox tells the
-	// sidecar to run global.gc(). 0 disables proactive triggering.
+	// sidecar to run global.gc() once, and, if it stays over while the host
+	// is idle, restarts it. 0 disables both.
 	// Default 200.
 	SidecarSoftLimitMB int `toml:"sidecar_soft_limit_mb" json:"sidecar_soft_limit_mb"`
 	// SidecarHardLimitMB is V8's --max-old-space-size for the sidecar.

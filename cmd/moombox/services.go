@@ -896,8 +896,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 		bgSidecar := sidecar.New(sidecar.Config{
 			Logger:        log,
 			V8HardLimitMB: cfg.Memory.SidecarHardLimitMB,
-			// ExposeGC is required for the periodic TriggerGC call that
-			// enforces the soft sidecar limit. Always on when the sidecar
+			// ExposeGC is required for the TriggerGC call the memory guard
+			// (sidecar_memory.go) makes when the soft sidecar limit is
+			// crossed, once per episode. Always on when the sidecar
 			// is enabled — the cost is a function global no caller invokes
 			// unless we ask for it.
 			ExposeGC:    true,

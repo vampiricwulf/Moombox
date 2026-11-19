@@ -503,7 +503,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `twitch_check_interval` | `15` | No | Seconds between Twitch GQL live-status checks (with jitter) |
 | `monitors.hide_finished_age_days` | `30` | No | Days before finished jobs move to Archived (also accepts `"30d"`) |
 | `memory.go_soft_limit_mb` | `256` | No | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
-| `memory.sidecar_soft_limit_mb` | `200` | No | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
+| `memory.sidecar_soft_limit_mb` | `200` | No | RSS threshold at which Moombox runs one V8 GC on the sidecar, then restarts it if it stays above while idle |
 | `memory.sidecar_hard_limit_mb` | `512` | Yes | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
 
 "Restart?" is whether a change waits for a restart. `network_access` decides who is admitted as soon as it is saved; only moving off `localhost` needs the restart, to listen on the network. Settings marked "No" apply when saved — the downloader ones to jobs that start afterwards.

@@ -233,7 +233,7 @@ var sections = []settingsSection{
 		name: "Memory",
 		fields: []fieldDef{
 			{"go_soft_limit_mb", "Go soft limit (MB)", fieldNumber, nil, "soft cap; GC ramps up but no OOM (default: 256, 0 disables)", nil},
-			{"sidecar_soft_limit_mb", "Sidecar soft limit (MB)", fieldNumber, nil, "RSS threshold to trigger V8 GC (default: 200, 0 disables)", nil},
+			{"sidecar_soft_limit_mb", "Sidecar soft limit (MB)", fieldNumber, nil, "soft cap: one GC, then a restart when idle (default: 200, 0 disables)", nil},
 			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default) (requires restart)", nil},
 		},
 	},

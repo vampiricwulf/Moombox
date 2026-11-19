@@ -459,7 +459,7 @@ use_sidecar = true              # BotGuard sidecar for PO tokens and signatures
 
 [memory]
 go_soft_limit_mb = 256          # 0 disables
-sidecar_soft_limit_mb = 200     # 0 disables
+sidecar_soft_limit_mb = 200     # one GC, then a restart when idle; 0 disables
 sidecar_hard_limit_mb = 512     # 0 = V8's own default
 
 [connectivity]

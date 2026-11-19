@@ -367,11 +367,14 @@ while solving a BotGuard challenge. Two settings bound it:
 
 - [`memory.sidecar_soft_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_soft_limit_mb)
   (default 200) — when Moombox's periodic check (about every two minutes)
-  finds the sidecar above this, it asks it to free memory. The log says
-  *sidecar soft limit hit; ran GC*.
+  finds the sidecar above this, it asks it to free memory once; the log says
+  *sidecar soft limit hit; ran GC*. If it stays above for about 10 minutes
+  while nothing is live, downloading or muxing, Moombox restarts the sidecar
+  (at most every 6 hours).
 - [`memory.sidecar_hard_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_hard_limit_mb)
   (default 512) — the sidecar's hard heap ceiling. Reaching it kills the
-  sidecar, which Moombox then restarts. Keep it comfortably above the soft
+  sidecar, which Moombox then restarts. Moombox also restarts it, between
+  requests, once its heap reaches 80% of this limit. Keep it comfortably above the soft
   limit.
 
 ### When the sidecar is down

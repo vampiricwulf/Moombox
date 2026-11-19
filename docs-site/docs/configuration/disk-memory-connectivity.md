@@ -212,12 +212,25 @@ go_soft_limit_mb = 512
 | `200` | 0–65536 (MB); `0` = off. Must be lower than `sidecar_hard_limit_mb` when both are non-zero | Within two minutes (next memory check) | Dashboard: Settings → Memory → **Sidecar soft limit (MB)**. TUI: Settings → Memory → **Sidecar soft limit (MB)**. |
 
 Every two minutes Moombox reads the sidecar's resident memory (RSS). When it
-is at or above this value, Moombox asks the sidecar to run a full garbage
-collection and logs `[Memory] sidecar soft limit hit; ran GC` with how much
-was reclaimed. Nothing is stopped or restarted. V8 has no soft limit of its
-own, so this periodic nudge is the soft half of the pair.
+crosses this value, Moombox asks the sidecar to run a full garbage collection
+and logs `[Memory] sidecar soft limit hit; ran GC` with how much was
+reclaimed. It asks again only if memory grows a further 10% of the limit, and
+logs one line when memory drops back under it.
 
-`0` turns the nudge off. The check only runs while the sidecar is up and
+If the sidecar stays over the limit for about 10 minutes while no stream is
+Live, Downloading or Muxing and the sidecar itself is idle, Moombox restarts
+it (the log says *recycling idle sidecar*), at most once every 6 hours.
+Requests that arrive during the restart wait a few seconds for the new
+sidecar. If a freshly restarted sidecar is already over the limit, the limit
+is below what the sidecar needs; Moombox logs a warning and stops restarting
+it until you change the limit.
+
+The sidecar also keeps prepared YouTube players in memory only while they are
+used: they leave RAM after 15 minutes unused and reload from the `players`
+folder in the sidecar's cache directory, and files there unused for 7 days
+are deleted.
+
+`0` turns all of this off. The check only runs while the sidecar is up and
 answering.
 
 Validation: both UIs refuse values outside 0–65536, and a soft limit at or
@@ -245,6 +258,9 @@ unavailable. The TUI status bar shows **SIDECAR DOWN** (**POT** on a narrow
 terminal) while it is down. If it stays down for 60 seconds you get a
 **BotGuard Sidecar Down** notification (event `sidecar_down`); **BotGuard
 Sidecar Restored** follows when it is back.
+
+Moombox does not wait for that abort: when the heap reaches 80% of this
+limit, it restarts the sidecar at the next moment no request is pending.
 
 Keep it comfortably above the soft limit: BotGuard bursts of 400–500 MB are
 normal, and the default 512 sits just above them. If your log shows repeated

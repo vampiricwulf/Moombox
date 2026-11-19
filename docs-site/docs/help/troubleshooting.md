@@ -529,6 +529,11 @@ See [Notifications](../guide/notifications.md).
   (256 MB): above it the garbage collector works harder, but nothing is
   killed.
 - The BotGuard sidecar settles around 150 MB and can spike to 400–500 MB.
+  Above
+  [`memory.sidecar_soft_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_soft_limit_mb)
+  (200 MB) Moombox asks it for one garbage collection, and restarts it if it
+  stays above that for about 10 minutes while nothing is recording. Cached
+  players leave its memory after 15 minutes unused.
 - Each download may hold out-of-order segments in memory while one segment
   is retried, up to
   [`reorder_buffer_mb`](../configuration/downloader.md#downloaderreorder_buffer_mb)
