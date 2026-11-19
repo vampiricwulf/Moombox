@@ -6,9 +6,9 @@ Where the last upstream review left off, so the next one (a local session, a sch
 
 ## Last review
 
-- **Date:** 2026-11-12
-- **Last port:** `15fe37f4` — fix(youtube,chat): read ytInitialData from the dedicated script element ← yt-dlp `12ac9aca7` (#17703)
-- **Ported into:** `internal/youtube/channel_membership.go` (`ytInitialDataAnchors`, which `internal/youtube/watch_page.go` shares) and `internal/chat/api.go` (its twin anchor set)
+- **Date:** 2026-11-19
+- **Last port:** `f59c110` — fix(constants): move the randomized Chrome major window to 151-157 ← yt-dlp `d432ab874` (#17930); and `96e79e4` — fix(youtube): web_embedded takes the web family's GVS token and follows tv ← yt-dlp `ee2559128` (#18051)
+- **Ported into:** `internal/constants/constants.go` (`chromeMajorMin`/`chromeMajorMax`); `internal/youtube/types.go` (`GvsTokenRequired`, `AuthLevelTVAuth`/`AuthLevelWebEmbedded`), `internal/youtube/player_api_strategy.go` (authed cascade order), with comments in the worker's GVS strategies
 
 ## Upstream repos — last reviewed commit
 
@@ -23,7 +23,7 @@ Locally, `bash references/update-all.sh` pulls all seven and prints two things p
 
 | Repo | Clone URL | Last reviewed | Commit date | Notes |
 |---|---|---|---|---|
-| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `412e7f0a4b0588fe884a02b344ac66a06538475b` | 2026-11-04 | past release 2026.10.26; build/CI only |
+| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `2d596f4882a2d6e6414836bccd9fd3fb1e1534a2` | 2026-11-17 | past release 2026.10.26 |
 | ejs | https://github.com/yt-dlp/ejs.git | `d48c6303a5a6455a42ef9e0b445149cadea51279` | 2026-10-26 | CI-only commits past the vendored pin |
 | BgUtils | https://github.com/LuanRT/BgUtils.git | `f842f8a14435a35800ff469d315bb1a7e6d7a64a` | 2026-10-23 | dev-dependency bump only |
 | bgutil-ytdlp-pot-provider | https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git | `26475e9d3665b972c4aeb83b4dbaafcf64b88438` | 2026-10-07 | |
@@ -56,6 +56,8 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-11-19 | `f59c110` | yt-dlp `d432ab874` (#17930: `random_user_agent`'s `CHROME_MAJOR_VERSION_RANGE` 145-151 → 151-157, `utils/networking.py`) | The randomized desktop Web UA draws its Chrome major from 151-157 |
+| 2026-11-19 | `96e79e4` | yt-dlp `ee2559128` (#18051, closes #17989: `web_embedded` gets `**WEB_PO_TOKEN_POLICIES`, `_base.py`; `_DEFAULT_AUTHED_CLIENTS = (tv_samsung, web_embedded, web)`, `_video.py`) | `GvsTokenRequired` answers true for `web_embedded` (tokenised on every path, mandatory unless Premium, so a failed mint drops its copies for token-free ones); `AuthLevelTVAuth` 1 ahead of `AuthLevelWebEmbedded` 2, so tv wins the authed tie and a web_embedded winner carries the token-free shadow; the authed cascade asks TV before web_embedded |
 | 2026-11-14 | `59a2b8af` | yt-dlp `YoutubeDLCookieJar.load` and `get_cookie_header`, `_extract_firefox_cookies`, `_extract_chrome_cookies` (`yt_dlp/cookies.py` at `43a45ae37`): no list of cookie names, every row loaded, a request carries each cookie whose domain and path match | Owner ruling KA-7: a row `www.youtube.com` is sent, on path `/`, is kept and sent under any name (`wwwYouTubeRow`) by `Load`, the `Cookie` header, the browser export and the reply renewals; plain `SIDCC` was the case. google.com rows stay kept by name, and a media host is sent the rows kept by name only (`GetYouTubeMediaCookieHeader`) |
 | 2026-11-12 | `1cf0289d` | yt-dlp `_call_api` (`extractor/youtube/_base.py:862-866`: `prettyPrint=false` in the query of every Innertube call it makes; `downloader/youtube_live_chat.py` builds the chat URL with the key alone) | `/player` and `/browse` calls carry `prettyPrint=false` after the key (`innertubeURL`); chat's `get_live_chat` calls are unchanged |
 | 2026-10-31 | `c900dabd` | yt-dlp `extractor/youtube/_video.py` at `b77c9304e` (`adjust_incomplete_format`: "Post-live DASH and m3u8 manifests only have the last ~2 hours", marked "(Last 2 hours)") | A post-live stream whose DASH is all DRM-protected and falls to its HLS manifest is recorded as a late start (`live_edge_reason`, one `live_edge` notification; `drmLiveEdgeReason`), as a live capture's DRM fallback already was (owner decision PR-R2) |
@@ -171,4 +173,11 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 Replace this section on each review. It is the reason the SHAs above moved past these commits.
 
-- All seven repos (yt-dlp, ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python): nothing new since the 2026-11-05 review; every HEAD is still the *Last reviewed* SHA above. The open `c7fb478d2` item is unchanged upstream.
+- yt-dlp `412e7f0a4..2d596f488` (2026-11-19 review), besides the two ported commits:
+  - `6c6d09761` (#18058, post-live fragment generation: read `X-Head-Seqnum` off a HEAD answered 5xx) — already Moombox's shape: the head probe (`probeHeadAt`, `internal/engine/downloader_fetch.go`) and every segment fetch (`noteHeadSeqFromResponse`) read the header whatever the status.
+  - `fcfd814ff` (#18059, drops the post-live `last_seq -= 2` truncation from `8c1f07d81`) — Moombox never truncated: it fetches up to the head and only tolerates ending two short of it (`EndOfStreamHeadMargin`).
+  - `5aecc65a2` (#18063, a `post_live` notice raised from debug to screen) — message only.
+  - `e6275c2b7` (twitter:spaces), `8f9e23a47` (facebook) — other extractors.
+  - `2d596f488`, `f38fb253b`, `9cd944f34`, `c8dfd5776` — docs, build and CI.
+- ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python: nothing new; every HEAD is still the *Last reviewed* SHA above.
+- Open items: `c7fb478d2` is unchanged upstream (`ee2559128` changes web_embedded's token policy and order, not its UA); R2-Y1 stands.
