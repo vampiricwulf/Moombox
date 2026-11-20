@@ -1,8 +1,9 @@
 package utils
 
 // dedicateddir.go — the shared "is this a dedicated secrets directory" rule
-// behind owner decision O-K (2026-09-17): the POSIX 0700 parent chmod applies
-// only when the secret's parent holds nothing else of Moombox's.
+// behind owner decision O-K (2026-09-17), extended to Windows on 2026-11-19: the
+// parent directory lockdown (POSIX chmod 0700, Windows icacls) applies only
+// when the secret's parent holds nothing else of Moombox's.
 
 import (
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // dedicatedDirScanLimit bounds the listing. A directory Moombox keeps only its
@@ -126,19 +128,53 @@ func DirHoldsSharedData(dir string) bool {
 
 // DirTighteningAllowed reports whether ApplyUserOnlyDACL may be applied to dir.
 //
-// Always true on Windows: icacls writes inheritable ACEs onto the directory and
-// its children rather than removing traversal from everyone else's world, so
-// the sharing problem O-K is about does not arise there, and the ruling says
-// Windows is unchanged.
+// It is the dedicated-directory test on every platform. What the lockdown
+// takes away differs, and it is too much for a shared folder either way:
+//   - POSIX: chmod 0700 makes the parent untraversable to everyone else,
+//     which on a shared data volume is the operator's own host user.
+//   - Windows: `icacls /inheritance:r /grant:r <user>:(OI)(CI)F` REMOVES every
+//     inherited entry, SYSTEM and Administrators included, from the folder and
+//     from everything under it. With the default cookie_file = "./cookies.txt"
+//     that folder is the install folder, holding output, staging, the database
+//     and the log. (Windows used to be exempt here on the reasoning that icacls
+//     only adds inheritable entries; /inheritance:r is what removes the rest.)
 //
-// On POSIX it is the dedicated-directory test. Files stay 0600 either way —
-// every cookie write chmods its temp file before the rename, and SaveMeta
-// writes 0600 — so what the directory chmod buys on POSIX is an untraversable
-// parent, which is worth having on a multi-user desktop with a dedicated
-// directory and actively harmful on a shared data volume.
+// The secret FILES do not depend on this: every cookie and config write
+// restricts its own temp file before the rename (0600, and RestrictFileToOwner
+// on Windows), whatever folder it is in. What a shared folder gives up is only
+// the restricted parent.
 func DirTighteningAllowed(dir string) bool {
-	if runtime.GOOS == "windows" {
-		return true
-	}
 	return !DirHoldsSharedData(dir)
+}
+
+// restrictedDirs is FirstDirRestriction's memo.
+var (
+	restrictedDirsMu sync.Mutex
+	restrictedDirs   = make(map[string]struct{})
+)
+
+// FirstDirRestriction reports whether this is the first time in this process
+// that dir is reported as locked down (ApplyUserOnlyDACL succeeded on it). The
+// cookie writer and config.Save each lock down their own file's folder, which
+// in a dedicated layout is the same folder, and each logs
+// "restricted folder to the current user" only when this answers true, so the
+// operator reads it once per folder. Keyed on the absolute path, which is also
+// returned for the log line: the cookie writer's default folder is spelled ".".
+func FirstDirRestriction(dir string) (absDir string, first bool) {
+	absDir = dir
+	if abs, err := filepath.Abs(dir); err == nil {
+		absDir = abs
+	}
+	absDir = filepath.Clean(absDir)
+	key := absDir
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	restrictedDirsMu.Lock()
+	defer restrictedDirsMu.Unlock()
+	if _, seen := restrictedDirs[key]; seen {
+		return absDir, false
+	}
+	restrictedDirs[key] = struct{}{}
+	return absDir, true
 }

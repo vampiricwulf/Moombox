@@ -621,6 +621,9 @@ func (s *runState) initConfigAndLogger(logLevelOverride string) error {
 	// and this process's own crash output is captured from here on.
 	s.prevCrash = s.captureCrashOutput(cfg.Paths.LogFilePath)
 	logConfigSource(log, cfg, s.configPath)
+	// Once per start, read-only: an install folder an earlier version's
+	// lockdown left without inherited permissions (folder_permissions.go).
+	logUninheritedFolders(log, sharedFoldersWithoutInheritance(cfg.Cookies.CookieFile, s.configPath))
 	for _, issue := range cfg.NormalizedOnLoad {
 		log.Warn("Config value corrected on load — the next save writes the correction to the file", slog.String("issue", issue))
 	}

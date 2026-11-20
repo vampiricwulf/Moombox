@@ -3,7 +3,6 @@ package cookies
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,9 +44,8 @@ func cookieDirFixture(t *testing.T, entries ...string) string {
 
 // fakeDirTighteningAllowed swaps the dirTighteningAllowed seam for the duration
 // of a test, restoring the real utils.DirTighteningAllowed via t.Cleanup. Same
-// shape, and the same reason, as fakeApplyUserOnlyDACL: the real predicate
-// answers true for EVERY directory on Windows (O-K leaves icacls alone), so on
-// this host nothing but a substituted verdict can drive the refusal arm.
+// shape as fakeApplyUserOnlyDACL. The real predicate reads the directory; a
+// substituted one can record that it was asked, or hold its answer back.
 func fakeDirTighteningAllowed(t *testing.T, fn func(dir string) bool) {
 	t.Helper()
 	real := dirTighteningAllowed
@@ -201,17 +199,13 @@ func TestTightenCookieDirOnceAppliesWhenTheGateAllows(t *testing.T) {
 // as a second opinion — so its production value has to answer exactly what
 // utils.DirTighteningAllowed answers.
 //
-// The CONTENT verdict is asserted per fixture as well, and that half is what
-// makes this test mean anything on Windows: utils.DirTighteningAllowed answers
-// true for every directory there (O-K leaves icacls unchanged), so the
-// equivalence compares true against true on the Windows leg and a seam pointed
-// at a local predicate would sail through it.
+// The CONTENT verdict is asserted per fixture as well, so the equivalence
+// cannot be satisfied by two predicates that are wrong in the same way.
 //
 // Mutants:
 //   - point the seam at a local predicate (or at DirHoldsSharedData without
-//     the negation) -> the answers diverge on one fixture (POSIX only).
-//   - break the content rule itself -> the wantShared column fails, on BOTH
-//     legs.
+//     the negation) -> the answers diverge on one fixture.
+//   - break the content rule itself -> the wantShared column fails.
 func TestCookieDirGateIsTheSharedPredicate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -227,23 +221,22 @@ func TestCookieDirGateIsTheSharedPredicate(t *testing.T) {
 				t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", tc.dir, got, want)
 			}
 			if got := utils.DirHoldsSharedData(tc.dir); got != tc.wantShared {
-				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about, "+
-					"and it is the half the OS-conditional predicate above cannot pin on Windows", tc.dir, got, tc.wantShared)
+				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about", tc.dir, got, tc.wantShared)
 			}
 		})
 	}
 }
 
-// TestTightenCookieDirOnceLeavesTheDataDirectoryAloneOnPOSIX drives the REAL
-// predicate over the Docker image's /data shape — cookies.txt beside output/,
-// staging/, the database and the log. It is deliberately differential: on
-// Windows icacls is unchanged by O-K and the apply must still run; on POSIX the
-// 0700 would take the operator's archives away from their own host user, so it
-// must not.
+// TestTightenCookieDirOnceLeavesTheDataDirectoryAlone drives the REAL
+// predicate over the shape of the Docker image's /data and of a default
+// Windows install folder — cookies.txt beside output/, staging/, the database
+// and the log. On POSIX the 0700 would take the operator's archives away from
+// their own host user; on Windows the icacls lockdown removes SYSTEM and
+// Administrators from the folder and every recording under it. Neither runs.
 //
-// Mutant: make DirTighteningAllowed content-tested on Windows too -> the
-// Windows leg fails here as well as in internal/utils.
-func TestTightenCookieDirOnceLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
+// Mutant: exempt Windows in DirTighteningAllowed again -> the apply runs on
+// the Windows leg.
+func TestTightenCookieDirOnceLeavesTheDataDirectoryAlone(t *testing.T) {
 	dir := cookieDirFixture(t, "cookies.txt", "output/", "staging/", "moombox.db", "moombox.log")
 	var calls atomic.Int32
 	applied := make(chan struct{}, 4)
@@ -255,18 +248,9 @@ func TestTightenCookieDirOnceLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
 
 	tightenCookieDirOnce(dir)
 
-	if runtime.GOOS == "windows" {
-		select {
-		case <-applied:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Windows lost its cookie-directory hardening — O-K leaves icacls unchanged")
-		}
-		awaitSettled(t, dir)
-		return
-	}
 	select {
 	case <-applied:
-		t.Fatal("POSIX chmodded the data directory 0700 — that is the container bug O-K forbids")
+		t.Fatal("the data directory was locked down — the container bug O-K forbids, and on Windows the install folder losing SYSTEM and Administrators")
 	case <-time.After(100 * time.Millisecond):
 	}
 	if got := calls.Load(); got != 0 {

@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -60,9 +59,8 @@ func (g *dirGateRecorder) seen() []string {
 
 // fakeDirTighteningAllowed / fakeApplyUserOnlyDACL swap the two seams Save goes
 // through, restoring the real functions via t.Cleanup. Mirrors the pair
-// internal/cookies already uses. The gate seam is the only way to drive the
-// refusal arm on Windows, where the real predicate answers true for every
-// directory (O-K leaves icacls unchanged); the apply seam keeps the assertion
+// internal/cookies already uses. The gate seam records that Save asked and
+// refuses a directory whatever it holds; the apply seam keeps the assertion
 // on "was the tightening actually skipped" rather than on a real icacls
 // shell-out or a chmod this host cannot observe.
 func fakeDirTighteningAllowed(t *testing.T, fn func(dir string) bool) {
@@ -131,18 +129,14 @@ func TestSaveTightensADedicatedConfigDir(t *testing.T) {
 // TestConfigDirGateIsTheSharedPredicate pins R3 from this side: Save's seam and
 // the cookie writer's seam are two references to one rule, not two opinions.
 //
-// The CONTENT verdict is asserted per fixture as well, and that half is what
-// makes this test mean anything on Windows: utils.DirTighteningAllowed answers
-// true for every directory there (O-K leaves icacls unchanged), so the
-// equivalence above compares true against true on the Windows leg and a seam
-// pointed at a local predicate would sail through it.
+// The CONTENT verdict is asserted per fixture as well, so the equivalence
+// cannot be satisfied by two predicates that are wrong in the same way.
 //
 // Mutants:
 //   - point the seam at a local predicate, or at DirHoldsSharedData without the
-//     negation -> the two answers diverge on one fixture (POSIX only).
+//     negation -> the two answers diverge on one fixture.
 //   - break the content rule itself (drop the directory-name check, stop
-//     stripping SQLite's -wal suffix) -> the wantShared column fails, on BOTH
-//     legs.
+//     stripping SQLite's -wal suffix) -> the wantShared column fails.
 func TestConfigDirGateIsTheSharedPredicate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -158,23 +152,23 @@ func TestConfigDirGateIsTheSharedPredicate(t *testing.T) {
 				t.Errorf("dirTighteningAllowed(%q) = %v, utils.DirTighteningAllowed = %v — both call sites must consult one rule", tc.dir, got, want)
 			}
 			if got := utils.DirHoldsSharedData(tc.dir); got != tc.wantShared {
-				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about, "+
-					"and it is the half the OS-conditional predicate above cannot pin on Windows", tc.dir, got, tc.wantShared)
+				t.Errorf("utils.DirHoldsSharedData(%q) = %v, want %v — the CONTENT rule is what O-K is about", tc.dir, got, tc.wantShared)
 			}
 		})
 	}
 }
 
-// TestSaveLeavesTheDataDirectoryAloneOnPOSIX drives the REAL predicate over the
-// Docker image's /data shape. Differential by design: Windows icacls is
-// unchanged by O-K, POSIX must leave the operator's data volume traversable.
+// TestSaveLeavesTheDataDirectoryAlone drives the REAL predicate over the shape
+// of the Docker image's /data and of a default Windows install folder. POSIX
+// must leave the operator's data volume traversable; Windows must leave the
+// install folder its inherited entries (SYSTEM, Administrators), which the
+// icacls lockdown removes from it and from every recording under it.
 //
-// Mutant: drop the gate from Save (or make DirTighteningAllowed content-tested
-// on Windows too) -> the POSIX leg sees one apply where it wants none, or the
-// Windows leg sees none where it wants one. A settings save is the gesture most
+// Mutant: drop the gate from Save, or exempt Windows in DirTighteningAllowed
+// again -> one apply where none is wanted. A settings save is the gesture most
 // likely to be the FIRST one on a new container, so this is the path that used
 // to undo `chmod 777 /data` before any cookie was ever written.
-func TestSaveLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
+func TestSaveLeavesTheDataDirectoryAlone(t *testing.T) {
 	dir := configDirFixture(t, "cookies.txt", "output/", "staging/", "moombox.db", "moombox.log")
 	var applies dirGateRecorder
 	fakeApplyUserOnlyDACL(t, func(d string) error { applies.record(d); return nil })
@@ -183,12 +177,7 @@ func TestSaveLeavesTheDataDirectoryAloneOnPOSIX(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	want := 0
-	if runtime.GOOS == "windows" {
-		want = 1
-	}
-	if got := len(applies.seen()); got != want {
-		t.Errorf("apply calls = %d on %s, want %d — Windows icacls unchanged; POSIX must not 0700 the data directory",
-			got, runtime.GOOS, want)
+	if got := applies.seen(); len(got) != 0 {
+		t.Errorf("the lockdown ran on %v, want none — a folder that also holds output, staging, the database and the log is left alone on every OS", got)
 	}
 }

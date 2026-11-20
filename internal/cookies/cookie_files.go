@@ -80,27 +80,26 @@ const cookieTempFileMaxAge = time.Hour
 var cookieTempFileSweepOnce sync.Once
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
-// preventing corruption on partial failure. Applies
-// utils.ApplyUserOnlyDACL to the parent directory (successful attempts are
-// memoised per directory; see tightenCookieDirOnce) so the highest-value
-// secret in the app (auth-token + SAPISID for the user's session) doesn't
-// sit on disk with a parent-inherited world-readable ACL when the cookie
-// file lives outside the config dir (e.g. default `./cookies.txt` in the
-// project root). The DACL is applied to the parent dir rather than the file
-// because (a) icacls /inheritance:r on individual files has corner cases
-// where the new ACL ends up over-restrictive, and (b) propagating from the
-// dir covers any future writes (rotated cookies, side-files) without
-// per-write icacls latency. Real hardening on non-Windows too — see
-// utils.ApplyUserOnlyDACL's non-Windows implementation, which chmods to
-// 0700/0600 rather than no-op'ing — not just Windows; idempotent once
-// applied.
+// preventing corruption on partial failure. The highest-value secret in the
+// app (auth-token + SAPISID for the user's session) must not sit on disk with
+// permissions inherited from wherever the file happens to live, so two things
+// are restricted: the file itself, on every write (below), and its parent
+// directory, by utils.ApplyUserOnlyDACL — icacls on Windows, a real chmod to
+// 0700 elsewhere — when that directory is a dedicated one (successful attempts
+// are memoised per directory; see tightenCookieDirOnce).
 //
-// CONDITIONAL on POSIX since owner decision O-K: tightenCookieDirOnce asks
-// utils.DirTighteningAllowed first, and a parent that also holds the output
-// tree, the staging tree, the database or the log is left alone there (the
-// Docker image's /data). Windows is unchanged. The FILE is 0600 either way —
-// that is the Chmod on the temp file below, which no gate touches — so what a
-// shared directory gives up is only the untraversable parent.
+// CONDITIONAL since owner decision O-K, on every platform since 2026-11-19:
+// tightenCookieDirOnce asks utils.DirTighteningAllowed first, and a parent
+// that also holds the output tree, the staging tree, the database or the log
+// is left alone (the Docker image's /data, and a default Windows install's
+// own folder, which the icacls lockdown used to strip of SYSTEM and
+// Administrators together with everything under it).
+//
+// The FILE is restricted on every write, whatever the folder: the Chmod to
+// 0600 on the temp file below, and restrictFileToOwner on it (on Windows a
+// protected DACL for the current user, SYSTEM and Administrators; nothing
+// elsewhere). Neither is behind the gate, and the rename carries both to the
+// target, so what a shared directory gives up is only the restricted parent.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name
@@ -131,6 +130,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Chmod(tmpPath, perm); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp cookie file: %w", err)
+	}
+	// Hardening, not a condition of the write: a volume without ACLs (FAT,
+	// some network shares) still gets its cookie file.
+	if err := restrictFileToOwner(tmpPath); err != nil {
+		slog.Debug("could not restrict cookie file to its owner", "path", path, "err", err)
 	}
 	if err := utils.ReplaceFile(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
@@ -202,6 +206,13 @@ func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
 // CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
 var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
 
+// restrictFileToOwner is utils.RestrictFileToOwner behind a seam, so a test
+// can see which file writeFileAtomic restricts and when, and can make it fail.
+// The real one starts no process (Win32 calls on Windows, nothing elsewhere),
+// so unlike the directory lockdown it needs no switch for other packages'
+// test binaries.
+var restrictFileToOwner = utils.RestrictFileToOwner
+
 // DisableDirTighteningForTesting replaces the cookie directory hardening with
 // a no-op for the rest of the process. For a test binary's TestMain, before
 // any test runs: nothing else may call it, and nothing in a running instance
@@ -219,11 +230,11 @@ func DisableDirTighteningForTesting() {
 }
 
 // dirTighteningAllowed is utils.DirTighteningAllowed behind a seam, for the
-// same reason as applyUserOnlyDACL above: the real predicate answers true for
-// EVERY directory on Windows — owner decision O-K leaves icacls unchanged — so
-// on a Windows host nothing but a substituted verdict can drive the refusal arm
-// of tightenCookieDirOnce. config.Save holds a seam over the same function for
-// its own twin; both are references to one rule, not two opinions.
+// same reason as applyUserOnlyDACL above: the real predicate reads the
+// directory, and a substituted verdict lets a test hold the gate open while it
+// looks at the memo, or refuse a directory whatever it holds. config.Save
+// holds a seam over the same function for its own twin; both are references to
+// one rule, not two opinions.
 var dirTighteningAllowed = utils.DirTighteningAllowed
 
 // dirTightenState is tightenCookieDirOnce's per-directory memo. Two states,
@@ -267,25 +278,33 @@ const (
 // be a mechanism to contain a mechanism, and nothing has profiled the plain
 // retry as costing anything.
 //
-// GATED on dirTighteningAllowed (owner decision O-K): on POSIX a directory
-// that also holds the output tree, the staging tree, the database or the log
-// is left alone, so a refused directory never appears in the memo at all —
-// do not go looking for an entry for /data that will never be written.
+// GATED on dirTighteningAllowed (owner decision O-K, every platform): a
+// directory that also holds the output tree, the staging tree, the database
+// or the log is left alone, so a refused directory never appears in the memo
+// at all — do not go looking for an entry for /data that will never be
+// written.
+//
+// A lockdown that succeeds is logged at Info, once per directory per process
+// (utils.FirstDirRestriction, shared with config.Save): it changes who can
+// reach a folder, and the operator is told.
 var (
 	tightenedCookieDirsMu sync.Mutex
 	tightenedCookieDirs   = make(map[string]dirTightenState)
 )
 
 func tightenCookieDirOnce(dir string) {
-	// Owner decision O-K: on POSIX the 0700 applies only to a DEDICATED
-	// directory. In the Docker image this parent is /data — the bind mount
-	// holding output/, staging/, the database and the log — and the first
-	// cookie write used to undo the Dockerfile's deliberate `chmod 777 /data`.
-	// Windows is unchanged. Checked ahead of the memo claim rather than inside
-	// the goroutine so a refused directory is never recorded as in-flight; the
-	// listing costs a readdir per cookie write, which happens on the 30-minute
-	// refresh cadence and on imports. Files stay 0600 either way —
-	// writeFileAtomic chmods the temp file before the rename.
+	// Owner decision O-K: the lockdown applies only to a DEDICATED directory.
+	// In the Docker image this parent is /data — the bind mount holding
+	// output/, staging/, the database and the log — and the first cookie write
+	// used to undo the Dockerfile's deliberate `chmod 777 /data`. On Windows
+	// with the default ./cookies.txt it is the install folder, and icacls
+	// /inheritance:r used to remove SYSTEM and Administrators from it and
+	// from every recording under it. Checked ahead of the memo claim rather
+	// than inside the goroutine so a refused directory is never recorded as
+	// in-flight; the listing costs a readdir per cookie write, which happens
+	// on the 30-minute refresh cadence and on imports. The files are
+	// restricted either way — writeFileAtomic does that to the temp file
+	// before the rename.
 	if !dirTighteningAllowed(dir) {
 		return
 	}
@@ -327,6 +346,11 @@ func tightenCookieDirOnce(dir string) {
 		if err := apply(dir); err != nil {
 			slog.Debug("could not restrict cookie dir to current user", "dir", dir, "err", err)
 			return
+		}
+		// Logged before the memo says done, so whoever waits on the memo
+		// finds the line already written.
+		if abs, first := utils.FirstDirRestriction(dir); first {
+			slog.Info("restricted folder to the current user", "dir", abs)
 		}
 		tightenedCookieDirsMu.Lock()
 		tightenedCookieDirs[dir] = dirTighteningDone

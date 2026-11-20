@@ -33,3 +33,12 @@ func ApplyUserOnlyDACL(path string) error {
 	}
 	return nil
 }
+
+// RestrictFileToOwner is the Windows per-file DACL (see winsec_windows.go).
+// Nothing to do here: the callers already write their secrets 0600, which is
+// the same restriction in this platform's own terms.
+func RestrictFileToOwner(path string) error { return nil }
+
+// DACLProtected reports whether a Windows path has stopped inheriting
+// permissions from its parent. There is no such flag on this platform.
+func DACLProtected(path string) (bool, error) { return false, nil }

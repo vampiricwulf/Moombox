@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -127,23 +126,56 @@ func TestDirHoldsSharedData(t *testing.T) {
 	})
 }
 
-// TestDirTighteningAllowedIsPOSIXOnly pins the OS half of O-K: "Windows icacls
-// unchanged". The Windows tightening writes inheritable ACEs and takes nothing
-// away from a sibling service that a shared POSIX 0700 does.
+// TestDirTighteningAllowedOnlyForADedicatedDirectory pins the gate on every
+// OS. A folder that also holds the output tree or the database is refused: on
+// POSIX the 0700 takes the data volume away from the operator's own host user,
+// and on Windows the lockdown removes the folder's inherited entries, SYSTEM
+// and Administrators included, from the folder and everything under it. The
+// default install keeps cookies.txt in the install folder itself.
 //
-// Mutant: apply the content test on Windows too -> the first assertion fails on
-// the Windows CI leg and every default install (exe dir holds output/, staging/,
-// the DB and the log) silently loses its cookie-directory hardening.
-func TestDirTighteningAllowedIsPOSIXOnly(t *testing.T) {
+// Mutant: answer true on Windows unconditionally (the shipped behaviour) -> the
+// second assertion fails on the Windows leg.
+func TestDirTighteningAllowedOnlyForADedicatedDirectory(t *testing.T) {
 	shared := mkTree(t, "cookies.txt", "output/", "moombox.db")
 	dedicated := mkTree(t, "cookies.txt")
 
 	if !DirTighteningAllowed(dedicated) {
 		t.Error("a dedicated secrets directory must still be tightened on every OS")
 	}
-	wantShared := runtime.GOOS == "windows"
-	if got := DirTighteningAllowed(shared); got != wantShared {
-		t.Errorf("DirTighteningAllowed(shared) = %v on %s, want %v — Windows icacls is unchanged by O-K; POSIX must not 0700 the data directory",
-			got, runtime.GOOS, wantShared)
+	if DirTighteningAllowed(shared) {
+		t.Error("DirTighteningAllowed(shared) = true: a folder that also holds the output tree and the database must be left alone on every OS")
+	}
+}
+
+// TestFirstDirRestrictionAnswersOncePerDirectory is the memo behind the
+// "restricted folder to the current user" line: the cookie writer and
+// config.Save can both lock down the same dedicated folder, and the operator is
+// told once.
+//
+// Mutant: key the memo on the path as spelled -> the relative spelling of the
+// same folder (what filepath.Dir("./cookies.txt") gives the cookie writer)
+// answers true a second time.
+func TestFirstDirRestrictionAnswersOncePerDirectory(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	if _, first := FirstDirRestriction(dir); !first {
+		t.Fatal("the first report for a folder answered false")
+	}
+	if _, first := FirstDirRestriction(dir); first {
+		t.Error("the second report for the same folder answered true")
+	}
+	if _, first := FirstDirRestriction(filepath.Join(dir, "sub") + string(filepath.Separator) + ".."); first {
+		t.Error("another spelling of the same folder answered true")
+	}
+	t.Chdir(dir)
+	abs, first := FirstDirRestriction(".")
+	if first {
+		t.Error("the relative spelling of the same folder answered true")
+	}
+	if !filepath.IsAbs(abs) {
+		t.Errorf("the folder to log is %q, want an absolute path (the default cookie folder is spelled \".\")", abs)
+	}
+	if _, first := FirstDirRestriction(other); !first {
+		t.Error("a different folder answered false")
 	}
 }
