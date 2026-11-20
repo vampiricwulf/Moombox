@@ -500,6 +500,12 @@ drive's permissions again, and so does everything in it. Moombox never
 changes the folder back itself: who may read your recordings is your
 decision.
 
+A `cookies.txt` or `config.toml` last written by the older version takes the
+drive's permissions as well, until Moombox writes it again. After the
+command, change and save any setting once (that rewrites `config.toml`), and
+refresh or re-import your cookies (that rewrites `cookies.txt`). Each file is
+restricted again the moment it is written.
+
 Current versions no longer restrict a folder that holds the output, staging,
 database or log. They restrict `cookies.txt` and `config.toml` themselves
 instead (your account, SYSTEM and Administrators), and restrict a folder
