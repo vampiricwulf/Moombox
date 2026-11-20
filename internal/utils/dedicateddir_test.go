@@ -39,7 +39,7 @@ func mkTree(t *testing.T, entries ...string) string {
 //     rows 6 and 7 answer false; paths.database_path and paths.log_file_path
 //     are operator-settable.
 //   - drop the unreadable-directory arm -> row 9 answers false, and a
-//     directory we cannot even list is assumed dedicated.
+//     directory we cannot even list is assumed to hold only the secrets.
 //   - treat io.EOF from ReadDir as a failed listing -> the "empty" row answers
 //     true.
 //   - test the marker NAMES only inside the IsDir() branch -> the "a FILE named
@@ -73,7 +73,7 @@ func TestDirHoldsSharedData(t *testing.T) {
 		})
 	}
 
-	t.Run("a directory that cannot be listed is not assumed dedicated", func(t *testing.T) {
+	t.Run("a directory that cannot be listed counts as shared", func(t *testing.T) {
 		if got := DirHoldsSharedData(filepath.Join(t.TempDir(), "does-not-exist")); !got {
 			t.Error("DirHoldsSharedData = false for an unlistable directory — a folder that cannot be inspected is not called a secrets-only one")
 		}
@@ -95,13 +95,13 @@ func TestDirHoldsSharedData(t *testing.T) {
 		}
 	})
 
-	// dedicatedDirScanLimit, stated by execution at both sides of the edge:
+	// sharedDataScanLimit, stated by execution at both sides of the edge:
 	// one entry under it is still judged on its contents, and hitting it
 	// disqualifies whatever else the directory holds.
 	//
 	// Mutant: raise the limit, or truncate instead of disqualifying -> the
 	// "at the limit" row answers false and a directory with hundreds of
-	// entries is called a dedicated secrets directory.
+	// entries is called a secrets-only directory.
 	t.Run("the scan limit disqualifies rather than truncating", func(t *testing.T) {
 		fill := func(t *testing.T, n int) string {
 			t.Helper()
@@ -113,14 +113,14 @@ func TestDirHoldsSharedData(t *testing.T) {
 			}
 			return dir
 		}
-		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit-1)); got {
+		if got := DirHoldsSharedData(fill(t, sharedDataScanLimit-1)); got {
 			t.Errorf("DirHoldsSharedData = true at %d harmless entries, one under the %d-entry limit — "+
-				"nothing here is another Moombox surface", dedicatedDirScanLimit-1, dedicatedDirScanLimit)
+				"nothing here is another Moombox surface", sharedDataScanLimit-1, sharedDataScanLimit)
 		}
-		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit)); !got {
+		if got := DirHoldsSharedData(fill(t, sharedDataScanLimit)); !got {
 			t.Errorf("DirHoldsSharedData = false at the %d-entry limit — a directory with that many "+
 				"entries is not one Moombox keeps only its secrets in, whatever the listing shows",
-				dedicatedDirScanLimit)
+				sharedDataScanLimit)
 		}
 	})
 }

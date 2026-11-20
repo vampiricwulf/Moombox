@@ -19,13 +19,13 @@ import (
 	"strings"
 )
 
-// dedicatedDirScanLimit bounds the listing. A directory Moombox keeps only its
+// sharedDataScanLimit bounds the listing. A directory Moombox keeps only its
 // secrets in has a handful of entries; one with hundreds is, whatever else it
 // is, not that — so hitting the limit disqualifies rather than truncating.
-const dedicatedDirScanLimit = 512
+const sharedDataScanLimit = 512
 
 // sharedDataDirNames are the names that mark a directory as Moombox's DATA
-// directory rather than a dedicated secrets directory. Matched
+// directory rather than a directory holding only the secrets. Matched
 // case-insensitively because Windows and macOS filesystems are, and matched
 // against EVERY entry rather than against subdirectories only: the name is the
 // marker, and an `output` that presents as a file or a dangling symlink (an
@@ -83,14 +83,14 @@ func DirHoldsSharedData(dir string) bool {
 
 	// io.EOF is not a failure here: File.ReadDir(n>0) reports it whenever the
 	// directory holds fewer than n entries, which includes the empty directory
-	// this rule calls dedicated. Any OTHER error means the listing we are about
+	// this test answers false for. Any OTHER error means the listing we are about
 	// to judge is incomplete, and an incomplete listing can only under-report
 	// the shared surfaces, so it answers shared.
-	entries, err := f.ReadDir(dedicatedDirScanLimit)
+	entries, err := f.ReadDir(sharedDataScanLimit)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return true
 	}
-	if len(entries) == dedicatedDirScanLimit {
+	if len(entries) == sharedDataScanLimit {
 		// More entries than any secrets directory has. Whatever this is, it is
 		// not a directory Moombox keeps only its own secrets in.
 		return true

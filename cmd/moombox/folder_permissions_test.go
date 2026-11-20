@@ -23,7 +23,7 @@ func (r *infoRecorder) Info(msg string, args ...any) {
 // one its owner restricted on purpose, and is not what the notice is about;
 // a shared folder that still inherits was never touched.
 //
-// Mutants: drop either condition -> the "dedicated, protected" or the "shared,
+// Mutants: drop either condition -> the "secrets-only, protected" or the "shared,
 // inheriting" file's folder is named; treat an unreadable ACL as protected ->
 // "unreadable" is named; drop the dedupe -> the default install, with both
 // files in one folder, is told twice.
