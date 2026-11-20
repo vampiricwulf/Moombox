@@ -1,8 +1,8 @@
 package cookies
 
-// cookie_files.go — cookie file hygiene: the atomic write, sweeping orphaned
-// temp files, tightening a cookie directory's ACL/permissions, and carrying
-// the cookie file into the one a first-run setup saves.
+// cookie_files.go — cookie file hygiene: the atomic write, its per-file
+// restriction, creating the cookie folder, sweeping orphaned temp files, and
+// carrying the cookie file into the one a first-run setup saves.
 
 import (
 	"errors"

@@ -19,8 +19,8 @@ func (r *infoRecorder) Info(msg string, args ...any) {
 
 // TestUninheritedSharedFoldersNamesOnlySharedAndProtected is the rule of the
 // startup notice: a folder is named only when it BOTH holds shared data and no
-// longer inherits its permissions. A dedicated secrets folder that Moombox
-// restricted on purpose is protected too, and is not what the notice is about;
+// longer inherits its permissions. A folder holding only the secrets may be
+// one its owner restricted on purpose, and is not what the notice is about;
 // a shared folder that still inherits was never touched.
 //
 // Mutants: drop either condition -> the "dedicated, protected" or the "shared,
