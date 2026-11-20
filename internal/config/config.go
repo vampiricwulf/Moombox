@@ -1418,12 +1418,13 @@ func Save(cfg *MoomboxConfig, path string) error {
 	// itself creates it, and never changes the permissions of a folder that
 	// already existed (owner ruling, 2026-11-19, which supersedes owner
 	// decision O-K). One Save has to create is created for its owner only:
-	// mode 0700 on POSIX, for the folder and for any missing parent created
-	// with it. On Windows the mode means nothing and no ACL call is made: the
-	// new folder inherits its parent's permissions. config.toml itself (the
-	// password hash) is restricted on every save, whatever the folder: the
-	// temp file's Chmod and restrictFileToOwner below.
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// mode 0700 on POSIX, for that folder alone — a missing parent gets the
+	// ordinary 0755 (utils.MkdirOwnerOnly). On Windows the mode means nothing
+	// and no ACL call is made: the new folder inherits its parent's
+	// permissions. config.toml itself (the password hash) is restricted on
+	// every save, whatever the folder: the temp file's Chmod and
+	// restrictFileToOwner below.
+	if err := utils.MkdirOwnerOnly(dir); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 

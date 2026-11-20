@@ -139,12 +139,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // createCookieDir makes sure the folder a cookie file (or its meta sidecar)
 // is about to be written into exists. A folder that is already there is left
 // exactly as it is. One Moombox has to create is created for its owner only:
-// mode 0700 on POSIX, for the folder and for any missing parent created with
-// it. On Windows the mode means nothing and no ACL call is made: the new folder
-// inherits its parent's permissions, and the per-file restriction in
-// writeFileAtomic is what protects the secret.
+// mode 0700 on POSIX, for that folder alone — a missing parent gets the
+// ordinary 0755 (utils.MkdirOwnerOnly). On Windows the mode means nothing and
+// no ACL call is made: the new folder inherits its parent's permissions, and
+// the per-file restriction in writeFileAtomic is what protects the secret.
 func createCookieDir(dir string) error {
-	return os.MkdirAll(dir, 0o700)
+	return utils.MkdirOwnerOnly(dir)
 }
 
 // sweepCookieTempFilesOnce runs sweepStaleCookieTempFiles through the given
