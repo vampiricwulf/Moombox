@@ -337,11 +337,14 @@ notification webhook URLs in Settings, and the cookie status.
 Your YouTube and Twitch cookies are the most valuable secret Moombox holds:
 they are your signed-in sessions.
 
-- Moombox writes the cookie file readable by its owner only (`0600` on Linux).
-  On Windows it also restricts the folder that holds it to your user. On
-  Linux it tightens that folder to owner-only too, unless the folder also
-  holds the output, staging, database or log (as the Docker image's `/data`
-  does).
+- Moombox restricts the cookie file itself on every write: `0600` on Linux;
+  on Windows, access for your user account, SYSTEM and Administrators only,
+  with nothing inherited from the folder. `config.toml` is written the same
+  way.
+- It restricts the folder that holds the file to your user account only when
+  that folder holds nothing else of Moombox's. A folder that also holds the
+  output, staging, database or log (the Docker image's `/data`, or the
+  install folder with the default `./cookies.txt`) keeps its permissions.
 - The paste or upload import in **Settings → Cookies** accepts up to 512 KiB,
   merges into the cookie file, and rolls back if the result does not verify.
 - On Windows, the optional DPAPI fallback reads your real browser's cookies,
