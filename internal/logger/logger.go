@@ -317,8 +317,8 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 	// Route the process-global slog default through the FULL pipeline (level
 	// gate, file, ring buffer, subscribers, TUI-safe stderr gating) via the
 	// bridge — not through l.handler directly, which would feed the file but
-	// skip the ring buffer and subscribers, leaving stray warnings (e.g.
-	// config.Save's DACL warning) invisible in the TUI log panel and the web
+	// skip the ring buffer and subscribers, leaving stray lines (e.g.
+	// config.Save's file-restriction miss) invisible in the TUI log panel and the web
 	// log endpoints. Std `log` output (http.Server error noise) is rebridged
 	// by SetDefault at Info level and lands in the same places.
 	slog.SetDefault(slog.New(defaultSlogBridge{l: l}))

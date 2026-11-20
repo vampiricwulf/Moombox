@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
@@ -60,17 +59,8 @@ var productionIframePlayerURL func(context.Context, string) (string, error)
 // suite near go test's ten-minute limit; a live call
 // a server fails is retried within milliseconds, which is no worse for a
 // test.
-//
-// The cookie directory hardening is off for the whole binary
-// (cookies.DisableDirTighteningForTesting): the tests that build a jar from a
-// cookie file (jarServiceFromCookieFile) flush renewals into a t.TempDir at
-// cleanup, and every such write starts a goroutine nothing joins — on Windows
-// a real icacls. Its allocations landed inside the two AllocsPerRun pins,
-// which count the whole process: TestLivenessVerdictDoesNotAllocate read 3
-// allocs/op on a Windows runner with nothing wrong in livenessVerdict.
 func TestMain(m *testing.M) {
 	playerRetryBackoffBase = time.Millisecond
-	cookies.DisableDirTighteningForTesting()
 	if os.Getenv("MOOMBOX_LIVE_YT_TEST") == "1" || os.Getenv("MOOMBOX_LIVE_YT_COOKIES") != "" {
 		os.Exit(treeguard.Run(m))
 	}

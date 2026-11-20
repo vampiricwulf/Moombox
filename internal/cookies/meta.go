@@ -106,7 +106,7 @@ func SaveMeta(cookiePath string, meta CookieMeta) error {
 	}
 
 	path := MetaPath(cookiePath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := createCookieDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("ensure meta dir: %w", err)
 	}
 	return writeFileAtomic(path, data, 0o600)

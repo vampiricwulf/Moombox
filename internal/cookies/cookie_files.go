@@ -1,8 +1,8 @@
 package cookies
 
-// cookie_files.go — cookie file hygiene: the atomic write, sweeping orphaned
-// temp files, tightening a cookie directory's ACL/permissions, and carrying
-// the cookie file into the one a first-run setup saves.
+// cookie_files.go — cookie file hygiene: the atomic write, its per-file
+// restriction, creating the cookie folder, sweeping orphaned temp files, and
+// carrying the cookie file into the one a first-run setup saves.
 
 import (
 	"errors"
@@ -80,27 +80,19 @@ const cookieTempFileMaxAge = time.Hour
 var cookieTempFileSweepOnce sync.Once
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
-// preventing corruption on partial failure. Applies
-// utils.ApplyUserOnlyDACL to the parent directory (successful attempts are
-// memoised per directory; see tightenCookieDirOnce) so the highest-value
-// secret in the app (auth-token + SAPISID for the user's session) doesn't
-// sit on disk with a parent-inherited world-readable ACL when the cookie
-// file lives outside the config dir (e.g. default `./cookies.txt` in the
-// project root). The DACL is applied to the parent dir rather than the file
-// because (a) icacls /inheritance:r on individual files has corner cases
-// where the new ACL ends up over-restrictive, and (b) propagating from the
-// dir covers any future writes (rotated cookies, side-files) without
-// per-write icacls latency. Real hardening on non-Windows too — see
-// utils.ApplyUserOnlyDACL's non-Windows implementation, which chmods to
-// 0700/0600 rather than no-op'ing — not just Windows; idempotent once
-// applied.
+// preventing corruption on partial failure. The highest-value secret in the
+// app (auth-token + SAPISID for the user's session) must not sit on disk with
+// permissions inherited from wherever the file happens to live, so the FILE is
+// restricted on every write: the Chmod to 0600 on the temp file below, and
+// restrictFileToOwner on it (on Windows a protected DACL for the current user,
+// SYSTEM and Administrators; nothing elsewhere). The rename carries both to
+// the target.
 //
-// CONDITIONAL on POSIX since owner decision O-K: tightenCookieDirOnce asks
-// utils.DirTighteningAllowed first, and a parent that also holds the output
-// tree, the staging tree, the database or the log is left alone there (the
-// Docker image's /data). Windows is unchanged. The FILE is 0600 either way —
-// that is the Chmod on the temp file below, which no gate touches — so what a
-// shared directory gives up is only the untraversable parent.
+// The file's FOLDER is never touched here (owner ruling, 2026-11-19, which
+// supersedes owner decision O-K): Moombox sets permissions on the files it
+// writes and on a folder at the moment Moombox itself creates it, and never
+// changes the permissions of a folder that already existed. Whoever needs the
+// folder first creates it with createCookieDir.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
 	// cookies.txt through its own temp file, and a shared fixed ".tmp" name
@@ -132,12 +124,27 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp cookie file: %w", err)
 	}
+	// Hardening, not a condition of the write: a volume without ACLs (FAT,
+	// some network shares) still gets its cookie file.
+	if err := restrictFileToOwner(tmpPath); err != nil {
+		slog.Debug("could not restrict cookie file to its owner", "path", path, "err", err)
+	}
 	if err := utils.ReplaceFile(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename temp cookie file: %w", err)
 	}
-	tightenCookieDirOnce(filepath.Dir(path))
 	return nil
+}
+
+// createCookieDir makes sure the folder a cookie file (or its meta sidecar)
+// is about to be written into exists. A folder that is already there is left
+// exactly as it is. One Moombox has to create is created for its owner only:
+// mode 0700 on POSIX, for that folder alone — a missing parent gets the
+// ordinary 0755 (utils.MkdirOwnerOnly). On Windows the mode means nothing and
+// no ACL call is made: the new folder inherits its parent's permissions, and
+// the per-file restriction in writeFileAtomic is what protects the secret.
+func createCookieDir(dir string) error {
+	return utils.MkdirOwnerOnly(dir)
 }
 
 // sweepCookieTempFilesOnce runs sweepStaleCookieTempFiles through the given
@@ -195,145 +202,10 @@ func sweepStaleCookieTempFiles(dir, base string, maxAge time.Duration) {
 	}
 }
 
-// applyUserOnlyDACL is utils.ApplyUserOnlyDACL behind a seam, so
-// tightenCookieDirOnce's retry-on-failure memoisation (below) can be tested
-// with a fake that fails once then succeeds, instead of shelling out to a
-// real icacls (Windows) or depending on real chmod failure modes (Linux) in
-// CI. Mirrors writeCookieFile/readCookieFile/statProfileDir above.
-var applyUserOnlyDACL = utils.ApplyUserOnlyDACL
-
-// DisableDirTighteningForTesting replaces the cookie directory hardening with
-// a no-op for the rest of the process. For a test binary's TestMain, before
-// any test runs: nothing else may call it, and nothing in a running instance
-// does. Every cookie write starts tightenCookieDirOnce's goroutine, which
-// nothing joins, against the directory just written into — in a test that is
-// a t.TempDir, and on Windows the goroutine is a real icacls still walking it
-// while the test's cleanup removes it. A package whose tests write a cookie
-// file by any route calls this — the real AutoCookieService, or a CookieJar's
-// renewal flush (FlushRenewals at a test's cleanup counts) — because the
-// goroutine's allocations also land in any testing.AllocsPerRun pin in the
-// same binary, which counts the whole process. The hardening itself is tested
-// in this package, against fakes.
-func DisableDirTighteningForTesting() {
-	applyUserOnlyDACL = func(string) error { return nil }
-}
-
-// dirTighteningAllowed is utils.DirTighteningAllowed behind a seam, for the
-// same reason as applyUserOnlyDACL above: the real predicate answers true for
-// EVERY directory on Windows — owner decision O-K leaves icacls unchanged — so
-// on a Windows host nothing but a substituted verdict can drive the refusal arm
-// of tightenCookieDirOnce. config.Save holds a seam over the same function for
-// its own twin; both are references to one rule, not two opinions.
-var dirTighteningAllowed = utils.DirTighteningAllowed
-
-// dirTightenState is tightenCookieDirOnce's per-directory memo. Two states,
-// not one boolean, because "an apply is running right now" and "an apply
-// already succeeded" must be told apart: the first still says "don't spawn
-// another", the second says "there is nothing left to do, ever". A dir
-// absent from the map is the implicit third state, not started.
-type dirTightenState int
-
-const (
-	dirTighteningInFlight dirTightenState = iota
-	dirTighteningDone
-)
-
-// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given parent
-// dir. Memoised on SUCCESS, not on attempt: icacls (Windows) / chmod
-// (Linux — see utils.ApplyUserOnlyDACL's non-Windows implementation, which
-// really chmods to 0700/0600 there, not a no-op) is a ~30-80ms shell-out/
-// syscall that would otherwise fire on every cookie write, but a transient
-// failure (an AV scanner holding the dir, a first-write race with the dir's
-// own creation) must not disable hardening for the rest of the process just
-// because the failure is demoted to a Debug log line.
-//
-// Three states per dir (dirTightenState above, plus "absent = not
-// started"):
-//   - not started: this call marks the dir in flight, synchronously, before
-//     spawning the goroutine that runs the apply — so a second write
-//     landing during the 30-80ms shell-out sees "in flight" and returns
-//     without spawning a second one.
-//   - in flight: return; the goroutine already running will resolve it.
-//   - done: return; already applied, nothing left to do.
-//
-// A failure — or a panic mid-apply — deletes the entry, putting the dir
-// back to "not started" so the NEXT cookie write retries rather than
-// leaving it stuck in flight or falsely memoised as done.
-//
-// Cost if icacls/chmod fails permanently on a given host: one extra
-// ~30-80ms shell-out per cookie write instead of one per process. Writes
-// happen on the refresh cadence (30 min) and on imports, so the bound is a
-// handful of shell-outs an hour. No failure cap, no backoff — either would
-// be a mechanism to contain a mechanism, and nothing has profiled the plain
-// retry as costing anything.
-//
-// GATED on dirTighteningAllowed (owner decision O-K): on POSIX a directory
-// that also holds the output tree, the staging tree, the database or the log
-// is left alone, so a refused directory never appears in the memo at all —
-// do not go looking for an entry for /data that will never be written.
-var (
-	tightenedCookieDirsMu sync.Mutex
-	tightenedCookieDirs   = make(map[string]dirTightenState)
-)
-
-func tightenCookieDirOnce(dir string) {
-	// Owner decision O-K: on POSIX the 0700 applies only to a DEDICATED
-	// directory. In the Docker image this parent is /data — the bind mount
-	// holding output/, staging/, the database and the log — and the first
-	// cookie write used to undo the Dockerfile's deliberate `chmod 777 /data`.
-	// Windows is unchanged. Checked ahead of the memo claim rather than inside
-	// the goroutine so a refused directory is never recorded as in-flight; the
-	// listing costs a readdir per cookie write, which happens on the 30-minute
-	// refresh cadence and on imports. Files stay 0600 either way —
-	// writeFileAtomic chmods the temp file before the rename.
-	if !dirTighteningAllowed(dir) {
-		return
-	}
-
-	tightenedCookieDirsMu.Lock()
-	if _, ok := tightenedCookieDirs[dir]; ok {
-		tightenedCookieDirsMu.Unlock()
-		return // in flight or already done
-	}
-	tightenedCookieDirs[dir] = dirTighteningInFlight
-	tightenedCookieDirsMu.Unlock()
-
-	// Read the seam here, on the caller's goroutine: a test swaps it without
-	// a lock, and a goroutine an earlier test left running would race it.
-	apply := applyUserOnlyDACL
-	go func() {
-		succeeded := false
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Warn("cookie dir DACL tightening panicked", "dir", dir, "panic", fmt.Sprint(r))
-			}
-			if !succeeded {
-				// Covers both a returned error and a recovered panic: either
-				// way the apply did not finish successfully, so the memo
-				// goes back to "not started" for the next write to retry.
-				tightenedCookieDirsMu.Lock()
-				delete(tightenedCookieDirs, dir)
-				tightenedCookieDirsMu.Unlock()
-			}
-		}()
-		// This is the hardening for the auth-cookie file (highest-value
-		// secret in the app). Demoted to Debug (matches the config +
-		// sidecar + profile dir sites): the common failure is ACCESS_DENIED
-		// on a dir created under an elevated/admin context, and on the
-		// single-user host this app targets nobody else can read it anyway.
-		// Raise the log level to Debug to surface the miss. A failure here
-		// is retried on the NEXT cookie write, not memoised — see the
-		// doc comment above.
-		if err := apply(dir); err != nil {
-			slog.Debug("could not restrict cookie dir to current user", "dir", dir, "err", err)
-			return
-		}
-		tightenedCookieDirsMu.Lock()
-		tightenedCookieDirs[dir] = dirTighteningDone
-		tightenedCookieDirsMu.Unlock()
-		succeeded = true
-	}()
-}
+// restrictFileToOwner is utils.RestrictFileToOwner behind a seam, so a test
+// can see which file writeFileAtomic restricts and when, and can make it fail.
+// The real one starts no process (Win32 calls on Windows, nothing elsewhere).
+var restrictFileToOwner = utils.RestrictFileToOwner
 
 // CarryCookieFileTo carries the cookies the operator supplied in this run —
 // a browser login FinishSetupDetailed accepted, an import ImportCookies
@@ -387,7 +259,7 @@ func (s *AutoCookieService) CarryCookieFileTo(newPath string) error {
 	if len(carried) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+	if err := createCookieDir(filepath.Dir(newPath)); err != nil {
 		return fmt.Errorf("create the directory for %s: %w", newPath, err)
 	}
 	existing, err := readCookieFile(newPath)

@@ -186,7 +186,7 @@ var launchWindowKillBudget = 2 * time.Second
 // var for exactly one reason: a test cannot wait out a 12 s window to prove the
 // two platforms are budgeted apart. Production never assigns it — the constant
 // above is the number, this is only the seam a test shortens. Same shape as
-// applyUserOnlyDACL and loadCookieJar elsewhere in this package.
+// restrictFileToOwner and loadCookieJar elsewhere in this package.
 var authVerifyWindow = authVerifyTimeout
 
 // taskkillDrainPause is the pause the three post-kill / post-exit sites

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -28,26 +27,25 @@ func mkTree(t *testing.T, entries ...string) string {
 	return dir
 }
 
-// TestDirHoldsSharedData is the content half of owner decision O-K. The Docker
-// image's /data holds cookies.txt BESIDE output/, staging/, the database and
-// the log, and chmodding it 0700 takes the operator's archives away from their
-// own host user. A directory that holds nothing but Moombox's secrets is a
-// different thing and still earns the hardening.
+// TestDirHoldsSharedData is the content test the startup notice reads. The
+// Docker image's /data, and a default install folder, hold cookies.txt BESIDE
+// output/, staging/, the database and the log. A directory that holds nothing
+// but Moombox's secrets is a different thing.
 //
 // Mutants:
 //   - drop the directory-name check -> rows 3 and 4 answer false and /data is
-//     chmodded 0700 again (the shipped bug).
+//     not called the data folder.
 //   - match only the exact default basenames (moombox.db / moombox.log) ->
 //     rows 6 and 7 answer false; paths.database_path and paths.log_file_path
 //     are operator-settable.
 //   - drop the unreadable-directory arm -> row 9 answers false, and a
-//     directory we cannot even list is assumed dedicated.
+//     directory we cannot even list is assumed to hold only the secrets.
 //   - treat io.EOF from ReadDir as a failed listing -> the "empty" row answers
-//     true, and a brand-new secrets directory never earns the hardening.
+//     true.
 //   - test the marker NAMES only inside the IsDir() branch -> the "a FILE named
 //     output" row answers false. `output` is a marker whatever its type: on a
 //     bind mount an unreadable or dangling `output` entry can present as a
-//     non-directory, and the fail-safe direction here is SHARED.
+//     non-directory.
 func TestDirHoldsSharedData(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -75,9 +73,9 @@ func TestDirHoldsSharedData(t *testing.T) {
 		})
 	}
 
-	t.Run("a directory that cannot be listed is not assumed dedicated", func(t *testing.T) {
+	t.Run("a directory that cannot be listed counts as shared", func(t *testing.T) {
 		if got := DirHoldsSharedData(filepath.Join(t.TempDir(), "does-not-exist")); !got {
-			t.Error("DirHoldsSharedData = false for an unlistable directory — a dir we cannot inspect must never be chmodded 0700")
+			t.Error("DirHoldsSharedData = false for an unlistable directory — a folder that cannot be inspected is not called a secrets-only one")
 		}
 	})
 
@@ -97,13 +95,13 @@ func TestDirHoldsSharedData(t *testing.T) {
 		}
 	})
 
-	// dedicatedDirScanLimit, stated by execution at both sides of the edge:
+	// sharedDataScanLimit, stated by execution at both sides of the edge:
 	// one entry under it is still judged on its contents, and hitting it
 	// disqualifies whatever else the directory holds.
 	//
 	// Mutant: raise the limit, or truncate instead of disqualifying -> the
 	// "at the limit" row answers false and a directory with hundreds of
-	// entries is called a dedicated secrets directory.
+	// entries is called a secrets-only directory.
 	t.Run("the scan limit disqualifies rather than truncating", func(t *testing.T) {
 		fill := func(t *testing.T, n int) string {
 			t.Helper()
@@ -115,35 +113,14 @@ func TestDirHoldsSharedData(t *testing.T) {
 			}
 			return dir
 		}
-		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit-1)); got {
+		if got := DirHoldsSharedData(fill(t, sharedDataScanLimit-1)); got {
 			t.Errorf("DirHoldsSharedData = true at %d harmless entries, one under the %d-entry limit — "+
-				"nothing here is another Moombox surface", dedicatedDirScanLimit-1, dedicatedDirScanLimit)
+				"nothing here is another Moombox surface", sharedDataScanLimit-1, sharedDataScanLimit)
 		}
-		if got := DirHoldsSharedData(fill(t, dedicatedDirScanLimit)); !got {
+		if got := DirHoldsSharedData(fill(t, sharedDataScanLimit)); !got {
 			t.Errorf("DirHoldsSharedData = false at the %d-entry limit — a directory with that many "+
 				"entries is not one Moombox keeps only its secrets in, whatever the listing shows",
-				dedicatedDirScanLimit)
+				sharedDataScanLimit)
 		}
 	})
-}
-
-// TestDirTighteningAllowedIsPOSIXOnly pins the OS half of O-K: "Windows icacls
-// unchanged". The Windows tightening writes inheritable ACEs and takes nothing
-// away from a sibling service that a shared POSIX 0700 does.
-//
-// Mutant: apply the content test on Windows too -> the first assertion fails on
-// the Windows CI leg and every default install (exe dir holds output/, staging/,
-// the DB and the log) silently loses its cookie-directory hardening.
-func TestDirTighteningAllowedIsPOSIXOnly(t *testing.T) {
-	shared := mkTree(t, "cookies.txt", "output/", "moombox.db")
-	dedicated := mkTree(t, "cookies.txt")
-
-	if !DirTighteningAllowed(dedicated) {
-		t.Error("a dedicated secrets directory must still be tightened on every OS")
-	}
-	wantShared := runtime.GOOS == "windows"
-	if got := DirTighteningAllowed(shared); got != wantShared {
-		t.Errorf("DirTighteningAllowed(shared) = %v on %s, want %v — Windows icacls is unchanged by O-K; POSIX must not 0700 the data directory",
-			got, runtime.GOOS, wantShared)
-	}
 }

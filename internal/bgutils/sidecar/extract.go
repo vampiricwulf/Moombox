@@ -89,8 +89,8 @@ func extractPayload(cacheDir, wantStamp string, nodeGz, sidecarTarGz []byte) err
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
 	}
-	// Log-but-continue on failure. Demoted to Debug (matches the config +
-	// cookie dir sites): the common failure is ACCESS_DENIED on a cache dir
+	// Log-but-continue on failure. Demoted to Debug (matches the profile
+	// dir site): the common failure is ACCESS_DENIED on a cache dir
 	// created under an elevated/admin context, and on the single-user host
 	// this app targets nobody else can read it anyway — a WARN there is just
 	// noise. Raise the log level to Debug to surface the miss.

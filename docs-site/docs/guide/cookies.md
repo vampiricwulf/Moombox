@@ -444,13 +444,26 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
 - Cookie values are never written to the log, shown in either UI, or included
   in error messages. The TUI import handles only the file path.
 - `cookies.txt` is written to a temporary file, flushed to disk and renamed
-  into place, so a crash cannot leave half a file. The file is made readable
-  only by your user (`0600` on Linux).
+  into place, so a crash cannot leave half a file.
+- The file itself is restricted on every write, wherever it lives: mode
+  `0600` on Linux; on Windows, access for your user account, SYSTEM and
+  Administrators only, with nothing inherited from the folder. `config.toml`
+  is written the same way.
+- Moombox sets permissions on the files it writes and on a folder at the
+  moment Moombox itself creates it. It never changes the permissions of a
+  folder that already existed, so the folder holding `cookies.txt` and
+  `config.toml` (the install folder by default, `/data` in Docker) stays as
+  you set it up.
+- If the cookie file's folder does not exist, Moombox creates it. On Linux it
+  is mode `0700` only when the cookie file or `config.toml` is the first
+  thing Moombox writes there; a folder that also holds the log file is
+  created for the log first, mode `0755`. On Windows it takes its parent
+  folder's permissions. The restriction on the file is the protection to
+  rely on.
 - The browser profile folder is restricted to your user account when the
-  browser login creates it (`0700` on Linux). On Windows the cookie file's
-  folder is restricted to your user account too. On Linux the cookie folder
-  is tightened to `0700` only when it is a folder of its own — not when it
-  also holds the output, staging, database or log (such as Docker's `/data`).
+  browser login creates it (`0700` on Linux), and the log then says
+  *restricted folder to the current user* and names it. A profile folder that
+  already exists is left as it is.
 - The browser login (start, finish, cancel) is only accepted from the host
   itself, so nobody on your network can open a browser window on your screen.
 - The DPAPI fallback and reading your real browser profile are both off until

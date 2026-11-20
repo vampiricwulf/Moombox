@@ -62,8 +62,8 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		return fmt.Errorf("please try again shortly: %w", inProgress)
 	}
 	// Claim the slot inside this critical section (mirrors RefreshCookies'
-	// refresh-slot claim): browser detection, MkdirAll, and the icacls
-	// shell-out below take tens of milliseconds, and a second StartSetup
+	// refresh-slot claim): browser detection, creating the profile folder, and
+	// the icacls shell-out for a new one below take tens of milliseconds, and a second StartSetup
 	// passing the gate in that window would launch a second browser against
 	// the same profile and leak the first Job Object. The claim drops when
 	// this call returns — by then either setupProcess holds the real
@@ -91,19 +91,8 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		return fmt.Errorf("a supported browser (Firefox, Waterfox, LibreWolf, Zen, Chrome, Brave, Edge, Vivaldi, Thorium or Opera) is required: %w", ErrNoBrowserFound)
 	}
 
-	if err := os.MkdirAll(s.profileDir, 0o755); err != nil {
+	if err := prepareProfileDir(s.profileDir, s.logger); err != nil {
 		return fmt.Errorf("create profile dir: %w", err)
-	}
-	// Tighten the dir's ACL so only the current user can read its
-	// contents (cookies.sqlite, browsing history, login state). Non-
-	// Windows hosts get a no-op; Windows shells out to icacls. A
-	// failed tightening doesn't fail setup — log and continue.
-	// Audit reports/cookies.md #25. Demoted to Debug (matches the config +
-	// cookie dir sites): the common failure is ACCESS_DENIED on a dir
-	// created under an elevated/admin context, benign on the single-user
-	// host this targets — raise the log level to Debug to see the miss.
-	if err := utils.ApplyUserOnlyDACL(s.profileDir); err != nil {
-		s.logger.Debug("could not restrict profile dir to current user", "path", s.profileDir, "err", err)
 	}
 
 	s.mu.Lock()
@@ -293,7 +282,7 @@ func (s *AutoCookieService) FinishSetupDetailed(ctx context.Context) (SetupResul
 	}
 
 	// Merge with existing cookies using temp file + rename for atomicity
-	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+	if err := createCookieDir(filepath.Dir(s.cookiePath)); err != nil {
 		// THE SET, which this exit and the two below it were missing. The
 		// policy on the lastError field says every failure exit records what it
 		// concluded, and these three returned an error to the caller while
@@ -613,4 +602,54 @@ func (s *AutoCookieService) AbandonSetup() (released bool, err error) {
 		"platform", s.targetPlatform)
 	s.cleanupLocked()
 	return true, nil
+}
+
+// prepareProfileDir makes sure the browser profile folder exists before a
+// browser is pointed at it, and restricts it to the current user ONLY when
+// this call created it.
+//
+// The path is the operator's (cookies.browser_profile_dir). Moombox sets
+// permissions on a folder at the moment Moombox itself creates it and never
+// changes those of a folder that already existed (owner ruling, 2026-11-19):
+// an existing folder may be one the operator shares, or keeps other things in,
+// and who can reach it is theirs to decide. The browser writes the files in
+// here (cookies.sqlite, history, login state), so the folder is the only thing
+// Moombox can restrict at all.
+//
+// "Created by this call" is what os.Mkdir answers for the leaf, not a Stat
+// beforehand: a folder that appears between a Stat and the create would be
+// someone else's. Missing parents are created with the default mode and are
+// not restricted.
+//
+// A failed restriction does not fail setup. It is a Debug line: the common
+// failure is ACCESS_DENIED under an elevated/admin context, benign on the
+// single-user host this targets. A restriction that is applied is said at
+// Info, because it changes who can reach a folder.
+func prepareProfileDir(dir string, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+}) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return err
+	}
+	err := os.Mkdir(dir, 0o700)
+	if errors.Is(err, fs.ErrExist) {
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			return statErr
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s exists and is not a folder", dir)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := utils.ApplyUserOnlyDACL(dir); err != nil {
+		logger.Debug("could not restrict profile dir to current user", "path", dir, "err", err)
+		return nil
+	}
+	logger.Info("restricted folder to the current user", "dir", dir)
+	return nil
 }

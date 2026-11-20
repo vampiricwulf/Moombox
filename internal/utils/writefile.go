@@ -31,7 +31,7 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // a per-branch os.Remove; done flips true only after ReplaceFile has moved
 // the temp into place, so a successful call leaves nothing behind to remove.
 //
-// Callers that need more than this (the cookie writer's DACL tightening, the
+// Callers that need more than this (the cookie writer's per-file restriction, the
 // chat file's in-place header rewrite) keep their own writers; this helper is
 // for the plain "replace this file's whole contents" case.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {

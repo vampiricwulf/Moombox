@@ -41,8 +41,8 @@ func (b boundedCause) Error() string {
 func (b boundedCause) Unwrap() error { return b.err }
 
 // loadCookieJar reloads the jar from path. It is CookieJar.Load behind a
-// package-level seam — the same shape, and for the same reason, as
-// applyUserOnlyDACL: a test can make it fail and drive the one exit where
+// package-level seam, the same shape as restrictFileToOwner: a test can make
+// it fail and drive the one exit where
 // cookies.txt is correct and the running process is not.
 //
 // Only the reload that follows a RESTORE goes through it. The ordinary
