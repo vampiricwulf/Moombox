@@ -341,10 +341,10 @@ they are your signed-in sessions.
   on Windows, access for your user account, SYSTEM and Administrators only,
   with nothing inherited from the folder. `config.toml` is written the same
   way.
-- It restricts the folder that holds the file to your user account only when
-  that folder holds nothing else of Moombox's. A folder that also holds the
-  output, staging, database or log (the Docker image's `/data`, or the
-  install folder with the default `./cookies.txt`) keeps its permissions.
+- It never changes the permissions of a folder that already existed: the
+  folder that holds the file (the install folder by default, the Docker
+  image's `/data`) keeps the permissions you gave it. Moombox sets permissions
+  only on the files it writes and on a folder at the moment it creates one.
 - The paste or upload import in **Settings → Cookies** accepts up to 512 KiB,
   merges into the cookie file, and rolls back if the result does not verify.
 - On Windows, the optional DPAPI fallback reads your real browser's cookies,

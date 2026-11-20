@@ -506,10 +506,9 @@ command, change and save any setting once (that rewrites `config.toml`), and
 refresh or re-import your cookies (that rewrites `cookies.txt`). Each file is
 restricted again the moment it is written.
 
-Current versions no longer restrict a folder that holds the output, staging,
-database or log. They restrict `cookies.txt` and `config.toml` themselves
-instead (your account, SYSTEM and Administrators), and restrict a folder
-only when it holds nothing but those files. See
+Current versions never change the permissions of a folder that already
+exists. They restrict `cookies.txt` and `config.toml` themselves instead
+(your account, SYSTEM and Administrators). See
 [How cookie files are protected](../guide/cookies.md#how-cookie-files-are-protected).
 
 ## Disk space

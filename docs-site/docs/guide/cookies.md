@@ -449,13 +449,17 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
   `0600` on Linux; on Windows, access for your user account, SYSTEM and
   Administrators only, with nothing inherited from the folder. `config.toml`
   is written the same way.
-- The cookie file's folder is restricted to your user account (`0700` on
-  Linux) only when it is a folder of its own, not when it also holds the
-  output, staging, database or log (such as Docker's `/data`, or the install
-  folder with the default `./cookies.txt`). When Moombox does restrict a
-  folder, the log says *restricted folder to the current user* and names it.
+- Moombox sets permissions on the files it writes and on a folder at the
+  moment Moombox itself creates it. It never changes the permissions of a
+  folder that already existed, so the folder holding `cookies.txt` and
+  `config.toml` (the install folder by default, `/data` in Docker) stays as
+  you set it up.
+- If the cookie file's folder does not exist, Moombox creates it: mode `0700`
+  on Linux; on Windows it takes its parent folder's permissions.
 - The browser profile folder is restricted to your user account when the
-  browser login creates it (`0700` on Linux).
+  browser login creates it (`0700` on Linux), and the log then says
+  *restricted folder to the current user* and names it. A profile folder that
+  already exists is left as it is.
 - The browser login (start, finish, cancel) is only accepted from the host
   itself, so nobody on your network can open a browser window on your screen.
 - The DPAPI fallback and reading your real browser profile are both off until

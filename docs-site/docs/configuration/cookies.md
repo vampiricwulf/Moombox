@@ -65,10 +65,10 @@ folder only your user can read.
 - Moombox replaces the file by writing a new one and renaming it over the old
   one. On every write it restricts the file itself: mode `0600` on Linux; on
   Windows, access for your user account, SYSTEM and Administrators only,
-  whatever the folder allows. The folder is restricted to your user account
-  only when it holds nothing else of Moombox's. A folder that also holds the
-  output, staging, database or log, such as the install folder with the
-  default `./cookies.txt`, keeps its permissions. See
+  whatever the folder allows. The folder keeps the permissions it has:
+  Moombox never changes the permissions of a folder that already existed. If
+  the folder does not exist, Moombox creates it (mode `0700` on Linux; on
+  Windows it takes its parent folder's permissions). See
   [How cookie files are protected](../guide/cookies.md#how-cookie-files-are-protected).
 - In Docker, do **not** bind-mount the file on its own or read-only — the
   rename then fails and the YouTube session slowly expires. Keep it inside
@@ -218,7 +218,8 @@ The browser profile folder Moombox uses:
 - For the **browser login** and the **browser refresh**, a Moombox-only
   profile kept separate from your everyday browser. Moombox creates the folder
   on the first browser login and restricts it to your user account (mode
-  `0700` on Linux). It holds a full browser profile, including the session,
+  `0700` on Linux). A folder that already exists is used as it is, with the
+  permissions it has. It holds a full browser profile, including the session,
   so treat it as private.
 - For the **profile read** on a host without a browser (Docker, headless
   servers) or with [`acquisition`](#cookiesacquisition) = `profile`: the
