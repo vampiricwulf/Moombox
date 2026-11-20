@@ -532,8 +532,8 @@ func updateCookieFileAt(filePath string, logger interface {
 
 	// Atomic write via the shared same-package helper — it uses a unique
 	// temp name (the AutoCookieService writes the same cookies.txt, so a
-	// fixed ".tmp" would let the two writers interleave) and applies the
-	// memoized parent-dir DACL tightening.
+	// fixed ".tmp" would let the two writers interleave) and restricts the
+	// file to its owner before the rename.
 	if err := writeFileAtomic(filePath, []byte(out), 0o600); err != nil {
 		return err
 	}

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -463,7 +462,7 @@ func (s *AutoCookieService) ImportCookies(ctx context.Context, netscape string) 
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+	if err := createCookieDir(filepath.Dir(s.cookiePath)); err != nil {
 		s.setFileError("could not create the directory for cookies.txt: " + err.Error())
 		return ImportResult{}, err
 	}

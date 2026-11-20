@@ -24,31 +24,28 @@ func securitySDDL(t *testing.T, path string) string {
 	return sd.String()
 }
 
-// TestSaveIntoASharedFolderRestrictsTheFileNotTheFolder is config.Save's half
-// of the incident, with nothing faked: the real gate, the real icacls lockdown
-// and the real file restriction, over a folder shaped like a default install
-// (config.toml beside output/, staging/, the database and the log). Save runs
-// its lockdown synchronously, so the folder is read back as soon as it returns.
+// folderPermissions reads a folder's permissions back from the file system in
+// this platform's own terms: owner, group and DACL as one SDDL string.
+func folderPermissions(t *testing.T, dir string) string {
+	t.Helper()
+	return securitySDDL(t, dir)
+}
+
+// TestSaveRestrictsTheFileOnWindows: with nothing faked, config.toml saved
+// into a folder shaped like a default install (beside output/, staging/, the
+// database and the log) carries the restricted DACL: the one
+// utils.RestrictFileToOwner sets, whose exact contents internal/utils reads
+// back entry by entry. That the folder itself is left alone is
+// TestSaveLeavesAnExistingFolderAlone.
 //
-// The folder's security descriptor must read back identical; config.toml must
-// carry the restricted DACL — the one utils.RestrictFileToOwner sets, whose
-// exact contents internal/utils reads back entry by entry.
-//
-// Mutants: answer true for every Windows folder in utils.DirTighteningAllowed
-// (the shipped behaviour) -> icacls rewrites the folder's descriptor; drop
-// Save's restrictFileToOwner call -> config.toml reads back with the folder's
-// inherited DACL.
-func TestSaveIntoASharedFolderRestrictsTheFileNotTheFolder(t *testing.T) {
+// Mutant: drop Save's restrictFileToOwner call -> config.toml reads back with
+// the folder's inherited DACL.
+func TestSaveRestrictsTheFileOnWindows(t *testing.T) {
 	dir := configDirFixture(t, "output/", "staging/", "moombox.db", "moombox.log")
-	before := securitySDDL(t, dir)
 	target := filepath.Join(dir, "config.toml")
 
 	if err := Save(Defaults(), target); err != nil {
 		t.Fatalf("Save: %v", err)
-	}
-
-	if after := securitySDDL(t, dir); after != before {
-		t.Errorf("the folder's permissions changed:\n before %s\n after  %s", before, after)
 	}
 
 	reference := filepath.Join(t.TempDir(), "reference")
@@ -65,5 +62,25 @@ func TestSaveIntoASharedFolderRestrictsTheFileNotTheFolder(t *testing.T) {
 	}
 	if got := securitySDDL(t, target); got != want {
 		t.Errorf("config.toml:\n got  %s\n want %s (current user, SYSTEM and Administrators only, not inherited)", got, want)
+	}
+}
+
+// TestSaveCreatedFolderInheritsOnWindows: a folder Save creates for
+// config.toml gets no ACL call. It inherits from its parent like any new
+// folder, and the file restriction is what protects the password hash.
+//
+// Mutant: lock the new folder down with ApplyUserOnlyDACL (what Save did to
+// every folder up to v2.9.9) -> its DACL reads back protected.
+func TestSaveCreatedFolderInheritsOnWindows(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "moombox")
+	if err := Save(Defaults(), filepath.Join(dir, "config.toml")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	protected, err := utils.DACLProtected(dir)
+	if err != nil {
+		t.Fatalf("DACLProtected: %v", err)
+	}
+	if protected {
+		t.Errorf("the created config folder stopped inheriting from its parent: %s", securitySDDL(t, dir))
 	}
 }

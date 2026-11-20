@@ -436,7 +436,7 @@ func (s *AutoCookieService) refreshCookiesDetailed(ctx context.Context, policy b
 	// Merge with existing cookies using temp file + rename for atomicity.
 	// previousCookies is kept verbatim so an import that turns out to have
 	// damaged a platform can hand that platform's rows back untouched.
-	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
+	if err := createCookieDir(filepath.Dir(s.cookiePath)); err != nil {
 		// Sets, exactly as FinishSetup's twin does (autocookies_setup.go): the
 		// policy on lastError says every exit that returns an error from a
 		// cookie pass records what it concluded, and these three returned while

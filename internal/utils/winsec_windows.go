@@ -15,11 +15,17 @@ import (
 // ApplyUserOnlyDACL restricts the given path's ACL so only the current
 // user has read/write access. On Windows, mode bits passed to
 // os.MkdirAll / os.OpenFile are advisory — the actual ACL inherits
-// from the parent directory. When Moombox runs from a non-user-private
-// location (Program Files, a shared drive, %TEMP%, etc.), inherited
-// ACLs leave sensitive files (cookies.sqlite, moombox.toml with
-// password hash, etc.) readable by other non-admin users on the same
-// host. Audit reports/cookies.md #25 + reports/config.md #22.
+// from the parent directory.
+//
+// It REPLACES who can reach a folder and everything under it, so it is for a
+// folder that is Moombox's own and nothing else: the sidecar cache under the
+// user cache directory, and a browser profile folder in the call that created
+// it. It is never applied to a folder that already existed and that Moombox
+// did not make (owner ruling, 2026-11-19): up to v2.9.9 it ran on the cookie
+// file's and the config file's folder, which in a default install is the
+// install folder, and removed SYSTEM and Administrators from every recording
+// under it. Secret FILES are restricted one at a time with
+// RestrictFileToOwner.
 //
 // Implementation: shells out to icacls — the standard Windows ACL tool.
 //
@@ -34,14 +40,14 @@ import (
 //
 // Trade-offs of the simple "user only" form:
 //   - SYSTEM loses access. Backup / antivirus running as SYSTEM can no
-//     longer read the path's contents. Acceptable for Moombox's data
-//     surfaces (cookies, config) — they're recreated on demand.
+//     longer read the path's contents. Acceptable for the two folders
+//     above — they're recreated on demand.
 //   - If the user is a member of Administrators, removing the
 //     Administrators inherited ACE means admins can't read the path
 //     except via take-ownership. Acceptable: same data-recovery
 //     argument applies.
 //
-// Errors are returned to the caller. Callers typically log at Warn and
+// Errors are returned to the caller. Callers log at Debug and
 // proceed — a failed ACL tightening doesn't break the underlying
 // operation, just leaves the path less locked-down than ideal.
 func ApplyUserOnlyDACL(path string) error {
@@ -148,8 +154,9 @@ func RestrictFileToOwner(path string) error {
 
 // DACLProtected reports whether path's DACL is protected, that is, whether the
 // path has stopped inheriting permissions from its parent (SE_DACL_PROTECTED).
-// It only reads. `icacls <path> /inheritance:r`, which ApplyUserOnlyDACL runs,
-// is one of the things that sets the flag.
+// It only reads. `icacls <path> /inheritance:r`, which ApplyUserOnlyDACL runs
+// (and which Moombox ran on its install folder up to v2.9.9), is one of the
+// things that sets the flag.
 func DACLProtected(path string) (bool, error) {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {

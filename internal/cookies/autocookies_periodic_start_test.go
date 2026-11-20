@@ -82,10 +82,6 @@ func waitFor(cond func() bool, budget time.Duration) bool {
 // AtRuntime on the Windows runner: testing's RemoveAll listed the directory,
 // the meta file's temp landed, and the rmdir answered "The directory is not
 // empty".
-//
-// A pass that writes cookies.txt also starts tightenCookieDirOnce's goroutine,
-// which nothing joins; TestMain replaces the icacls / chmod it runs with a
-// no-op for the whole package, so that one does not touch the TempDir.
 func startJoinedPeriodicRefresh(t *testing.T, s *AutoCookieService, interval time.Duration) {
 	t.Helper()
 	s.StartPeriodicRefresh(t.Context(), interval)

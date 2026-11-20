@@ -27,26 +27,25 @@ func mkTree(t *testing.T, entries ...string) string {
 	return dir
 }
 
-// TestDirHoldsSharedData is the content half of owner decision O-K. The Docker
-// image's /data holds cookies.txt BESIDE output/, staging/, the database and
-// the log, and chmodding it 0700 takes the operator's archives away from their
-// own host user. A directory that holds nothing but Moombox's secrets is a
-// different thing and still earns the hardening.
+// TestDirHoldsSharedData is the content test the startup notice reads. The
+// Docker image's /data, and a default install folder, hold cookies.txt BESIDE
+// output/, staging/, the database and the log. A directory that holds nothing
+// but Moombox's secrets is a different thing.
 //
 // Mutants:
 //   - drop the directory-name check -> rows 3 and 4 answer false and /data is
-//     chmodded 0700 again (the shipped bug).
+//     not called the data folder.
 //   - match only the exact default basenames (moombox.db / moombox.log) ->
 //     rows 6 and 7 answer false; paths.database_path and paths.log_file_path
 //     are operator-settable.
 //   - drop the unreadable-directory arm -> row 9 answers false, and a
 //     directory we cannot even list is assumed dedicated.
 //   - treat io.EOF from ReadDir as a failed listing -> the "empty" row answers
-//     true, and a brand-new secrets directory never earns the hardening.
+//     true.
 //   - test the marker NAMES only inside the IsDir() branch -> the "a FILE named
 //     output" row answers false. `output` is a marker whatever its type: on a
 //     bind mount an unreadable or dangling `output` entry can present as a
-//     non-directory, and the fail-safe direction here is SHARED.
+//     non-directory.
 func TestDirHoldsSharedData(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -76,7 +75,7 @@ func TestDirHoldsSharedData(t *testing.T) {
 
 	t.Run("a directory that cannot be listed is not assumed dedicated", func(t *testing.T) {
 		if got := DirHoldsSharedData(filepath.Join(t.TempDir(), "does-not-exist")); !got {
-			t.Error("DirHoldsSharedData = false for an unlistable directory — a dir we cannot inspect must never be chmodded 0700")
+			t.Error("DirHoldsSharedData = false for an unlistable directory — a folder that cannot be inspected is not called a secrets-only one")
 		}
 	})
 
@@ -124,58 +123,4 @@ func TestDirHoldsSharedData(t *testing.T) {
 				dedicatedDirScanLimit)
 		}
 	})
-}
-
-// TestDirTighteningAllowedOnlyForADedicatedDirectory pins the gate on every
-// OS. A folder that also holds the output tree or the database is refused: on
-// POSIX the 0700 takes the data volume away from the operator's own host user,
-// and on Windows the lockdown removes the folder's inherited entries, SYSTEM
-// and Administrators included, from the folder and everything under it. The
-// default install keeps cookies.txt in the install folder itself.
-//
-// Mutant: answer true on Windows unconditionally (the shipped behaviour) -> the
-// second assertion fails on the Windows leg.
-func TestDirTighteningAllowedOnlyForADedicatedDirectory(t *testing.T) {
-	shared := mkTree(t, "cookies.txt", "output/", "moombox.db")
-	dedicated := mkTree(t, "cookies.txt")
-
-	if !DirTighteningAllowed(dedicated) {
-		t.Error("a dedicated secrets directory must still be tightened on every OS")
-	}
-	if DirTighteningAllowed(shared) {
-		t.Error("DirTighteningAllowed(shared) = true: a folder that also holds the output tree and the database must be left alone on every OS")
-	}
-}
-
-// TestFirstDirRestrictionAnswersOncePerDirectory is the memo behind the
-// "restricted folder to the current user" line: the cookie writer and
-// config.Save can both lock down the same dedicated folder, and the operator is
-// told once.
-//
-// Mutant: key the memo on the path as spelled -> the relative spelling of the
-// same folder (what filepath.Dir("./cookies.txt") gives the cookie writer)
-// answers true a second time.
-func TestFirstDirRestrictionAnswersOncePerDirectory(t *testing.T) {
-	dir := t.TempDir()
-	other := t.TempDir()
-	if _, first := FirstDirRestriction(dir); !first {
-		t.Fatal("the first report for a folder answered false")
-	}
-	if _, first := FirstDirRestriction(dir); first {
-		t.Error("the second report for the same folder answered true")
-	}
-	if _, first := FirstDirRestriction(filepath.Join(dir, "sub") + string(filepath.Separator) + ".."); first {
-		t.Error("another spelling of the same folder answered true")
-	}
-	t.Chdir(dir)
-	abs, first := FirstDirRestriction(".")
-	if first {
-		t.Error("the relative spelling of the same folder answered true")
-	}
-	if !filepath.IsAbs(abs) {
-		t.Errorf("the folder to log is %q, want an absolute path (the default cookie folder is spelled \".\")", abs)
-	}
-	if _, first := FirstDirRestriction(other); !first {
-		t.Error("a different folder answered false")
-	}
 }

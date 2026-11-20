@@ -16,8 +16,8 @@ import (
 var errFakeJarReload = errors.New("fake reload failure: cookies.txt is not readable")
 
 // fakeLoadCookieJar swaps the loadCookieJar seam for the duration of a test,
-// restoring the real one via t.Cleanup. Same shape, and the same reason, as
-// fakeApplyUserOnlyDACL.
+// restoring the real one via t.Cleanup. Same shape as
+// fakeRestrictFileToOwner.
 //
 // It is not the ONLY way to reach the reload failure — a counting
 // writeCookieFile stub that lets the merged write through and turns

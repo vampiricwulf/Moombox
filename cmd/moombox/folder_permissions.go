@@ -7,11 +7,12 @@ package main
 // folder (`icacls <dir> /inheritance:r /grant:r <user>:(OI)(CI)F`) ran on ANY
 // folder, and with the default ./cookies.txt that is the install folder: it
 // removed SYSTEM and Administrators from the folder and from the output tree,
-// the staging tree, the database and the log under it, and logged nothing. The
-// lockdown now runs on a dedicated folder only (utils.DirTighteningAllowed);
-// this file is for the installs it already ran on. It READS, and says what it
-// found with the command that undoes it. It never changes a folder: which
-// accounts should reach the operator's recordings is theirs to decide.
+// the staging tree, the database and the log under it, and logged nothing.
+// Moombox no longer changes the permissions of a folder that already existed
+// (owner ruling, 2026-11-19); this file is for the installs the lockdown
+// already ran on. It READS, and says what it found with the command that
+// undoes it. It never changes a folder: which accounts should reach the
+// operator's recordings is theirs to decide.
 
 import (
 	"path/filepath"
@@ -25,9 +26,9 @@ import (
 // shared data (holdsSharedData) and no longer inherit permissions from their
 // parent (daclProtected), as absolute paths, each once, in the order given.
 //
-// Both conditions, because each alone is ordinary: a dedicated secrets folder
-// is restricted on purpose and is protected by design, and a shared folder
-// that still inherits was never touched. An empty file path is skipped (no
+// Both conditions, because each alone is ordinary: a folder holding only the
+// secrets may be one its owner restricted on purpose, and a shared folder that
+// still inherits was never touched. An empty file path is skipped (no
 // such file is configured), a drive root is skipped (it has no parent), and a
 // folder whose ACL cannot be read is not named: the notice states a fact, and
 // there is none to state.

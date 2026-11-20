@@ -1,13 +1,10 @@
 package config
 
 import (
-	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -72,90 +69,5 @@ func TestSaveSurvivesAFailedFileRestriction(t *testing.T) {
 	}
 	if _, err := Load(target); err != nil {
 		t.Errorf("the saved config does not load: %v", err)
-	}
-}
-
-// restrictedLineRecorder counts the "restricted folder" records logged through
-// slog's default logger, by level, for one folder.
-type restrictedLineRecorder struct {
-	mu     sync.Mutex
-	dir    string
-	levels []slog.Level
-}
-
-func (h *restrictedLineRecorder) Enabled(context.Context, slog.Level) bool { return true }
-func (h *restrictedLineRecorder) WithAttrs([]slog.Attr) slog.Handler       { return h }
-func (h *restrictedLineRecorder) WithGroup(string) slog.Handler            { return h }
-func (h *restrictedLineRecorder) Handle(_ context.Context, r slog.Record) error {
-	if r.Message != "restricted folder to the current user" {
-		return nil
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == "dir" && a.Value.String() == h.dir {
-			h.mu.Lock()
-			h.levels = append(h.levels, r.Level)
-			h.mu.Unlock()
-		}
-		return true
-	})
-	return nil
-}
-
-func (h *restrictedLineRecorder) seen() []slog.Level {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]slog.Level(nil), h.levels...)
-}
-
-func captureRestrictedLines(t *testing.T, dir string) *restrictedLineRecorder {
-	t.Helper()
-	h := &restrictedLineRecorder{dir: dir}
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	slog.SetDefault(slog.New(h))
-	return h
-}
-
-// TestSaveReportsADirLockdownOnce: a lockdown that succeeded changes who can
-// reach the config folder, and it used to log nothing. It is said at Info,
-// once, however many saves follow.
-//
-// Mutants: drop the line -> none; log outside the once-per-directory block ->
-// three.
-func TestSaveReportsADirLockdownOnce(t *testing.T) {
-	dir := configDirFixture(t, "cookies.txt")
-	logs := captureRestrictedLines(t, dir)
-	fakeApplyUserOnlyDACL(t, func(string) error { return nil })
-
-	for range 3 {
-		if err := Save(Defaults(), filepath.Join(dir, "config.toml")); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-	}
-
-	got := logs.seen()
-	if len(got) != 1 {
-		t.Fatalf("%d \"restricted folder\" lines across three saves, want exactly 1", len(got))
-	}
-	if got[0] != slog.LevelInfo {
-		t.Errorf("the line was logged at %v, want Info", got[0])
-	}
-}
-
-// TestSaveDoesNotReportALockdownThatFailed: the line states a fact about the
-// folder. A refused icacls changed nothing.
-//
-// Mutant: log whatever the apply returned -> one line here.
-func TestSaveDoesNotReportALockdownThatFailed(t *testing.T) {
-	dir := configDirFixture(t, "cookies.txt")
-	logs := captureRestrictedLines(t, dir)
-	fakeApplyUserOnlyDACL(t, func(string) error { return errors.New("access denied") })
-
-	if err := Save(Defaults(), filepath.Join(dir, "config.toml")); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	if got := logs.seen(); len(got) != 0 {
-		t.Errorf("a failed lockdown was reported as done: %v", got)
 	}
 }

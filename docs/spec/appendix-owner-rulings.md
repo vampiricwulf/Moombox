@@ -59,7 +59,7 @@ Three more series look like the ids here and are not on this page. `Q1` to `Q13`
 - **O-H** — the 30 s quality monitor probes auth-walled streams with one TV-with-cookies call, and runs the full extraction cascade only when that returns nothing selectable. See architecture.md.
 - **O-I** — waiting-room polls reuse the first ANDROID_VR result and skip the cookieless clients when TV says the stream is upcoming and playable. See platform-services.md.
 - **O-J** — disabling a channel pauses its queued backlog: it resolves to 0 archive slots. See architecture.md.
-- **O-K** — the lockdown of the cookie file's (and the config file's) parent applies only to a dedicated directory, never to a shared output, database or log directory: the POSIX 0700 chmod since 2026-09-17, and the Windows `icacls` lockdown since 2026-11-19, when the owner reversed the ruling's "Windows is unchanged" half. The files themselves are restricted on every write. See data-and-storage.md.
+- **O-K** — SUPERSEDED on 2026-11-19. It limited the lockdown of the cookie file's (and the config file's) parent folder to a dedicated directory. The ruling that replaced it: Moombox sets permissions on the files it writes and on a folder at the moment Moombox itself creates it; it never changes the permissions of a folder that already existed. See data-and-storage.md.
 - **O-L** — the cookie import and finish handlers set `Content-Length` before writing their answer. See data-and-storage.md.
 - **O-M** — Ctrl+C always quits the TUI: `handleKey` checks it ahead of every overlay.
 - **O-N** — the TLS scheme-sniffing accept loop retries temporary accept errors with a capped backoff; a web server that dies late does not take the process down.

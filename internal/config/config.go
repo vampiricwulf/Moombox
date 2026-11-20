@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -94,33 +93,10 @@ func isLocalProbeHost(host string) bool {
 // reported as risky. Not a cap: the value is honoured as written.
 const SegmentWorkersWarnThreshold = 16
 
-// dacledDirs memoises the set of dirs that have had their DACL tightened
-// this process lifetime. icacls shells out (~30-80ms on Windows); without
-// memoisation every config Save under Store.Update's write lock pays that
-// latency on a no-op. The set lives for the process — restart re-applies.
-var (
-	dacledDirsMu sync.Mutex
-	dacledDirs   = make(map[string]struct{})
-)
-
-// applyUserOnlyDACL and dirTighteningAllowed are the two functions Save's
-// tightening block goes through, behind seams so a test can observe the
-// decision without shelling out to a real icacls or depending on chmod modes
-// this host cannot show. Mirrors the pair internal/cookies keeps over the same
-// two functions for the cookie file's parent — the twin this block is of.
-//
-// The gate (utils.DirTighteningAllowed) is the dedicated-directory test on
-// every platform; its seam lets a test record that Save asked, and refuse a
-// directory whatever it holds.
-//
 // restrictFileToOwner is the per-FILE restriction Save puts on its temp file
 // on every save (a protected DACL on Windows, nothing elsewhere), behind a
 // seam so a test can see which file it runs on and when, and can make it fail.
-var (
-	applyUserOnlyDACL    = utils.ApplyUserOnlyDACL
-	dirTighteningAllowed = utils.DirTighteningAllowed
-	restrictFileToOwner  = utils.RestrictFileToOwner
-)
+var restrictFileToOwner = utils.RestrictFileToOwner
 
 // platformDefaults returns the two memory-derived downloader defaults for a
 // GOARCH: the per-job reorder ceiling and the process-wide reorder budget, in
@@ -1437,63 +1413,18 @@ var validQualityPreferences = map[string]bool{
 // Save writes the configuration to a TOML file at the given path.
 func Save(cfg *MoomboxConfig, path string) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// A folder that is already there is left exactly as it is: Moombox sets
+	// permissions on the files it writes and on a folder at the moment Moombox
+	// itself creates it, and never changes the permissions of a folder that
+	// already existed (owner ruling, 2026-11-19, which supersedes owner
+	// decision O-K). One Save has to create is created for its owner only:
+	// mode 0700 on POSIX, for the folder and for any missing parent created
+	// with it. On Windows the mode means nothing and no ACL call is made: the
+	// new folder inherits its parent's permissions. config.toml itself (the
+	// password hash) is restricted on every save, whatever the folder: the
+	// temp file's Chmod and restrictFileToOwner below.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-	// Tighten the config dir's ACL to current-user-only, when the dir is a
-	// dedicated one (the gate below). Files written inside (moombox.toml,
-	// .tmp scratchpads) inherit the restrictive ACL so the password hash +
-	// cookie paths + auth tokens aren't readable by other non-admin users
-	// on a shared host. icacls on Windows, chmod 0700 on POSIX; idempotent
-	// if the dir already has the right ACL. Memoised across Save calls because
-	// icacls shell-out is ~30-80ms and otherwise blocks every config
-	// save under Store.Update's write lock for no benefit. Failures
-	// are logged-but-survived at the caller level — config save still
-	// proceeds. Audit reports/config.md Finding 22.
-	dacledDirsMu.Lock()
-	_, alreadyApplied := dacledDirs[dir]
-	if !alreadyApplied {
-		// Insert the marker BEFORE releasing the lock + invoking
-		// icacls. This matches the F13 pattern in cookies/autocookies.go
-		// and ensures concurrent Save callers for the same dir cannot
-		// both miss the cache and both shell out. Today's only caller
-		// path is Store.Update under a write lock so the race cannot
-		// fire, but this future-proofs against any caller that bypasses
-		// the Store.
-		dacledDirs[dir] = struct{}{}
-	}
-	dacledDirsMu.Unlock()
-	if !alreadyApplied {
-		// Log-but-survive on failure (the comment above promises
-		// "logged-but-survived"). Demoted to Debug rather than Warn: the
-		// common failure is ACCESS_DENIED (icacls exit 5) on a config dir
-		// created under an elevated/admin context — a UAC filtered token
-		// then can't rewrite that dir's DACL. On the single-user, run-it-
-		// 24/7 host this targets, the dir isn't reachable by anyone else
-		// anyway, so a startup WARN there is pure noise. A multi-user
-		// operator who genuinely cares about the tightening can raise the
-		// log level to Debug to see the miss.
-		// Owner decision O-K: the lockdown applies only to a DEDICATED
-		// directory, on every platform. config.toml sits at /data/config.toml
-		// in the image, so this is the same /data the cookie writer used to
-		// chmod — and a settings save is the gesture most likely to be the
-		// FIRST one on a new container. On Windows a default install keeps
-		// config.toml in the install folder, where icacls /inheritance:r
-		// removed SYSTEM and Administrators from the folder and from every
-		// recording under it. The config file itself is restricted on every
-		// save whatever the folder (the temp file's Chmod and
-		// restrictFileToOwner below), so what is given up in a shared folder
-		// is only the restricted parent. See utils.DirTighteningAllowed.
-		if !dirTighteningAllowed(dir) {
-			slog.Debug("config dir also holds the output/staging/database/log surfaces — leaving its permissions alone", "dir", dir)
-		} else if daclErr := applyUserOnlyDACL(dir); daclErr != nil {
-			slog.Debug("could not restrict config dir to current user", "dir", dir, "err", daclErr)
-		} else if abs, first := utils.FirstDirRestriction(dir); first {
-			// Changing who can reach a folder is said, once per folder per
-			// process; the cookie writer shares the memo, so a folder
-			// holding both files is reported once.
-			slog.Info("restricted folder to the current user", "dir", abs)
-		}
 	}
 
 	// Unique temp name (not a fixed path+".tmp"): callers are expected to

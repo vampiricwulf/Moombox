@@ -11,14 +11,16 @@ import (
 // access — the POSIX counterpart of the Windows icacls implementation.
 // Mode bits are the native mechanism here: 0700 for directories and 0600 for
 // files. Unlike the Windows (OI)(CI) inheritance — which writes restrictive
-// ACEs onto each child object so the file stays protected on its own — this
-// only changes the path's own bits; files already inside a directory keep
-// their existing modes and rely on the untraversable 0700 parent to block
-// other local users (adequate for the single-host multi-user threat model).
-// Callers create these paths with default modes (0755/0644) and call this to
-// tighten them afterwards, exactly as on Windows; without this, sensitive
-// surfaces (cookies.sqlite, moombox.toml with the password hash) stay
-// readable by other local users on multi-user Linux hosts.
+// ACEs onto each child object — this only changes the path's own bits; files
+// already inside a directory keep their existing modes and rely on the
+// untraversable 0700 parent to block other local users.
+//
+// As on Windows it is for a folder that is Moombox's own and nothing else:
+// the sidecar cache under the user cache directory, and a browser profile
+// folder in the call that created it. It is never applied to a folder that
+// already existed and that Moombox did not make (owner ruling, 2026-11-19);
+// the cookie file and config.toml are written 0600, and a folder Moombox has
+// to create for either is created 0700.
 func ApplyUserOnlyDACL(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
