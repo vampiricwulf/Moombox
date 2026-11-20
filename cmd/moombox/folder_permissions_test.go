@@ -71,6 +71,22 @@ func TestUninheritedSharedFoldersResolvesARelativeCookieFile(t *testing.T) {
 	}
 }
 
+// TestUninheritedSharedFoldersSkipsADriveRoot: a root has no parent to inherit
+// from, so "does not inherit" is no finding there, and the restore command for
+// one (`icacls "D:\" /inheritance:e`) would not even parse: `\"` escapes the
+// quote.
+func TestUninheritedSharedFoldersSkipsADriveRoot(t *testing.T) {
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	always := func(string) bool { return true }
+	protected := func(string) (bool, error) { return true, nil }
+
+	got := uninheritedSharedFolders([]string{filepath.Join(root, "cookies.txt")}, always, protected)
+
+	if len(got) != 0 {
+		t.Errorf("folders named = %q, want none for a file in the root %q", got, root)
+	}
+}
+
 // sameFolder compares two spellings of a folder the way the file system does
 // (t.TempDir and os.Getwd can differ in a short name or a symlink).
 func sameFolder(a, b string) bool {

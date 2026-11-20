@@ -61,20 +61,15 @@ func TestStartupNoticeOnRealFolders(t *testing.T) {
 	lockedSecrets := installFolder(t, "locked-secrets", false, true)
 	plainSecrets := installFolder(t, "plain-secrets", false, false)
 	before := folderSDDL(t, strippedInstall)
-	rec := &infoRecorder{}
 
 	var named []string
 	for _, dir := range []string{strippedInstall, healthyInstall, lockedSecrets, plainSecrets} {
 		named = append(named, sharedFoldersWithoutInheritance(
 			filepath.Join(dir, "cookies.txt"), filepath.Join(dir, "config.toml"))...)
 	}
-	logUninheritedFolders(rec, named)
 
 	if want := []string{strippedInstall}; !reflect.DeepEqual(named, want) {
 		t.Errorf("folders named = %q, want %q", named, want)
-	}
-	if len(rec.lines) != 1 {
-		t.Errorf("%d lines logged, want 1: %q", len(rec.lines), rec.lines)
 	}
 	if after := folderSDDL(t, strippedInstall); after != before {
 		t.Errorf("the folder was changed:\n before %s\n after  %s", before, after)

@@ -28,8 +28,9 @@ import (
 // Both conditions, because each alone is ordinary: a dedicated secrets folder
 // is restricted on purpose and is protected by design, and a shared folder
 // that still inherits was never touched. An empty file path is skipped (no
-// such file is configured), and a folder whose ACL cannot be read is not
-// named: the notice states a fact, and there is none to state.
+// such file is configured), a drive root is skipped (it has no parent), and a
+// folder whose ACL cannot be read is not named: the notice states a fact, and
+// there is none to state.
 func uninheritedSharedFolders(files []string, holdsSharedData func(dir string) bool, daclProtected func(dir string) (bool, error)) []string {
 	var out []string
 	seen := make(map[string]bool, len(files))
@@ -40,6 +41,11 @@ func uninheritedSharedFolders(files []string, holdsSharedData func(dir string) b
 		dir := filepath.Dir(file)
 		if abs, err := filepath.Abs(dir); err == nil {
 			dir = abs
+		}
+		if filepath.Dir(dir) == dir {
+			// A drive root has no parent to inherit from: nothing to report,
+			// and no restore command to give.
+			continue
 		}
 		key := dir
 		if runtime.GOOS == "windows" {
