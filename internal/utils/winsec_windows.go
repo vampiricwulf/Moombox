@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"os/user"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -109,6 +110,16 @@ func RestrictFileToOwner(path string) error {
 		if !sid.Equals(tokenUser.User.Sid) {
 			sids = append(sids, sid)
 		}
+	}
+	// A TrusteeValue is a uintptr, which the garbage collector does not follow:
+	// without the pins nothing keeps the SIDs (the user's lives inside
+	// tokenUser's buffer) allocated until SetEntriesInAcl has read them. x/sys
+	// asks for exactly this (TrusteeValueFromSID). The ACL ACLFromEntries
+	// returns is a copy, so the pins can end with this function.
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	for _, sid := range sids {
+		pin.Pin(sid)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, len(sids))
 	for _, sid := range sids {
