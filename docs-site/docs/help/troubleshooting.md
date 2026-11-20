@@ -476,6 +476,36 @@ The cookie guide has its own table of messages:
 - **Browser login on a server** — there is no browser to start; paste or
   upload a `cookies.txt` in Settings → **Cookies** instead.
 
+### Another account or a service cannot read the recordings (Windows)
+
+Versions up to 2.9.9 restricted the folder holding `cookies.txt` and
+`config.toml` to the account Moombox ran as. With the default
+`./cookies.txt` that is the install folder, so everything in it, including
+the output folder, the database and the log, stopped inheriting permissions
+from the drive: other accounts, SYSTEM and Administrators lost access, and
+backup tools, media servers and services could no longer read the
+recordings.
+
+Moombox logs this at startup when it finds it: *this folder does not inherit
+permissions from its parent; an earlier Moombox version may have restricted
+it to one account*, with the folder and the command that restores it. Run
+that command in a terminal as the account Moombox runs as:
+
+```
+icacls "D:\Moombox" /inheritance:e
+```
+
+Use your own folder in place of `D:\Moombox`. The folder then inherits the
+drive's permissions again, and so does everything in it. Moombox never
+changes the folder back itself: who may read your recordings is your
+decision.
+
+Current versions no longer restrict a folder that holds the output, staging,
+database or log. They restrict `cookies.txt` and `config.toml` themselves
+instead (your account, SYSTEM and Administrators), and restrict a folder
+only when it holds nothing but those files. See
+[How cookie files are protected](../guide/cookies.md#how-cookie-files-are-protected).
+
 ## Disk space
 
 | Notification | Meaning |

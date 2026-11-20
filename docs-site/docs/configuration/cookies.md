@@ -63,9 +63,16 @@ folder only your user can read.
   containing a `..` segment, or one wrapped in quotes (what Windows Explorer's
   "Copy as path" gives you), is refused by both UIs.
 - Moombox replaces the file by writing a new one and renaming it over the old
-  one, and makes it readable only by your user. In Docker, do **not**
-  bind-mount the file on its own or read-only — the rename then fails and the
-  YouTube session slowly expires. Keep it inside the `/data` mount.
+  one. On every write it restricts the file itself: mode `0600` on Linux; on
+  Windows, access for your user account, SYSTEM and Administrators only,
+  whatever the folder allows. The folder is restricted to your user account
+  only when it holds nothing else of Moombox's. A folder that also holds the
+  output, staging, database or log, such as the install folder with the
+  default `./cookies.txt`, keeps its permissions. See
+  [How cookie files are protected](../guide/cookies.md#how-cookie-files-are-protected).
+- In Docker, do **not** bind-mount the file on its own or read-only — the
+  rename then fails and the YouTube session slowly expires. Keep it inside
+  the `/data` mount.
 
 ```toml
 [cookies]

@@ -444,13 +444,18 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
 - Cookie values are never written to the log, shown in either UI, or included
   in error messages. The TUI import handles only the file path.
 - `cookies.txt` is written to a temporary file, flushed to disk and renamed
-  into place, so a crash cannot leave half a file. The file is made readable
-  only by your user (`0600` on Linux).
+  into place, so a crash cannot leave half a file.
+- The file itself is restricted on every write, wherever it lives: mode
+  `0600` on Linux; on Windows, access for your user account, SYSTEM and
+  Administrators only, with nothing inherited from the folder. `config.toml`
+  is written the same way.
+- The cookie file's folder is restricted to your user account (`0700` on
+  Linux) only when it is a folder of its own, not when it also holds the
+  output, staging, database or log (such as Docker's `/data`, or the install
+  folder with the default `./cookies.txt`). When Moombox does restrict a
+  folder, the log says *restricted folder to the current user* and names it.
 - The browser profile folder is restricted to your user account when the
-  browser login creates it (`0700` on Linux). On Windows the cookie file's
-  folder is restricted to your user account too. On Linux the cookie folder
-  is tightened to `0700` only when it is a folder of its own — not when it
-  also holds the output, staging, database or log (such as Docker's `/data`).
+  browser login creates it (`0700` on Linux).
 - The browser login (start, finish, cancel) is only accepted from the host
   itself, so nobody on your network can open a browser window on your screen.
 - The DPAPI fallback and reading your real browser profile are both off until
