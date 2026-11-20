@@ -454,8 +454,12 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
   folder that already existed, so the folder holding `cookies.txt` and
   `config.toml` (the install folder by default, `/data` in Docker) stays as
   you set it up.
-- If the cookie file's folder does not exist, Moombox creates it: mode `0700`
-  on Linux; on Windows it takes its parent folder's permissions.
+- If the cookie file's folder does not exist, Moombox creates it. On Linux it
+  is mode `0700` only when the cookie file or `config.toml` is the first
+  thing Moombox writes there; a folder that also holds the log file is
+  created for the log first, mode `0755`. On Windows it takes its parent
+  folder's permissions. The restriction on the file is the protection to
+  rely on.
 - The browser profile folder is restricted to your user account when the
   browser login creates it (`0700` on Linux), and the log then says
   *restricted folder to the current user* and names it. A profile folder that

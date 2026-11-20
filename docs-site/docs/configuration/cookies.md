@@ -67,8 +67,11 @@ folder only your user can read.
   Windows, access for your user account, SYSTEM and Administrators only,
   whatever the folder allows. The folder keeps the permissions it has:
   Moombox never changes the permissions of a folder that already existed. If
-  the folder does not exist, Moombox creates it (mode `0700` on Linux; on
-  Windows it takes its parent folder's permissions). See
+  the folder does not exist, Moombox creates it. On Linux it is mode `0700`
+  only when the cookie file or `config.toml` is the first thing Moombox
+  writes there; a folder that also holds the log file is created for the log
+  first, mode `0755`. On Windows it takes its parent folder's permissions.
+  The restriction on the file is the protection to rely on. See
   [How cookie files are protected](../guide/cookies.md#how-cookie-files-are-protected).
 - In Docker, do **not** bind-mount the file on its own or read-only — the
   rename then fails and the YouTube session slowly expires. Keep it inside
