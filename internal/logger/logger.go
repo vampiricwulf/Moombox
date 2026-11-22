@@ -107,6 +107,10 @@ type Logger struct {
 	// alternate screen, so diagf reroutes those lines into the ring
 	// buffer + subscribers (the TUI log panel) instead.
 	stderrGate *switchableWriter
+	// diag queues the logger's own stderr lines (stderrLine), so a stderr
+	// that has stopped taking output never blocks a goroutine that logs.
+	// nil on a Logger not built by New, which writes them directly.
+	diag *consoleQueue
 
 	// File rotation
 	filePath    string
@@ -285,6 +289,7 @@ func New(filePath, level string, maxSize, maxFiles int, options ...Option) (*Log
 	l.stderrGate.enabled.Store(true)
 	l.consoleCloseWait = consoleCloseFlush
 	l.console = &consoleQueue{out: l.stdout, limit: consoleQueueLines}
+	l.diag = &consoleQueue{out: stderrNow{gate: l.stderrGate}, limit: diagQueueLines}
 	sinks := lineSinks{stdout: consoleSink{l: l}}
 	if l.file != nil {
 		sinks.file = l
@@ -692,7 +697,7 @@ func (l *Logger) broadcast(line string, seq uint64) {
 		if now-last >= int64(time.Second) {
 			if l.dropWarnLast.CompareAndSwap(last, now) {
 				if l.stderrGate == nil || l.stderrGate.enabled.Load() {
-					fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
+					l.stderrLine("logger: dropped log line for slow subscriber")
 				} else {
 					// Defer the ring-append (see ringWarn above); the CAS
 					// rate-limit guarantees this is set at most once here.
@@ -878,7 +883,7 @@ func (l *Logger) SetLevel(level string) bool {
 // before the TUI takes it. Whatever is still queued after that is discarded
 // when its turn comes, not written over the TUI.
 func (l *Logger) SuppressStdout() {
-	l.console.flush(consoleSuppressFlush)
+	l.flushConsoles(consoleSuppressFlush)
 	l.stdout.enabled.Store(false)
 	if l.stderrGate != nil {
 		l.stderrGate.enabled.Store(false)
@@ -949,11 +954,58 @@ func (l *Logger) consoleNote(msg string) {
 func (l *Logger) diagf(format string, args ...any) {
 	msg := strings.TrimRight(fmt.Sprintf(format, args...), "\n")
 	if l.stderrGate == nil || l.stderrGate.enabled.Load() {
-		fmt.Fprintln(os.Stderr, msg)
+		l.stderrLine(msg)
 		return
 	}
 	line := time.Now().Format("2006-01-02 15:04:05") + " WARN " + msg
 	l.broadcast(line, l.addToRingBuffer(line))
+}
+
+// diagQueueLines is how many of the logger's own stderr lines may wait for
+// stderr. They are rare (a failed rotation, a slow subscriber), so a queue
+// this small fills only when stderr has stopped taking output.
+const diagQueueLines = 256
+
+// stderrNow writes to whatever os.Stderr is at the time of the write. A line
+// still queued when the TUI took the terminal (SuppressStdout) is discarded
+// when its turn comes, as a queued stdout line is.
+type stderrNow struct {
+	gate *switchableWriter
+}
+
+func (w stderrNow) Write(p []byte) (int, error) {
+	if w.gate != nil && !w.gate.enabled.Load() {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
+}
+
+// flushConsoles gives the queued stdout lines, then the logger's own queued
+// stderr lines, one shared wait to print.
+func (l *Logger) flushConsoles(wait time.Duration) {
+	deadline := time.Now().Add(wait)
+	l.console.flush(wait)
+	if l.diag != nil {
+		l.diag.flush(max(time.Until(deadline), 0))
+	}
+}
+
+// stderrLine prints one of the logger's own lines on stderr without ever
+// blocking the caller. Stderr is the same console or pipe as stdout in a
+// normal run and can stop taking output the same way (see consoleQueue);
+// diagf is called with fileMu held and the slow-subscriber notice with subMu
+// read-held, so a write that blocked there stopped every goroutine that
+// logged next. The line is queued and written by the queue's own goroutine;
+// when the queue is full it is left off, and the first line that fits again
+// is preceded by a count of those that were.
+func (l *Logger) stderrLine(msg string) {
+	if l.diag == nil {
+		fmt.Fprintln(os.Stderr, msg)
+		return
+	}
+	l.diag.push([]byte(msg+"\n"), func(dropped int) []byte {
+		return fmt.Appendf(nil, "logger: %d of the logger's own lines were not shown on stderr while it was not taking output\n", dropped)
+	})
 }
 
 // Close flushes and closes the logger. The lines still queued for the
@@ -968,7 +1020,7 @@ func (l *Logger) Close() {
 	if limit := l.closeFlushLimit.Load(); limit != nil && *limit < wait {
 		wait = *limit
 	}
-	l.console.flush(wait)
+	l.flushConsoles(wait)
 	l.fileMu.Lock()
 	defer l.fileMu.Unlock()
 

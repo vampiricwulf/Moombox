@@ -1051,7 +1051,14 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 				// A row cancelled or deleted since the read is left alone: the
 				// re-mux accepts a Cancelled row as the Mux action does, and
 				// would archive what the operator just cancelled.
-				if !w.stillMuxingAfter(job.ID, map[string]any{"error": ""}) {
+				// A mux killed while it waited for a download slot left its
+				// wait line on the row, and this re-mux may take a free slot
+				// without writing one.
+				fields := map[string]any{"error": ""}
+				if isMuxSlotWaitLine(job.Progress) {
+					fields["progress"] = ""
+				}
+				if !w.stillMuxingAfter(job.ID, fields) {
 					continue
 				}
 				w.logger.Info("resuming interrupted mux from staged media", "jobID", job.ID)

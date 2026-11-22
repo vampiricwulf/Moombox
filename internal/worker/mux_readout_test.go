@@ -541,3 +541,26 @@ func TestLiveFinalPartMuxOwnsTheLine(t *testing.T) {
 		}
 	})
 }
+
+// TestMuxReadoutDoesNotSaveAMuxSlotWaitLine: a process killed while a mux
+// waited for a download slot leaves the wait line on the Muxing row, and the
+// re-mux after the restart takes a free slot without rewriting it. A copy
+// that then fails must not put a wait that is not happening back on the row.
+//
+// Mutant: newMuxReadout saving a mux-slot wait line (the Error row reads
+// "Waiting for a download slot to mux...").
+func TestMuxReadoutDoesNotSaveAMuxSlotWaitLine(t *testing.T) {
+	w, db := testWorkerSetup(t)
+	readoutJob(t, db, "j")
+	db.UpdateJobFields("j", map[string]any{"progress": muxSlotWaitLine(3 * time.Minute)})
+	job, _ := db.GetJob("j")
+	r := w.orchestrator.newMuxReadout(w.buildJobContext(job))
+	if r == nil {
+		t.Fatal("no readout")
+	}
+	r.report(engine.CopyProgress{OutputBytes: 10, InputBytes: 100})
+	r.restore()
+	if line, _ := progressOf(t, db, "j"); line != "" {
+		t.Errorf("line after a failed re-mux = %q, want none", line)
+	}
+}

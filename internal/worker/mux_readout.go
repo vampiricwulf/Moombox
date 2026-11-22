@@ -63,8 +63,11 @@ func (o *DownloadOrchestrator) newMuxReadout(jobCtx *JobContext) *muxReadout {
 	// A line the readout itself wrote is not a download's line: a mux that
 	// was killed mid-copy leaves one on the row, and the re-mux after the
 	// restart must not put it back on a row that then reads Error.
+	// Nor is a mux-slot wait line: a process killed while a mux waited for a
+	// download slot leaves it on the row, and the re-mux after the restart
+	// takes a free slot without rewriting it.
 	saved := fresh.Progress
-	if _, _, ok := jobstate.MuxReadout(saved); ok {
+	if _, _, ok := jobstate.MuxReadout(saved); ok || isMuxSlotWaitLine(saved) {
 		saved = ""
 	}
 	if saved != "" {

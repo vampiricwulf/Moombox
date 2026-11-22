@@ -290,3 +290,39 @@ func TestLimitCloseFlushCapsTheWaitForAStalledConsole(t *testing.T) {
 		}
 	}
 }
+
+// TestAStalledStderrDoesNotBlockTheLoggersOwnLines: stderr is the same
+// console or pipe as stdout in a normal run. diagf runs with the file lock
+// held (a failed rotation) and the slow-subscriber notice with the
+// subscriber lock read-held, so a stderr write that blocked there stopped
+// every goroutine that logged next. Both now queue the line and return, and
+// stderr gets it once it takes output again.
+//
+// Mutant: stderrLine writing its line on the calling goroutine: diagf never
+// returns and the test times out waiting for it.
+func TestAStalledStderrDoesNotBlockTheLoggersOwnLines(t *testing.T) {
+	l, err := New(filepath.Join(t.TempDir(), "moombox.log"), "INFO", 1<<20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	l.consoleCloseWait = 10 * time.Millisecond
+	stderr := newStalledConsole()
+	l.diag.out = stderr
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		l.diagf("logger: first")
+		l.diagf("logger: second")
+	}()
+	waitClosed(t, returned, "diagf to return while stderr is stalled")
+
+	close(stderr.release)
+	if !l.diag.flush(30 * time.Second) {
+		t.Fatal("the queued lines were not written after stderr took output again")
+	}
+	if got := strings.Join(stderr.lines(), ""); got != "logger: first\nlogger: second\n" {
+		t.Errorf("stderr got %q", got)
+	}
+}

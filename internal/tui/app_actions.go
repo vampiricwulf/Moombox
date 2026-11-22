@@ -185,10 +185,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				if j == nil || !jobverbs.ResumeSupported(j.Platform) {
 					continue
 				}
-				if a.HasStagingFiles != nil && !a.HasStagingFiles(id) {
+				// Status first: the staging probe reads a directory, on the
+				// update loop, and a selection can be the whole list (Ctrl+A).
+				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
 					continue
 				}
-				if !jobverbs.ResumableStatus(j.Status, j.IncompleteTail) {
+				if a.HasStagingFiles != nil && !a.HasStagingFiles(id) {
 					continue
 				}
 				ids = append(ids, id)
