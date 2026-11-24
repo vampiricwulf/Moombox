@@ -21,7 +21,7 @@ require (
 	github.com/ulikunitz/xz v0.5.17
 	github.com/yuin/goldmark v1.8.7
 	golang.org/x/crypto v0.59.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
