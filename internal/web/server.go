@@ -588,6 +588,12 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("TLS setup: %w", err)
 		}
+		// Once per start, here and not in the certificate reload or the
+		// redirect's load-only path: a key Moombox generated before it
+		// restricted the file itself gets the restriction now.
+		if len(tlsConfig.Certificates) > 0 {
+			restrictOwnGeneratedKey(s.cfg, keyPath, &tlsConfig.Certificates[0], s.logger)
+		}
 		s.server.TLSConfig = tlsConfig
 		scheme = "https"
 	}

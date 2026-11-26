@@ -506,6 +506,13 @@ command, change and save any setting once (that rewrites `config.toml`), and
 refresh or re-import your cookies (that rewrites `cookies.txt`). Each file is
 restricted again the moment it is written.
 
+If HTTPS is on with the self-signed certificate Moombox generated, its
+private key (`moombox.key`) is restricted again at the next start, with
+nothing for you to do. That happens only when `tls_cert_path` and
+`tls_key_path` are both empty and the certificate is Moombox's own. A
+certificate and key you supplied yourself are never changed: set their
+permissions as you see fit.
+
 Current versions never change the permissions of a folder that already
 exists. They restrict `cookies.txt` and `config.toml` themselves instead
 (your account, SYSTEM and Administrators). See

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,7 +19,20 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// restrictFileToOwner is utils.RestrictFileToOwner (a protected DACL for the
+// current user, SYSTEM and Administrators on Windows, nothing elsewhere)
+// behind a seam, so a test can see which file it runs on and when, and can
+// make it fail. It is only ever given the TLS private key: never the
+// certificate, never a folder.
+var restrictFileToOwner = utils.RestrictFileToOwner
+
+// generatedCertLifetime is how long the certificate Moombox generates for
+// itself is valid. isOwnGeneratedCert reads it back, so the generator and the
+// reader must stay one constant.
+const generatedCertLifetime = 10 * 365 * 24 * time.Hour // ~10 years
 
 // certWatcher holds an atomically-swappable *tls.Certificate so the TLS
 // stack can pick up a freshly written cert/key pair without restarting the
@@ -263,7 +277,10 @@ func LoadOrGenerateTLSConfig(certPath, keyPath, networkAccess string, logger int
 }
 
 // generateSelfSignedCert creates an ECDSA P-256 self-signed certificate and
-// writes the PEM-encoded cert and key to disk.
+// writes the PEM-encoded cert and key to disk. The key file is restricted to
+// its owner before the key is written into it (mode 0600, and
+// restrictFileToOwner for Windows); a failure of the latter is a Warn, since
+// this logger has no Debug.
 func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -284,7 +301,7 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: placeholderCertCN},
 		NotBefore:    now,
-		NotAfter:     now.Add(10 * 365 * 24 * time.Hour), // ~10 years
+		NotAfter:     now.Add(generatedCertLifetime),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 
@@ -322,6 +339,13 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	if err != nil {
 		return fmt.Errorf("write key file: %w", err)
 	}
+	// The Windows counterpart of that 0600, set while the file is still empty:
+	// there the mode means nothing for access and a new file inherits its
+	// folder's permissions. Hardening, not a condition of HTTPS: a volume
+	// without ACLs still gets its key.
+	if err := restrictFileToOwner(keyPath); err != nil {
+		logger.Warn("[TLS] could not restrict the generated private key to its owner", "key", keyPath, "err", err)
+	}
 	if err := pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
 		keyFile.Close()
 		return fmt.Errorf("encode key PEM: %w", err)
@@ -342,6 +366,83 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	logger.Info("[TLS] Certificate SANs: " + sans.String())
 
 	return nil
+}
+
+// restrictOwnGeneratedKey re-applies the owner-only restriction to an EXISTING
+// private key at startup, and only to a key that is Moombox's own: one an
+// earlier version generated and left under its folder's inherited permissions
+// (owner ruling R3-6, 2026-11-25). A key the operator supplied is never
+// touched. Both of these must hold, and when either is in doubt the file is
+// left exactly as it is:
+//
+//   - network.tls_cert_path and network.tls_key_path are BOTH empty in the
+//     configuration, so the pair is at the default ./moombox.crt and
+//     ./moombox.key. A path the operator wrote, the default spelled out
+//     included, is the operator's.
+//   - the certificate in use has every mark of generateSelfSignedCert's
+//     template (isOwnGeneratedCert).
+//
+// keyPath is the key that certificate was just loaded with, so the two are a
+// pair (tls.LoadX509KeyPair checked it). Only that one file is changed, and
+// only if it is a regular file: not the certificate, not a link, never a
+// folder. Off Windows nothing happens: the key was created 0600 there.
+func restrictOwnGeneratedKey(cfg *config.MoomboxConfig, keyPath string, cert *tls.Certificate, logger interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) {
+	if cfg.Network.TLSCertPath != "" || cfg.Network.TLSKeyPath != "" {
+		return
+	}
+	if !isOwnGeneratedCert(cert) {
+		return
+	}
+	if info, err := os.Lstat(keyPath); err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	if err := restrictFileToOwner(keyPath); err != nil {
+		logger.Warn("[TLS] could not restrict the generated private key to its owner", "key", keyPath, "err", err)
+	}
+}
+
+// isOwnGeneratedCert reports whether cert is the certificate
+// generateSelfSignedCert writes. It is deliberately stricter than the Common
+// Name test snapshot uses to ignore the placeholder's SANs: this answer lets
+// Moombox change a file's permissions, so a certificate an operator made and
+// happened to name "Moombox" must not pass. Every mark of the template is
+// required (it has not changed since the first release with HTTPS, v2.0.5):
+//
+//   - a single certificate, no chain;
+//   - subject and issuer identical, and nothing in them but CN=Moombox;
+//   - signed by its own key, an ECDSA P-256 one, and not a CA;
+//   - key usage digital signature only, extended key usage server auth only;
+//   - "localhost" its one DNS name;
+//   - valid for exactly generatedCertLifetime.
+func isOwnGeneratedCert(cert *tls.Certificate) bool {
+	if cert == nil || len(cert.Certificate) != 1 {
+		return false
+	}
+	c, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return false
+	}
+	if !bytes.Equal(c.RawSubject, c.RawIssuer) || len(c.Subject.Names) != 1 || c.Subject.CommonName != placeholderCertCN {
+		return false
+	}
+	pub, ok := c.PublicKey.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P256() || c.IsCA {
+		return false
+	}
+	// Not CheckSignatureFrom: that demands a CA parent, which this is not.
+	if c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) != nil {
+		return false
+	}
+	if c.KeyUsage != x509.KeyUsageDigitalSignature || len(c.ExtKeyUsage) != 1 || c.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth || len(c.UnknownExtKeyUsage) != 0 {
+		return false
+	}
+	if len(c.DNSNames) != 1 || c.DNSNames[0] != "localhost" {
+		return false
+	}
+	return c.NotAfter.Sub(c.NotBefore) == generatedCertLifetime
 }
 
 // getLANIPs returns all non-loopback unicast IPs from local network interfaces.

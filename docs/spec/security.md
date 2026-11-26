@@ -584,6 +584,17 @@ Three TOML config fields control TLS:
 - If `https_enabled` is true and the files do NOT exist, a self-signed certificate is auto-generated and written to the configured paths. The generated certificate includes SANs (Subject Alternative Names) appropriate for the `network_access` level — localhost for local access, or the machine's IP addresses for LAN/external.
 - The server wraps its TCP listener with `tls.NewListener` using the loaded TLS config.
 
+### Private key permissions
+
+The generated private key is a secret file Moombox writes, so it is restricted like `cookies.txt` and `config.toml` (the rule "The files are restricted on every write, whatever the folder" in `data-and-storage.md`): `generateSelfSignedCert` creates it 0600 and calls `utils.RestrictFileToOwner` on it while it is still empty, before the key is written. On Windows that is a protected DACL for the account the process runs as, SYSTEM and Administrators; elsewhere it does nothing. A failure is logged at Warn (the TLS logger has no Debug) and does not stop HTTPS. This applies wherever the pair is generated, a configured path included: the file is one Moombox has just written.
+
+An EXISTING key is restricted again once per start, in `Server.Start`'s HTTPS branch (`restrictOwnGeneratedKey`, `internal/web/tls.go`), only when it is Moombox's own generated key (owner ruling R3-6, 2026-11-25). Versions up to 2.9.10 wrote the key without the Windows restriction, so it kept its folder's inherited permissions. "Moombox's own" is recognised by two tests, both required, and a file that fails either is left exactly as it is:
+
+1. **Default paths.** `tls_cert_path` and `tls_key_path` are both empty in the configuration. A path the operator wrote is the operator's, even when it spells the default `./moombox.key`, and even when the certificate there is one Moombox generated.
+2. **The generator's certificate.** The certificate in use carries every mark of the generator's template (`isOwnGeneratedCert`): a single certificate with no chain; subject and issuer identical and holding nothing but `CN=Moombox`; an ECDSA P-256 key that signed the certificate itself; not a CA; key usage digital signature only and extended key usage server auth only; `localhost` as its one DNS name; a validity of exactly the generator's ten years. This is stricter on purpose than the Common Name test that keeps the placeholder's SANs out of the origin check: here the answer changes a file. The template has been the same since HTTPS was added (v2.0.5), so every key Moombox ever generated is matched.
+
+Only the key file is changed, and only when it is a regular file: never the certificate, never a link, never a folder. The redirect's load-only path and the certificate hot reload never restrict anything. An operator's own certificate and key are never touched at any path.
+
 ### Cross-Scheme Redirect
 
 Both protocols share the single configured port. A protocol splitter (`internal/web/listener_mux.go`) sniffs each accepted connection's first byte (TLS handshakes start with `0x16`) and answers mismatched-scheme requests with a `307` to the same host/port/path on the correct scheme:
