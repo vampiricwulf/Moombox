@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/worker"
@@ -227,6 +228,47 @@ func TestImportNoteBoundsTheEntriesItNames(t *testing.T) {
 	last := fmt.Sprintf("stray%02d.txt", importNoteNames+2)
 	if strings.Contains(r.Import.Note, last) || !strings.Contains(r.Import.Note, "and 3 more") {
 		t.Errorf("note %q", r.Import.Note)
+	}
+}
+
+// A left-out entry's name is repeated at most importReportNameBytes long,
+// cut on a rune with a closing "…": in skipped, in unpairedChats and in the
+// note, which also names at most importNoteNames chats. A zip entry's name
+// can be 64 KB, and both clients show the note whole.
+//
+// Mutants: importReportName returning the base name whole (the full names in
+// the response); the cut made on a byte (invalid UTF-8 in the body); the
+// chat clause joining every name (the sixth chat in the note).
+func TestImportReportsLongLeftOutNamesCut(t *testing.T) {
+	f := newImportFixture(t)
+	// 3-byte runes, so a cut at a fixed byte count lands inside one.
+	long := strings.Repeat("あ", 100)
+	entries := []importEntry{
+		{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		{name: "folder/" + long + ".txt", data: []byte("x")},
+	}
+	for i := range importNoteNames + 1 {
+		entries = append(entries, importEntry{name: fmt.Sprintf("%s%02d.chat.json", long, i), data: []byte("{}")})
+	}
+	rec, _ := importZip(t, f, orderedImportZip(t, entries...))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	r := decodeImportResult(t, rec.Body.Bytes())
+	if len(r.Import.Skipped) != 1 || len(r.Import.UnpairedChats) != importNoteNames+1 {
+		t.Fatalf("skipped %d, unpaired chats %d; want 1 and %d", len(r.Import.Skipped), len(r.Import.UnpairedChats), importNoteNames+1)
+	}
+	want := strings.Repeat("あ", 65) + "…" // 195 bytes and the 3-byte ellipsis
+	for _, name := range append(r.Import.Skipped, r.Import.UnpairedChats...) {
+		if name != want {
+			t.Errorf("reported name is %d bytes %q, want the first 65 runes and an ellipsis", len(name), name)
+		}
+	}
+	if strings.Contains(r.Import.Note, long) || !utf8.ValidString(r.Import.Note) {
+		t.Errorf("the note repeats a long name whole, or is cut inside a rune: %d bytes", len(r.Import.Note))
+	}
+	if !strings.Contains(r.Import.Note, "and 1 more: a chat is imported only beside") {
+		t.Errorf("the note names every left-out chat: %q", r.Import.Note)
 	}
 }
 

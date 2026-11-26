@@ -614,6 +614,37 @@ type importOutcome struct {
 // the note on its feedback line. Skipped lists them all.
 const importNoteNames = 5
 
+// importReportNameBytes is the most bytes of one entry's name the response
+// repeats, in unpairedChats, skipped and the note. A zip entry's name can be
+// 64 KB and a zip can hold a thousand of them, and both clients show the
+// note whole. A name from a real filesystem is at most 255 bytes a
+// component, so few are ever cut.
+const importReportNameBytes = 200
+
+// importReportName is the name an entry left out of the import is reported
+// under: its base name, cut to importReportNameBytes with a closing "…" when
+// it is longer. Every place that records such a name goes through it, so the
+// count caps (maxFiles entries, importNoteNames a reason in the note) bound
+// the response in bytes as well.
+func importReportName(name string) string {
+	const ellipsis = "…"
+	base := path.Base(name)
+	if len(base) <= importReportNameBytes {
+		return base
+	}
+	return truncateUTF8(base, importReportNameBytes-len(ellipsis)) + ellipsis
+}
+
+// importNoteList joins the first importNoteNames of names for the note, and
+// counts the rest.
+func importNoteList(names []string) string {
+	listed := strings.Join(names[:min(len(names), importNoteNames)], ", ")
+	if more := len(names) - importNoteNames; more > 0 {
+		listed += fmt.Sprintf(" and %d more", more)
+	}
+	return listed
+}
+
 // importRename is one file placed under a " (n)" name: From is the name a
 // different file already held, To the name the import took.
 type importRename struct {
@@ -629,7 +660,7 @@ func newImportOutcome(baseStem string, files []*importFile, unpairedChats []stri
 	out := importOutcome{UnpairedChats: unpairedChats}
 	var notes []string
 	if len(unpairedChats) > 0 {
-		notes = append(notes, "left out "+strings.Join(unpairedChats, ", ")+": a chat is imported only beside the video its name matches")
+		notes = append(notes, "left out "+importNoteList(unpairedChats)+": a chat is imported only beside the video its name matches")
 	}
 	// One clause per reason, in the order first met, naming its entries.
 	var reasons []string
@@ -642,12 +673,7 @@ func newImportOutcome(baseStem string, files []*importFile, unpairedChats []stri
 		byReason[sk.reason] = append(byReason[sk.reason], sk.name)
 	}
 	for _, r := range reasons {
-		names := byReason[r]
-		listed := strings.Join(names[:min(len(names), importNoteNames)], ", ")
-		if more := len(names) - importNoteNames; more > 0 {
-			listed += fmt.Sprintf(" and %d more", more)
-		}
-		notes = append(notes, "left out "+listed+": "+r)
+		notes = append(notes, "left out "+importNoteList(byReason[r])+": "+r)
 	}
 	for _, f := range files {
 		name := filepath.Base(f.dest)
@@ -877,7 +903,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	unpaired := map[*zip.File]bool{}
 	for _, c := range chatEntries {
 		if !named[c.stem] && (!c.json || importJSONIsChat(c.entry)) {
-			rec.unpairedChats = append(rec.unpairedChats, path.Base(c.name))
+			rec.unpairedChats = append(rec.unpairedChats, importReportName(c.name))
 			unpaired[c.entry] = true
 		}
 	}
@@ -970,7 +996,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 				}
 			}
 		}
-		rec.skipped = append(rec.skipped, importSkip{name: path.Base(e.name), reason: reason})
+		rec.skipped = append(rec.skipped, importSkip{name: importReportName(e.name), reason: reason})
 	}
 	return rec, nil
 }
@@ -1144,7 +1170,7 @@ func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]
 		}
 		os.Remove(f.tmp)
 		f.tmp = ""
-		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: importSkipChapters})
+		skipped = append(skipped, importSkip{name: importReportName(zipEntryName(f.entry)), reason: importSkipChapters})
 		return true
 	})
 	return kept, skipped
@@ -1180,7 +1206,7 @@ func chooseImportSidecarNames(outputDir string, files []*importFile, skipped []i
 		}
 		os.Remove(f.tmp)
 		f.tmp = ""
-		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: reason})
+		skipped = append(skipped, importSkip{name: importReportName(zipEntryName(f.entry)), reason: reason})
 		return true
 	})
 	return kept, skipped
