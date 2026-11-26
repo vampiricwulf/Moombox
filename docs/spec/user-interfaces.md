@@ -944,7 +944,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `POST` | `/api/jobs/{id}/mux` | Force a mux from the segment files already in staging, without re-downloading. |
 | `POST` | `/api/jobs/{id}/recover-asides` | Mux the recordings the engine set aside on a mid-stream restart into their own files beside the archive, carrying a kept chat capture beside the first of them … |
 | `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` … |
-| `DELETE` | `/api/jobs/{id}` | Delete the job's row (and its child rows). Files stay on disk: the output and any staging then surface in Files → Orphaned, where they are deleted deliberately. |
+| `DELETE` | `/api/jobs/{id}` | Delete the job's row (and its child rows). A YouTube job's delete also leaves its history row marked `job_created` in the same transaction (`DeleteJobLeavingHistory`, owner ruling R4-3; the TUI's `A D` calls the same method), so a job added by URL or import is held back from re-detection as a monitor-created one is, until its entry is removed from the Orphaned list. Files stay on disk: the output and any staging then surface in Files → Orphaned, where they are deleted deliberately. |
 
 #### `GET /api/jobs/{id}`
 

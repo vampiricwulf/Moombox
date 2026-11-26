@@ -99,7 +99,7 @@ func TestDecapi_ASettledJobHoldsItsBroadcastBack(t *testing.T) {
 // one DECAPI recorded for a video it skipped or gave up on, with no job ever
 // created — job_created 0, as the v28 upgrade leaves every orphaned row. It
 // goes in through a second connection to the test database's file, because
-// AddToHistory writes only a job's row.
+// AddToHistory and DeleteJobLeavingHistory write only a job's row.
 func addSkipHistoryRow(t *testing.T, db *database.Database, videoID string) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", "file:"+db.File()+"?_pragma=busy_timeout(5000)")
@@ -159,17 +159,17 @@ func TestFeed_ADeletedJobsStreamIsNotFoundAgain(t *testing.T) {
 }
 
 // The DECAPI half: the newest video, upcoming, whose job was deleted, is not
-// probed or found until its orphaned history row is removed.
+// probed or found until its orphaned history row is removed. This job was
+// added by URL, so nothing wrote its history row at creation: the operator's
+// Delete (DeleteJobLeavingHistory) writes it.
 func TestDecapi_ADeletedJobsStreamIsNotFoundAgain(t *testing.T) {
 	db := newTestDB(t)
 	const id = "vidDecDel01"
-	if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Status: database.StatusUpcoming}); err != nil {
+	job := &database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube", Status: database.StatusUpcoming, ManuallyAdded: true}
+	if _, err := db.AddJob(job); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AddToHistory(id); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.DeleteJob(id); err != nil {
+	if err := db.DeleteJobLeavingHistory(job); err != nil {
 		t.Fatal(err)
 	}
 	probes := 0

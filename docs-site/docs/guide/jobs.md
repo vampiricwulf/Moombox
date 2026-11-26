@@ -379,12 +379,12 @@ same job at the same time (see [When two actions collide](#when-two-actions-coll
 Removes the job from the list. It does **not** delete any files: the archive, its chat and thumbnail, and any
 staging stay on disk and appear in the dashboard's **Orphaned** tab (TUI:
 ++a++ ++o++), where you can delete them. The video also stays in Moombox's
-processed history, so the monitors do not pick it up again, even a stream
-that is still upcoming or live — remove its entry under **Orphaned History
-Entries** on the same tab if you want it archived again. A job you added
-yourself by URL leaves no history entry, so if its channel is monitored, a
-stream that is still upcoming or live is found again after the delete; to
-dismiss such a stream, cancel the job and keep it instead.
+processed history (a job you added by URL as well as one a monitor found),
+so the monitors do not pick it up again, even a stream that is still
+upcoming or live — remove its entry under **Orphaned History Entries** on
+the same tab if you want it archived again. A job deleted before you
+upgraded to this release holds back only finished videos (see
+[Storage](storage.md)).
 
 ### Watched
 

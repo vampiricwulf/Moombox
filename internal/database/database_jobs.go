@@ -305,6 +305,55 @@ func (db *Database) DeleteJob(id string) error {
 	return nil
 }
 
+// DeleteJobLeavingHistory is the operator's Delete (the Web route and the
+// TUI). For a YouTube job it also leaves the job's history row marked
+// job_created, in the same transaction, so every deleted YouTube job holds
+// its video back from re-detection (HasJobBlockingRedetection, owner ruling
+// R4-3), a job added by URL or by import as well as one a monitor created
+// (whose row AddToHistory already wrote). Removing the row from the Orphaned
+// list reopens the video. A YouTube job's ID is its video ID, the key history
+// uses. A Twitch job is deleted as DeleteJob does: only the Twitch monitor
+// writes its rows. DeleteJob stays for the deletes that are not the
+// operator's (an import rolling back its own row).
+func (db *Database) DeleteJobLeavingHistory(job *Job) error {
+	if job.Platform == "twitch" {
+		return db.DeleteJob(job.ID)
+	}
+	db.mu.Lock()
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		db.mu.Unlock()
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
+		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, job.ID, now); err != nil {
+		db.mu.Unlock()
+		return err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", job.ID)
+	if err != nil {
+		db.mu.Unlock()
+		return err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		// The row was already gone: write nothing, as DeleteJob would.
+		db.mu.Unlock()
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		db.mu.Unlock()
+		return err
+	}
+	db.mu.Unlock()
+	db.notifyJobDeleted(job.ID)
+	return nil
+}
+
 // HasActiveJob checks if there's an active (non-terminal) job for the given video ID.
 func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	db.mu.RLock()
