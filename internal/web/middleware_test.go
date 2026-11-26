@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -1790,5 +1791,92 @@ func TestRefuseCrossSite(t *testing.T) {
 		if rec.Code != want {
 			t.Errorf("Sec-Fetch-Site %q: status %d, want %d", site, rec.Code, want)
 		}
+	}
+}
+
+// TestCSRFRefusalLogBudget pins owner ruling R3-7: the refusal line runs
+// under one global per-minute budget. The first csrfRefusalLogBudget
+// refusals of a window log as before; the rest only count, and the count is
+// reported as one "suppressed N more" line when the window ends (by the
+// timer, or by the next refusal if that comes first). Every refusal is still
+// answered 403.
+//
+// THE MUTANTS: removing the budget check logs every refusal (too many
+// lines); never arming the timer loses the summary of a quiet tail; keying
+// the budget by address fails too, because every request below comes from a
+// different peer.
+func TestCSRFRefusalLogBudget(t *testing.T) {
+	store := config.NewStore(&config.MoomboxConfig{
+		Network: config.NetworkConfig{NetworkAccess: "public"},
+	}, "")
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	clock := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	var pending []func()
+	var delays []time.Duration
+	budget := &refusalLogBudget{
+		now:   func() time.Time { return clock },
+		after: func(d time.Duration, f func()) { delays = append(delays, d); pending = append(pending, f) },
+	}
+	log := &recordingLogger{}
+	h := csrfMiddleware(store, "tok", log, budget)(pass)
+	refuse := func(i int) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(""))
+		r.RemoteAddr = fmt.Sprintf("203.0.113.%d:1234", i%250+1)
+		r.Host = "dash.example:774"
+		r.Header.Set("Origin", "http://attacker.example")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("refusal %d: status %d, want 403", i, rr.Code)
+		}
+	}
+	countRefusalLines := func() (lines, summaries int, last string) {
+		for _, l := range log.warns {
+			switch {
+			case strings.Contains(l, "suppressed"):
+				summaries++
+				last = l
+			case strings.HasPrefix(l, "CSRF: origin refused"):
+				lines++
+			}
+		}
+		return
+	}
+
+	for i := 0; i < csrfRefusalLogBudget+7; i++ {
+		refuse(i)
+	}
+	if lines, sums, _ := countRefusalLines(); lines != csrfRefusalLogBudget || sums != 0 {
+		t.Fatalf("within the window: %d refusal lines, %d summaries; want %d and 0 (%v)",
+			lines, sums, csrfRefusalLogBudget, log.warns)
+	}
+	if len(pending) != 1 || delays[0] != csrfRefusalLogWindow {
+		t.Fatalf("summary timer armed %d times with delays %v; want once at the window's end", len(pending), delays)
+	}
+
+	// The window ends with nothing more arriving: the timer reports the tail.
+	clock = clock.Add(csrfRefusalLogWindow)
+	pending[0]()
+	if _, sums, last := countRefusalLines(); sums != 1 || !strings.Contains(last, "suppressed 7 more") {
+		t.Fatalf("after the window: %d summaries, last %q; want one naming 7 (%v)", sums, last, log.warns)
+	}
+
+	// A new window logs afresh; a refusal that arrives after that window has
+	// ended reports the window's suppressed count itself, once, even before
+	// the timer fires, and the late timer then has nothing left to report.
+	for i := 0; i < csrfRefusalLogBudget+2; i++ {
+		refuse(i)
+	}
+	clock = clock.Add(csrfRefusalLogWindow + time.Second)
+	refuse(0)
+	for _, f := range pending[1:] {
+		f()
+	}
+	lines, sums, last := countRefusalLines()
+	if lines != 2*csrfRefusalLogBudget+1 || sums != 2 || !strings.Contains(last, "suppressed 2 more") {
+		t.Fatalf("second window: %d refusal lines, %d summaries, last %q (%v)", lines, sums, last, log.warns)
 	}
 }

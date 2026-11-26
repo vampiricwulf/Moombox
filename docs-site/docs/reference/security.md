@@ -254,6 +254,9 @@ Cross-site request forgery
     `Origin` or `Referer` that names the dashboard itself. A request with
     neither gets `403 Forbidden: missing origin`; one that names another site
     gets `403 Forbidden: invalid origin` and a `CSRF: origin refused` log line.
+    Only the first five refusals in a minute are logged one by one; the rest
+    are counted into one `suppressed N more` line when the minute ends, so a
+    flood of bad requests cannot push your other log lines out.
     No cross-origin access is granted to other sites. The TUI talks to Moombox
     in-process and is not affected. Scripts must send an `Origin` header (see
     [API](api.md)).
