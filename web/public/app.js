@@ -1654,7 +1654,7 @@ export class MoomboxApp {
         }
         // A stop held busy for a trim that ended meanwhile has no outcome
         // frame coming to release it.
-        for (const id of [...this.stoppingTrims]) {
+        for (const id of this.stoppingTrims || []) {
           if (!this.runningTrims[id]) this.stoppingTrims.delete(id);
         }
         if (this.selectedJobId) {
@@ -2160,7 +2160,7 @@ export class MoomboxApp {
     delete this.runningTrims[p.id];
     // A stop sent for it is answered now: its button was held busy until
     // the trim left the running list, so it never offered a second stop.
-    this.stoppingTrims.delete(p.id);
+    this.stoppingTrims?.delete(p.id);
     const job = this.jobs.find((j) => j.id === p.jobId) || this.archivedJobs.find((j) => j.id === p.jobId);
     const range = `${formatTimestamp(p.startTime)} – ${formatTimestamp(p.endTime)}`;
     const of = job?.title ? ` of "${job.title}"` : "";
