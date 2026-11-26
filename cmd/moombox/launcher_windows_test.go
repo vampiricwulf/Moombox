@@ -469,6 +469,12 @@ func TestTheStartupErrorNoticePromisesOnlyWhatTheNextStartDoes(t *testing.T) {
 			exePath, boot := firstUpdateRestarted(t)
 			if tc.started {
 				resolveLandedUpdateBreadcrumb(exePath, "2.0.1", &nopLogger{})
+				// A settings restart 30 s in: the launcher carries the boot forward.
+				_, wasFirst := boot.judge(false, exitCodeRestart, 30*time.Second, false, 0)
+				boot.restarted(boot.restartArtifact(exePath, wasFirst), pendingUpdateTag(exePath), wasFirst, 30*time.Second)
+				if !boot.armed {
+					t.Fatal("the restart inside the window did not carry the boot forward")
+				}
 			}
 			stderr := captureStderr(t, func() { boot.recoverFailedBoot(exePath, exitCodeStartupError) })
 			for _, s := range []string{promise, moves} {
