@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,11 @@ func TestMain(m *testing.M) {
 	if isFakeSetupLaunch(os.Args) {
 		os.Exit(runFakeSetupBrowser(os.Getenv(fakeBrowserModeEnv)))
 	}
+	if isFakeChromiumLaunch(os.Args) {
+		// The stand-in Chromium: it exits at once and hands nothing off, as a
+		// browser with no display does, so its CDP endpoint never answers.
+		os.Exit(0)
+	}
 	// Nor does any test pay the post-kill drain: every one that reaches it
 	// kills or finds exited a fixture process (Pid -1, or a made-up PID
 	// nothing runs as), so there is no handle for Windows to release, and
@@ -131,6 +137,15 @@ func isFakeSetupLaunch(args []string) bool {
 		}
 	}
 	return sawNewInstance
+}
+
+// isFakeChromiumLaunch recognises a Chromium-family launch of this test
+// binary: only those argvs carry --remote-debugging-port, and no go test flag
+// does.
+func isFakeChromiumLaunch(args []string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		return strings.HasPrefix(a, "--remote-debugging-port=")
+	})
 }
 
 // runFakeSetupBrowser is the setup stub's whole body.

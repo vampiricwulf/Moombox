@@ -81,3 +81,37 @@ func TestWaitForCDPStopsWhenTheBrowserIsGone(t *testing.T) {
 		t.Errorf("liveness asked %d times, want 2 — a live browser must be waited for", polls)
 	}
 }
+
+// The setup launch wires the liveness check into the CDP wait: a Chromium
+// that exits at once and leaves nothing in its Job Object or process group
+// (here the test binary, standing in through isFakeChromiumLaunch) ends
+// StartSetup with ErrBrowserExitedEarly, unwrapped so both UIs show the
+// sentence, long before the 15 s CDP timeout.
+//
+// Mutant it kills: startChromiumSetup passing nil (or a check that never
+// matches this process) to waitForCDP; the 15 s timeout answers instead.
+func TestStartSetupReportsAChromiumThatExitsBeforeItOpens(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot locate the test binary to stand in for a browser: %v", err)
+	}
+	s := NewAutoCookieService(filepath.Join(t.TempDir(), "profile"),
+		filepath.Join(t.TempDir(), "cookies.txt"), NewCookieJar(), nopAutoCookieLogger{})
+	s.ConfiguredBrowserOverride = func() (string, string) { return exe, "chrome" }
+
+	start := time.Now()
+	err = s.StartSetup("youtube")
+	elapsed := time.Since(start)
+	if err == nil || err.Error() != ErrBrowserExitedEarly.Error() {
+		t.Fatalf("StartSetup with a browser that exits at once: err = %v, want %q", err, ErrBrowserExitedEarly)
+	}
+	if elapsed > 8*time.Second {
+		t.Errorf("took %v to report the exit, want well under the %v CDP timeout", elapsed, cdpPollTimeout)
+	}
+	s.mu.Lock()
+	held := s.setupProcess != nil
+	s.mu.Unlock()
+	if held {
+		t.Error("the failed start left its process on the service; a retry would read 'setup already in progress'")
+	}
+}
