@@ -139,8 +139,51 @@ Where the build departs from the wording of a ruling, on purpose:
 
 ## Improvement sweep 3, 2026-11-25
 
-No design spec was ever in the tree for this one: the owner's rulings were the brief. Its ids are written `R3-1` and on, so they cannot be taken for the `R3` of the earlier chains above.
+No design spec was ever in the tree for this one: the owner's rulings were the brief. Its ids are written `R3-1` and on, so they cannot be taken for the `R3` of the earlier chains above. All seventeen are listed, cited in the tree or not.
 
-- **R3-15** — a batch Cancel (`A X` over a selection) runs off the TUI update loop under the shared job-verb busy state, and while it runs a new Resume, Reinitialize or Cancel is refused with a line saying Cancel is still running. A single-job Cancel stays synchronous, and the `A R` staging probe stays where it is.
+- **R3-1** — a refused Finished write is retried a few times over a few seconds; still refused, the job ends in Error naming the archive and pointing at Mux, with staging kept and no Finished notification; a row that is gone ends as cancelled. See architecture.md § DownloadOrchestrator.
+- **R3-2** — a tab item's age text is matched only as a whole string value, and an age that is not recognised reads as "now", so the item is probed rather than dated out. See platform-services.md § Channel Membership Tab.
+- **R3-3** — a tab page whose items all carry live or upcoming markers is not a parser failure; repeated parser failures on the same tab back off to about one retry an hour, with the error state still shown. Since the review round of 2026-11-26, a config change that asks more of the channel ends that wait. See architecture.md § 13. Feed Monitor.
+- **R3-4** — the continuation token is also read from its `commandExecutorCommand` wrapping; a continuation item that cannot be read logs a Warn and the scan finishes there. See architecture.md § 13. Feed Monitor.
+- **R3-5** — `browser_path` is refused by file name on every platform: any ending an import can write. There is no folder rule. See security.md § Paths Moombox Executes.
+- **R3-6** — a generated TLS key is restricted when it is created, and an existing key is restricted again at startup when the certificate is Moombox's own self-signed one. An operator's own key or certificate is never touched. See security.md § Private key permissions.
+- **R3-7** — CSRF refusals are logged at Warn under one per-minute budget for the whole server; the ones past it are counted into a single "suppressed N more" line. See security.md § 6. CSRFMiddleware.
+- **R3-8** — the documented systemd unit uses `KillMode=mixed`, and a mux that fails while the worker is already shutting down leaves the row Muxing for the next start's re-mux, by one predicate on every mux failure path. See architecture.md § Panic Recovery Patterns.
+- **R3-9** — a goja player compile is given 120 s, and a player whose compile ran out of it is refused for 10 minutes. See platform-services.md § Thundering Herd Prevention.
+- **R3-10** — an update that was applied and never booted, whose first boot dies quickly, is rolled back automatically, only when the breadcrumb names this binary's version, and with `.old` itself as the artifact. See operations.md § Automatic Rollback.
+- **R3-11** — the yt-dlp plugin's HTTPS flavour bypasses proxies, and a generated plugin carries a version marker, so both UIs show an older installed file as outdated. See user-interfaces.md § `GET /api/ytdlp-plugin/status`.
+- **R3-12** — deleting a job stops its running trim without a Trim Failed notification, and both UIs have a Stop control for a running trim. See architecture.md § 11. Trim Service.
+- **R3-13** — a port that cannot be bound for lack of permission got its own wording, naming the capability and `network.port` 1024 or above; nothing else changed, and there is no fallback to an unprivileged port of Moombox's choosing. See security.md § Port.
+- **R3-14** — `fonts.gstatic.com` went back into the CSP's `img-src`, after it was confirmed in a real archived YouTube chat file (standard emoji are stored as images on that host). See security.md § Directive Rationale.
+- **R3-15** — a batch Cancel (`A X` over a selection) runs off the TUI update loop under the shared job-verb busy state, and while it runs a new Resume, Reinitialize or Cancel is refused with a line saying Cancel is still running. A single-job Cancel stays synchronous, and the `A R` staging probe stays where it is. See user-interfaces.md § The Chord System.
+- **R3-16** — `local-gate.sh --full` fails its frontend gate when `web/tests` has no jsdom, since the DOM suites would otherwise skip and pass. No spec page covers it; CLAUDE.md, under Local verification, does.
+- **R3-17** — CI downloads the pinned real player and runs the tests that need it; a failed download is a warning and a skip, never a red run, and the local gate prints SKIP when the fixture is missing. See operations.md § Test Workflow.
 
-See user-interfaces.md § The Chord System.
+## Improvement sweep 4, 2026-11-25
+
+As for sweep 3, the owner's rulings were the brief and no design spec was in the tree. All fourteen are listed.
+
+- **R4-1** — a restarted YouTube live capture that chose another rendition than its staged part splits into a new part, as a mid-run quality change does; it never appends and never stops the job. The chosen itag is saved so a missing sidecar is covered too. See architecture.md § DownloadOrchestrator.
+- **R4-2** — removing the dashboard password resets network access to Localhost Only from External or Public only, as the TUI does; LAN is left alone. See security.md § The three interactive blocks.
+- **R4-3** — deleting a YouTube job whose stream is upcoming or live stops its re-detection: the history row the Delete leaves blocks it until the entry is removed in the Orphaned tab. History rows written by skip and give-up paths, which never had a job, still do not block. See data-and-storage.md § Auxiliary Data Operations.
+- **R4-4** — any existing YouTube row other than Finished counts as handled for upcoming and live re-detection: no probe and no Info lines. Finished stays eligible for the incomplete-tail resume, and "Video found" is logged at Info only when the job was actually added. See architecture.md § 13. Feed Monitor.
+- **R4-5** — a Twitch GQL 5xx or a 429 with a long Retry-After on a swept clip or a Twitch backlog VOD takes the backlog requeue (5, 10, 20 minutes; 3 retries), as a YouTube backlog VOD does. See architecture.md § Backlog Scheduler.
+- **R4-6** — turning clip archiving back on, after an opt-out, a disable or a removal, is a fresh opt-in: the sweep looks back one week, as a restart does. See platform-services.md § Twitch Clips.
+- **R4-7** — on Linux a browser login is refused up front when `DISPLAY` and `WAYLAND_DISPLAY` are both empty, in both UIs, and a browser that exits before CDP opens says so instead of timing out after 15 s. Nothing is decided from Firefox's exit code. See data-and-storage.md § Chromium (opt-in fallback).
+- **R4-8** — a failed notification delivery logs the event, the title and the target as its 1-based position in `[[notifications]]` ("target #2"), never the URL or the token. See operations.md § Dispatch Behavior.
+- **R4-9** — a Discord 429 whose Retry-After is 60 s or less is waited out; a longer, missing or malformed one still drops the message. The 30 s cap of the bucket wait and of the give-up arming is unchanged. See operations.md § Dispatch Behavior.
+- **R4-10** — per-job Authentication Required alerts are batched (a 5 s window, one ping) on edit-in-place targets too; job lifecycle messages keep editing in place. See operations.md § Delivery Modes.
+- **R4-11** — the archive import answers 507 when the output volume lacks room or the import would cross `disk_critical`, through the helper the re-mux room check uses; a volume that cannot be read passes. See user-interfaces.md § `POST /api/import`.
+- **R4-12** — importing a Moombox archive zip restores its same-stem sidecars (thumbnail, description, raw chat, chapter list) beside the archive and uses them on the row. See user-interfaces.md § `POST /api/import`.
+- **R4-13** — the unused DASH timeline fields, `CalculateSegmentRange` and their tests were deleted. No page describes it: the code is gone.
+- **R4-14** — a YouTube VOD or OTF download (no parts) that restarts with another rendition sets the old partial file aside as `<file>.restart-<ts>`, muxes it beside the archive, and downloads again from segment 0. See architecture.md § DownloadOrchestrator.
+
+## Review fix round, 2026-11-26
+
+The review of sweeps 3 and 4 ended in five more rulings, again with no design spec in the tree.
+
+- **RV-1** — a part mux, a set-aside mux or a same-format merge cut short by the shutdown leaves the row Muxing, so the next start finishes it: only when one of them actually failed and the worker is stopping. A finalize that completed inside the stop wait still finishes. See architecture.md § Panic Recovery Patterns.
+- **RV-2** — on a startup-armed boot (an update applied and never booted), a failure to start the child is not a failed boot: the launcher reports the error and exits, keeps `.old`, and writes no rollback and no skip mark, so the next start tries the new release again. A child that ran and died quickly still rolls back (R3-10). See operations.md § Automatic Rollback.
+- **RV-3** — a Twitch VOD or live broadcast added by a single URL gets its processing-history row at the add, as a pasted clip does, so its Delete leaves an Orphaned entry that holds it back from the backlog and the live monitor until the entry is removed. See platform-services.md § Twitch Clips.
+- **RV-4** — this page carries one entry for every sweep-3 and sweep-4 ruling and for RV-1 to RV-5, each naming the page that explains it.
+- **RV-5** — the trim stop and delete-mid-trim tests run on Windows too: their stand-in FFmpeg is the test binary run again (`internal/ffmpegtest`), the same on every platform. See appendix-metrics.md § Package Scale.
