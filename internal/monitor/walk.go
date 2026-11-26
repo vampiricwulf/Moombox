@@ -175,7 +175,7 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			hasJob, err := fm.db.HasAnyJob(row.VideoID)
 			if err != nil || hasJob || row.DatePrecision != "started" {
 				skipped++
-				continue // restart carve-out only: vod + started + no job row (§8)
+				continue // restart carve-out only: vod + started + no job row (§8); a deleted job's history row already held it at the job gate (R4-3)
 			}
 		default:
 			skipped++
