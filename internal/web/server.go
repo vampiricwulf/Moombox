@@ -604,23 +604,14 @@ func (s *Server) Start(ctx context.Context) error {
 		s.doShutdown()
 	}()
 
-	// Try the preferred port, then probe nearby ports. The probe runs on any
-	// error; the first error's kind only picks the words (bind_errors.go).
-	ln, err := net.Listen("tcp", addr)
+	// Try the preferred port, then probe nearby ports (listenNearby).
+	ln, err := listenNearby(host, port, func(a string) (net.Listener, error) { return net.Listen("tcp", a) },
+		func(first error) {
+			s.logger.Warn(classifyBindError(first).probeMessage(), "port", port, "error", first.Error())
+		},
+		func(used int) { s.logger.Info("using alternative port", "port", used) })
 	if err != nil {
-		firstErr := err
-		s.logger.Warn(classifyBindError(firstErr).probeMessage(), "port", port, "error", firstErr.Error())
-		for offset := 1; offset <= 10; offset++ {
-			candidate := fmt.Sprintf("%s:%d", host, port+offset)
-			ln, err = net.Listen("tcp", candidate)
-			if err == nil {
-				s.logger.Info("using alternative port", "port", port+offset)
-				break
-			}
-		}
-		if err != nil {
-			return bindError(port, firstErr)
-		}
+		return err
 	}
 
 	// Cross-scheme redirect on the single configured port: each accepted

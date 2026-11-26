@@ -53,3 +53,43 @@ func TestBindErrorWordsTheCause(t *testing.T) {
 		}
 	}
 }
+
+// TestListenNearbyWordsTheConfiguredPortsError: with mixed errors (port 1023
+// refused for permission, 1024-1033 taken) the error must name the configured
+// port's cause, not the last probe's "already in use".
+//
+// Mutant: listenNearby returning bindError(port, <last probe's error>).
+func TestListenNearbyWordsTheConfiguredPortsError(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	_, inUse := net.Listen("tcp", held.Addr().String())
+	if inUse == nil {
+		t.Skip("this platform let a second listener share the port")
+	}
+	denied := &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EACCES)}
+
+	var tried []string
+	var probed error
+	ln, err := listenNearby("127.0.0.1", 1023, func(addr string) (net.Listener, error) {
+		tried = append(tried, addr)
+		if addr == "127.0.0.1:1023" {
+			return nil, denied
+		}
+		return nil, inUse
+	}, func(first error) { probed = first }, func(int) { t.Error("no port was free") })
+	if ln != nil || err == nil {
+		t.Fatalf("listenNearby = %v, %v; want an error", ln, err)
+	}
+	if len(tried) != 11 || tried[10] != "127.0.0.1:1033" {
+		t.Errorf("tried %v, want 1023 and the ten after it", tried)
+	}
+	if probed != denied {
+		t.Errorf("onProbe got %v, want the configured port's error", probed)
+	}
+	if !strings.Contains(err.Error(), "CAP_NET_BIND_SERVICE") || strings.Contains(err.Error(), "already in use") {
+		t.Errorf("%q: want the permission wording, not the last probe's", err)
+	}
+}
