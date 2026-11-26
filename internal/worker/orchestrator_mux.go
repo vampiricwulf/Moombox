@@ -664,8 +664,10 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 				continue
 			}
-			// An FFmpeg the shutdown signalled is not a failed copy (R3-8).
+			// Reported to a split finalize, which reads it only while the
+			// worker is stopping (RV-1).
 			jobCtx.FinalizeMuxFailed = true
+			// An FFmpeg the shutdown signalled is not a failed copy (R3-8).
 			o.muxFailed("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
 				"the set-aside recording stays in staging for a later Mux action",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
@@ -1549,7 +1551,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
 
 	// One of this finalize's own FFmpeg runs failed (a recovered part's mux,
-	// the merge's concat, a set-aside recording's copy) and Moombox is
+	// the merge's probe or concat, a set-aside recording's copy) and Moombox is
 	// shutting down: the failure is read as the shutdown's, as MuxJob reads
 	// a failed single-file mux (owner rulings R3-8 and RV-1). Something that
 	// signals the whole process tree kills FFmpeg while this context is
