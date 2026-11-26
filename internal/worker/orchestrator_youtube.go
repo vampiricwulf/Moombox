@@ -781,6 +781,18 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			if isRefused {
 				backVideoSeq, backAudioSeq, backVideoMoved, backAudioMoved = pastRefusedSegment(refused.Seq, oldVideoSeq, oldAudioSeq)
 			}
+			// A staged part of another rendition is closed by whichever exit
+			// below comes first: the switch back, a path switch on a failed
+			// look (switchPart), or the split at the end of this branch.
+			// Each muxes it under currentQuality, which still names what
+			// result was set up to record. The part's quality is what its
+			// file holds, so it is read from the file here, ahead of all
+			// three, for the part's row and the split notification (owner
+			// ruling R4-1). An iteration that waits and retries probes the
+			// file again, once per verify interval.
+			if isRenditionChanged {
+				currentQuality = o.stagedPartQuality(ctx, result)
+			}
 			stopped := result
 			if switchBack(freshInfo, backVideoSeq, backAudioSeq) {
 				if isRefused {
@@ -924,14 +936,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// A staged part of another rendition closes whatever quality the
 			// refresh came back at: the refresh only rebuilt the downloaders
-			// that refused it, in the same directory. The part's quality is
-			// what its file holds, not what result was set up to record, so
-			// it is read from the file for the part's row and the split
-			// notification. Never short: it is a resumed part.
+			// that refused it, in the same directory. currentQuality already
+			// names what its file holds (read above, before the switch
+			// back). Never short: it is a resumed part.
 			if isRenditionChanged {
 				o.logger.Warn("the staged part holds another rendition than the one chosen now — closing it as a part and recording on in a new one",
 					"segment", segmentIndex+1, "err", downloadErr, "jobID", jobCtx.Job.ID)
-				currentQuality = o.stagedPartQuality(ctx, result)
 				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, -1, true); exit {
 					return result, end(), err
 				}
