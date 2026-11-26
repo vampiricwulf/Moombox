@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // A mux whose FFmpeg dies once Moombox's stop has begun is the shutdown, not
@@ -97,11 +98,13 @@ func TestASplitFinalizeCutShortByShutdownStaysMuxing(t *testing.T) {
 		name       string
 		stopping   bool
 		unmuxed    bool // part 2 has no row, and FFmpeg cannot read its staging
+		aside      bool // a set-aside recording FFmpeg cannot read
 		wantStatus database.JobStatus
 	}{
-		{"a part mux fails while stopping", true, true, database.StatusMuxing},
-		{"nothing fails while stopping", true, false, database.StatusFinished},
-		{"a part mux fails on a running worker", false, true, database.StatusFinished},
+		{"a part mux fails while stopping", true, true, false, database.StatusMuxing},
+		{"a set-aside recording's copy fails while stopping", true, false, true, database.StatusMuxing},
+		{"nothing fails while stopping", true, false, false, database.StatusFinished},
+		{"a part mux fails on a running worker", false, true, false, database.StatusFinished},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, db := testWorkerSetup(t)
@@ -127,6 +130,12 @@ func TestASplitFinalizeCutShortByShutdownStaysMuxing(t *testing.T) {
 			}
 			if err := os.WriteFile(media, []byte("not a recording"), 0o644); err != nil {
 				t.Fatal(err)
+			}
+			if tc.aside {
+				aside := filepath.Join(staging, "video.ts"+engine.StagedRestartSuffix+"1700000000")
+				if err := os.WriteFile(aside, []byte("not a recording"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if tc.stopping {
 				w.stopBegun.Store(true)
