@@ -779,3 +779,51 @@ func TestItemAgeReadsPlaylistVideoInfo(t *testing.T) {
 		t.Errorf("videoInfo simpleText: Age = %v, want %v", got, want)
 	}
 }
+
+// Marked is the explicit live or upcoming marker the backfill scanner uses to
+// let a tab of only live or upcoming streams through its parser-failure arm.
+// Each marker is a structural field of the item; text the channel wrote (a
+// title spelling a marker) never marks one, or a parser break could pass as a
+// page of upcoming streams (owner ruling R3-3).
+func TestItemMarkedReadsOnlyStructuralMarkers(t *testing.T) {
+	page := `{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[
+		{"tabRenderer":{"selected":true,"tabIdentifier":"TAB_ID_SPONSORSHIPS","content":{"richGridRenderer":{"contents":[
+			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"upEvent0001","title":{"simpleText":"a"},
+				"upcomingEventData":{"startTime":"1784000000"}}}}},
+			{"richItemRenderer":{"content":{"gridVideoRenderer":{"videoId":"upStyle0002","title":{"simpleText":"b"},
+				"thumbnailOverlays":[{"thumbnailOverlayTimeStatusRenderer":{"style":"UPCOMING"}}]}}}},
+			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"liveBadge03","title":{"simpleText":"c"},
+				"badges":[{"metadataBadgeRenderer":{"style":"BADGE_STYLE_TYPE_LIVE_NOW"}}]}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"upLockup004",
+				"contentImage":{"thumbnailViewModel":{"overlays":[{"thumbnailBottomOverlayViewModel":{"badges":[
+					{"thumbnailBadgeViewModel":{"text":"Upcoming"}}]}}]}}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"liveLockup5",
+				"contentImage":{"thumbnailViewModel":{"overlays":[{"thumbnailOverlayBadgeViewModel":{"thumbnailBadges":[
+					{"thumbnailBadgeViewModel":{"badgeStyle":"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE","text":"LIVE"}}]}}]}}}}}},
+			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"titleOnly06",
+				"title":{"simpleText":"Upcoming LIVE BADGE_STYLE_TYPE_LIVE_NOW Started streaming upcomingEventData"},
+				"thumbnailOverlays":[{"thumbnailOverlayTimeStatusRenderer":{"style":"DEFAULT","text":{"simpleText":"1:02:03"}}}]}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"titleOnly07",
+				"metadata":{"lockupMetadataViewModel":{"title":{"content":"Upcoming"}}},
+				"contentImage":{"thumbnailViewModel":{"overlays":[{"thumbnailBottomOverlayViewModel":{"badges":[
+					{"thumbnailBadgeViewModel":{"text":"1:02:03"}}]}}]}}}}}}
+		]}}}}
+	]}}}`
+	videos, ok := parseMembershipTab([]byte(wrapPage(page)))
+	if !ok {
+		t.Fatal("expected access")
+	}
+	want := map[string]bool{
+		"upEvent0001": true, "upStyle0002": true, "liveBadge03": true,
+		"upLockup004": true, "liveLockup5": true,
+		"titleOnly06": false, "titleOnly07": false,
+	}
+	if len(videos) != len(want) {
+		t.Fatalf("videos = %d, want %d", len(videos), len(want))
+	}
+	for _, v := range videos {
+		if v.Marked != want[v.VideoID] {
+			t.Errorf("%s: Marked = %v, want %v", v.VideoID, v.Marked, want[v.VideoID])
+		}
+	}
+}

@@ -54,11 +54,14 @@ const browseStripTTL = 30 * time.Minute
 // TabItem is one video listed on a channel tab page. Age comes from itemAge
 // (spec §11 classification): 0 means live/upcoming/undatable — "now" — via the
 // live-badge short-circuit; only a "Streamed N <unit> ago" text yields a
-// non-zero coarse age (the lower bound of the true age, spec §12).
+// non-zero coarse age (the lower bound of the true age, spec §12). Marked is
+// itemMarked: an explicit live or upcoming marker, which tells the backfill
+// scanner an Age-0 item is one YouTube labelled, not one the parser missed.
 type TabItem struct {
 	VideoID string
 	Title   string
 	Age     time.Duration
+	Marked  bool
 }
 
 // TabPage is one /browse page of a channel tab. Continuation "" means the tab

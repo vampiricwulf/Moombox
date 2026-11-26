@@ -1139,7 +1139,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		items := make([]monitor.TabItem, len(page.Items))
 		for i, it := range page.Items {
-			items[i] = monitor.TabItem{VideoID: it.VideoID, Title: it.Title, Age: it.Age}
+			items[i] = monitor.TabItem{VideoID: it.VideoID, Title: it.Title, Age: it.Age, Marked: it.Marked}
 		}
 		return &monitor.TabPage{Items: items, Continuation: page.Continuation}, nil
 	}

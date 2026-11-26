@@ -35,11 +35,14 @@ const backfillPageInterval = time.Second
 // stays decoupled from the youtube package — the wiring closure in
 // cmd/moombox adapts between the two, exactly like MembershipVideo does for
 // FetchMembership. Age 0 means live/upcoming badge or undatable ("now");
-// only a dated listing text yields a non-zero coarse age.
+// only a dated listing text yields a non-zero coarse age. Marked tells the
+// two Age-0 cases apart: true when the listing carried an explicit live or
+// upcoming marker, false when nothing about the item was recognised.
 type TabItem struct {
 	VideoID string
 	Title   string
 	Age     time.Duration
+	Marked  bool
 }
 
 // TabPage is one page of a channel tab. Continuation "" means the tab is
@@ -54,8 +57,61 @@ type TabPage struct {
 var ErrTabContinuationLoop = errors.New("tab continuation loop detected")
 
 // errUndatablePage is the parser-failure arm's error (spec §11 second stop
-// arm): a NON-EMPTY page with no datable item.
+// arm): a NON-EMPTY page with no datable item and at least one item that
+// carries no live or upcoming marker either.
 var errUndatablePage = errors.New("non-empty page with no datable item (parser-failure arm)")
+
+// undatableTabError is errUndatablePage with the tab it stopped, so runScan
+// can count the arm's failures per tab (noteParserArm).
+type undatableTabError struct{ chID, tab string }
+
+func (e *undatableTabError) Error() string {
+	return fmt.Sprintf("backfill %s/%s: %v", e.chID, e.tab, errUndatablePage)
+}
+
+func (e *undatableTabError) Unwrap() error { return errUndatablePage }
+
+// undatableTabs lists the tabs the parser-failure arm stopped in a scan's
+// error (scanChannel joins one error per incomplete tab).
+func undatableTabs(err error) []string {
+	var tabs []string
+	var walk func(error)
+	walk = func(err error) {
+		if err == nil {
+			return
+		}
+		if ute, ok := err.(*undatableTabError); ok {
+			tabs = append(tabs, ute.tab)
+			return
+		}
+		switch u := err.(type) {
+		case interface{ Unwrap() []error }:
+			for _, e := range u.Unwrap() {
+				walk(e)
+			}
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
+		}
+	}
+	walk(err)
+	return tabs
+}
+
+// parserArmRetryInterval is how long a channel waits for its next scan once
+// the parser-failure arm has stopped the same tab twice in a row (owner
+// ruling R3-3). The arm retries by refetching the page, which only helps once
+// the parser is fixed or the tab's content changes, so every feed cycle was a
+// request and two log lines for nothing.
+const parserArmRetryInterval = time.Hour
+
+// parserArmState is one channel's run of parser-failure-arm stops: how many
+// scans in a row the arm stopped each tab, and, once any tab reaches two,
+// when the sweep may queue the channel again. In memory only: a restart
+// forgets it and the first scan after boot runs at once.
+type parserArmState struct {
+	fails   map[string]int
+	retryAt time.Time
+}
 
 // TabPageFetchFunc fetches ONE page of a channel tab ("videos", "streams",
 // "membership"): continuation "" requests page 1. Wired to
@@ -233,6 +289,12 @@ type BackfillWorker struct {
 	queue []scanItem
 	// wakeCh (cap 1) nudges the consumer; a pending nudge coalesces.
 	wakeCh chan struct{}
+	// parserArm is the parser-failure arm's back-off, keyed by channel ID and
+	// guarded by mu (noteParserArm writes it from the consumer goroutine,
+	// Sweep reads it). An entry exists only while a channel's last scan was
+	// stopped by the arm, and is dropped with the channel, so the map is
+	// bounded by the channel list.
+	parserArm map[string]*parserArmState
 	// baseCtx is Start's context; per-scan contexts derive from it. nil
 	// until Start — Sweep no-ops so a pre-start trigger cannot build a
 	// queue nothing drains.
@@ -282,6 +344,7 @@ func NewBackfillWorker(db *database.Database, logger interface {
 		db:           db,
 		logger:       logger,
 		inflight:     make(map[string]*inFlight),
+		parserArm:    make(map[string]*parserArmState),
 		wakeCh:       make(chan struct{}, 1),
 		pageInterval: backfillPageInterval,
 		now:          time.Now,
@@ -393,6 +456,12 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 	}
 	bw.insertedThisScan = 0
 	err := bw.scan(item.ctx, item.ref.Ch, chID, item.ref.WindowDays, item.ref.WithMembership)
+	// A cancelled or paused scan says nothing about the parser: its record
+	// is left as it was.
+	var backedOff bool
+	if err == nil || item.ctx.Err() == nil {
+		backedOff = bw.noteParserArm(chID, err)
+	}
 	switch {
 	case err == nil:
 		// Completed — completeScan wrote backfilled_at; the sweep's first
@@ -409,10 +478,51 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 		bw.emitProgress(chID, "", 0, BackfillIdle)
 	default:
 		// Incomplete: the cursor was saved per page; the sweep retries
-		// next cycle (backfilled_at is still NULL) and resumes from it.
-		bw.logger.Warn("backfill scan incomplete; sweep will retry", "channel", chID, "err", err)
+		// next cycle (backfilled_at is still NULL) and resumes from it —
+		// unless the parser-failure arm has now stopped the same tab twice
+		// running, in which case the retry is about hourly. The error state
+		// is emitted either way and stays up between retries.
+		if backedOff {
+			bw.logger.Warn("backfill scan incomplete: a tab listed nothing datable again; next retry in about an hour (a manual rescan retries now)",
+				"channel", chID, "retryIn", parserArmRetryInterval, "err", err)
+		} else {
+			bw.logger.Warn("backfill scan incomplete; sweep will retry", "channel", chID, "err", err)
+		}
 		bw.emitProgress(chID, "", 0, BackfillError)
 	}
+}
+
+// noteParserArm records how a finished scan left the parser-failure arm and
+// reports whether the channel is now backed off. A scan the arm did not stop
+// (complete, or incomplete for another reason such as a failed fetch) clears
+// the record: those keep the every-cycle retry. A tab the arm stopped counts
+// one more failure in a row, a tab it did not stop this time starts over, and
+// from the second failure in a row on one tab the channel's next scan waits
+// parserArmRetryInterval.
+func (bw *BackfillWorker) noteParserArm(chID string, err error) bool {
+	tabs := undatableTabs(err)
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	if len(tabs) == 0 {
+		delete(bw.parserArm, chID)
+		return false
+	}
+	prev := bw.parserArm[chID]
+	st := &parserArmState{fails: make(map[string]int, len(tabs))}
+	repeated := false
+	for _, tab := range tabs {
+		n := 1
+		if prev != nil {
+			n += prev.fails[tab]
+		}
+		st.fails[tab] = n
+		repeated = repeated || n >= 2
+	}
+	if repeated {
+		st.retryAt = bw.now().Add(parserArmRetryInterval)
+	}
+	bw.parserArm[chID] = st
+	return repeated
 }
 
 // isPaused reports whether fl was cancelled by Sweep's pause arm.
@@ -494,7 +604,17 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 			// clearing it here instead could race the old scan's final
 			// per-page cursor save.
 			fl.cancel()
+			delete(bw.parserArm, ref.ChID) // a deeper or wider scan starts over
 			bw.enqueueLocked(ref)
+			continue
+		}
+		if force {
+			// The manual re-run is the operator asking now.
+			delete(bw.parserArm, ref.ChID)
+		} else if st := bw.parserArm[ref.ChID]; st != nil && bw.now().Before(st.retryAt) {
+			// The parser-failure arm stopped the same tab twice running:
+			// the channel still needs its backfill, and its error state is
+			// still up, but the next attempt waits (parserArmRetryInterval).
 			continue
 		}
 		if !force {
@@ -541,6 +661,13 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 	for id := range departed {
 		bw.CancelAndPrune(id)
 	}
+	bw.mu.Lock()
+	for id := range bw.parserArm {
+		if _, ok := active[id]; !ok {
+			delete(bw.parserArm, id)
+		}
+	}
+	bw.mu.Unlock()
 }
 
 // needsBackfill is the sweep condition's four DB arms (spec §11), evaluated
@@ -890,13 +1017,18 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 			return fmt.Errorf("backfill %s/%s: %w", chID, tab, err)
 		}
 
-		datable := 0
+		// unread counts the items the listing said nothing recognisable
+		// about: no age text and no live or upcoming marker.
+		datable, unread := 0, 0
 		for _, it := range page.Items {
-			if it.Age > 0 {
+			switch {
+			case it.Age > 0:
 				datable++
+			case !it.Marked:
+				unread++
 			}
 		}
-		if len(page.Items) > 0 && datable == 0 {
+		if datable == 0 && unread > 0 {
 			// Second stop arm (spec §11): a NON-EMPTY page with no datable
 			// item. An undatable item is dated `now` — inside every window —
 			// so the date arm can never fire on a page of them, and under a
@@ -914,9 +1046,19 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 			// NEITHER arm (natural exhaustion, handled below) — reading this
 			// arm as vacuously true of an empty page would classify every
 			// empty channel as a parser failure and rescan it forever.
+			//
+			// A page whose every item carries an explicit live or upcoming
+			// marker is NOT this arm either (owner ruling R3-3): a channel
+			// before its debut, or one that removes every VOD, lists just a
+			// scheduled or live stream, and that is a page the parser read.
+			// Its items are written 'assumed' below, as marked items on a
+			// mixed page always were. One unmarked, undated item on a page
+			// with nothing datable is enough to fire: the markers are
+			// structural fields a title cannot spell, so a parser break
+			// cannot pass as an all-marked page.
 			bw.logger.Error("backfill parser-failure arm: non-empty page with no datable item; stopping tab",
-				"channel", chID, "tab", tab, "items", len(page.Items))
-			return fmt.Errorf("backfill %s/%s: %w", chID, tab, errUndatablePage)
+				"channel", chID, "tab", tab, "items", len(page.Items), "unread", unread)
+			return &undatableTabError{chID: chID, tab: tab}
 		}
 
 		// allOlder seeds from len>0 so an EMPTY page can never fire arm (a)
@@ -929,8 +1071,8 @@ func (bw *BackfillWorker) scanTab(ctx context.Context, chID, tab string, cur *ba
 			// Classification (spec §11): Age>0 ⇒ coarse, published=now-Age
 			// (the NEWEST instant consistent with the listing text, so an
 			// out-of-window coarse date is out on any reading — no extra
-			// margin needed); Age==0 ⇒ assumed, published=now (live/upcoming
-			// badge or undatable — the scanner cannot tell which).
+			// margin needed); Age==0 ⇒ assumed, published=now (a marked
+			// live/upcoming item, or an unread one beside datable items).
 			pub, prec := scanNow, "assumed"
 			if it.Age > 0 {
 				pub, prec = scanNow.Add(-it.Age), "coarse"

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,10 +79,16 @@ var ytInitialDataAnchors = []*regexp.Regexp{
 // timestamp — a past item shows only "Streamed N <unit> ago"). Age is 0 for a
 // live/upcoming/unrecognized item (treated as "now"), so it always ranks into
 // the cap; only a proven past VOD gets a non-zero Age and can be crowded out.
+//
+// Marked says the item carries an explicit live or upcoming marker
+// (itemMarked). It never changes Age: it only lets the backfill scanner tell
+// an Age-0 item YouTube labelled live or upcoming from one the parser could
+// not read.
 type MembershipVideo struct {
 	VideoID string
 	Title   string
 	Age     time.Duration // ~time since it streamed; 0 = live/upcoming/now
+	Marked  bool          // explicit live or upcoming marker present
 }
 
 // relativeAgeRe matches YouTube's relative published text, e.g. "Streamed 2
@@ -270,13 +277,13 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	case map[string]any:
 		if lv, ok := n["lockupViewModel"].(map[string]any); ok {
 			if cid := getStr(lv, "contentId"); len(cid) == 11 {
-				addVideo(cid, lockupTitle(lv), itemAge(lv), seen, out)
+				addVideo(cid, lockupTitle(lv), itemAge(lv), itemMarked(lv), seen, out)
 			}
 		}
 		for _, key := range []string{"videoRenderer", "gridVideoRenderer", "playlistVideoRenderer"} {
 			if r, ok := n[key].(map[string]any); ok {
 				if vid := getStr(r, "videoId"); len(vid) == 11 {
-					addVideo(vid, rendererTitle(r), itemAge(r), seen, out)
+					addVideo(vid, rendererTitle(r), itemAge(r), itemMarked(r), seen, out)
 				}
 			}
 		}
@@ -290,12 +297,12 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	}
 }
 
-func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out *[]MembershipVideo) {
+func addVideo(id, title string, age time.Duration, marked bool, seen map[string]struct{}, out *[]MembershipVideo) {
 	if _, dup := seen[id]; dup {
 		return
 	}
 	seen[id] = struct{}{}
-	*out = append(*out, MembershipVideo{VideoID: id, Title: title, Age: age})
+	*out = append(*out, MembershipVideo{VideoID: id, Title: title, Age: age, Marked: marked})
 }
 
 // itemAge estimates how long ago a membership item streamed, for recency
@@ -336,6 +343,58 @@ func itemAge(item map[string]any) time.Duration {
 	// No live badge and no past-time text → upcoming or unrecognized → "now",
 	// so live/upcoming catching never depends on a single fragile badge marker.
 	return 0
+}
+
+// itemMarkers are the key/value pairs that mark a listing item live or
+// upcoming, each one a structural field of the item and each taken from what
+// yt-dlp reads (extractor/youtube/_tab.py): the classic renderers' time-status
+// overlay style and live badge, and the lockup's thumbnail badge style. The
+// live badge's icon name is the one Moombox's own live check already keyed on.
+var itemMarkers = map[string][]string{
+	"style":      {"LIVE", "UPCOMING", "BADGE_STYLE_TYPE_LIVE_NOW"},
+	"badgeStyle": {"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"},
+	"imageName":  {"LIVE"},
+}
+
+// itemMarked reports whether a listing item carries an EXPLICIT live or
+// upcoming marker: one of itemMarkers, a classic renderer's upcomingEventData
+// (the scheduled start), or a lockup thumbnail badge whose text is "Upcoming".
+//
+// It is deliberately narrower than itemAge's "anything not dated is now". The
+// backfill scanner uses it to let a tab that lists only live or upcoming
+// streams through its parser-failure arm, so it must not be satisfiable by
+// text the channel wrote: every marker is a key, or a whole value under a
+// named key, and a title is neither. The live wording "Started streaming" is
+// left out for that reason (owner ruling R3-3).
+func itemMarked(node any) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		if _, ok := n["upcomingEventData"]; ok {
+			return true
+		}
+		for key, values := range itemMarkers {
+			if v, ok := n[key].(string); ok && slices.Contains(values, v) {
+				return true
+			}
+		}
+		if badge, ok := n["thumbnailBadgeViewModel"].(map[string]any); ok {
+			if strings.EqualFold(getStr(badge, "text"), "upcoming") {
+				return true
+			}
+		}
+		for _, v := range n {
+			if itemMarked(v) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if itemMarked(v) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // findAgeText looks through an item for a string VALUE that is, as a whole,

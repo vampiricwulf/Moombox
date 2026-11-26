@@ -123,8 +123,8 @@ func coarseItem(id string, age time.Duration) TabItem {
 	return TabItem{VideoID: id, Title: id, Age: age}
 }
 
-// undatedItem builds an Age==0 item — a live/upcoming badge or an item the
-// parser could not date; the scanner cannot tell which (spec §11).
+// undatedItem builds an Age==0 item with no live or upcoming marker: one the
+// parser could not read (spec §11). markedItem is the labelled kind.
 func undatedItem(id string) TabItem {
 	return TabItem{VideoID: id, Title: id, Age: 0}
 }
