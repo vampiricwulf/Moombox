@@ -395,6 +395,9 @@ same tab if you want it archived again. What stays depends on the job:
 - **A Twitch live broadcast** leaves an entry when the monitor found it, or
   when you added its channel in the dashboard or the TUI while Twitch
   reported it live. The entry holds the broadcast back from the live check.
+  An entry from your own add names the broadcast that was live at the add:
+  if you reinitialized that job and it went on to record a later broadcast,
+  the later one is not held back.
 - **A Twitch channel job that had to wait for the broadcast** leaves no
   entry: one added while the channel was offline or while Twitch could not
   be reached, and any channel added with `moombox add`. If the channel is
