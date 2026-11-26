@@ -14,8 +14,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
-// gql503 is what gqlRequest returns once a 5xx has outlasted its retries.
-var gql503 = errors.New("gql exhausted 3 retries: gql http 503 (ShareClipRenderStatus): 0-byte body")
+// errGQL503 is what gqlRequest returns once a 5xx has outlasted its retries.
+var errGQL503 = errors.New("gql exhausted 3 retries: gql http 503 (ShareClipRenderStatus): 0-byte body")
 
 // TestTwitchBacklogGQLRefusalRequeues is owner ruling R4-5: a Twitch GQL 5xx
 // that outlasted gqlRequest's retries, or a 429 whose Retry-After was too
@@ -42,7 +42,7 @@ func TestTwitchBacklogGQLRefusalRequeues(t *testing.T) {
 
 	t.Run("swept clip, 5xx", func(t *testing.T) {
 		w, db := testWorkerSetup(t)
-		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) { return nil, gql503 }
+		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) { return nil, errGQL503 }
 		id := backlogClip(t, db)
 		w.processJob(context.Background(), id)
 		if row, _ := db.GetJob(id); row.Status != database.StatusQueued || !w.scheduler.held(id, time.Now()) {
@@ -64,11 +64,11 @@ func TestTwitchBacklogGQLRefusalRequeues(t *testing.T) {
 
 	t.Run("manual clip, 5xx", func(t *testing.T) {
 		w, db := testWorkerSetup(t)
-		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) { return nil, gql503 }
+		w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) { return nil, errGQL503 }
 		job := addClipJob(t, db, t.TempDir())
 		w.processJob(context.Background(), job.ID)
 		row, _ := db.GetJob(job.ID)
-		if row.Status != database.StatusError || row.Error != "twitch clip error: "+gql503.Error() {
+		if row.Status != database.StatusError || row.Error != "twitch clip error: "+errGQL503.Error() {
 			t.Errorf("status = %s (%q), want Error with the GQL answer", row.Status, row.Error)
 		}
 	})
