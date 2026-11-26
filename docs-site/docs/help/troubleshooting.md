@@ -431,9 +431,10 @@ If it never starts:
 
 - On Linux it needs **glibc**; on Alpine and other musl systems it cannot run.
   Use a glibc distribution or the Docker image.
-- It unpacks about 36 MB into your cache folder on first start
-  (`%LOCALAPPDATA%\Moombox\sidecar` or `~/.cache/Moombox/sidecar`). A full or
-  read-only cache folder stops it.
+- It unpacks roughly 115 to 150 MB, depending on platform, into your cache
+  folder on first start (`%LOCALAPPDATA%\Moombox\sidecar` or
+  `~/.cache/Moombox/sidecar`), and later keeps the YouTube players it prepares
+  there too. A full or read-only cache folder stops it.
 - If it is killed for memory, raise
   [`memory.sidecar_hard_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_hard_limit_mb)
   (restart required).

@@ -1754,7 +1754,7 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 
 ```
 %LOCALAPPDATA%/Moombox/sidecar/
-├── moombox-sidecar[.exe]            (the Node binary, ~83 MB extracted from the platform's gzipped ~33-44 MB node-<goos>-<goarch>.gz)
+├── moombox-sidecar[.exe]            (the Node binary: at v24.22.3, ~94 MB on Windows and ~123-127 MB on Linux, extracted from the platform's gzipped ~36-46 MB node-<goos>-<goarch>.gz)
 ├── package.json
 ├── package-lock.json
 ├── version.txt                      (the embedded Node manifest + "sidecar@<sha256 of sidecar.tar.gz>" — cache-invalidation key)
@@ -1762,8 +1762,12 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 │   ├── server.js                    (~900 lines, JSON-RPC server)
 │   ├── cipher.js                    (ejs signature/n solving)
 │   └── homepage.js                  (homepage challenge extraction)
-└── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~17 MB)
+├── vendor/                          (the vendored ejs solver)
+├── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~19 MB)
+└── players/                         (the players the sidecar has prepared, player-store.js; MOOMBOX_SIDECAR_PLAYER_DIR)
 ```
+
+All told the first extraction is roughly 115 MB on Windows and 145-150 MB on Linux; the operator docs say "roughly 115-150 MB" so the figure survives a Node pin bump.
 
 ### Lifecycle
 
