@@ -493,12 +493,47 @@ func twitchVodFetchError(ctx context.Context, what string, err error) error {
 	return fmt.Errorf("%s: %w", what, err)
 }
 
+// twitchTransientAnswerError is the error a Twitch VOD or clip fetch that
+// Twitch answered with a server error or a rate limit makes stream
+// processing return, rather than a result (owner ruling R4-5): a 5xx that
+// outlasted gqlRequest's own retries, or a 429 whose Retry-After was too long
+// for it to wait (internal/twitch/api.go). As an error it reaches processJob's
+// requeueBacklogAfterTransientFailure, so a swept clip or a Twitch backlog VOD
+// goes back to Queued for the backlog retry, as a YouTube backlog VOD's 5xx
+// or 429 does; any other job ends in Error with the text the result form
+// carried. It is an answer from Twitch, so it is never waited out as an
+// outage (outageCalled) nor parked as unreachable: probeVote is unchanged.
+// nil for any other failure.
+func twitchTransientAnswerError(what string, err error) error {
+	if !isTwitchTransientAnswer(err) {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// isTwitchTransientAnswer reports whether err is a Twitch GQL 5xx ("gql http
+// 5xx", also after "gql exhausted N retries: ") or 429 ("gql rate limited
+// ("), read from the head before " — " as probeVote reads it.
+func isTwitchTransientAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if i := strings.Index(msg, " — "); i >= 0 {
+		msg = msg[:i]
+	}
+	return strings.Contains(msg, "gql http 5") || strings.Contains(msg, "gql rate limited (")
+}
+
 func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
 	vodID, _ := twitch.VodIDFromJobID(job.VideoID)
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
 		if err := twitchVodFetchError(ctx, "twitch VOD error", err); err != nil {
+			return nil, err
+		}
+		if err := twitchTransientAnswerError("twitch VOD error", err); err != nil {
 			return nil, err
 		}
 		return &StreamProcessResult{
@@ -544,6 +579,10 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
 		if err := twitchVodFetchError(ctx, "twitch VOD HLS error", err); err != nil {
+			return nil, err
+		}
+		// The access-token request ahead of the playlist is a GQL call too.
+		if err := twitchTransientAnswerError("twitch VOD HLS error", err); err != nil {
 			return nil, err
 		}
 		return &StreamProcessResult{

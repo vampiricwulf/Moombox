@@ -944,7 +944,7 @@ The two limiters are per-IP and separate from the shared API limiter: `rateLimit
 | `POST` | `/api/jobs/{id}/mux` | Force a mux from the segment files already in staging, without re-downloading. |
 | `POST` | `/api/jobs/{id}/recover-asides` | Mux the recordings the engine set aside on a mid-stream restart into their own files beside the archive, carrying a kept chat capture beside the first of them … |
 | `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in the desktop file manager — Explorer on Windows, `xdg-open` on Linux, through the one switch `OpenPathCommand` … |
-| `DELETE` | `/api/jobs/{id}` | Delete the job's row (and its child rows). Files stay on disk: the output and any staging then surface in Files → Orphaned, where they are deleted deliberately. |
+| `DELETE` | `/api/jobs/{id}` | Delete the job's row (and its child rows). A YouTube job's delete also leaves its history row marked `job_created` in the same transaction (`DeleteJobLeavingHistory`, owner ruling R4-3; the TUI's `A D` calls the same method), so a job added by URL or import is held back from re-detection as a monitor-created one is, until its entry is removed from the Orphaned list. Files stay on disk: the output and any staging then surface in Files → Orphaned, where they are deleted deliberately. |
 
 #### `GET /api/jobs/{id}`
 
@@ -1315,7 +1315,7 @@ Body `{"paths": [...]}`. Each path must lie under the staging or output director
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (the job was deleted, or a row DECAPI wrote for a video it skipped or gave up on, before it stopped recording those). While the row remains, the monitor treats the video as already-processed and won't re-discover it. Keyed by job ID, so the match is against `jobs.id`. |
+| `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (the job was deleted, or a row DECAPI wrote for a video it skipped or gave up on, before it stopped recording those). While the row remains, the monitor treats the video as already-processed and won't archive it again; a deleted job's row (`job_created`) also keeps a YouTube stream still upcoming or live from being found again (owner ruling R4-3), while a skip row does not. Keyed by job ID, so the match is against `jobs.id`. |
 | `DELETE` | `/api/history/orphaned` | Remove the given history video IDs (JSON body `{"videoIds":[...]}`), unblocking re-discovery. Only a row that is still orphaned is removed: an ID whose video has a job by now keeps its row. Answers `{deleted, removed, errors}`: `deleted` echoes the requested IDs, and `removed` is the number of rows actually removed, lower when an ID had no row or was no longer an orphan. The Files tab's toasts count `removed` (`historyRemovedCount`, `web/public/modules/files.js`), and a single Remove that removed nothing says the entry was kept. |
 
 ### Updates

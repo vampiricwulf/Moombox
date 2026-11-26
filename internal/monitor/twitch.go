@@ -79,13 +79,18 @@ type TwitchMonitor struct {
 // Health returns the per-channel health snapshot for /api/status.
 func (tm *TwitchMonitor) Health() []ChannelHealth { return tm.health.snapshot() }
 
-// PruneHealth drops health entries for channels no longer configured.
+// PruneHealth drops health entries for channels no longer configured. It
+// runs on every channel save (kickMonitors), so it also forgets the clip
+// sweep state of the channels no longer opted in (forgetClipChannelsExcept):
+// clips switched off and back on between two polls are still a fresh opt-in.
 func (tm *TwitchMonitor) PruneHealth() {
+	channels := tm.getTwitchChannels()
 	active := make(map[string]struct{})
-	for _, ch := range tm.getTwitchChannels() {
+	for _, ch := range channels {
 		active[ch.ID] = struct{}{}
 	}
 	tm.health.prune(active)
+	tm.forgetClipChannelsExcept(clipChannelsOf(channels))
 }
 
 // SetOnChannelUnhealthy installs the callback fired when a channel crosses
@@ -206,11 +211,16 @@ func (tm *TwitchMonitor) runCycle(ctx context.Context) {
 const twitchBatchChunk = 30
 
 func (tm *TwitchMonitor) doCheck(ctx context.Context) {
+	channels := tm.getTwitchChannels()
+	clipChannels := clipChannelsOf(channels)
+	// A channel no longer opted in is forgotten here, ahead of every early
+	// return (offline, no Twitch channel, none opted in), so its return is a
+	// fresh opt-in (forgetClipChannelsExcept).
+	tm.forgetClipChannelsExcept(clipChannels)
 	if tm.IsOnline != nil && !tm.IsOnline() {
 		tm.logger.Debug("skipping Twitch poll — offline")
 		return
 	}
-	channels := tm.getTwitchChannels()
 	if len(channels) == 0 {
 		return
 	}
@@ -218,7 +228,7 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 	tm.logger.Debug("twitch checking", "channels", len(channels))
 	// The opted-in channels' clips, on a goroutine of their own: hourly, and
 	// never in the live poll's way (startClipSweep).
-	tm.startClipSweep(ctx, clipChannelsOf(channels))
+	tm.startClipSweep(ctx, clipChannels)
 
 	// Batch: one GQL request per chunk instead of one per channel. An
 	// N-channel cycle collapses from N serialized round-trips (~0.8s each)
