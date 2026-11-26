@@ -291,7 +291,7 @@ The terminal UI uses chords — see
 | Play | **Play** | — | `Finished` with an archive |
 | Open folder | **Open Folder** | ++o++ ++f++ | Finished jobs with a file, and active jobs |
 | Open stream page | **Open URL** | ++o++ ++s++ | Jobs with a stream URL |
-| Copy stream URL | — | ++o++ ++c++ | Jobs with a stream URL |
+| Copy stream URL | Copy button on the details' *Stream URL* row | ++o++ ++c++ | Jobs with a stream URL |
 | Job log | *Job Logs* section of the details | ++o++ ++l++ | Any job |
 
 In the TUI, a confirm-gated chord needs its last key pressed again within 3
@@ -310,8 +310,9 @@ everything already captured. It sets the job back to `Downloading`. Resume
 is **YouTube only**; it is refused with *Resume is only supported for
 YouTube jobs — use Reinitialize instead* for Twitch, and with *No staging
 files found — use Reinitialize instead* when nothing is staged. A Resume
-clicked while the job's previous run is still shutting down waits for it
-(up to a minute) instead of racing it.
+clicked while the job's previous run is still shutting down waits for it,
+however long that takes, instead of racing it; after a minute the log says
+once that it is still waiting.
 
 On the dashboard row the restart icon is **Resume** where the job can
 continue, and **Reinitialize** only where it cannot. Whichever applies is
