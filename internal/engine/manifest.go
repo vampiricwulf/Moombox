@@ -35,13 +35,6 @@ const defaultSegmentDuration = 2.0
 // protected; Moombox cannot record it".
 var ErrDRMProtected = errors.New("DRM-protected or encrypted media")
 
-// DashSegment represents a segment in a DASH timeline.
-type DashSegment struct {
-	T int64 // Timestamp (optional, 0 if unset)
-	D int64 // Duration in timescale units
-	R int   // Repeat count (0 means 1 occurrence, 1 means 2, etc.)
-}
-
 // DashStream represents a parsed DASH adaptation/representation.
 type DashStream struct {
 	Itag           int
@@ -51,24 +44,13 @@ type DashStream struct {
 	Height         int
 	FPS            int // From frameRate attribute (0 if not present, or 1 or less: knownFPS)
 	Bandwidth      int
-	BaseURL        string        // Template URL with $Number$ placeholder
-	StartNumber    int           // First segment sequence number
-	Timescale      int           // Time unit divisor
-	Segments       []DashSegment // Segment timeline
-	Initialization string        // Init segment URL
+	BaseURL        string // Template URL with $Number$ placeholder
+	Initialization string // Init segment URL
 	// Lang is the stream's lang attribute, the Representation's or else its
 	// AdaptationSet's, as yt-dlp's _parse_mpd_formats reads it
 	// (extractor/common.py); "" when neither states one. The worker ranks a
 	// dubbed audio stream by it against the extraction's original language.
 	Lang string
-}
-
-// SegmentRange maps a time range to segment indices.
-type SegmentRange struct {
-	StartSegment    int     // Absolute segment index
-	EndSegment      int     // Inclusive, -1 means to end
-	TrimStartOffset float64 // Seconds into first segment
-	TrimDuration    float64 // Total duration
 }
 
 // HlsVariant represents a variant in an HLS master playlist.
@@ -248,28 +230,12 @@ type representationXML struct {
 }
 
 type segmentTemplateXML struct {
-	Media          string           `xml:"media,attr"`
-	Initialization string           `xml:"initialization,attr"`
-	StartNumber    int              `xml:"startNumber,attr"`
-	Timescale      int              `xml:"timescale,attr"`
-	Timeline       *segmentTimeline `xml:"SegmentTimeline"`
+	Media          string `xml:"media,attr"`
+	Initialization string `xml:"initialization,attr"`
 }
 
 type segmentListXML struct {
-	StartNumber    int              `xml:"startNumber,attr"`
-	Timescale      int              `xml:"timescale,attr"`
-	Initialization *initXML         `xml:"Initialization"`
-	Timeline       *segmentTimeline `xml:"SegmentTimeline"`
-}
-
-type segmentTimeline struct {
-	Segments []segmentTimelineS `xml:"S"`
-}
-
-type segmentTimelineS struct {
-	T int64 `xml:"t,attr"`
-	D int64 `xml:"d,attr"`
-	R int   `xml:"r,attr"`
+	Initialization *initXML `xml:"Initialization"`
 }
 
 type initXML struct {
@@ -504,160 +470,24 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 	}
 
 	if tmpl != nil {
-		stream.StartNumber = tmpl.StartNumber
-		stream.Timescale = tmpl.Timescale
-		if stream.Timescale == 0 {
-			stream.Timescale = 1000
-		}
 		if tmpl.Media != "" {
 			stream.BaseURL = resolveURL(repBase, tmpl.Media)
 		}
 		if tmpl.Initialization != "" {
 			stream.Initialization = resolveURL(repBase, tmpl.Initialization)
 		}
-		if tmpl.Timeline != nil {
-			stream.Segments = parseTimeline(tmpl.Timeline)
-		}
 	} else if segList != nil {
-		stream.StartNumber = segList.StartNumber
-		stream.Timescale = segList.Timescale
-		if stream.Timescale == 0 {
-			stream.Timescale = 1000
-		}
 		if segList.Initialization != nil && segList.Initialization.SourceURL != "" {
 			stream.Initialization = resolveURL(repBase, segList.Initialization.SourceURL)
-		}
-		if segList.Timeline != nil {
-			stream.Segments = parseTimeline(segList.Timeline)
 		}
 	}
 
 	return stream
 }
 
-func parseTimeline(tl *segmentTimeline) []DashSegment {
-	segments := make([]DashSegment, 0, len(tl.Segments))
-	for _, s := range tl.Segments {
-		segments = append(segments, DashSegment(s))
-	}
-	return segments
-}
-
 // SegmentURL builds the URL for a specific segment number from a template.
 func SegmentURL(template string, seqNum int) string {
 	return strings.ReplaceAll(template, "$Number$", strconv.Itoa(seqNum))
-}
-
-// CalculateSegmentRange maps a time range to segment indices in a DASH stream.
-//
-// Returns nil if the time range is nonsensical:
-//   - negative startTimeSec or endTimeSec
-//   - endTimeSec > 0 and endTimeSec <= startTimeSec (reversed or empty range)
-//
-// startTimeSec == 0 is valid (range starts at the beginning). endTimeSec == 0
-// is valid as "unbounded" (only startTimeSec applies).
-func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64) *SegmentRange {
-	// Input validation: reject negative times and reversed/empty ranges so
-	// callers get a nil (treat as invalid) instead of bizarre segment math.
-	if startTimeSec < 0 || endTimeSec < 0 {
-		return nil
-	}
-	if endTimeSec > 0 && endTimeSec <= startTimeSec {
-		return nil
-	}
-
-	timescale := float64(stream.Timescale)
-	if timescale == 0 {
-		timescale = 1000 // Default fallback
-	}
-
-	// Expand segments with repeat counts
-	type expandedSeg struct {
-		duration float64 // seconds
-	}
-	var expanded []expandedSeg
-
-	if len(stream.Segments) > 0 {
-		for _, seg := range stream.Segments {
-			dur := float64(seg.D) / timescale
-			count := seg.R + 1 // R=0 means 1 occurrence
-			for range count {
-				expanded = append(expanded, expandedSeg{duration: dur})
-				if len(expanded) > 100000 {
-					return nil // Safety limit
-				}
-			}
-		}
-	}
-
-	// If no segment timeline, use estimated 2s segment duration (YouTube live typical)
-	const defaultSegDuration = 2.0
-	useEstimate := len(expanded) == 0
-
-	getSegDuration := func(idx int) float64 {
-		if useEstimate {
-			return defaultSegDuration
-		}
-		if idx < len(expanded) {
-			return expanded[idx].duration
-		}
-		if len(expanded) > 0 {
-			return expanded[len(expanded)-1].duration
-		}
-		return defaultSegDuration
-	}
-
-	result := &SegmentRange{
-		StartSegment: stream.StartNumber,
-		EndSegment:   -1,
-	}
-
-	// Use stream.StartNumber to convert array index to actual segment number.
-	// (StartNumber is the sequence number of segment[0], not always 0.)
-	baseNum := stream.StartNumber
-
-	// Walk through segments to find start index
-	if startTimeSec > 0 {
-		accumSec := 0.0
-		segIdx := 0
-		for {
-			segDur := getSegDuration(segIdx)
-			if accumSec+segDur > startTimeSec {
-				result.StartSegment = baseNum + segIdx
-				result.TrimStartOffset = startTimeSec - accumSec
-				break
-			}
-			accumSec += segDur
-			segIdx++
-			if segIdx > 100000 {
-				result.StartSegment = baseNum + segIdx
-				result.TrimStartOffset = 0
-				break
-			}
-		}
-	}
-
-	// Walk through segments to find end index
-	if endTimeSec > 0 {
-		accumSec := 0.0
-		segIdx := 0
-		for {
-			segDur := getSegDuration(segIdx)
-			segEnd := accumSec + segDur
-			if segEnd >= endTimeSec {
-				result.EndSegment = baseNum + segIdx
-				result.TrimDuration = endTimeSec - startTimeSec
-				break
-			}
-			accumSec = segEnd
-			segIdx++
-			if segIdx > 100000 {
-				break
-			}
-		}
-	}
-
-	return result
 }
 
 // --- HLS Parsing ---
@@ -1043,46 +873,6 @@ func resolveURL(base, ref string) string {
 		return ref
 	}
 	return baseU.ResolveReference(refU).String()
-}
-
-// totalDurationSec returns the total duration of a DASH stream in seconds.
-// Private helper — kept for test coverage of the segment-math paths that
-// might eventually feed a progress estimator. Not exported because no
-// production caller exists today.
-func totalDurationSec(stream *DashStream) float64 {
-	if stream.Timescale == 0 || len(stream.Segments) == 0 {
-		return 0
-	}
-	ts := float64(stream.Timescale)
-	total := 0.0
-	for _, seg := range stream.Segments {
-		count := seg.R + 1
-		total += float64(seg.D) / ts * float64(count)
-	}
-	return total
-}
-
-// totalSegmentCount returns the total number of segments, expanding repeats.
-func totalSegmentCount(stream *DashStream) int {
-	total := 0
-	for _, seg := range stream.Segments {
-		total += seg.R + 1
-	}
-	return total
-}
-
-// segmentDurationSec returns the average segment duration in seconds.
-func segmentDurationSec(stream *DashStream) float64 {
-	count := totalSegmentCount(stream)
-	if count == 0 {
-		return defaultSegmentDuration
-	}
-	return totalDurationSec(stream) / float64(count)
-}
-
-// estimateSegmentCount estimates the number of segments for a given duration.
-func estimateSegmentCount(durationSec float64) int {
-	return int(math.Ceil(durationSec / defaultSegmentDuration))
 }
 
 // parseFrameRate parses a DASH frameRate attribute value.

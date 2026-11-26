@@ -158,7 +158,7 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 	// and LastSeq 0 with BYTES is the direct path's ordinary state. Treating
 	// it as valid would cause the caller to advance currentSeq to
 	// LastSeq+1 = 1 and skip segment 0 entirely, losing the first segment
-	// for YouTube live DASH (StartNumber=0) on resume.
+	// for YouTube live DASH, whose segments number from 0, on resume.
 	if state.LastSeq < 0 || (state.LastSeq == 0 && state.BytesWritten == 0) {
 		return nil, nil
 	}
