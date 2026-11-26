@@ -229,3 +229,44 @@ func TestImportNoteBoundsTheEntriesItNames(t *testing.T) {
 		t.Errorf("note %q", r.Import.Note)
 	}
 }
+
+// A second sidecar of a kind already kept (a zip can carry one name twice,
+// or in another case) is named with that reason, never as a kind the import
+// does not keep.
+//
+// Mutants: the second entry given no reason (the note then says the import
+// keeps descriptions while leaving one out as "only ... description"); the
+// second kept over the first.
+func TestImportNamesASecondSidecarOfAKind(t *testing.T) {
+	f := newImportFixture(t)
+	rec, job := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].chat.json", data: []byte(reimportChat)},
+		importEntry{name: "Stream [dQw4w9WgXcQ].chat.raw.jsonl", data: []byte("{}\n")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].CHAT.RAW.JSONL", data: []byte("[]\n")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].description", data: []byte("First")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].DESCRIPTION", data: []byte("Second")},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	stored, err := f.db.GetJob(job.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if stored.Description != "First" {
+		t.Errorf("description %q, want the first entry's", stored.Description)
+	}
+	r := decodeImportResult(t, rec.Body.Bytes())
+	for _, want := range []string{
+		"left out Stream [dQw4w9WgXcQ].CHAT.RAW.JSONL: a chat keeps one raw chat",
+		"left out Stream [dQw4w9WgXcQ].DESCRIPTION: an archive keeps one description",
+	} {
+		if !strings.Contains(r.Import.Note, want) {
+			t.Errorf("note %q lacks %q", r.Import.Note, want)
+		}
+	}
+	if strings.Contains(r.Import.Note, importSkipOther) {
+		t.Errorf("note %q names a second sidecar as a kind the import does not keep", r.Import.Note)
+	}
+}

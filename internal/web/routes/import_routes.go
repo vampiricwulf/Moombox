@@ -940,7 +940,8 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 			continue
 		}
 		if paired[kind+"|"+chatStem] {
-			continue // a second entry of the same name: left out below
+			reasons[sc.entry] = importSkipSecond(kind)
+			continue
 		}
 		paired[kind+"|"+chatStem] = true
 		kept[sc.entry] = true
@@ -1118,12 +1119,23 @@ func (r *importRecording) files() []*importFile {
 	return append(append(files, chats...), sidecars...)
 }
 
+// importSkipSecond is the reason a second sidecar of a kind already kept is
+// left out (a zip can hold one name twice): a recording keeps one of each,
+// and each chat one raw chat.
+func importSkipSecond(kind string) string {
+	if kind == importKindRawChat {
+		return "a chat keeps one raw chat"
+	}
+	return "an archive keeps one " + kind
+}
+
 // dropUnreadableImportChapters leaves out an extracted chapter list that
 // does not parse as one (utils.ReadChaptersSidecar), removing its temporary
 // file and naming it in skipped: beside the archive it would make every
 // later chapter save refuse.
 func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]*importFile, []importSkip) {
-	return slices.DeleteFunc(files, func(f *importFile) bool {
+	// The closure appends to skipped: read it only after DeleteFunc returns.
+	kept := slices.DeleteFunc(files, func(f *importFile) bool {
 		if f.kind != importKindChapters {
 			return false
 		}
@@ -1134,7 +1146,8 @@ func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]
 		f.tmp = ""
 		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: importSkipChapters})
 		return true
-	}), skipped
+	})
+	return kept, skipped
 }
 
 // chooseImportSidecarNames gives each sidecar the name of the file it
@@ -1147,7 +1160,8 @@ func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]
 // that cannot be used (past a file name's 255 bytes), leaves the sidecar out,
 // named in skipped. The others keep their temporary files for place.
 func chooseImportSidecarNames(outputDir string, files []*importFile, skipped []importSkip) ([]*importFile, []importSkip) {
-	return slices.DeleteFunc(files, func(f *importFile) bool {
+	// The closure appends to skipped: read it only after DeleteFunc returns.
+	kept := slices.DeleteFunc(files, func(f *importFile) bool {
 		if f.follows == nil {
 			return false
 		}
@@ -1168,7 +1182,8 @@ func chooseImportSidecarNames(outputDir string, files []*importFile, skipped []i
 		f.tmp = ""
 		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: reason})
 		return true
-	}), skipped
+	})
+	return kept, skipped
 }
 
 // importDescriptionText is a description sidecar's text for the row's
