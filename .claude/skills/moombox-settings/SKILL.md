@@ -58,7 +58,7 @@ Fourteen callbacks on `ConfigRoutesCallbacks` (`internal/web/routes/config_route
 - `OnHideFinishedAgeChanged()` → re-broadcasts the job list
 - `OnChannelChange()` → `kickMonitors` to re-evaluate channels
 - `OnMonitorIntervalChange()` → `kickMonitors` (a changed `feed_check_interval`, `decapi_check_interval` or `twitch_check_interval`; not called when the save also carried channels)
-- `OnActivePlatformsChange()` → `resendTUICookieStatus` (the platforms whose cookie indicators show changed)
+- `OnActivePlatformsChange()` → `activePlatformsChanged` (the platforms whose cookie indicators show changed): nudges every open dashboard (`status_changed`) and re-sends the TUI's cookie status; the TUI's own save nudges the dashboards from its `OnSaveConfig` block
 - `OnDiskSettingsChange()` → `requestDiskRecheck` (`disk.disk_warn_percent`, `disk.disk_critical_percent`, `paths.output_directory` or `paths.staging_directory` changed)
 - `OnSegmentWorkersChange(n)` → `warnSegmentWorkers` (the high-value warning boot logs)
 - `OnNotificationsChange()` → `notifyMgr.Reload()` — the notification targets follow the save; it also fires for a `network.public_url` change, and the per-target `enabled`/`mention`/`mention_events`/`mode` keys all hot-reload through it too (the restart list stays at 17)

@@ -74,8 +74,9 @@ type ConfigRoutesCallbacks struct {
 	OnMonitorIntervalChange func()
 	// OnActivePlatformsChange is called when the platforms whose cookie
 	// indicators show (config.GetActivePlatforms) change, so the TUI's
-	// status bar follows a dashboard save — it otherwise re-read them only
-	// on an auth transition.
+	// status bar and every open dashboard (a status_changed nudge) follow
+	// a dashboard save — they otherwise re-read them only on an auth
+	// transition.
 	OnActivePlatformsChange func()
 	// OnDiskSettingsChange is called when disk.disk_warn_percent,
 	// disk.disk_critical_percent, paths.output_directory or
