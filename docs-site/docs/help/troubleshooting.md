@@ -115,16 +115,25 @@ Values that parse but are out of range do **not** stop startup; they are
 replaced and logged. See
 [Configuration → Values Moombox cannot use](../configuration/index.md#values-moombox-cannot-use).
 
-### "port … (and nearby ports) already in use"
+### "already in use" or "cannot bind port"
 
-When the dashboard port is taken, Moombox logs *port in use, probing nearby
-ports* and tries the next ten ports; the one it found is logged as *using
-alternative port*, and the *Web dashboard available at …* line gives the
-address. Only when all eleven are taken does it fail:
+When the dashboard port cannot be bound, Moombox logs why (*port in use,
+probing nearby ports* for a taken port) and tries the next ten ports; the one
+it found is logged as *using alternative port*, and the *Web dashboard
+available at …* line gives the address. Only when all eleven fail does it
+stop:
 
-- **Without the TUI** (headless, Docker, systemd), Moombox prints
-  `Error: port 774 (and nearby ports) already in use: …` and
-  `Web dashboard is unavailable.`, and exits with code 3.
+- **Without the TUI** (headless, Docker, systemd), Moombox prints the reason
+  and `Web dashboard is unavailable.`, and exits with code 3. The reason is
+  one of:
+    - `Error: port 774 (and nearby ports) already in use: …`: another
+      program has the port.
+    - `Error: cannot bind port 774: permission denied - on Linux ports below
+      1024 need CAP_NET_BIND_SERVICE; set network.port to 1024 or above: …`:
+      see the note below.
+    - `Error: could not bind port 774 (or the ten after it): …`: anything
+      else, such as a bind address this machine does not have; the end of
+      the line gives the system's reason.
 - **With the TUI**, it keeps running without a dashboard and logs *Web server
   failed, continuing in TUI-only mode*.
 
@@ -132,12 +141,10 @@ Free the port, or change [`network.port`](../configuration/network.md#networkpor
 In Docker, the port inside the container must match the published port and
 the health check.
 
-!!! note "Linux: permission denied, not a busy port"
+!!! note "Linux: permission denied"
     On Linux an ordinary user usually cannot bind ports below 1024, and the
     default `774` and the ten ports Moombox tries after it are all below 1024.
-    Moombox still reports this as *port 774 (and nearby ports) already in
-    use*; the end of the message reads `bind: permission denied` instead of
-    `address already in use`. Freeing the port will not help. Set
+    Freeing the port will not help. Set
     [`network.port`](../configuration/network.md#networkport) to 1024 or
     above, or grant the binary the `CAP_NET_BIND_SERVICE` capability (for
     example `sudo setcap cap_net_bind_service=+ep ./moombox`, repeated after

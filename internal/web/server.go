@@ -604,10 +604,12 @@ func (s *Server) Start(ctx context.Context) error {
 		s.doShutdown()
 	}()
 
-	// Try the preferred port, then probe nearby ports
+	// Try the preferred port, then probe nearby ports. The probe runs on any
+	// error; the first error's kind only picks the words (bind_errors.go).
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		s.logger.Warn("port in use, probing nearby ports", "port", port)
+		firstErr := err
+		s.logger.Warn(classifyBindError(firstErr).probeMessage(), "port", port, "error", firstErr.Error())
 		for offset := 1; offset <= 10; offset++ {
 			candidate := fmt.Sprintf("%s:%d", host, port+offset)
 			ln, err = net.Listen("tcp", candidate)
@@ -617,7 +619,7 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("port %d (and nearby ports) already in use: %w", port, err)
+			return bindError(port, firstErr)
 		}
 	}
 

@@ -228,8 +228,7 @@ Things to know:
 - The default dashboard port, 774, is below 1024. On most Linux systems an
   ordinary user may not bind such ports, so without
   `AmbientCapabilities=CAP_NET_BIND_SERVICE` Moombox fails on 774 and on the
-  ten ports after it, and the log reports "port 774 (and nearby ports) already
-  in use" even though nothing else is using them. Either keep that line or
+  ten ports after it with "permission denied". Either keep that line or
   set [`network.port`](../configuration/network.md#networkport) to 1024 or
   above before you start the service.
 - A startup failure (a configuration it cannot read, a port it cannot bind)
