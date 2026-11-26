@@ -662,7 +662,9 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 				continue
 			}
-			o.logger.Error("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
+			// An FFmpeg the shutdown signalled is not a failed copy (R3-8).
+			o.muxFailed("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
+				"the set-aside recording stays in staging for a later Mux action",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 			continue
 		}

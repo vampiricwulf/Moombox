@@ -86,8 +86,15 @@ func (o *DownloadOrchestrator) stopping() bool {
 // way no status is written here: the part stays in staging, and the job's
 // finalize muxes it (muxUnrecordedSegments).
 func (o *DownloadOrchestrator) partMuxFailed(msg string, args ...any) {
+	o.muxFailed(msg, "the part stays in staging for the job's finalize", args...)
+}
+
+// muxFailed logs a mux that returned an error and writes no status: an
+// Error line on a running worker, and an Info line once the stop has begun
+// (R3-8), whose tail says where the recording waits.
+func (o *DownloadOrchestrator) muxFailed(msg, stoppingTail string, args ...any) {
 	if o.stopping() {
-		o.logger.Info(msg+": Moombox is shutting down; the part stays in staging for the job's finalize", args...)
+		o.logger.Info(msg+": Moombox is shutting down; "+stoppingTail, args...)
 		return
 	}
 	o.logger.Error(msg, args...)
