@@ -1363,6 +1363,15 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 		select {
 		case <-ctx.Done():
 			wait.Stop()
+			// A delete cancels the job's context too (its OnJobDeleted
+			// listener), and only after the delete has committed: a row
+			// that is gone now is that delete, answered as the read at the
+			// top of a pass answers it, so the caller reclaims staging
+			// instead of keeping it under no row. A shutdown leaves the row
+			// in place and still ends below.
+			if cur, err := o.db.GetJob(jobID); err == nil && cur == nil {
+				return nil, &finishedRowGoneError{written: written}
+			}
 			return nil, o.finishedNotWritten(jobID, fmt.Errorf("the recording was written to %s, but the job was stopped before it could be marked Finished; staging is kept, use Mux to record it", written))
 		case <-wait.C:
 		}
@@ -2495,15 +2504,7 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		if info, statErr := os.Stat(mediaPath); statErr == nil {
 			unixEnd = info.ModTime().Unix()
 		}
-		quality := QualityInfo{Label: "unknown"}
-		if probe := o.runFFprobe(ctx, mediaPath); probe != nil && probe.Height > 0 {
-			quality = QualityInfo{
-				Width:  probe.Width,
-				Height: probe.Height,
-				FPS:    probe.Fps,
-				Label:  FormatQualityLabel(probe.Height, probe.Fps),
-			}
-		}
+		quality := o.probedQuality(ctx, mediaPath)
 		// unixStart 0 = muxSegment's derive-from-duration sentinel: it
 		// computes end - probed duration (from the MUXED output — at least as
 		// accurate as this raw stream's container metadata), clamped so the
@@ -2519,4 +2520,34 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// probedQuality is the quality a staged file holds, read with ffprobe:
+// "unknown" (zero size) when ffprobe cannot tell, or the file has no video.
+// For a part whose quality nothing recorded — a part the finalize recovers,
+// and the staged part a restart closes because it holds another rendition
+// than the one chosen now (stagedPartQuality).
+func (o *DownloadOrchestrator) probedQuality(ctx context.Context, path string) QualityInfo {
+	if probe := o.runFFprobe(ctx, path); probe != nil && probe.Height > 0 {
+		return QualityInfo{
+			Width:  probe.Width,
+			Height: probe.Height,
+			FPS:    probe.Fps,
+			Label:  FormatQualityLabel(probe.Height, probe.Fps),
+		}
+	}
+	return QualityInfo{Label: "unknown"}
+}
+
+// stagedPartQuality is probedQuality of the part res records into: its video
+// file, or its audio file when it has no video.
+func (o *DownloadOrchestrator) stagedPartQuality(ctx context.Context, res *DownloadResult) QualityInfo {
+	path := res.VideoPath
+	if path == "" {
+		path = res.AudioPath
+	}
+	if path == "" {
+		return QualityInfo{Label: "unknown"}
+	}
+	return o.probedQuality(ctx, path)
 }

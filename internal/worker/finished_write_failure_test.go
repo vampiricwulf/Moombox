@@ -275,6 +275,79 @@ func TestAJobDeletedBeforeItsFinishedWriteHasItsStagingReclaimed(t *testing.T) {
 	}
 }
 
+// deleteAfterInfoLogger records every line and, on the first Info line with
+// prefix, deletes the job after delay from a goroutine of its own, so the
+// delete lands while the caller is further on.
+type deleteAfterInfoLogger struct {
+	levelLogger
+	prefix string
+	once   sync.Once
+	delete func()
+	delay  time.Duration
+}
+
+func (l *deleteAfterInfoLogger) Info(msg string, args ...any) {
+	l.levelLogger.Info(msg, args...)
+	if strings.HasPrefix(msg, l.prefix) {
+		l.once.Do(func() {
+			go func() {
+				defer func() { _ = recover() }()
+				time.Sleep(l.delay)
+				l.delete()
+			}()
+		})
+	}
+}
+
+// A delete that lands while writeFinished waits between its attempts cancels
+// the job's context through the delete listener before the next pass can read
+// the row. The wait's context arm reads it once more: the row is gone, so the
+// run is the deleted job's, staging is reclaimed, and no "use Mux" Error is
+// logged for a job that no longer exists.
+//
+// Mutant: the ctx arm returns finishedNotWritten without the read (staging is
+// kept and the Error line is logged).
+func TestAJobDeletedDuringAFinishedWriteRetryHasItsStagingReclaimed(t *testing.T) {
+	w, db, rec, staging, dbPath := finishedWriteFixture(t, false)
+	finishedWriteRetries = []time.Duration{time.Hour}
+	failJobWritesWhere(t, dbPath, `NEW.status = 'Finished'`)
+	w.logger = discardLogger{}
+	log := &deleteAfterInfoLogger{
+		prefix: "download complete",
+		delay:  time.Second,
+		delete: func() {
+			if err := db.DeleteJob("j-fw"); err != nil {
+				t.Errorf("DeleteJob: %v", err)
+			}
+		},
+	}
+	w.orchestrator.logger = log
+
+	if err := w.MuxJob("j-fw"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { w.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the mux sat out its retry wait after the job was deleted")
+	}
+
+	if row, _ := db.GetJob("j-fw"); row != nil {
+		t.Fatalf("row = %+v, want it deleted", row)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging was kept for a job deleted during the Finished write's retry wait (stat: %v)", err)
+	}
+	if n := log.count("ERROR", "use Mux"); n != 0 {
+		t.Errorf("%d Error lines pointing at Mux for a deleted job: %v", n, log.lines)
+	}
+	if sent := rec.ByEvent("finished"); len(sent) != 0 {
+		t.Errorf("%d Download Finished notifications sent for a deleted job", len(sent))
+	}
+}
+
 // A retry of the Finished write is decided on the read before it, so it
 // applies only while the row holds no outcome: a Cancel that landed between
 // the attempts stands, and staging is kept.

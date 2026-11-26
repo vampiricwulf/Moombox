@@ -99,7 +99,7 @@ grouped as below; the label in brackets is what the dashboard shows.
 | `scheduled` (Scheduled) | *YouTube Start Time Confirmed* | An upcoming YouTube stream's start time became known after it was found (a schedule known at discovery is shown on *Stream Found* instead). |
 | `rescheduled` (Rescheduled) | *YouTube Schedule Changed* | An upcoming YouTube stream's start time moved. |
 | `downloading` (Downloading) | *YouTube Download Starting*, *Twitch Download Starting* | Recording began or resumed. |
-| `quality_split` (Quality Split) | *YouTube Quality Split*, *Twitch Quality Split* | The stream's quality changed mid-recording; the current part was closed and a new one started in the new quality. |
+| `quality_split` (Quality Split) | *YouTube Quality Split*, *Twitch Quality Split* | The stream's quality changed mid-recording; the current part was closed and a new one started in the new quality. Also sent when a YouTube recording restarted in a different resolution than the part it had staged. |
 | `gap_split` (Gap Split) | *Twitch Stream Gap — New Part Started* | On Twitch, segments expired before they could be downloaded; the part was closed and recording continues at the live edge in a new part. |
 | `live_edge` (Live Edge Start) | *Recording From the Live Edge* | A live YouTube recording could not start from the beginning of the broadcast and records from "now" instead (the stream was older than YouTube keeps, protected, or tokens or signatures could not be solved). Sent again if a later resume also has to fall back. |
 | `muxing` (Muxing) | *Muxing Starting* | FFmpeg is joining the recording into the final file — also for a manual Mux. |
@@ -132,7 +132,7 @@ connection down it could not be delivered.
 |---|---|---|
 | `trim_created` (Trim Created) | *Trim Created* | A trimmed copy of a finished recording was made. |
 | `trim_deleted` (Trim Deleted) | *Trim Deleted* | A trim was deleted. |
-| `trim_error` (Trim Error) | *Trim Failed* | A trim failed — FFmpeg, the disk or the database failed, or an automatic post-download trim could not produce its file. |
+| `trim_error` (Trim Error) | *Trim Failed* | A trim failed — FFmpeg, the disk or the database failed, or an automatic post-download trim could not produce its file (including one cut short by Moombox shutting down). A trim you stopped yourself, or one whose job you deleted, sends nothing. |
 
 ### System
 

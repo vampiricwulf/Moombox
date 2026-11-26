@@ -229,10 +229,17 @@ func TestSetAsideStagedMediaNeverRenamesOntoAnAside(t *testing.T) {
 // TestSetAsideStagedMediaRemovesEmptyFiles: an empty capture has nothing to
 // recover, and an aside FFmpeg cannot open is shielded in staging for good.
 //
-// Mutant: drop the Size()==0 branch — the empty file becomes an aside.
+// Its rendition marker goes with it: it describes a file that is gone.
+//
+// Mutants: drop the Size()==0 branch — the empty file becomes an aside; drop
+// the marker removal — the marker outlives its file.
 func TestSetAsideStagedMediaRemovesEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "video.ts"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	marker := engine.StagedRenditionMarker(filepath.Join(dir, "video.ts"))
+	if err := os.WriteFile(marker, []byte("abcdefghijk/299\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	asides, err := setAsideStagedMedia(dir, liveShapeStagingNames)
@@ -241,6 +248,9 @@ func TestSetAsideStagedMediaRemovesEmptyFiles(t *testing.T) {
 	}
 	if fileExists(filepath.Join(dir, "video.ts")) || len(stagedRestartAsides(dir)) != 0 {
 		t.Errorf("the empty capture is still in staging")
+	}
+	if fileExists(marker) {
+		t.Errorf("the empty capture's rendition marker is still in staging")
 	}
 }
 

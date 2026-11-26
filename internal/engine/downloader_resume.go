@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -157,7 +158,7 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 	// and LastSeq 0 with BYTES is the direct path's ordinary state. Treating
 	// it as valid would cause the caller to advance currentSeq to
 	// LastSeq+1 = 1 and skip segment 0 entirely, losing the first segment
-	// for YouTube live DASH (StartNumber=0) on resume.
+	// for YouTube live DASH, whose segments number from 0, on resume.
 	if state.LastSeq < 0 || (state.LastSeq == 0 && state.BytesWritten == 0) {
 		return nil, nil
 	}
@@ -282,4 +283,85 @@ func (d *SegmentDownloader) saveResume() {
 // ClearResume removes the resume state file.
 func (d *SegmentDownloader) ClearResume() {
 	os.Remove(d.opts.ResumeFile)
+}
+
+// renditionFileSuffix names the rendition marker beside a staged file:
+// <OutputFile>.rendition, holding the streamIdentity (videoID/itag) the file
+// is recorded in. A SplitOnRenditionChange downloader writes it when it opens
+// the file, before any media, so a restart that finds no usable sidecar — one
+// before the first sidecar save, or with the sidecar lost — still knows what
+// the file holds (owner ruling R4-1). Nothing else reads it. Package worker
+// treats it as metadata, never a recording (IsStagedRenditionMarker), and
+// removes it with an empty file it removes (StagedRenditionMarker).
+const renditionFileSuffix = ".rendition"
+
+func (d *SegmentDownloader) renditionFile() string {
+	return StagedRenditionMarker(d.opts.OutputFile)
+}
+
+// StagedRenditionMarker returns the rendition marker beside the staged media
+// file p. Exported so package worker can remove it with the file it names.
+func StagedRenditionMarker(p string) string { return p + renditionFileSuffix }
+
+// IsStagedRenditionMarker reports whether name, a file in a staging
+// directory, is a rendition marker: a record about a file, never media.
+func IsStagedRenditionMarker(name string) bool {
+	return strings.HasSuffix(name, renditionFileSuffix)
+}
+
+// renditionChanged reports whether the staged file holds another rendition
+// than the one this downloader records, and names the staged one for the log.
+// Only a file that holds bytes counts, and only for a download that would
+// append to it: a whole-file download and a DiscardStaged one never append to
+// what they cannot resume. sidecarNamesOther is Start's verdict on the resume
+// sidecar (resumeIdentityMismatch); without one the rendition marker decides,
+// and a file with no marker — staged by an older build — or a URL with no
+// identity to compare is not known to differ.
+func (d *SegmentDownloader) renditionChanged(sidecarNamesOther bool) (bool, string) {
+	if d.opts.IsDirectURL || d.opts.DiscardStaged {
+		return false, ""
+	}
+	if info, err := os.Stat(d.opts.OutputFile); err != nil || info.Size() == 0 {
+		return false, ""
+	}
+	marked := ""
+	if data, err := os.ReadFile(d.renditionFile()); err == nil {
+		marked = strings.TrimSpace(string(data))
+	}
+	if sidecarNamesOther {
+		if marked == "" {
+			marked = "named by the resume sidecar"
+		}
+		return true, marked
+	}
+	current := streamIdentity(d.getBaseURL())
+	if marked == "" || current == "" {
+		return false, ""
+	}
+	return marked != current, marked
+}
+
+// writeRenditionMarker records the rendition this downloader records into
+// beside its output file (renditionFileSuffix). A URL with no identity
+// removes any marker left from an earlier file instead, so a stale one never
+// speaks for this file. A failed write costs only the check on a later
+// restart, so it is logged, not fatal.
+func (d *SegmentDownloader) writeRenditionMarker() {
+	id := streamIdentity(d.getBaseURL())
+	if id == "" {
+		d.removeRenditionMarker()
+		return
+	}
+	if err := utils.WriteFileAtomic(d.renditionFile(), []byte(id+"\n"), 0o644); err != nil {
+		d.logger.Warn("[Downloader] Could not record the staged file's rendition; a restart cannot check it",
+			"file", d.renditionFile(), "err", err)
+	}
+}
+
+// removeRenditionMarker removes the marker beside the output file: it named
+// another file than the one now opened. A failed removal is logged.
+func (d *SegmentDownloader) removeRenditionMarker() {
+	if err := os.Remove(d.renditionFile()); err != nil && !os.IsNotExist(err) {
+		d.logger.Warn("[Downloader] Could not remove a stale rendition marker", "file", d.renditionFile(), "err", err)
+	}
 }

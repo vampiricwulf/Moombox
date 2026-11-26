@@ -40,7 +40,8 @@ var liveShapeStagingNames = []string{"video_stream", "audio_stream", "video.ts"}
 // first.
 //
 // An empty file is removed rather than set aside — there is nothing in it to
-// recover, and an aside FFmpeg cannot open is shielded in staging forever.
+// recover, and an aside FFmpeg cannot open is shielded in staging forever —
+// with its resume sidecar and rendition marker.
 //
 // A rename that fails is NOT downgraded to a delete, and the call stops at the
 // first one: nothing is destroyed implicitly, and the caller decides what a
@@ -60,6 +61,9 @@ func setAsideStagedMedia(dir string, names []string) ([]string, error) {
 			}
 			if err := os.Remove(engine.StagedRestartSidecar(p)); err != nil && !os.IsNotExist(err) {
 				return nil, fmt.Errorf("remove the resume state of empty staged %s: %w", name, err)
+			}
+			if err := os.Remove(engine.StagedRenditionMarker(p)); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("remove the rendition marker of empty staged %s: %w", name, err)
 			}
 			continue
 		}

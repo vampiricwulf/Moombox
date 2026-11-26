@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 func TestHasStagingFiles(t *testing.T) {
@@ -25,6 +27,14 @@ func TestHasStagingFiles(t *testing.T) {
 	}
 	if HasStagingFiles(dir, "job1") {
 		t.Fatal("expected false for a staging dir holding only the display-aspect record")
+	}
+	// And a rendition marker (engine.StagedRenditionMarker) left beside a
+	// media file that is gone: it names a rendition, it holds none.
+	if err := os.WriteFile(engine.StagedRenditionMarker(filepath.Join(dir, "job1", "video_stream")), []byte("abcdefghijk/299\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if HasStagingFiles(dir, "job1") {
+		t.Fatal("expected false for a staging dir holding only metadata and a rendition marker")
 	}
 	// With file
 	os.WriteFile(filepath.Join(dir, "job1", "chat.json"), []byte("{}"), 0o644)

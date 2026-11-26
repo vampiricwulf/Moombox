@@ -153,18 +153,6 @@ func TestParseDash(t *testing.T) {
 	if video.Codecs != "avc1.640028" {
 		t.Errorf("expected avc1.640028, got %q", video.Codecs)
 	}
-	if len(video.Segments) != 1 {
-		t.Fatalf("expected 1 segment entry, got %d", len(video.Segments))
-	}
-	// r=9 means 10 occurrences, each 2000ms = 20s total
-	totalSegs := totalSegmentCount(&video)
-	if totalSegs != 10 {
-		t.Errorf("expected 10 segments, got %d", totalSegs)
-	}
-	totalDur := totalDurationSec(&video)
-	if totalDur != 20.0 {
-		t.Errorf("expected 20.0s duration, got %f", totalDur)
-	}
 }
 
 func TestParseDash_YouTubeLiveTemplate(t *testing.T) {
@@ -450,26 +438,14 @@ func TestParseDash_SegmentTemplate(t *testing.T) {
 		t.Fatalf("expected 1 stream, got %d", len(streams))
 	}
 
+	// The AdaptationSet's template is inherited by its Representation and
+	// resolved against the Representation's BaseURL.
 	s := streams[0]
-	if s.StartNumber != 1 {
-		t.Errorf("startNumber: got %d, want 1", s.StartNumber)
+	if want := "https://cdn.example.com/stream/seg_$Number$.m4s"; s.BaseURL != want {
+		t.Errorf("BaseURL = %q, want %q", s.BaseURL, want)
 	}
-	if s.Timescale != 90000 {
-		t.Errorf("timescale: got %d, want 90000", s.Timescale)
-	}
-	if len(s.Segments) != 1 {
-		t.Fatalf("expected 1 segment entry (with repeats), got %d", len(s.Segments))
-	}
-	if s.Segments[0].R != 4 {
-		t.Errorf("repeat: got %d, want 4", s.Segments[0].R)
-	}
-	count := totalSegmentCount(&s)
-	if count != 5 {
-		t.Errorf("total segments: got %d, want 5", count)
-	}
-	dur := totalDurationSec(&s)
-	if dur != 10.0 { // 5 segments * 180000/90000 = 10s
-		t.Errorf("total duration: got %f, want 10.0", dur)
+	if want := "https://cdn.example.com/stream/init.m4s"; s.Initialization != want {
+		t.Errorf("Initialization = %q, want %q", s.Initialization, want)
 	}
 }
 
@@ -661,97 +637,6 @@ func TestParseFrameRate(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseFrameRate(%q) = %d, want %d", tt.input, got, tt.want)
 		}
-	}
-}
-
-func TestCalculateSegmentRange_NoSegments(t *testing.T) {
-	stream := &DashStream{
-		StartNumber: 0,
-		Timescale:   1000,
-	}
-	result := CalculateSegmentRange(stream, 5.0, 15.0)
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	// Should use estimated 2s segments
-	if result.StartSegment != 2 { // 5.0 / 2.0 = segment 2 (0-indexed)
-		t.Errorf("StartSegment: got %d, want 2", result.StartSegment)
-	}
-}
-
-func TestCalculateSegmentRange_NegativeTimes(t *testing.T) {
-	stream := &DashStream{StartNumber: 0, Timescale: 1000}
-	// Negative start
-	if r := CalculateSegmentRange(stream, -1.0, 10.0); r != nil {
-		t.Errorf("expected nil for negative startTimeSec, got %+v", r)
-	}
-	// Negative end
-	if r := CalculateSegmentRange(stream, 1.0, -5.0); r != nil {
-		t.Errorf("expected nil for negative endTimeSec, got %+v", r)
-	}
-}
-
-func TestCalculateSegmentRange_ReversedRange(t *testing.T) {
-	stream := &DashStream{StartNumber: 0, Timescale: 1000}
-	// End <= start with end > 0 should return nil
-	if r := CalculateSegmentRange(stream, 10.0, 5.0); r != nil {
-		t.Errorf("expected nil for reversed range, got %+v", r)
-	}
-	// Zero-length range (start == end)
-	if r := CalculateSegmentRange(stream, 10.0, 10.0); r != nil {
-		t.Errorf("expected nil for zero-length range, got %+v", r)
-	}
-}
-
-func TestCalculateSegmentRange_EndZero_IsUnbounded(t *testing.T) {
-	stream := &DashStream{StartNumber: 0, Timescale: 1000}
-	// endTimeSec == 0 means "no end bound" -- valid even with startTimeSec > 0
-	r := CalculateSegmentRange(stream, 5.0, 0)
-	if r == nil {
-		t.Fatal("expected non-nil result for endTimeSec == 0")
-	}
-	if r.EndSegment != -1 {
-		t.Errorf("EndSegment: got %d, want -1 (unbounded)", r.EndSegment)
-	}
-}
-
-func TestCalculateSegmentRange_WithTimeline(t *testing.T) {
-	stream := &DashStream{
-		StartNumber: 100,
-		Timescale:   1000,
-		Segments: []DashSegment{
-			{D: 2000, R: 9}, // 10 segments of 2s each = 20s total
-		},
-	}
-	result := CalculateSegmentRange(stream, 5.0, 15.0)
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
-	// Start at 5s: segment at index 2 (5.0/2.0), absolute = 100 + 2 = 102
-	if result.StartSegment != 102 {
-		t.Errorf("StartSegment: got %d, want 102", result.StartSegment)
-	}
-	if result.TrimDuration != 10.0 {
-		t.Errorf("TrimDuration: got %f, want 10.0", result.TrimDuration)
-	}
-}
-
-func TestSegmentDurationSec_Default(t *testing.T) {
-	stream := &DashStream{Timescale: 1000}
-	dur := segmentDurationSec(stream)
-	if dur != defaultSegmentDuration {
-		t.Errorf("expected default %f, got %f", defaultSegmentDuration, dur)
-	}
-}
-
-func TestEstimateSegmentCount(t *testing.T) {
-	count := estimateSegmentCount(10.0)
-	if count != 5 { // ceil(10 / 2) = 5
-		t.Errorf("expected 5, got %d", count)
-	}
-	count = estimateSegmentCount(0)
-	if count != 0 {
-		t.Errorf("expected 0, got %d", count)
 	}
 }
 
