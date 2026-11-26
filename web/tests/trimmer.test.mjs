@@ -351,7 +351,9 @@ test("a page reloaded mid-trim shows the trim still running", { skip }, async ()
 // Mutants: drop the Stop button from the running row; drop the
 // data-stop-trim delegation (the click sends nothing); drop stopTrim's
 // stoppingTrims check (a second click sends a second DELETE); drop the
-// ?stop=1 (a stop that lands after the trim finished deletes its clip).
+// ?stop=1 (a stop that lands after the trim finished deletes its clip);
+// clear the busy mark when the stop is taken rather than on the trim's
+// outcome (the row offers Stop again while the trim still runs).
 test("a running trim's Stop sends one stop for that trim", { skip }, async () => {
   const r = await trimRace();
   let release;
@@ -367,17 +369,22 @@ test("a running trim's Stop sends one stop for that trim", { skip }, async () =>
   assert.deepEqual(sent.map((c) => c.url + c.search), ["/api/jobs/A/trims/tA?stop=1"], "Stop sent the wrong requests");
   release(response({ body: { success: true, stopped: true } }));
   for (let i = 0; i < 6; i++) await r.h.flush();
-  assert.equal(r.h.app.stoppingTrims.size, 0, "the stop's busy mark outlived its answer");
+  assert.ok(r.h.app.stoppingTrims.has("tA"), "the trim still runs, but its Stop was offered again");
+  await r.click(runningRow(r.h, "tA").querySelector("[data-stop-trim]"));
+  assert.equal(r.h.http.calls.filter((c) => c.method === "DELETE").length, 1, "a second stop was sent before the trim ended");
+  trimStatus(r.h, { ...runningFrame("tA", "A", 10), state: "failed", stopped: true, stopReason: "operator", error: "Stopped" });
+  assert.equal(r.h.app.stoppingTrims.size, 0, "the stop's busy mark outlived the trim");
 });
 
-// Mutant: drop handleTrimStatus's stopped arm — a stopped trim is toasted as
-// failed.
+// Mutants: drop handleTrimStatus's stopped arm — a stopped trim is toasted as
+// failed; show the reason by error's wording instead of stopReason — a
+// reworded operator stop is toasted with its text.
 test("a stopped trim is toasted as stopped, not failed", { skip }, async () => {
   const r = await trimRace();
-  trimStatus(r.h, { id: "tB", jobId: "B", state: "failed", stopped: true, startTime: 70, endTime: 80, error: "Stopped" });
+  trimStatus(r.h, { id: "tB", jobId: "B", state: "failed", stopped: true, stopReason: "operator", startTime: 70, endTime: 80, error: "Stopped by you" });
   assert.match(said(r.h), /Trim 1:10 – 1:20 of "title B" stopped/);
-  assert.doesNotMatch(said(r.h), /failed/);
-  trimStatus(r.h, { id: "tC", jobId: "C", state: "failed", stopped: true, startTime: 70, endTime: 80, error: "The job was deleted before the trim finished" });
+  assert.doesNotMatch(said(r.h), /failed|Stopped by you/);
+  trimStatus(r.h, { id: "tC", jobId: "C", state: "failed", stopped: true, stopReason: "job_deleted", startTime: 70, endTime: 80, error: "The job was deleted before the trim finished" });
   assert.match(said(r.h), /stopped: The job was deleted before the trim finished/);
 });
 
@@ -409,4 +416,19 @@ test("a Stop confirmed after its trim finished sends nothing", { skip }, async (
   await pending;
   await r.h.flush();
   assert.deepEqual(r.h.http.calls.filter((c) => c.method === "DELETE"), [], "a Stop for a finished trim was sent");
+});
+
+// The trim finished between the confirm's check and the request: the server
+// answers 404, and the trim's own "created" toast already said what happened.
+//
+// Mutant: toast every non-ok answer — a danger toast for a trim that succeeded.
+test("a Stop that arrives just after its trim ended says nothing", { skip }, async () => {
+  const r = await trimRace();
+  r.h.http.on("DELETE /api/jobs/:id/trims/:trimId", () => response({ status: 404, body: { error: "the trim is no longer running" } }));
+  r.h.app.showConfirm = async () => true;
+  trimStatus(r.h, runningFrame("tA", "A", 99));
+  await r.h.app.stopTrim("A", "tA");
+  await r.h.flush();
+  assert.doesNotMatch(said(r.h), /Failed to stop trim/);
+  assert.equal(r.h.app.stoppingTrims.size, 0, "a stop that was not taken kept its busy mark");
 });
