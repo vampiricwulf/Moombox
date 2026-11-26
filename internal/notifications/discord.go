@@ -604,9 +604,8 @@ func (d *DiscordWebhook) bucketWait() time.Duration {
 // delivery: the ladder gave up on it, or its Retry-After was missing,
 // malformed or past discordRetryAfterWaitCap. noteBucket leaves every 429 to the
 // ladder, so with nothing recorded the queue's next item POSTed straight into
-// the same limit, and the one after it — a Retry-After of 45 s (Discord's
-// per-channel webhook limit commonly asks 30-60 s) dropped every queued alert
-// within milliseconds. The window is the Retry-After, else
+// the same limit, and the one after it — a Retry-After past the wait cap
+// dropped every queued alert within milliseconds. The window is the Retry-After, else
 // X-RateLimit-Reset-After, else the cap, and never more than the cap, which
 // waitForBucket enforces anyway. A no-op for anything but a 429.
 func (d *DiscordWebhook) noteRateLimitGiveUp(r discordResponse) {
