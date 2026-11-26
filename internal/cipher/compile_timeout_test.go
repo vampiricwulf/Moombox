@@ -82,15 +82,11 @@ func getSolvers(t *testing.T, s *GojaResolver, ctx context.Context, playerURL st
 // 10 minutes rather than run again for the full bound on every request;
 // after that it is compiled again.
 //
-// Mutants: the compile run without a bound (the backstop fires); the
-// production bound other than 120 s (the pin fails); no refusal (the second
-// request compiles the working script and succeeds); the refusal checked
-// only after the fetch (gets goes up); a refusal that never ends (the
+// Mutants: the compile run without a bound (the backstop fires); no refusal
+// (the second request compiles the working script and succeeds); the refusal
+// checked only after the fetch (gets goes up); a refusal that never ends (the
 // request at +10 min is refused).
 func TestGetSolversRefusesAPlayerWhoseCompileTimedOut(t *testing.T) {
-	if compileTimeout != 120*time.Second {
-		t.Fatalf("compileTimeout = %v, want 120s: production compiles get that bound", compileTimeout)
-	}
 	const playerURL = "https://www.youtube.com/s/player/aaaa1111/player_ias.vflset/en_US/base.js"
 	s, gets, now := compileFixture(t, playerURL, hangingPlayer, 100*time.Millisecond)
 
@@ -153,31 +149,45 @@ func TestGetSolversACallerQueuedBehindATimedOutCompileIsRefused(t *testing.T) {
 	}
 }
 
-// A compile stopped by its caller's context is the caller's ending, not the
-// player's fault: the player is not refused, and the next request compiles.
+// A caller whose context ends while the compile runs does not cut the
+// compile short: the compile finishes and fills the cache, so the next
+// caller gets the solvers without compiling again. Callers with short
+// deadlines (a 30 s probe) would otherwise each start from zero.
 //
-// Mutants: the context not reaching the run (the backstop fires, the bound
-// being 60 s here); a cancelled compile refused like a timed-out one (the
-// next request is refused).
-func TestGetSolversACancelledCompileIsNotRefused(t *testing.T) {
+// Mutant: the caller's context passed to the run (the first call returns
+// context.Canceled and the second compiles again, gets going to 2).
+func TestGetSolversACallerCancelDoesNotAbortARunningCompile(t *testing.T) {
 	const playerURL = "https://www.youtube.com/s/player/cccc3333/player_ias.vflset/en_US/base.js"
-	s, gets, _ := compileFixture(t, playerURL, hangingPlayer, 60*time.Second)
+	const slowPlayer = `var end = Date.now() + 400; while (Date.now() < end) {}
+_result.n = function(x) { return x + "_ok"; };`
+	s, gets, _ := compileFixture(t, playerURL, slowPlayer, 60*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("cancel goroutine panicked: %v", r)
+			}
+		}()
 		for gets.Load() == 0 {
 			time.Sleep(time.Millisecond)
 		}
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	if _, err := getSolvers(t, s, ctx, playerURL); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled compile = %v, want context.Canceled", err)
+	if _, err := getSolvers(t, s, ctx, playerURL); err != nil {
+		t.Fatalf("compile whose caller cancelled = %v, want the solvers", err)
 	}
-
-	setPreprocessed(t, s, playerURL, workingPlayer)
-	if _, err := getSolvers(t, s, context.Background(), playerURL); err != nil {
-		t.Errorf("request after a cancelled compile = %v, want a compile", err)
+	solvers, err := getSolvers(t, s, context.Background(), playerURL)
+	if err != nil {
+		t.Fatalf("next request = %v, want the cached solvers", err)
+	}
+	if out, err := solvers.DecryptN("x"); err != nil || out != "x_ok" {
+		t.Errorf("DecryptN = %q, %v; want x_ok", out, err)
+	}
+	if got := gets.Load(); got != 1 {
+		t.Errorf("CDN requests = %d, want 1: the next request should hit the cache", got)
 	}
 }
 

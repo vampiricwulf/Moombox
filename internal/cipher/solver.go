@@ -331,8 +331,11 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 		return nil, err
 	}
 
+	// The caller's context bounds the fetch and the wait for the slot, not
+	// the compile: a compile cut short by a short-deadline caller would fill
+	// no cache, and the next caller would start again from zero.
 	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
-	solvers, err := getFromPreparedCtx(ctx, preprocessed)
+	solvers, err := getFromPrepared(preprocessed)
 	if err != nil {
 		return nil, fmt.Errorf("compile cipher solver for %s: %w", playerID, err)
 	}
@@ -422,17 +425,10 @@ func containsKey(order []string, key string) bool {
 // it ran on. Wrap the whole thing in a deferred recover so a broken player
 // script produces a clean error return the caller can handle.
 //
-// getFromPrepared is the context-free form the tests call; compileSolver
-// calls getFromPreparedCtx with the caller's context.
-func getFromPrepared(code string) (*Solvers, error) {
-	return getFromPreparedCtx(context.Background(), code)
-}
-
-// getFromPreparedCtx runs code under compileTimeout and ctx: either one ending
-// interrupts the script (a JS-level loop; a hang inside a native Go call is
-// not reached by an interrupt). A timeout's error wraps
-// mbgoja.ErrExecutionTimeout.
-func getFromPreparedCtx(ctx context.Context, code string) (solvers *Solvers, err error) {
+// The run is bounded by compileTimeout alone: its end interrupts the script
+// (a JS-level loop; a hang inside a native Go call is not reached by an
+// interrupt), and the error then wraps mbgoja.ErrExecutionTimeout.
+func getFromPrepared(code string) (solvers *Solvers, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			solvers = nil
@@ -455,7 +451,7 @@ func getFromPreparedCtx(ctx context.Context, code string) (solvers *Solvers, err
 	}
 
 	// Execute the preprocessed code
-	_, err = mbgoja.RunStringWithTimeout(ctx, vm, code, compileTimeout)
+	_, err = mbgoja.RunStringWithTimeout(context.Background(), vm, code, compileTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("run preprocessed code: %w", err)
 	}

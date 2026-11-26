@@ -1614,7 +1614,7 @@ The `compileSolver` method executes this pipeline:
 
 3. **Compile**: Execute the preprocessed code in a fresh Goja VM:
    - A `_result` object is created in the VM.
-   - The preprocessed code is executed, populating `_result.sig` and `_result.n` with JavaScript functions. The run is bounded by `compileTimeout` (120 s) and by the caller's context, through `mbgoja.RunStringWithTimeout`; an interrupt stops a JS-level loop, not a hang inside a native Go call.
+   - The preprocessed code is executed, populating `_result.sig` and `_result.n` with JavaScript functions. The run is bounded by `compileTimeout` (120 s) alone, through `mbgoja.RunStringWithTimeout`; an interrupt stops a JS-level loop, not a hang inside a native Go call.
    - These are wrapped in Go closures with panic recovery.
 
 ### STS Extraction
@@ -1635,7 +1635,7 @@ The `compileSolver` method executes this pipeline:
 
 A failed compile is not cached, so each waiter then tries its own. That is why the slot is not a plain mutex: with the player CDN down, a cancelled job would wait out every fetch ahead of it.
 
-The one failure that is remembered is a compile that ran out of `compileTimeout`: the script on disk is the same next time, so `GetSolvers` refuses that player with `ErrCompileRefused` for `compileRefusal` (10 minutes) instead of running it again for the full bound while holding the slot. The refusal is checked before the slot and again after it, so callers queued behind the timed-out compile are refused too. The list lives in memory, holds at most `maxTimedOutPlayers` (16) players, and drops the one whose refusal ends first when full. A compile stopped by its caller's context is not refused.
+The one failure that is remembered is a compile that ran out of `compileTimeout`: the script on disk is the same next time, so `GetSolvers` refuses that player with `ErrCompileRefused` for `compileRefusal` (10 minutes) instead of running it again for the full bound while holding the slot. The refusal is checked before the slot and again after it, so callers queued behind the timed-out compile are refused too. The list lives in memory, holds at most `maxTimedOutPlayers` (16) players, and drops the one whose refusal ends first when full. The caller's context bounds the player fetch and the wait for the slot but not the compile, so a caller with a short deadline cannot cut a compile short and leave nothing cached for the next one.
 
 ---
 
