@@ -1771,6 +1771,25 @@ export function streamUrl(job) {
 }
 
 /**
+ * historyEntryUrl is the page an orphaned feed-history entry names, from its
+ * ID alone (an entry carries no platform). History is keyed by job ID, so a
+ * Twitch job leaves its "tw_" key: a VOD's "tw_v<digits>" links to its
+ * twitch.tv page through streamUrl's VOD rule; a live capture's
+ * "tw_<stream id>" and a clip's "tw_clip_<slug>" name no page. Any other ID
+ * links to YouTube only when it is shaped like a YouTube video ID (eleven
+ * characters), so an import placeholder such as "imp_0a1b2c3d" is not linked.
+ * Empty string = no link.
+ * @param {string} id
+ * @returns {string}
+ */
+export function historyEntryUrl(id) {
+  if (/^tw_v\d+$/.test(id || "")) return streamUrl({ videoId: id, platform: "twitch", isVod: true });
+  if ((id || "").startsWith("tw_")) return "";
+  if (/^[A-Za-z0-9_-]{11}$/.test(id || "")) return streamUrl({ videoId: id });
+  return "";
+}
+
+/**
  * isImportPlaceholderId reports whether a videoId is the stand-in the ZIP
  * import mints when the archive carries no YouTube id: "imp_" and the eight
  * lowercase hex digits of randomHex(4) (internal/web/routes/import_routes.go).

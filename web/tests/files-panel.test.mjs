@@ -37,6 +37,29 @@ test("each row's delete control names what it removes", { skip }, async () => {
   assert.equal(remove.getAttribute("label"), "Remove dQw4w9WgXcQ");
 });
 
+// History is keyed by job ID, so Twitch jobs leave "tw_" keys behind: a live
+// capture's "tw_<stream id>", a clip's "tw_clip_<slug>", a VOD's "tw_v<id>".
+// Every row linked to youtube.com/watch, so a Twitch row opened a YouTube
+// error page. Only a YouTube video ID links to YouTube now; a VOD links to its
+// twitch.tv page, and any other ID, which names no page, is plain text.
+//
+// Mutants: link every row to youtube.com/watch again; drop the VOD link.
+test("each history row links to the page its ID names, and only that", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.files.renderOrphanedHistory(
+    ["dQw4w9WgXcQ", "tw_v123456789", "tw_41234567890", "tw_clip_FaintLightGull-abc", "imp_0a1b2c3d"]
+      .map((videoId) => ({ videoId, addedAt: "2026-09-01T00:00:00Z" })));
+  const rows = [...h.document.querySelectorAll("#history-table .history-vid")]
+    .map((el) => [el.textContent, el.tagName.toLowerCase(), el.getAttribute("href")]);
+  assert.deepEqual(rows, [
+    ["dQw4w9WgXcQ", "a", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    ["tw_v123456789", "a", "https://www.twitch.tv/videos/123456789"],
+    ["tw_41234567890", "span", null],
+    ["tw_clip_FaintLightGull-abc", "span", null],
+    ["imp_0a1b2c3d", "span", null],
+  ]);
+});
+
 // Mutant: drop the asides sentence from either confirm.
 test("the delete confirms say when set-aside recordings go with the files", { skip }, async () => {
   const h = await harness.makeApp();
