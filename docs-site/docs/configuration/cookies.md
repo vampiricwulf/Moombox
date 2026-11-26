@@ -274,8 +274,9 @@ be paired with [`browser_type`](#cookiesbrowser_type).
   regular file, or is not executable, and refuse a path without a browser
   type ("browser_type required when browser_path is set" in the TUI).
 - Both UIs also refuse a file whose name ends like one an import writes
-  (`.mp4`, `.mkv`, `.webm`, `.ts`, `.chat.json`, `.partial` or `.zip`, in
-  any letter case), or a link that leads to such a file: an imported file
+  (`.mp4`, `.mkv`, `.webm`, `.ts`, `.chat.json`, `.chat.raw.jsonl`,
+  `.chapters.json`, `.description`, `.jpg`, `.webp`, `.png`, `.partial` or
+  `.zip`, in any letter case), or a link that leads to such a file: an imported file
   is never a browser, and on a drive
   without Linux permissions (an SMB share, exFAT, NTFS, a Docker Desktop
   folder) such a file can look executable.
