@@ -817,6 +817,15 @@ export class MoomboxApp {
     try {
       const status = await this._fetchStatus();
       if (status) {
+        // The archive import's upload cap (constants.MaxImportUploadBytes),
+        // which the Imports panel checks a chosen file against before
+        // uploading it. Taken from a superseded read too: it is a constant
+        // of the build, so no newer answer can differ, and the import's own
+        // read of it (uploadImport) may be the one superseded.
+        if (Number.isFinite(status.importMaxBytes) && status.importMaxBytes !== this.importMaxBytes) {
+          this.importMaxBytes = status.importMaxBytes;
+          this.imports?.showImportLimit?.();
+        }
         if (gen !== this._statusGen) return;
         // Each group of fields is skipped when a newer writer of it answered meanwhile.
         this._applyAuthStatus(status, gens);
@@ -826,13 +835,6 @@ export class MoomboxApp {
         if (Number.isFinite(status.utcOffsetMinutes) && status.utcOffsetMinutes !== this.serverUtcOffsetMinutes) {
           this.serverUtcOffsetMinutes = status.utcOffsetMinutes;
           this.settings?._wireTemplatePreview?.();
-        }
-        // The archive import's upload cap (constants.MaxImportUploadBytes),
-        // which the Imports panel checks a chosen file against before
-        // uploading it.
-        if (Number.isFinite(status.importMaxBytes) && status.importMaxBytes !== this.importMaxBytes) {
-          this.importMaxBytes = status.importMaxBytes;
-          this.imports?.showImportLimit?.();
         }
         if (status.version) {
           if (this._version && status.version !== this._version) {
