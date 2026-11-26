@@ -740,13 +740,24 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if archive, gone := finishedRowGone(err); gone {
+				// The mux finished and the row was deleted before it could
+				// be marked Finished: the archive is in place under no row,
+				// and staging is reclaimed as a finished mux's is.
+				w.logger.Info("MuxJob: the job was deleted after its recording was written; the archive is left for the orphan scan",
+					"jobID", jobID, "output", archive)
+				w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
+				return
+			}
 			if errors.Is(err, ErrCancelled) {
 				// The finalize's Muxing write found an outcome on the row —
 				// an operator's Cancel this listener has yet to hear, or
 				// another outcome no cancel follows — and nothing was muxed.
 				// It stands: read as a failure, the Error write below landed
-				// on it, whatever this mux's ctx said.
-				w.logger.Info("MuxJob: the row already holds an outcome; nothing muxed, staging is kept", "jobID", jobID)
+				// on it, whatever this mux's ctx said. Or the outcome landed
+				// after the archive was written, before the Finished write
+				// (writeFinished): err then names the file.
+				w.logger.Info("MuxJob: the row already holds an outcome; staging is kept", "jobID", jobID, "err", err)
 				return
 			}
 			if ctx.Err() != nil && root.Err() == nil {
@@ -768,6 +779,17 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 				// (muxOnRestart only routes a Muxing row — writing Error here
 				// would strand the recording).
 				w.logger.Info("MuxJob: cancelled by shutdown; the row stays Muxing for the next start", "jobID", jobID)
+				return
+			}
+			if w.shuttingDown() {
+				// The stop has begun and the mux root is not cancelled yet
+				// (Stop waits inFlightWait first): an FFmpeg that was
+				// signalled directly — systemd's default KillMode — failed
+				// this mux, not the recording. As the cancel above: the row
+				// stays Muxing with its staging, and the next start re-muxes
+				// it (owner ruling R3-8).
+				w.logger.Info("MuxJob: the mux stopped while Moombox is shutting down; the row stays Muxing for the next start",
+					"jobID", jobID, "err", err)
 				return
 			}
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
@@ -1016,7 +1038,7 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 		defer releaseSlot()
 
 		if err := w.orchestrator.recoverAsides(ctx, jobCtx); err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || w.shuttingDown() {
 				w.logger.Info("RecoverAsides: cancelled by shutdown; the recordings stay in staging", "jobID", jobID)
 				return
 			}

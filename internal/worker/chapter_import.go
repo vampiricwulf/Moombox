@@ -224,6 +224,12 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 		return w.archiveStillAsRead(jobID, expect)
 	}
 	if err := muxer.RemuxChapters(ctx, path, path, metaPath, check); err != nil {
+		if w.shuttingDown() {
+			// Said for what it is, as every mux failure path says it (owner
+			// ruling R3-8): the archive is as it was, and the import can be
+			// run again after the restart.
+			return nil, fmt.Errorf("the re-mux was stopped because Moombox is shutting down: %w", err)
+		}
 		return nil, err
 	}
 

@@ -408,6 +408,26 @@ func TestTrimEventWireShape(t *testing.T) {
 	if _, ok := got["error"]; ok {
 		t.Errorf("a finished trim's frame carries an error: %s", b)
 	}
+	if _, ok := got["stopped"]; ok {
+		t.Errorf("a finished trim's frame says stopped: %s", b)
+	}
+	if _, ok := got["stopReason"]; ok {
+		t.Errorf("a finished trim's frame carries a stopReason: %s", b)
+	}
+
+	// A stopped trim: app.js reads "stopped" to toast it as no failure, and
+	// "stopReason" to tell the operator's Stop from the job's delete.
+	b, err = json.Marshal(TrimEvent{TrimTask: TrimTask{ID: "trim_j_1", JobID: "j"}, State: TrimStateFailed, Error: trimStoppedReason, Stopped: true, StopReason: TrimStopOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["stopped"] != true || got["state"] != "failed" || got["stopReason"] != "operator" {
+		t.Errorf("a stopped trim's frame = %s, want state failed, stopped true and stopReason operator", b)
+	}
 }
 
 // TestRunningTrimsReportProgress: the dashboard had no trim progress at all —

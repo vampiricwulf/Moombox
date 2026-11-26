@@ -484,3 +484,55 @@ func TestTwitchClipDescriptionNamesTheCurator(t *testing.T) {
 		}
 	}
 }
+
+// A job deleted after its archive was written and before the Finished write,
+// on the queued path: the delete cancels the run's context, and the finalize
+// error still says the row is gone, so processJob reclaims staging as a
+// finished run does rather than holding the raw recording for the orphan
+// sweep.
+//
+// Mutant: the finalize error replaced by ctx.Err() again (staging is kept).
+func TestAJobDeletedBeforeItsFinishedWriteReclaimsStagingOnTheQueuedPath(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	fixture := filepath.Join(t.TempDir(), "clip.mp4")
+	if out, err := exec.Command(ffmpegPath, "-y",
+		"-f", "lavfi", "-i", "testsrc=duration=1:size=128x72:rate=30",
+		"-f", "lavfi", "-i", "sine=duration=1",
+		"-c:v", "libx264", "-c:a", "aac", "-shortest", fixture).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v\n%s", err, out)
+	}
+	media, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/preview.jpg" {
+			http.Error(rw, "no thumbnail here", http.StatusNotFound)
+			return
+		}
+		http.ServeContent(rw, r, "clip.mp4", time.Time{}, strings.NewReader(string(media)))
+	}))
+	defer srv.Close()
+
+	w, db := testWorkerSetup(t)
+	w.streamProc.clipFn = func(context.Context, string) (*twitch.TwitchClipInfo, error) { return testClip(srv.URL), nil }
+	job := addClipJob(t, db, t.TempDir())
+	staging := w.buildJobContext(job).StagingDir
+	w.orchestrator.logger = &onInfoLogger{
+		prefix: "download complete",
+		hook: func() {
+			if err := db.DeleteJob(job.ID); err != nil {
+				t.Errorf("DeleteJob: %v", err)
+			}
+		},
+	}
+
+	w.processJob(context.Background(), job.ID)
+
+	if row, _ := db.GetJob(job.ID); row != nil {
+		t.Fatalf("row = %+v, want it deleted", row)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging was kept for a deleted job whose archive was written (stat: %v)", err)
+	}
+}

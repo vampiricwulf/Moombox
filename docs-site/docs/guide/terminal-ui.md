@@ -349,7 +349,7 @@ The dashboard shows the same summary before its Reinitialize.
 | `A X X` | **Cancel Job**. Batch-capable; a batch runs in the background, and while it runs a new Resume, Reinitialize or Cancel is refused. | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?`. |
 | `A D D` | **Delete Job**. Batch-capable. | `Finished`, `Error`, `Cancelled`, `COOKIES?`. Cancel an active job first. |
 | `A W` | **Toggle Watched**: adds or removes the dim `•`. Batch-capable. | `Finished`. |
-| `A T` | **Trim Video**: cut a clip from the archive. | `Finished` jobs with an output file. One trim runs at a time. |
+| `A T` | **Trim Video**: cut a clip from the archive. | `Finished` jobs with an output file. One trim runs at a time; while it runs in the background, `A T` from any row brings its progress back. |
 | `A O` | **Browse Orphaned Items**. | Always. |
 | `A K` | **Manage Client Tokens**. | Always. |
 | `A C` | **Import Chapters**: paste a timestamp comment as the job's chapters. | Complete `Finished` jobs with an archive. |
@@ -479,7 +479,13 @@ import.
 Enter a start and end time (++tab++ switches field, ++enter++ continues), check
 the confirmation, and press ++enter++ to create the trim. The end must be after
 the start, within the video's length, and at least 1 second later. While it
-encodes, ++esc++ closes the dialog and the encode carries on in the background.
+encodes, `S` stops the trim (the unfinished file is removed, the dialog closes
+with "Trim stopped", and no Trim Failed notification is sent), and ++esc++
+closes the dialog while the encode carries on in the background; `A T`, from any row, brings
+its progress back, so `S` can still stop it. A trim that
+has finished encoding and is being saved can no longer be stopped; the dialog
+says so and the trim completes. Deleting the job stops its trim too ("Trim
+stopped: the job was deleted").
 `M` switches to delete mode, which lists the job's existing trims; ++enter++
 twice deletes the selected one.
 

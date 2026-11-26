@@ -761,6 +761,9 @@ func TestRepairRefusedWithoutSpace(t *testing.T) {
 	if err := w.restartMux(id); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
+	// Waited for, not stopped: a mux that fails once the stop has begun
+	// leaves the row Muxing for the next start (owner ruling R3-8).
+	w.wg.Wait()
 	w.Stop()
 
 	row, _ := db.GetJob(id)

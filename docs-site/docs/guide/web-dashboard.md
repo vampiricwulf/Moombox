@@ -352,7 +352,8 @@ Below that, sections appear when they have something to show:
   video was added.
 - **Trims** — every trim of this job with its range, duration and size, a
   **Delete** button (asks "Delete this trim? This cannot be undone."), and a
-  progress bar for each trim still running. See [Trimming](#trimming).
+  progress bar with a **Stop** button for each trim still running. See
+  [Trimming](#trimming).
 - **Set-aside Recordings** — footage the engine preserved when it could not
   resume a recording mid-stream. Each is listed with its age, size and
   whether it has a resume sidecar, plus whether a chat capture is kept in
@@ -440,6 +441,12 @@ split recording.
 The trim runs on the server: you can close the dialog or the page and it
 keeps going. Its progress bar shows in the job's **Trims** section, and a
 toast reports "Trim *start – end* of "*title*" created" or "… failed: *reason*".
+**Stop** on a running trim's row (asks "Stop this trim? What it has encoded
+so far is discarded.") ends it: the unfinished file is removed, the toast says
+"… stopped", and no Trim Failed notification is sent. A trim that has finished
+encoding and is being saved can no longer be stopped ("the trim has finished
+encoding and is being saved"). Deleting the job stops its running trim the
+same way.
 
 A trim is refused when:
 

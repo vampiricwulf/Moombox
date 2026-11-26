@@ -92,9 +92,34 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 	})
 
 	// DELETE /api/jobs/:id/trims/:trimId
+	//
+	// A trim still running is stopped (TrimService.StopTrim, the call the
+	// TUI's stop makes): {success: true, stopped: true}, its outcome then
+	// arriving as a trim_status frame marked stopped. 409 when it is past
+	// stopping (being saved). A stored trim is deleted, as before — unless
+	// the request says ?stop=1 (the dashboard's Stop): then a trim no longer
+	// running is 404 "the trim is no longer running", so a Stop that lands
+	// just after the trim finished never deletes the clip it made.
 	r.Delete("/api/jobs/{id}/trims/{trimId}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		trimID := chi.URLParam(req, "trimId")
+
+		err := trimSvc.StopTrim(jobID, trimID)
+		var refused *worker.TrimRefusedError
+		switch {
+		case err == nil:
+			jsonResponse(rw, map[string]any{"success": true, "stopped": true})
+			return
+		case errors.As(err, &refused):
+			jsonError(rw, refused.Reason, http.StatusConflict)
+			return
+		case !errors.Is(err, worker.ErrTrimNotFound):
+			jsonError(rw, "failed to stop trim", http.StatusInternalServerError)
+			return
+		case req.URL.Query().Get("stop") == "1":
+			jsonError(rw, "the trim is no longer running", http.StatusNotFound)
+			return
+		}
 
 		if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
 			if errors.Is(err, worker.ErrTrimNotFound) {

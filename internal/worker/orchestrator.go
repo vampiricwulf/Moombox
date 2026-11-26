@@ -108,6 +108,12 @@ type DownloadOrchestrator struct {
 	// orchestrator a test builds by struct literal) never waits.
 	waitArchiveRewrite func(ctx context.Context, jobID, what string) bool
 
+	// shuttingDown is the worker's one answer to "has the stop begun"
+	// (DownloadWorker.shuttingDown, set by the worker; owner ruling R3-8),
+	// read through stopping. nil (an orchestrator a test builds by struct
+	// literal) is never stopping.
+	shuttingDown func() bool
+
 	// globalOutputDir is paths.output_directory as it stands now, absolute
 	// (resolveOutputDir; set by the worker): what the rows' relative columns
 	// are read against when a finalize asks whether another row names a file
@@ -781,7 +787,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Mux and finalize (B5: includes ffprobe metadata)
 	if err := o.muxAndFinalize(ctx, jobCtx, result); err != nil {
-		if ctx.Err() != nil {
+		// A row deleted after its archive was written says so through the
+		// error, whatever the delete did to ctx: processJob reclaims staging
+		// on it (writeFinished).
+		if _, gone := finishedRowGone(err); !gone && ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return err
@@ -881,6 +890,12 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	// it does not count as a failure. But nobody asked for this trim from a
 	// dialog, so both are told here: one Trim Failed per failed post-download
 	// trim, as before.
+	// One the operator stopped (StopTrim) is an answer they gave: nothing to
+	// tell them.
+	if errors.Is(trimErr, ErrTrimStopped) {
+		o.logger.Info("post-download trim stopped by the operator", "jobID", job.ID)
+		return
+	}
 	_, refused := errors.AsType[*TrimRefusedError](trimErr)
 	if refused || errors.Is(trimErr, errTrimInterrupted) {
 		o.failPostDownloadTrim(job, trimErr)
@@ -891,8 +906,9 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 
 // failPostDownloadTrim logs a post-download trim that made no file and sends
 // Trim Failed for it — unless the job is gone: a job deleted before its trim
-// ran, or while it ran (its context is cancelled, so the trim stops), is one
-// whoever deleted it wants none of.
+// ran, or while it ran (the trim service cancels a trim whose job is deleted,
+// whichever context it runs under — the mux root of a re-claimed finalize
+// included), is one whoever deleted it wants none of.
 func (o *DownloadOrchestrator) failPostDownloadTrim(job *database.Job, trimErr error) {
 	if fresh, err := o.db.GetJob(job.ID); err == nil && fresh == nil {
 		o.logger.Info("post-download trim dropped: the job was deleted", "jobID", job.ID, "err", trimErr)

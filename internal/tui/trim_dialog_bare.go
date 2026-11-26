@@ -17,8 +17,9 @@ import (
 //	confirm   the range and the resulting length, the estimated size, and
 //	          "Re-encodes into a new file." whole; a failed create's error
 //	          under them
-//	progress  the percentage in the title, the bar, the elapsed time; the
-//	          keys row says Esc closes and the encode keeps running
+//	progress  the percentage in the title, the bar, the elapsed time (and
+//	          "Stopping..." while a stop is out); the keys row says S stops
+//	          the trim and Esc closes while the encode keeps running
 //	delete    the trims in a window that always holds the cursor, and one
 //	          message under it: the error, else "Deleting...", else the
 //	          armed "Enter again deletes this trim", whole
@@ -120,13 +121,17 @@ func (m *TrimDialogModel) bareView() string {
 	case trimStepProgress:
 		sheet.left = m.spinner.View() + " " + TitleStyle.Render("Creating trim")
 		sheet.right = lipgloss.NewStyle().Foreground(ColorCyan).Render(fmt.Sprintf("%.1f%%", m.progressPercent))
-		sheet.keys = DimStyle.Render("Esc: keep running, close")
+		keys("S: Stop  Esc: keep running, close", "S:Stop  Esc:run in background")
 		// Set on every draw, as the normal form does: nothing outlives it.
 		m.progressBar.SetWidth(w)
 		progress.WithColors(ColorDownloading, ColorMuxing)(&m.progressBar)
+		elapsed := DimStyle.Render(fmt.Sprintf("Elapsed %s", m.progressElapsed.Truncate(time.Second)))
+		if m.stopping {
+			elapsed += " " + YellowStyle.Render("Stopping...")
+		}
 		sheet.body = []string{
 			m.progressBar.ViewAs(m.progressPercent / 100),
-			DimStyle.Render(fmt.Sprintf("Elapsed %s", m.progressElapsed.Truncate(time.Second))),
+			elapsed,
 		}
 		sheet.errorUnder(m.errorMsg, ErrorStyle, w, h)
 	}

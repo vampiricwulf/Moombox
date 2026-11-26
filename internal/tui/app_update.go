@@ -786,8 +786,36 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chapterSaveResultMsg:
 		return a.handleChapterSaveResult(msg)
 
+	case stopTrimResultMsg:
+		// Taken: the trim's own result follows, Stopped. Refused (it is
+		// being saved, or has already ended): S works again, and why is
+		// shown where the operator is looking.
+		// No trim running any more: it ended as the stop was sent, and its
+		// own result has already been reported ("Trim created" or its
+		// failure), which a refusal must not cover.
+		if msg.Err == "" || !a.trimInProgress {
+			return a, nil
+		}
+		if a.trimDlg.IsVisible() && a.trimDlg.JobID() == msg.JobID && a.trimDlg.Stopping() {
+			a.trimDlg.StopRefused(msg.Err)
+		} else {
+			a.setFeedbackWithSeverity("Trim stop failed: "+msg.Err, severityError)
+		}
+		return a, nil
+
 	case createTrimResultMsg:
 		a.trimInProgress = false
+		if msg.Stopped {
+			if a.trimDlg.IsVisible() {
+				a.trimDlg.Close()
+			}
+			if msg.Err != "" {
+				a.setFeedback("Trim stopped: " + msg.Err)
+			} else {
+				a.setFeedback("Trim stopped")
+			}
+			return a, a.ensureMarqueeTicking()
+		}
 		if a.trimDlg.IsVisible() {
 			// Dialog still open — show result or error inline
 			if msg.Err != "" {

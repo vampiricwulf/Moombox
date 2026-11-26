@@ -882,7 +882,7 @@ func TestBareTrimFrames(t *testing.T) {
 		"Elapsed 1m12s",
 		"",
 		"",
-		"Esc: keep running, close",
+		"S:Stop  Esc:run in background",
 	})
 	if got := plainRows(bareTrim(30, 6, "progress").View())[0]; !strings.Contains(got, "Creating trim") || !strings.HasSuffix(got, "42.3%") {
 		t.Errorf("the progress title: %q", got)

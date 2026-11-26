@@ -1209,7 +1209,7 @@ streamEnded:
 		}
 		seg, muxErr := o.muxLiveFinalPart(ctx, jobCtx, tracker, end(), segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
-			o.logger.Error("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+			o.partMuxFailed("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
 			o.logger.Info("final quality segment muxed",
 				"segment", segmentIndex, "quality", currentQuality.Label,

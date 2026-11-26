@@ -349,3 +349,130 @@ func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
 		t.Errorf("%s holds %q, want the whole encode", filepath.Base(trimFile), b)
 	}
 }
+
+// TestTrimDeleteStopsARunningTrim: DELETE on a trim still encoding answered
+// 404 (it searched stored trims only), so a running trim had no stop but a
+// restart of Moombox. It now stops it — the same TrimService.StopTrim the
+// TUI's stop calls — and answers {stopped: true}; the partial file goes and
+// nothing is stored. A stored trim is deleted as before (here: none, 404).
+//
+// Mutant: drop the handler's StopTrim — the running trim answers 404.
+func TestTrimDeleteStopsARunningTrim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stand-in for FFmpeg")
+	}
+	dir := t.TempDir()
+	db, err := database.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	out := filepath.Join(dir, "out", "Title [stop12345].mp4")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	length := 600
+	if _, err := db.AddJob(&database.Job{ID: "stop12345", VideoID: "stop12345", URL: "u",
+		Status: database.StatusFinished, OutputFile: out, Filename: "Title [stop12345].mp4", LengthSeconds: &length}); err != nil {
+		t.Fatal(err)
+	}
+	// A stand-in FFmpeg that opens its output and waits for a gate that never
+	// opens (30 s at most, so nothing it is left running outlives the test).
+	ff := filepath.Join(dir, "ffmpeg")
+	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\nprintf partial > \"$out\"\n" +
+		"i=0; while [ ! -e '" + filepath.Join(dir, "gate") + "' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n"
+	if err := os.WriteFile(ff, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc := worker.NewTrimService(db, ff, silentLogger{})
+	t.Cleanup(svc.Stop)
+	r := chi.NewRouter()
+	TrimRoutes(r, db, svc, nil)
+
+	task, err := svc.StartTrim(mustGetJob(t, db, "stop12345"), 60, 300)
+	if err != nil {
+		t.Fatalf("StartTrim: %v", err)
+	}
+	trimDir := filepath.Join(dir, "out", "trim")
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	trimFiles := func() int {
+		entries, _ := os.ReadDir(trimDir)
+		return len(entries)
+	}
+	waitFor("the encode to open its output", func() bool { return trimFiles() > 0 })
+
+	del := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/stop12345/trims/"+task.ID, nil))
+		return rec
+	}
+	rec := del()
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"stopped":true`) {
+		t.Fatalf("DELETE on the running trim: %d %s, want 200 with stopped true", rec.Code, rec.Body)
+	}
+	waitFor("the stopped trim to end", func() bool { return len(svc.RunningTrims()) == 0 })
+	if n := trimFiles(); n != 0 {
+		t.Errorf("the stopped trim left %d files in trim/", n)
+	}
+	if rows, _ := db.GetTrimsForJob("stop12345"); len(rows) != 0 {
+		t.Errorf("the stopped trim stored %d rows", len(rows))
+	}
+	if rec := del(); rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE once the trim has stopped: %d %s, want 404", rec.Code, rec.Body)
+	}
+}
+
+func mustGetJob(t *testing.T, db *database.Database, id string) *database.Job {
+	t.Helper()
+	j, err := db.GetJob(id)
+	if err != nil || j == nil {
+		t.Fatalf("GetJob(%q): %v %v", id, j, err)
+	}
+	return j
+}
+
+// TestTrimStopNeverDeletesAStoredTrim: a stored trim carries the id its
+// encode ran under, so a dashboard Stop that lands just after the trim
+// finished named a stored trim, and the DELETE fell through to deleting the
+// clip it had just made. With ?stop=1 (what the dashboard's Stop sends) a
+// trim no longer running is 404 and the stored one is kept; without it the
+// DELETE still deletes.
+//
+// Mutant: drop the handler's stop=1 case — the stored trim is deleted.
+func TestTrimStopNeverDeletesAStoredTrim(t *testing.T) {
+	f := newTrimFixture(t)
+	jobID := f.seedJob(t, "stored12345")
+	if err := f.db.AddTrim(&database.TrimRecord{ID: "trim_stored12345_1", JobID: jobID, StartTime: 1, EndTime: 9,
+		Filename: "trim/x.mp4", CreatedAt: "2026-11-25T00:00:00Z", Duration: 8}); err != nil {
+		t.Fatalf("AddTrim: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/"+jobID+"/trims/trim_stored12345_1?stop=1", nil))
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "no longer running") {
+		t.Errorf("a stop for a trim that has finished: %d %s, want 404 \"the trim is no longer running\"", rec.Code, rec.Body)
+	}
+	if rows, _ := f.db.GetTrimsForJob(jobID); len(rows) != 1 {
+		t.Fatalf("a stop deleted the stored trim: %d rows left", len(rows))
+	}
+
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/"+jobID+"/trims/trim_stored12345_1", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("a plain DELETE of the stored trim: %d %s, want 200", rec.Code, rec.Body)
+	}
+	if rows, _ := f.db.GetTrimsForJob(jobID); len(rows) != 0 {
+		t.Errorf("the plain DELETE kept the stored trim: %d rows", len(rows))
+	}
+}

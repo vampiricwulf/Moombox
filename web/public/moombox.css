@@ -836,8 +836,8 @@ sl-badge.status.cookies::part(base) {
     display: contents;
 }
 
-/* A trim the server is encoding: its range, a bar taking the free width, and
-   the percentage (job-details.js _trimsSectionHtml / updateRunningTrim). */
+/* A trim the server is encoding: its range, a bar taking the free width, the
+   percentage and Stop (job-details.js _trimsSectionHtml / updateRunningTrim). */
 .trim-item-running {
     display: flex;
     align-items: center;
@@ -857,6 +857,10 @@ sl-badge.status.cookies::part(base) {
     --height: 6px;
 }
 
+.trim-item-running [data-stop-trim] {
+    flex: 0 0 auto;
+}
+
 .trim-item-running .trim-progress-text {
     flex: 0 0 auto;
     min-width: 4ch;
@@ -867,7 +871,7 @@ sl-badge.status.cookies::part(base) {
 
 @media (max-width: 768px) {
     /* A phone gives the range its own line and the bar the full width
-       under it, beside its percentage. */
+       under it, beside its percentage and Stop. */
     .trim-item-running {
         flex-wrap: wrap;
         row-gap: var(--sl-spacing-2x-small);

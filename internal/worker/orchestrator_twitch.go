@@ -1607,7 +1607,7 @@ sessionLoop:
 		}
 		seg, muxErr := o.muxFinalPart(muxCtx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
-			o.logger.Error("failed to mux final Twitch part", "err", muxErr, "jobID", jobCtx.Job.ID)
+			o.partMuxFailed("failed to mux final Twitch part", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
 			o.logger.Info("final Twitch part muxed",
 				"segment", segmentIndex, "quality", currentQuality.Label,

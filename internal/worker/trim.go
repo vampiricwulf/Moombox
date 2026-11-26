@@ -78,7 +78,21 @@ type TrimEvent struct {
 	State string               `json:"state"`
 	Trim  *database.TrimRecord `json:"trim,omitempty"`
 	Error string               `json:"error,omitempty"`
+	// Stopped marks a "failed" trim that nothing broke: the operator stopped
+	// it (StopTrim) or its job was deleted. Error still says which. The
+	// state stays "failed" so a page that does not read this field still
+	// takes the trim off its running list.
+	Stopped bool `json:"stopped,omitempty"`
+	// StopReason says which, on a Stopped event: TrimStopOperator or
+	// TrimStopJobDeleted. A page branches on it, never on Error's wording.
+	StopReason string `json:"stopReason,omitempty"`
 }
+
+// The StopReason values of a Stopped TrimEvent.
+const (
+	TrimStopOperator   = "operator"
+	TrimStopJobDeleted = "job_deleted"
+)
 
 // trimFailedReason is what a trim that broke tells the user; its detail
 // (paths, FFmpeg's stderr) stays in the log and the trim_error embed. The
@@ -96,6 +110,25 @@ const trimInterruptedReason = "Moombox stopped before the trim finished"
 // still live when Stop cuts it short at shutdown, so that context alone
 // cannot say so.
 var errTrimInterrupted = errors.New("the trim was stopped before it finished")
+
+// trimJobDeletedReason is a trim cut short because its job was deleted while
+// it encoded: whoever deleted the job wants none of its trims, so nothing
+// failed and no trim_error is sent.
+const trimJobDeletedReason = "The job was deleted before the trim finished"
+
+// ErrTrimJobDeleted is the cause run's context is cancelled with when the
+// trim's job is deleted mid-encode; the error run returns wraps it beside
+// errTrimInterrupted, so a caller (the TUI's wiring) can tell it from a
+// trim that broke.
+var ErrTrimJobDeleted = errors.New("the job was deleted")
+
+// trimStoppedReason is a trim the operator stopped (StopTrim).
+const trimStoppedReason = "Stopped"
+
+// ErrTrimStopped is wrapped in the error CreateTrim returns for a trim the
+// operator stopped with StopTrim, beside errTrimInterrupted: nothing failed,
+// so no trim_error is sent, the post-download trim included.
+var ErrTrimStopped = errors.New("the trim was stopped")
 
 // trimProgressInterval is the least time between two "running" events of
 // one trim. FFmpeg reports progress about twice a second and the dashboard's
@@ -132,13 +165,19 @@ type TrimService struct {
 	// the first encodes — with the progress RunningTrims reports. A
 	// reservation whose request is still being checked has no ID yet.
 	activeOps map[string]*TrimTask
-	stopped   bool // set by Stop, under activeMu: no trim starts after it
-	onEvent   func(TrimEvent)
+	// stops holds, per job, the operator's stop for the trim in activeOps
+	// (StopTrim). Set once the trim has its id, removed with the slot.
+	stops   map[string]*trimStop
+	stopped bool // set by Stop, under activeMu: no trim starts after it
+	onEvent func(TrimEvent)
 	// archiveRewriting reports whether a chapter import is rewriting the
 	// job's archive right now (DownloadWorker.chapterImportRunning, set by
 	// NewDownloadWorker; nil: never). prepare refuses a trim while it does
 	// (owner decision CI-1: the import's re-mux never overlaps a trim).
 	archiveRewriting func(jobID string) bool
+	// shuttingDown reports whether Moombox's stop has begun
+	// (DownloadWorker.shuttingDown, set by NewDownloadWorker; nil: never).
+	shuttingDown func() bool
 	// progressInterval is trimProgressInterval; a field so a test can take
 	// every report, or none.
 	progressInterval time.Duration
@@ -165,6 +204,7 @@ func NewTrimService(db *database.Database, ffmpegPath string, logger interface {
 		ctx:       ctx,
 		cancel:    cancel,
 		activeOps: make(map[string]*TrimTask),
+		stops:     make(map[string]*trimStop),
 		logger:    logger,
 
 		progressInterval: trimProgressInterval,
@@ -238,9 +278,28 @@ func (ts *TrimService) Stop() {
 // method with an optional callback). The trim runs under ctx and the
 // service's own lifetime both.
 func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
+	return ts.CreateTrimStarted(ctx, job, startTime, endTime, nil, progressFn)
+}
+
+// CreateTrimStarted is CreateTrim that also hands started (when not nil) the
+// trim once its request has passed every check, before the encode begins:
+// its id is what StopTrim takes. The TUI's trim dialog runs trims this way.
+func (ts *TrimService) CreateTrimStarted(ctx context.Context, job *database.Job, startTime, endTime float64, started func(TrimTask), progressFn func(float64)) (*database.TrimRecord, error) {
 	plan, err := ts.prepare(job, startTime, endTime)
 	if err != nil {
 		return nil, err
+	}
+	if started != nil {
+		// A panic here would leave the job's trim slot held for good: run,
+		// which gives it back, has not started.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ts.logger.Error("panic in trim start hook", "jobID", job.ID, "panic", fmt.Sprint(r))
+				}
+			}()
+			started(ts.snapshot(plan))
+		}()
 	}
 	return ts.run(ctx, plan, progressFn)
 }
@@ -265,9 +324,10 @@ func (ts *TrimService) StartTrim(job *database.Job, startTime, endTime float64) 
 			}
 		}()
 		if _, err := ts.run(ts.ctx, plan, nil); err != nil {
-			if ts.ctx.Err() != nil {
-				// Stop cut it short: Moombox is stopping, nothing failed.
-				ts.logger.Info("trim interrupted by shutdown", "jobID", job.ID, "trimID", task.ID)
+			if errors.Is(err, errTrimInterrupted) {
+				// Cut short — Moombox is stopping, or the job was deleted —
+				// nothing failed.
+				ts.logger.Info("trim interrupted", "jobID", job.ID, "trimID", task.ID, "reason", err.Error())
 				return
 			}
 			ts.logger.Error("Failed to create trim", "jobID", job.ID, "trimID", task.ID, "error", err.Error())
@@ -301,6 +361,22 @@ type trimPlan struct {
 	// trim's own goroutine touches it: FFmpeg's progress is reported from
 	// the stderr loop run's encode runs in.
 	lastEmit time.Time
+	// stop is the operator's stop for this trim (StopTrim).
+	stop *trimStop
+}
+
+// trimStop is the operator's stop for one running trim. ctx ends when
+// StopTrim stops it, which cancels the encode. requested and saving are read
+// and written under TrimService.activeMu.
+type trimStop struct {
+	ctx  context.Context
+	stop context.CancelFunc
+	// requested: StopTrim stopped this trim.
+	requested bool
+	// saving: the encode is done and the clip is being moved into place and
+	// recorded. Past that point a stop is refused, so a trim answered as
+	// stopped is never stored.
+	saving bool
 }
 
 // prepare holds the job's trim slot and checks the request, returning the
@@ -346,11 +422,14 @@ func (ts *TrimService) prepare(job *database.Job, startTime, endTime float64) (*
 		return nil, err
 	}
 
+	stopCtx, stop := context.WithCancel(context.Background())
+	plan.stop = &trimStop{ctx: stopCtx, stop: stop}
 	ts.activeMu.Lock()
 	task.ID = fmt.Sprintf("trim_%s_%d", job.ID, time.Now().UnixMilli())
 	task.JobID = job.ID
 	task.StartTime = startTime
 	task.EndTime = endTime
+	ts.stops[job.ID] = plan.stop
 	ts.activeMu.Unlock()
 	plan.task = task
 	return plan, nil
@@ -372,10 +451,30 @@ func (ts *TrimService) setArchiveRewriting(fn func(jobID string) bool) {
 	ts.archiveRewriting = fn
 }
 
+// setShuttingDown installs the worker's "the stop has begun" predicate.
+func (ts *TrimService) setShuttingDown(fn func() bool) {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	ts.shuttingDown = fn
+}
+
+// shutdownBegun reports whether Moombox's stop has begun, by the worker's
+// predicate (owner ruling R3-8).
+func (ts *TrimService) shutdownBegun() bool {
+	ts.activeMu.Lock()
+	fn := ts.shuttingDown
+	ts.activeMu.Unlock()
+	return fn != nil && fn()
+}
+
 // release gives back the job's trim slot and the Stop wait it counts in.
 func (ts *TrimService) release(jobID string) {
 	ts.activeMu.Lock()
 	delete(ts.activeOps, jobID)
+	if st := ts.stops[jobID]; st != nil {
+		st.stop() // frees the stop's context
+		delete(ts.stops, jobID)
+	}
 	ts.activeMu.Unlock()
 	ts.wg.Done()
 }
@@ -486,12 +585,31 @@ func partialTrimPath(trimPath string) string {
 // stores its record and announces it; or, when anything fails, removes what
 // it wrote, says so, and gives the slot back. Every outcome — a panic
 // included — ends in exactly one "finished" or "failed" TrimEvent, sent
-// after the slot is free.
+// after the slot is free. It is cut short by its caller's context, by Stop,
+// by its job being deleted, and by the operator's StopTrim.
 func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(float64)) (rec *database.TrimRecord, err error) {
 	job := plan.job
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer context.AfterFunc(ts.ctx, cancel)()
+	// The cause says why the trim was cut short: nil (context.Canceled) for
+	// the caller or Stop, ErrTrimJobDeleted for a deleted job, ErrTrimStopped
+	// for the operator (StopTrim).
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	defer context.AfterFunc(ts.ctx, func() { cancel(nil) })()
+	if plan.stop != nil {
+		defer context.AfterFunc(plan.stop.ctx, func() { cancel(ErrTrimStopped) })()
+	}
+	// A trim is of a Finished job, which no delete path cancels anything for:
+	// without this, deleting the job let FFmpeg encode to the end, then the
+	// record failed on the trims foreign key, the clip was removed and Trim
+	// Failed was sent for a job that no longer exists. Unsubscribed after the
+	// outcome below has run (defers run last-in first-out).
+	if ts.db != nil {
+		defer ts.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+			if deleted.JobID == job.ID {
+				cancel(ErrTrimJobDeleted)
+			}
+		})()
+	}
 
 	// No trim row names the file until the encode is done, which for a long
 	// range is a long time to be an unreferenced file in trim/. The claim is
@@ -516,7 +634,22 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 		switch {
 		case err == nil:
 			ev.State, ev.Trim = TrimStateFinished, rec
-		case ctx.Err() != nil:
+		case ts.stopRequested(plan):
+			// Asked for by the operator, so not answered as a failure. Read
+			// off the request, not the context: the stop cancels the context
+			// from a goroutine of its own, which may not have run yet.
+			ev.State, ev.Error, ev.Stopped, ev.StopReason = TrimStateFailed, trimStoppedReason, true, TrimStopOperator
+			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimStopped, err)
+		case errors.Is(context.Cause(ctx), ErrTrimJobDeleted), ts.jobGone(job.ID):
+			// The second: the row went between the encode's end and the
+			// record (AddTrim then fails on the foreign key), before the
+			// subscription above could cancel anything.
+			ev.State, ev.Error, ev.Stopped, ev.StopReason = TrimStateFailed, trimJobDeletedReason, true, TrimStopJobDeleted
+			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimJobDeleted, err)
+		case ctx.Err() != nil, ts.shutdownBegun():
+			// The second: an FFmpeg the shutdown signalled directly
+			// (systemd's default KillMode) failed before Stop cancelled
+			// ts.ctx. That is the shutdown, not a broken trim (R3-8).
 			ev.State, ev.Error = TrimStateFailed, trimInterruptedReason
 			err = fmt.Errorf("%w: %w", errTrimInterrupted, err)
 		default:
@@ -546,6 +679,12 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 	}
 	if err != nil {
 		return nil, err
+	}
+	// The encode is whole. Moving the clip into place and recording it is
+	// not interrupted: a stop asked for before this point ends the trim
+	// here, and one asked for after it is refused (StopTrim).
+	if !ts.beginSaving(plan) {
+		return nil, ErrTrimStopped
 	}
 	// utils.ReplaceFile, not os.Rename: the file was written a moment ago,
 	// and on Windows a scanner or indexer still holding it turns the move
@@ -657,6 +796,67 @@ func (ts *TrimService) encodeSingle(ctx context.Context, plan *trimPlan, out str
 // to answer to, sends those itself (DownloadOrchestrator.sendTrimFailed).
 func (ts *TrimService) sendTrimFailed(job *database.Job, err error) {
 	sendTrimFailed(ts.notifier, job, err)
+}
+
+// StopTrim stops the trim trimID of job jobID while it encodes — the
+// dashboard's Stop (DELETE /api/jobs/{id}/trims/{trimId} on a running trim)
+// and the TUI trim dialog's S key both call it. FFmpeg is killed, the
+// partial file removed, and the trim's "failed" event is marked Stopped; no
+// trim_error is sent. It returns once the stop is asked for, not once the
+// trim has ended.
+//
+// ErrTrimNotFound: no trim of that id is running for the job (it may be a
+// stored trim, which DeleteTrim deletes). A *TrimRefusedError (Conflict):
+// the encode is done and the clip is being saved, too late to stop.
+func (ts *TrimService) StopTrim(jobID, trimID string) error {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	task, st := ts.activeOps[jobID], ts.stops[jobID]
+	if trimID == "" || task == nil || st == nil || task.ID != trimID {
+		return ErrTrimNotFound
+	}
+	if st.saving {
+		return conflictTrim("the trim has finished encoding and is being saved")
+	}
+	st.requested = true
+	st.stop()
+	ts.logger.Info("trim stop requested", "jobID", jobID, "trimID", trimID)
+	return nil
+}
+
+// stopRequested reports whether StopTrim stopped plan's trim.
+func (ts *TrimService) stopRequested(plan *trimPlan) bool {
+	if plan.stop == nil {
+		return false
+	}
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	return plan.stop.requested
+}
+
+// beginSaving marks plan's encode done, after which StopTrim refuses, and
+// reports false when a stop was asked for first.
+func (ts *TrimService) beginSaving(plan *trimPlan) bool {
+	if plan.stop == nil {
+		return true
+	}
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	if plan.stop.requested {
+		return false
+	}
+	plan.stop.saving = true
+	return true
+}
+
+// jobGone reports whether jobID's row is known to be gone: a read that
+// failed says nothing, so it is not taken as gone.
+func (ts *TrimService) jobGone(jobID string) bool {
+	if ts.db == nil {
+		return false
+	}
+	j, err := ts.db.GetJob(jobID)
+	return err == nil && j == nil
 }
 
 // DeleteTrim deletes a trim record and its file.

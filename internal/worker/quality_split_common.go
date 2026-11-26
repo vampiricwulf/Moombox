@@ -73,6 +73,33 @@ func (o *DownloadOrchestrator) muxRoot() context.Context {
 	return o.muxRootCtx
 }
 
+// stopping reports whether Moombox is already shutting down, by the worker's
+// predicate (DownloadWorker.shuttingDown).
+func (o *DownloadOrchestrator) stopping() bool {
+	return o.shuttingDown != nil && o.shuttingDown()
+}
+
+// partMuxFailed logs a part mux that returned an error. Not as an Error once
+// the stop has begun (owner ruling R3-8): an FFmpeg that systemd, or anything
+// else ending the process tree, signalled directly exits non-zero before the
+// mux root is cancelled, and that is the shutdown, not a failed mux. Either
+// way no status is written here: the part stays in staging, and the job's
+// finalize muxes it (muxUnrecordedSegments).
+func (o *DownloadOrchestrator) partMuxFailed(msg string, args ...any) {
+	o.muxFailed(msg, "the part stays in staging for the job's finalize", args...)
+}
+
+// muxFailed logs a mux that returned an error and writes no status: an
+// Error line on a running worker, and an Info line once the stop has begun
+// (R3-8), whose tail says where the recording waits.
+func (o *DownloadOrchestrator) muxFailed(msg, stoppingTail string, args ...any) {
+	if o.stopping() {
+		o.logger.Info(msg+": Moombox is shutting down; "+stoppingTail, args...)
+		return
+	}
+	o.logger.Error(msg, args...)
+}
+
 // CancelMuxes cancels every in-flight background and final mux. Called by
 // DownloadWorker.Stop once the in-flight wait has run out (owner decision
 // O-E) so FFmpeg dies with the child rather than outliving it. Nothing else
@@ -134,7 +161,7 @@ func (o *DownloadOrchestrator) launchBackgroundSegmentMux(
 		}
 		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segIdx, startTime, endTime, quality, muxResult)
 		if muxErr != nil {
-			o.logger.Error("failed to mux quality segment",
+			o.partMuxFailed("failed to mux quality segment",
 				"platform", platformTag,
 				"err", muxErr,
 				"jobID", jobCtx.Job.ID)

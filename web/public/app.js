@@ -88,6 +88,8 @@ export class MoomboxApp {
     // it when its outcome arrives. Drawn as a progress bar in its job's Trims
     // section.
     this.runningTrims = {};
+    // Running trims whose Stop request is out (stopTrim).
+    this.stoppingTrims = new Set();
     this.selectedJobId = null;
     this._selectedTaskJobs = new Set();
     this._selectedArchivedJobs = new Set();
@@ -1650,6 +1652,11 @@ export class MoomboxApp {
         for (const t of p.runningTrims || []) {
           if (t?.id && t.jobId) this.runningTrims[t.id] = t;
         }
+        // A stop held busy for a trim that ended meanwhile has no outcome
+        // frame coming to release it.
+        for (const id of this.stoppingTrims || []) {
+          if (!this.runningTrims[id]) this.stoppingTrims.delete(id);
+        }
         if (this.selectedJobId) {
           // An archived row's open details are not refreshed below.
           const shown = this.jobs.find((j) => j.id === this.selectedJobId)
@@ -2151,6 +2158,9 @@ export class MoomboxApp {
     }
     if (p.state !== "finished" && p.state !== "failed") return;
     delete this.runningTrims[p.id];
+    // A stop sent for it is answered now: its button was held busy until
+    // the trim left the running list, so it never offered a second stop.
+    this.stoppingTrims?.delete(p.id);
     const job = this.jobs.find((j) => j.id === p.jobId) || this.archivedJobs.find((j) => j.id === p.jobId);
     const range = `${formatTimestamp(p.startTime)} – ${formatTimestamp(p.endTime)}`;
     const of = job?.title ? ` of "${job.title}"` : "";
@@ -2160,6 +2170,12 @@ export class MoomboxApp {
         if (!trims.some((t) => t.id === p.trim.id)) job.trims = [...trims, p.trim];
       }
       this.showToast(`Trim ${range}${of} created`, "success");
+    } else if (p.stopped) {
+      // Stopped by an operator, or its job was deleted: nothing broke. The
+      // reason is shown for a deleted job only, chosen by stopReason
+      // (worker.TrimEvent), never by the wording of error.
+      const why = p.stopReason === "job_deleted" && p.error ? `: ${p.error}` : "";
+      this.showToast(`Trim ${range}${of} stopped${why}`, "primary");
     } else {
       this.showToast(`Trim ${range}${of} failed: ${p.error || "Failed to create trim"}`, "danger");
     }
@@ -4276,6 +4292,45 @@ export class MoomboxApp {
     } catch (error) {
       this.showToast(error.message, 'danger');
     }
+  }
+
+  /**
+   * Stop a trim the server is encoding (DELETE on its id while it runs,
+   * TrimService.StopTrim). What it encoded so far is discarded, so it asks
+   * first. The answer only says the stop was taken: the trim leaves the
+   * running list, and is toasted as stopped, on its trim_status frame.
+   * stoppingTrims holds the trims whose stop is out, so a second click sends
+   * nothing and a redrawn row still shows its button busy; a stop that was
+   * taken stays there until the trim's outcome frame takes it off the running
+   * list (handleTrimStatus). A 404 is a trim that ended as the stop was sent:
+   * its own outcome is toasted, so this adds nothing.
+   */
+  async stopTrim(jobId, trimId) {
+    if (this.stoppingTrims.has(trimId)) return;
+    if (!await this.showConfirm("Stop this trim? What it has encoded so far is discarded.", { okLabel: "Stop", okVariant: "danger" })) {
+      return;
+    }
+    // It may have ended while the confirm was open; its outcome is toasted.
+    if (!this.runningTrims[trimId]) return;
+    this.stoppingTrims.add(trimId);
+    const btn = [...document.querySelectorAll("#details-trims [data-stop-trim]")].find((b) => b.dataset.trimId === trimId);
+    if (btn) btn.loading = true;
+    try {
+      // stop=1: never a delete. A trim that finished as this was sent is
+      // refused (404) rather than its clip deleted — the stored record
+      // carries the running trim's id.
+      const response = await fetch(`/api/jobs/${jobId}/trims/${trimId}?stop=1`, { method: "DELETE" });
+      if (response.ok) return;
+      if (response.status !== 404) {
+        throw new Error("Failed to stop trim: " + await serverErrorMessage(response));
+      }
+    } catch (error) {
+      this.showToast(error.message, "danger");
+    }
+    // Not taken: the button works again.
+    this.stoppingTrims.delete(trimId);
+    const after = [...document.querySelectorAll("#details-trims [data-stop-trim]")].find((b) => b.dataset.trimId === trimId);
+    if (after) after.loading = false;
   }
 
   openTrimDialog(job) {

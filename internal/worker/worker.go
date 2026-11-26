@@ -362,6 +362,9 @@ type DownloadWorker struct {
 	// stops waiting on (awaitJobExit). Nil until Start, and in tests that
 	// never call it, where such a wait ends only with the run.
 	runCtx atomic.Pointer[context.Context]
+	// stopBegun is set on Stop's first line: the other half of shuttingDown,
+	// for a stop that did not come through Start's context.
+	stopBegun atomic.Bool
 
 	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
 	// monitor poll that lands while one is in flight does not start another;
@@ -577,11 +580,15 @@ func NewDownloadWorker(
 	// archive (ClaimChapterImport has the other half).
 	if trims != nil {
 		trims.setArchiveRewriting(w.chapterImportRunning)
+		// And whether the stop has begun: a trim whose FFmpeg the shutdown
+		// killed is interrupted, not failed (R3-8).
+		trims.setShuttingDown(w.shuttingDown)
 	}
 	// And a finalize waits for one (owner decision PR-M5): it writes the
 	// archive the import's re-mux is about to rename its copy over.
 	if orchestrator != nil {
 		orchestrator.waitArchiveRewrite = w.waitChapterImport
+		orchestrator.shuttingDown = w.shuttingDown
 		orchestrator.beginFinishing = w.beginFinishing
 		orchestrator.globalOutputDir = func() (dir string) {
 			w.readConfig(func(c *config.MoomboxConfig) { dir = resolveOutputDir(c) })
@@ -1600,6 +1607,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			// cancellation's own handling.
 			if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
 				w.handleCancellation(job)
+				if archive, gone := finishedRowGone(dlErr); gone {
+					// Deleted after its archive was written: the recording is
+					// in place under no row, and staging is reclaimed as a
+					// finished finalize's is (writeFinished).
+					w.logger.Info("the job was deleted after its recording was written; the archive is left for the orphan scan",
+						"jobID", job.ID, "output", archive)
+					w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
+				}
 				return
 			}
 			// A download whose setup fetch met a connectivity outage waits for
@@ -1661,7 +1676,17 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	// remove is tried again here, before staging a mux-gap record keeps is
 	// kept with it.
 	w.removeStaleRepairedCopies(jobID, stagingDir)
-	fresh, _ := w.db.GetJob(jobID)
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil {
+		// A row that cannot be read is not a row that is gone (GetJob answers
+		// nil, nil for that one, which decideStagingCleanup supports): the
+		// shields below read the row's incomplete tail and chat verdict, and
+		// deleting the recording on a read that failed would decide without
+		// them. Kept; the boot sweep and the staging expiry see it again.
+		w.logger.Warn("preserving staging dir: the job's row could not be read, so nothing says the recording is safe to delete",
+			"path", stagingDir, "jobID", jobID, "err", err)
+		return
+	}
 	v := decideStagingCleanup(w.db, fresh, jobID, stagingDir)
 	switch v.keep {
 	case keepStagingForAsides:
@@ -2364,6 +2389,33 @@ const muxCancelGrace = 2 * time.Second
 // but a mux ended that way is killed mid-write instead of cancelled.
 const StopBudget = inFlightWait + muxCancelGrace
 
+// shuttingDown reports whether Moombox's stop has begun: Start's context has
+// ended, which is the first thing a stop signal, a Quit and a restart do
+// (cmd/moombox, stopOnSignal), or Stop has been entered. It is the one
+// predicate every mux failure path asks before it reads an FFmpeg's error as
+// a failed mux (owner ruling R3-8).
+//
+// A mux's own context cannot answer that. The muxes that outlive their job
+// hang off the mux root, which Stop cancels only after inFlightWait, so that
+// a mux about to finish can; for those ten seconds a mux that dies reads as a
+// failure. FFmpeg does die in them when something signals the whole process
+// tree at once: systemd's default KillMode sends SIGTERM to every process in
+// the unit's control group, FFmpeg included, whatever process group it is in
+// (internal/childproc). The Mux action's Error write then landed on a row the
+// next start does not re-mux, since only a Muxing row is routed there.
+//
+// A mux that genuinely failed in those seconds is left Muxing as well; the
+// boot re-mux runs it once more and writes its Error then.
+func (w *DownloadWorker) shuttingDown() bool {
+	if w.stopBegun.Load() {
+		return true
+	}
+	if ctx := w.runCtx.Load(); ctx != nil {
+		return (*ctx).Err() != nil
+	}
+	return false
+}
+
 // Stop signals the worker to stop processing new jobs and waits for in-flight
 // jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
 // Muxes still running after that wait are cancelled rather than orphaned
@@ -2382,6 +2434,7 @@ func (w *DownloadWorker) Stop() {
 // closes: that is Stop. Once hurry has closed it takes muxCancelGrace at
 // most.
 func (w *DownloadWorker) StopHurried(hurry <-chan struct{}) {
+	w.stopBegun.Store(true)
 	w.logger.Info("download worker stopping")
 	if w.streamProc != nil {
 		w.streamProc.Stop()

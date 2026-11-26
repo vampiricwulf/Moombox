@@ -25,7 +25,9 @@ func TestDialogCommandPanicsAnswerTheirDialog(t *testing.T) {
 		t.Errorf("import dialog after a panic: step %d, error %q — want it back on its form with the error", a.importDlg.step, a.importDlg.errorMsg)
 	}
 
-	a.OnCreateTrim = func(string, float64, float64, func(float64)) (string, string) { panic("encoder exploded") }
+	a.OnCreateTrim = func(string, float64, float64, func(string), func(float64)) (string, string, bool) {
+		panic("encoder exploded")
+	}
 	a.trimInProgress = true
 	a.Update(a.createTrimCmd("j", 0, 10)())
 	if a.trimInProgress {
