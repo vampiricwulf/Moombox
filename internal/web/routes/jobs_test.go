@@ -1152,9 +1152,6 @@ func TestJobCreateRejectsPathTraversal(t *testing.T) {
 	}
 }
 
-// A ".." inside a folder name is not traversal: both arms of the add route
-// use the segment rule (config.PathHasTraversal) like every config path
-// field. Mutant: restoring strings.Contains(dir, "..") on either arm.
 // A pasted Explorer "Copy as path" value is refused on both arms of the add
 // route, as every path setting is: nothing downstream takes the quotes off,
 // so the job would fail at mux after the whole download.
@@ -1173,6 +1170,9 @@ func TestJobCreateRefusesAQuotedOutputDirectory(t *testing.T) {
 	}
 }
 
+// A ".." inside a folder name is not traversal: both arms of the add route
+// use the segment rule (config.PathHasTraversal) like every config path
+// field. Mutant: restoring strings.Contains(dir, "..") on either arm.
 func TestJobCreateAcceptsDotsInsideAFolderName(t *testing.T) {
 	f := newJobsFixture(t)
 	dir := filepath.Join(t.TempDir(), "Wait.. what")
