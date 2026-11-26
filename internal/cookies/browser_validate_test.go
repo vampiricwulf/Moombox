@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -80,5 +81,52 @@ func TestValidateBrowserPathQuickAcceptsValidExe(t *testing.T) {
 	// Should pass static checks but does NOT call --version
 	if err := ValidateBrowserPathQuick(exe, "firefox"); err != nil {
 		t.Errorf("expected nil error for the test binary: %v", err)
+	}
+}
+
+// A file name an import can write is refused on every platform, before the
+// file is looked at (owner ruling R3-5). On a filesystem without POSIX modes
+// (CIFS, exFAT, ntfs-3g, a Docker Desktop bind mount) an imported file
+// reports the executable bit, so the Unix mode check alone does not stop a
+// planted upload. The rule is on the name, so it holds wherever the output
+// folder is and whatever it is later moved to.
+func TestValidateBrowserPathQuickRefusesNamesAnImportWrites(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{
+		"planted [abc].mp4",
+		"planted [abc].MKV",
+		"planted [abc].mKv", // KELVIN SIGN lower-cases to "k", as the import folds it
+		"planted [abc].webm",
+		"planted [abc].ts",
+		"planted [abc] - part2.mp4",
+		"planted [abc].chat.json",
+		"moombox-import-123.partial",
+		"moombox-import-123.zip",
+	} {
+		err := ValidateBrowserPathQuick(filepath.Join(root, name), "firefox")
+		if !errors.Is(err, errImportWrittenName) {
+			t.Errorf("%q: err = %v, want the import-name refusal", name, err)
+		}
+	}
+	for _, name := range []string{"firefox", "firefox-bin", "Brave.AppImage", "chrome.exe", "vivaldi.sh", "start.json"} {
+		err := ValidateBrowserPathQuick(filepath.Join(root, name), "firefox")
+		if errors.Is(err, errImportWrittenName) {
+			t.Errorf("%q: refused as an import name; no import writes it", name)
+		}
+	}
+}
+
+// The same rule on a file that passes every other check on Unix: executable
+// bit set, as a filesystem without POSIX modes reports it.
+func TestValidateBrowserPathQuickRefusesAnExecutableImportName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses any non-.exe; the name rule is pinned above")
+	}
+	planted := filepath.Join(t.TempDir(), "planted [abc].mp4")
+	if err := os.WriteFile(planted, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateBrowserPathQuick(planted, "firefox"); !errors.Is(err, errImportWrittenName) {
+		t.Errorf("an executable file named like an import was accepted: %v", err)
 	}
 }

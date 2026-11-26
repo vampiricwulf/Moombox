@@ -591,6 +591,9 @@ func newImportOutcome(baseStem string, files []*importFile, unpairedChats []stri
 // importVideoExts are the extensions an import takes for a video.
 var importVideoExts = map[string]bool{".mp4": true, ".mkv": true, ".webm": true, ".ts": true}
 
+// importChatSuffix ends the name of every chat an import writes.
+const importChatSuffix = ".chat.json"
+
 // importPartRe is a split recording's part, its name less the extension: the
 // finalize names each "<name> - part<N>" with N from 1 (muxSegment,
 // internal/worker/orchestrator_mux.go).
@@ -651,8 +654,8 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		switch ext := filepath.Ext(name); {
 		case importVideoExts[strings.ToLower(ext)]:
 			videos = append(videos, importPart{video: f, stem: strings.TrimSuffix(name, ext), ext: ext})
-		case strings.HasSuffix(lower, ".chat.json"):
-			if stem := name[:len(name)-len(".chat.json")]; chats[stem] == nil {
+		case strings.HasSuffix(lower, importChatSuffix):
+			if stem := name[:len(name)-len(importChatSuffix)]; chats[stem] == nil {
 				chats[stem] = f
 				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 			}
@@ -828,11 +831,11 @@ func (r *importRecording) files() []*importFile {
 		partSuffix := p.stem[len(r.stem):] // " - partN", or "" for a recording in one file
 		files = append(files, &importFile{entry: p.video, kind: "video", suffix: partSuffix + p.ext, part: p.num})
 		if p.chat != nil {
-			chats = append(chats, &importFile{entry: p.chat, kind: "chat", suffix: partSuffix + ".chat.json", part: p.num})
+			chats = append(chats, &importFile{entry: p.chat, kind: "chat", suffix: partSuffix + importChatSuffix, part: p.num})
 		}
 	}
 	if r.chat != nil {
-		chats = append([]*importFile{{entry: r.chat, kind: "chat", suffix: ".chat.json"}}, chats...)
+		chats = append([]*importFile{{entry: r.chat, kind: "chat", suffix: importChatSuffix}}, chats...)
 	}
 	return append(files, chats...)
 }
@@ -1223,7 +1226,7 @@ func zipEntryWrittenName(f *zip.File) string {
 // importNameReserve is what an import's file name can carry past its
 // "<title> [<id>]" stem: a " (999)" disambiguation, a " - part999" part
 // suffix and the longest sibling suffix, ".chat.json".
-const importNameReserve = len(" (999)") + len(" - part999") + len(".chat.json")
+const importNameReserve = len(" (999)") + len(" - part999") + len(importChatSuffix)
 
 // importStem is the file stem an import writes: the sanitized title and
 // " [<id>]". The title is cut by BYTES on a rune boundary, to the budget a

@@ -273,6 +273,11 @@ be paired with [`browser_type`](#cookiesbrowser_type).
 - Both UIs refuse a path that is not absolute, does not exist, is not a
   regular file, or is not executable, and refuse a path without a browser
   type ("browser_type required when browser_path is set" in the TUI).
+- Both UIs also refuse a file whose name ends like one an import writes
+  (`.mp4`, `.mkv`, `.webm`, `.ts`, `.chat.json`, `.partial` or `.zip`, in
+  any letter case): an imported file is never a browser, and on a drive
+  without Linux permissions (an SMB share, exFAT, NTFS, a Docker Desktop
+  folder) such a file can look executable.
 - The dashboard additionally runs the browser with `--version` (up to 10
   seconds) when you save a custom path, and reports the result.
 - In a hand-edited file, a path with no `browser_type` is ignored and
