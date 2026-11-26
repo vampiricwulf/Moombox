@@ -305,6 +305,13 @@ Stops the job and marks it `Cancelled`; staged data is kept. Cancelling a
 `Queued` or `Upcoming` job simply stops it from ever starting. Cancelling a
 `COOKIES?` job stops Moombox from resuming it automatically.
 
+Cancelling a Twitch job you added yourself also keeps the broadcast it was
+recording from being picked up by the channel's live check, for as long as
+the cancelled job is in the list. (A job the monitor created is held back
+the same way, by its history entry.) If the job ends in `Error` or
+`Finished` instead, the live check may record what is left of the broadcast
+with a job of its own.
+
 ### Resume
 
 Continues the **same** recording from its staging and resume data, keeping
@@ -402,7 +409,9 @@ same tab if you want it archived again. What stays depends on the job:
   any channel added with `moombox add`) leaves an entry for the broadcast
   it recorded, named `tw_` and Twitch's stream ID. The entry appears when
   you delete the job, not before, and holds that broadcast back from the
-  live check. A job that has never started recording a broadcast
+  live check. A job that is still recording is cancelled first, and the
+  cancelled job holds the broadcast back until the entry takes over, so
+  the live check cannot pick it up in between. A job that has never started recording a broadcast
   leaves no entry; a reinitialized job still leaves the entry of the
   broadcast it recorded before.
 - **An import of a Twitch recording, or one with no video ID in its file

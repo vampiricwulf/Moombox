@@ -54,7 +54,10 @@ into the dashboard's **Add a video** dialog or the TUI's `A A` (Add Video):
   says does not exist is refused when you add it; one that disappears while
   waiting (renamed, banned, deleted) fails after 10 such answers in a row.
 - While a hand-added job is waiting or recording, the monitor does not
-  create a second job for the same broadcast.
+  create a second job for the same broadcast. The same holds for the
+  broadcast a hand-added job was recording when you cancelled it, until
+  you delete the job and remove its entry under **Orphaned History
+  Entries** (see [Delete](jobs.md#delete)).
 
 ### Quality
 

@@ -89,3 +89,67 @@ func TestTwitch_DeletedManualAddHoldsItsBroadcastBack(t *testing.T) {
 		t.Errorf("orphaned history after the deletes = %v, want [tw_900] and nothing for the job that recorded no broadcast", keys)
 	}
 }
+
+// TestTwitch_ManualJobNamingABroadcastHoldsIt is owner ruling RV-8. A
+// manually added job that names a broadcast (twitch_stream_id) holds it back
+// from the live monitor while the row is active or Cancelled. The Cancelled
+// case is the Delete's window: both delete paths cancel the job, wait for the
+// worker to let go, and only then delete the row and leave the history entry
+// (the test above starts there). A poll in between used to find the
+// broadcast and record it again under a job of the monitor's own. It is also
+// a plain Cancel, which the monitor used to answer within one poll. A
+// Finished or Errored row holds nothing, and neither does a row that names
+// another broadcast.
+//
+// Mutants: the ManualTwitchJobHoldsStream gate dropped from
+// processStreamInfo (the three held cases find 900); Cancelled added to the
+// statuses its query excludes (the Cancelled case finds 900); Error dropped
+// from them (the Errored case finds nothing); the stream ID dropped from its
+// WHERE (the "another broadcast" case finds nothing).
+func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		jobID    string
+		status   database.JobStatus
+		streamID string
+		held     bool
+	}{
+		{"cancelled, not yet deleted", "tw_manual_ch_1", database.StatusCancelled, "900", true},
+		// Rows manualJobClaims never reads: a `moombox add` row (the bare
+		// login) and a broadcast add re-initialised onto a later broadcast.
+		{"a moombox add row recording it", "ch", database.StatusDownloading, "900", true},
+		{"a re-initialised broadcast add muxing it", "tw_800", database.StatusMuxing, "900", true},
+		{"errored", "tw_manual_ch_1", database.StatusError, "900", false},
+		{"finished", "tw_manual_ch_1", database.StatusFinished, "900", false},
+		{"cancelled, naming another broadcast", "tw_manual_ch_1", database.StatusCancelled, "899", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+				infos := make([]*twitch.TwitchStreamInfo, len(logins))
+				for i, login := range logins {
+					infos[i] = &twitch.TwitchStreamInfo{StreamID: "900", ChannelLogin: login, IsLive: true,
+						Title: "live", StartedAt: "2026-11-26T10:00:00Z"}
+				}
+				return infos, make([]error, len(logins)), nil
+			}, config.ChannelConfig{ID: "ch", Name: "ch", Platform: "twitch"})
+			if _, err := tm.db.AddJob(&database.Job{ID: tc.jobID, VideoID: tc.jobID, URL: "https://twitch.tv/ch",
+				Platform: "twitch", Status: tc.status, ManuallyAdded: true}); err != nil {
+				t.Fatal(err)
+			}
+			tm.db.UpdateJobFields(tc.jobID, map[string]any{"twitch_stream_id": tc.streamID})
+
+			var found []string
+			tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) {
+				found = append(found, info.StreamID)
+			}
+			tm.doCheck(context.Background())
+
+			if tc.held && len(found) != 0 {
+				t.Errorf("streams found = %v, want none: the %s row names broadcast 900 and holds it", found, tc.status)
+			}
+			if !tc.held && !slices.Equal(found, []string{"900"}) {
+				t.Errorf("streams found = %v, want [900]: a %s row naming %s holds nothing", found, tc.status, tc.streamID)
+			}
+		})
+	}
+}

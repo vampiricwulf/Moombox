@@ -468,6 +468,38 @@ func (db *Database) HasJobBlockingRedetection(videoID string) (bool, error) {
 	return true, nil
 }
 
+// ManualTwitchJobHoldsStream reports whether a manually added Twitch job
+// holds the broadcast streamID back from the live monitor (owner ruling
+// RV-8): a row that names it (Job.TwitchStreamID) and is active or Cancelled.
+// A Finished or Errored row holds nothing: its capture is over, and the
+// monitor may record what is left of the broadcast with a job of its own.
+// Cancelled holds because the operator stopped that recording, and because
+// the operator's Delete cancels first and deletes seconds later: the row
+// holds the broadcast until the delete's own transaction leaves the history
+// row that holds it from then on (DeleteJobLeavingHistory, RV-6). Keyed on
+// the stream ID, so it holds one broadcast and never a later one, whatever
+// the row's ID is ("tw_manual_<login>_<n>", a bare login, an earlier
+// broadcast's "tw_<stream id>").
+func (db *Database) ManualTwitchJobHoldsStream(streamID string) (bool, error) {
+	if streamID == "" {
+		return false, nil
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var one int
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT 1 FROM jobs WHERE twitch_stream_id = ? AND manually_added = 1 AND status NOT IN (?, ?) LIMIT 1`,
+		streamID, StatusFinished, StatusError).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ManualTwitchJobs returns the non-terminal manually added Twitch jobs for
 // login's channel — the `tw_manual_<login>_<ns>` rows the Web add creates when
 // the channel is offline — with ID, Status and StreamStartTime set. Such a row
