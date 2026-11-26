@@ -797,9 +797,14 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == "" || !a.trimInProgress {
 			return a, nil
 		}
-		if a.trimDlg.IsVisible() && a.trimDlg.JobID() == msg.JobID && a.trimDlg.Stopping() {
+		// The dialog's stop is taken back whether or not the dialog is on
+		// screen: one hidden with Esc before this answer came is brought
+		// back by A T, and must come back with S live and the reason shown.
+		forDialog := a.trimDlg.JobID() == msg.JobID && a.trimDlg.Stopping()
+		if forDialog {
 			a.trimDlg.StopRefused(msg.Err)
-		} else {
+		}
+		if !forDialog || !a.trimDlg.IsVisible() {
 			a.setFeedbackWithSeverity("Trim stop failed: "+msg.Err, severityError)
 		}
 		return a, nil

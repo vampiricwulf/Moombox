@@ -224,3 +224,38 @@ func TestALateStopRefusalLeavesTheTrimsResult(t *testing.T) {
 		t.Error("the failed trim's dialog still holds a stop")
 	}
 }
+
+// TestAStopRefusedWhileTheDialogIsHiddenFreesS: S, then Esc before the stop
+// has answered, then the refusal. The hidden dialog's stop is taken back as
+// a visible one's is, so A T brings back a progress step whose S asks again
+// and which shows the reason, instead of "Stopping..." with S dead for the
+// rest of the trim. The refusal is also said on the feedback line, the only
+// place the operator can see it while the dialog is hidden.
+//
+// Mutant: put IsVisible back into stopTrimResultMsg's StopRefused condition
+// (the reshown dialog still holds the stop and the second S asks nothing).
+func TestAStopRefusedWhileTheDialogIsHiddenFreesS(t *testing.T) {
+	a, asked := trimRunningApp(t, "trim_A_1", errors.New("the trim has finished encoding and is being saved"))
+	_, stop := a.keyTrim(tea.KeyPressMsg{}, "S")
+	pressTrim(a, keyEsc)
+	if a.trimDlg.IsVisible() {
+		t.Fatal("Esc did not send the trim to the background")
+	}
+	a.Update(stop())
+	if !strings.Contains(a.feedback.msg, "being saved") {
+		t.Errorf("feedback = %q, want the refusal while the dialog is hidden", a.feedback.msg)
+	}
+
+	a.handleChord("a")
+	a.handleChord("t")
+	if !a.trimDlg.IsVisible() || a.trimDlg.Stopping() {
+		t.Fatalf("after A T: visible=%v stopping=%v, want the progress step with S live", a.trimDlg.IsVisible(), a.trimDlg.Stopping())
+	}
+	if view := stripANSI(a.trimDlg.View()); !strings.Contains(view, "being saved") {
+		t.Errorf("the reshown dialog does not say why the stop was refused:\n%s", view)
+	}
+	pressTrim(a, "S")
+	if len(*asked) != 2 {
+		t.Errorf("S after the reshow asked %d times in all, want 2", len(*asked))
+	}
+}
