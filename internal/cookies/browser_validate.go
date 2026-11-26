@@ -23,10 +23,12 @@ var knownBrowserTypes = map[string]struct{}{
 // ImportWrittenSuffixes are the endings of every file name POST /api/import
 // can leave on disk: the video extensions it takes (importVideoExts in
 // internal/web/routes/import_routes.go), the ".chat.json" it names a chat
-// with, the ".partial" an entry is extracted to and the ".zip" an upload is
-// spooled to. A test in internal/web/routes pins this list equal to the
-// import's own, so a new import extension cannot slip past the browser rule.
-var ImportWrittenSuffixes = []string{".mp4", ".mkv", ".webm", ".ts", ".chat.json", ".partial", ".zip"}
+// with, the sidecars it restores beside them (owner ruling R4-12: a raw
+// chat, a chapter list, a description, a thumbnail), the ".partial" an entry
+// is extracted to and the ".zip" an upload is spooled to. A test in
+// internal/web/routes pins this list equal to the import's own, so a new
+// import extension cannot slip past the browser rule.
+var ImportWrittenSuffixes = []string{".mp4", ".mkv", ".webm", ".ts", ".chat.json", ".chat.raw.jsonl", ".chapters.json", ".description", ".jpg", ".webp", ".png", ".partial", ".zip"}
 
 // errImportWrittenName is the refusal of a browser path whose file name an
 // import could have written.

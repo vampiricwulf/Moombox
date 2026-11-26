@@ -48,7 +48,7 @@ func importAnsweredWith(t *testing.T, a *App, status int, body string) importRes
 // "Imported: <title>".
 //
 // Mutants: importFileCmd not decoding import.note (the plain line); Warn not
-// set from import.renamed or from import.unpairedChats, or the update
+// set from import.renamed, import.unpairedChats or import.skipped, or the update
 // ignoring it (green for a warning); setFeedback in place of
 // setWrappedFeedback (the note is cut to one row).
 func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
@@ -63,6 +63,8 @@ func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
 			severitySuccess, "kept the identical copy"},
 		{"a chat left out", `{"title":"Stream","import":{"unpairedChats":["B.chat.json"],"note":"left out B.chat.json: a chat is imported only beside the video its name matches"}}`,
 			severityWarning, "left out B.chat.json"},
+		{"an entry left out", `{"title":"Stream","import":{"skipped":["notes.txt"],"note":"left out notes.txt: not named after the recording"}}`,
+			severityWarning, "left out notes.txt"},
 		{"plain", `{"title":"Stream","import":{}}`, severityUnstated, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

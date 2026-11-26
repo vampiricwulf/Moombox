@@ -206,12 +206,15 @@ func TestImportBadChecksumLeavesNothingBehind(t *testing.T) {
 // TestImportNamesAreRefusedAsBrowsers pins cookies.ImportWrittenSuffixes,
 // the list the browser-path name rule refuses (owner ruling R3-5), equal to
 // what the import itself can write: its video extensions, the chat suffix,
-// the extraction partial and the upload spool. An extension added to the
+// the sidecars it restores, the extraction partial and the upload spool. An extension added to the
 // import without the browser rule, or the other way round, fails here.
 func TestImportNamesAreRefusedAsBrowsers(t *testing.T) {
 	want := map[string]bool{importChatSuffix: true, importPartialExt: true, importSpoolExt: true}
 	for ext := range importVideoExts {
 		want[ext] = true
+	}
+	for _, s := range importSidecarSuffixes {
+		want[s] = true
 	}
 	got := map[string]bool{}
 	for _, s := range cookies.ImportWrittenSuffixes {

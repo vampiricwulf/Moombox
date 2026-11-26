@@ -124,13 +124,21 @@ test("an import's outcome note is shown and kept", { skip }, async () => {
 // W25-04: a chat the zip carried but named after no video was left out; the
 // note says so, as a warning. A re-adoption alone is a success.
 //
+// imports-4: any other entry left out (skipped) warns the same way.
+//
 // Mutants: warning only for a rename (the left-out chat toasts as a
-// success); warning for every note (the re-adoption toasts as a warning).
-test("a left-out chat warns; a re-adoption does not", { skip }, async () => {
+// success); skipped not read (the left-out entry toasts as a success);
+// warning for every note (the re-adoption toasts as a warning).
+test("a left-out chat or entry warns; a re-adoption does not", { skip }, async () => {
   const h = await harness.makeApp();
   const left = 'left out Recording B.chat.json: a chat is imported only beside the video its name matches';
   await importAnswered(h, 201, { id: "imp_0a1b2c3d", import: { unpairedChats: ["Recording B.chat.json"], note: left } });
   assert.ok(h.toasts().some((t) => t.textContent.includes(left) && t.variant === "warning"), "the left-out chat did not warn");
+
+  const hs = await harness.makeApp();
+  const skippedNote = "left out notes.txt: not named after the recording";
+  await importAnswered(hs, 201, { id: "imp_0a1b2c3d", import: { skipped: ["notes.txt"], note: skippedNote } });
+  assert.ok(hs.toasts().some((t) => t.textContent.includes(skippedNote) && t.variant === "warning"), "the left-out entry did not warn");
 
   const h2 = await harness.makeApp();
   const kept = "kept the identical copy already in imports/: Stream [dQw4w9WgXcQ].mp4";

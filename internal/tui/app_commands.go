@@ -325,12 +325,13 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		// (importOutcome, internal/web/routes/import_routes.go): a
 		// byte-identical file re-adopted, or a different one left alone
 		// while this archive took " (2)" — and any chat left out for
-		// matching no video's name.
+		// matching no video's name, and any other entry it did not keep.
 		var result struct {
 			Title  string `json:"title"`
 			Import struct {
 				Renamed       []json.RawMessage `json:"renamed"`
 				UnpairedChats []string          `json:"unpairedChats"`
+				Skipped       []string          `json:"skipped"`
 				Note          string            `json:"note"`
 			} `json:"import"`
 		}
@@ -348,7 +349,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		return importResultMsg{
 			Title: importedTitle,
 			Note:  result.Import.Note,
-			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0,
+			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0 || len(result.Import.Skipped) > 0,
 		}
 	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }

@@ -485,7 +485,21 @@ The `.zip` must hold **one** recording:
 
 - a video file (`.mp4`, `.mkv`, `.webm` or `.ts`), **or** a split
   recording's `"<name> - part1"`, `"<name> - part2"`… files, and
-- optionally its chat, named after it: `"<name>.chat.json"`.
+- optionally its chat, named after it: `"<name>.chat.json"`, and
+- optionally the other files Moombox writes beside an archive, named after
+  it: its thumbnail (`"<name>.jpg"`, `.webp` or `.png`; one is kept, in
+  that order), `"<name>.description"`, its chapter list
+  `"<name>.chapters.json"` and a chat's raw copy
+  `"<name>.chat.raw.jsonl"`. A split recording's are named after the name
+  its parts share (`"<name>.jpg"` beside `"<name> - part1.mp4"`). They are
+  put back beside the imported recording, so the job shows its own thumbnail
+  and description and the player its chapters — useful for a video that has
+  since been deleted, and for every Twitch recording.
+
+Anything else in the `.zip` is left out, and the result line names it with
+the reason (for example "left out notes.txt: not named after the recording").
+A chapter list Moombox cannot read is left out too, and so is one of these
+files when `imports` already holds a different file under the name it needs.
 
 The video ID is read from the last `[id]` in the file name (the form both
 Moombox and yt-dlp use, `Title [dQw4w9WgXcQ]`), or from the chat file. A
