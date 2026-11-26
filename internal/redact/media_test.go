@@ -47,6 +47,10 @@ func assertNoMediaSecret(t *testing.T, what, got string) {
 //     row keeps the session ahead of the file.
 //   - isFileExt without its length bound: the "a dot inside the session" row
 //     keeps the session's tail as an extension.
+//   - MediaURL without its hasSigAndToken branch: the "signed download" rows
+//     keep the signature and the token; hasSigAndToken answering true for
+//     either key alone: the "sig without a token" and "token without a sig"
+//     rows are cut.
 //   - the Twitch branch appending the query as it came: the "another layout"
 //     and usher rows keep their query values.
 func TestMediaURL(t *testing.T) {
@@ -140,7 +144,21 @@ func TestMediaURL(t *testing.T) {
 			"https://usher.ttvnw.net/vod/2212345678.m3u8?sig=SECRETSIG",
 			"https://usher.ttvnw.net/vod/2212345678.m3u8?sig=<redacted>",
 		},
+		// A signed download: both a sig and a token key, on any host.
+		{
+			"Twitch clip, signed download",
+			"https://production.assets.clips.twitchcdn.net/v2/media/SomeClipSlug-abc123/video-1080.mp4?sig=SECRETSIG&token=%7B%22authorization%22%3A%7B%22SECRETTOKEN%22%3Atrue%7D%2C%22clip_uri%22%3A%22%22%7D",
+			"https://production.assets.clips.twitchcdn.net/v2/media/SomeClipSlug-abc123/video-1080.mp4?sig=<redacted>&token=<redacted>",
+		},
+		{
+			"signed download, another host, token first, more keys and a fragment",
+			"https://clips-media-assets2.twitch.tv/AT-cm%7C123.mp4?token=SECRETTOKEN&a=SECRETEI&sig=SECRETSIG#SECRETSIG",
+			"https://clips-media-assets2.twitch.tv/AT-cm%7C123.mp4?token=<redacted>&a=<redacted>&sig=<redacted>#<redacted>",
+		},
 		// Not a media URL: only a PO token goes.
+		{"not media, a sig without a token", "https://production.assets.clips.twitchcdn.net/v2/media/x/video-1080.mp4?sig=abc&a=b", "https://production.assets.clips.twitchcdn.net/v2/media/x/video-1080.mp4?sig=abc&a=b"},
+		{"not media, a token without a sig", "https://production.assets.clips.twitchcdn.net/v2/media/x/video-1080.mp4?token=abc&design=1", "https://production.assets.clips.twitchcdn.net/v2/media/x/video-1080.mp4?token=abc&design=1"},
+		{"not media, sig and token in the path only", "https://h/sig/a/token/b?sigx=1&tokens=2", "https://h/sig/a/token/b?sigx=1&tokens=2"},
 		{"not media, PO token", "https://h/v?itag=1&pot=SECRETPOT&ip=x", "https://h/v?itag=1&pot=<redacted>&ip=x"},
 		{"not media, a watch page", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10"},
 		{"not media, videoplayback deeper in the path", "https://h/x/videoplayback?a=b", "https://h/x/videoplayback?a=b"},
@@ -196,6 +214,11 @@ func TestMediaText(t *testing.T) {
 			"setJobError's shape, a Twitch variant playlist",
 			`setup download: HLS playlist fetch failed after 10 consecutive errors: Get "https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/CsoESECRETSESSION.m3u8": dial tcp: i/o timeout`,
 			`setup download: HLS playlist fetch failed after 10 consecutive errors: Get "https://video-weaver.fra05.hls.ttvnw.net/v1/playlist/<redacted>.m3u8": dial tcp: i/o timeout`,
+		},
+		{
+			"setJobError's shape, a Twitch clip download",
+			`download: Get "https://production.assets.clips.twitchcdn.net/v2/media/SomeClipSlug-abc123/video-1080.mp4?sig=SECRETSIG&token=%7B%22authorization%22%3A%7B%22SECRETTOKEN%22%3Atrue%7D%7D": context deadline exceeded`,
+			`download: Get "https://production.assets.clips.twitchcdn.net/v2/media/SomeClipSlug-abc123/video-1080.mp4?sig=<redacted>&token=<redacted>": context deadline exceeded`,
 		},
 		{"token outside a URL", "token pot=SECRETPOT and /pot/SECRETPOT", "token pot=<redacted> and /pot/<redacted>"},
 		{"no URL at all", "no URL at all", "no URL at all"},
