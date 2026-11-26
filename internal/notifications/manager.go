@@ -1006,10 +1006,11 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		// The filter runs BEFORE the coalescing stage, so a target never
 		// accumulates an embed it would not have sent.
 		//
-		// The batcher decides immediately-or-coalesce from isBatchable(opts)
-		// and re-wraps the embed into a Message on the way out, which is also
-		// where the item's tier is derived (enqueueBatch) — from the embeds it
-		// actually carries rather than from this one send.
+		// The batcher decides immediately-or-coalesce from batchableIn (the
+		// event and the target's mode) and re-wraps the embed into a Message
+		// on the way out, which is also where the item's tier is derived
+		// (enqueueBatch) — from the embeds it actually carries rather than
+		// from this one send.
 		//
 		// The ping lands on the MESSAGE, not on the embed's opts: Discord
 		// applies content and allowed_mentions per message, so a batch of ten

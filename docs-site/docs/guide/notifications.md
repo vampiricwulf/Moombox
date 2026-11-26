@@ -279,7 +279,8 @@ the network is slow:
 - **Batching.** `found`, `added` and per-job *Authentication Required*
   notifications are held for 5 seconds and sent together, up to 10 embeds
   per Discord message. A single one still waits the 5 seconds. Everything
-  else goes out at once; an error never waits behind a batch.
+  else goes out at once; an error never waits behind a batch. On a target
+  set to one message per job, only *Authentication Required* is batched.
 - **Order.** Each target delivers in order, one message at a time, so a
   job's notifications never arrive out of order.
 - **Retries.** Each message gets up to 3 attempts, with a 15-second timeout

@@ -800,9 +800,15 @@ three-attempt loop, the same `Retry-After` handling and the same per-target
 FIFO. That FIFO is what makes edit mode safe — a job's states can never
 reorder, and a retried edit can never land after a later one.
 
-**Batching does not apply.** The 5 s `found`/`added`/`auth` window is
-separate-mode only: for an edit-mode target the `found` embed IS the job's
-lifecycle message, and coalescing it would defeat one-message-per-job.
+**Batching applies to per-job `auth` only.** For an edit-mode target the
+`found` embed IS the job's lifecycle message, and coalescing it would defeat
+one-message-per-job, so lifecycle events skip the 5 s window
+(`batchableIn`, `internal/notifications/batch.go`). The per-job "Authentication
+Required" is never a lifecycle message and still coalesces (owner ruling
+R4-10; it reverses the 2026-09-27 design decision that edit-mode targets never
+batch): one dead cookie parking N jobs is one post and one ping here too. A
+job's next lifecycle event, sent at once, flushes a window holding that job's
+alarm first (`holdsPredecessor`), so the alarm is never read after it.
 
 **A mode flip flushes the open window.** `applyTargets`
 (`internal/notifications/manager.go`) rebinds a surviving queue's dispatch
@@ -816,7 +822,8 @@ that job's newly created lifecycle message; a window holding more than one is
 still several jobs sharing a POST, so the same function's single-embed guard
 sends it as an ordinary multi-embed post instead, and each job's next event
 opens its own lifecycle message under the new mode. A flip back to separate
-mode flushes an always-empty window, because edit mode never opens one. An
+mode flushes a window that can hold only per-job `auth` alarms, which post
+plain as they always do. An
 `Add` racing the flip re-checks the mode under the same hold that appends, so a
 flip landing between its first check and the append emits that embed at once
 instead of arming a window on an edit-mode target.
@@ -863,7 +870,7 @@ A `Message` is one queue item, so the per-target FIFO's drop policy and the orde
 
 A retired target's open window is flushed into its queue before that queue starts discarding: `applyTargets` (`internal/notifications/manager.go`) stops the batcher before it retires the queue, so a webhook removed mid-window does not take its coalesced embeds with it. The flush is about ACCOUNTING, not about delivery — once in the queue the flushed message is treated exactly like anything else already queued for a removed target, which means it either wins the race with `stopDiscard` and goes out, or meets the same "target removed — discarding its queued notifications" Warn an ordinary queued item would. Without the flush it would simply vanish with the batcher, counted nowhere. `BeginShutdown` and `Wait` (`internal/notifications/manager.go`) flush every open window immediately, AFTER switching targets to single-attempt delivery — so the rescued batch is itself single-attempt rather than spending the shutdown budget on a 2s/5s ladder — and before closing the drain, since `enqueue` drops with a Warn once the queue is closing. A window open at shutdown is delivered, never held open to wait out its own 5 seconds.
 
-The window is separate-mode only: an edit-mode target's `found` embed IS the job's lifecycle message, so it is never coalesced. See **Delivery Modes**.
+On an edit-mode target only the per-job `auth` uses the window: its `found` and `added` embeds ARE the job's lifecycle message, so they are never coalesced (`batchableIn`). See **Delivery Modes**.
 
 ### Dispatch Behavior
 
