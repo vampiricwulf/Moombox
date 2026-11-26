@@ -346,7 +346,7 @@ The dashboard shows the same summary before its Reinitialize.
 | `A I I` | **Reinitialize Job**: reset the job to start again from scratch. Batch-capable. | `Error`, `Cancelled`, `COOKIES?`. |
 | `A M M` | **Mux Job**: build the output file from what is staged. | `Error` or `Cancelled` with staged segments; `Finished` with an unmuxed part left in staging. |
 | `A S S` | **Recover Set-aside Recordings**: mux each set-aside recording into its own file beside the archive, carry a kept chat capture beside the first, then clear staging if nothing unmuxed is left. | Jobs that are not active (`Upcoming`, `Live`, `Downloading`, `Muxing`) and have set-aside recordings. |
-| `A X X` | **Cancel Job**. Batch-capable; a batch runs in the background, and a new Resume, Reinitialize or Cancel waits for it. | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?`. |
+| `A X X` | **Cancel Job**. Batch-capable; a batch runs in the background, and while it runs a new Resume, Reinitialize or Cancel is refused. | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?`. |
 | `A D D` | **Delete Job**. Batch-capable. | `Finished`, `Error`, `Cancelled`, `COOKIES?`. Cancel an active job first. |
 | `A W` | **Toggle Watched**: adds or removes the dim `•`. Batch-capable. | `Finished`. |
 | `A T` | **Trim Video**: cut a clip from the archive. | `Finished` jobs with an output file. One trim runs at a time. |
