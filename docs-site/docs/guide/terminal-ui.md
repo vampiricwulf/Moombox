@@ -562,7 +562,7 @@ See [Statistics](statistics.md).
 
 - Click a panel to focus it. Click a task row to select it; click the archive divider to expand or collapse it.
 - The wheel scrolls the panel under the pointer, three rows a notch (in Tasks it moves the cursor).
-- In the action menu, clicks and the wheel move the selection only. Settings can be clicked.
+- In the action menu, clicks and the wheel move the selection only. Settings can be clicked, and the wheel scrolls its section.
 - The wheel works in every other overlay that has something to scroll: text (Help, the release notes, the job log, the FFmpeg check's script review) scrolls three rows a notch, and a list or table moves its cursor one row. The cookie file import and the yt-dlp plugin screen have nothing to scroll and ignore the mouse. Clicks do nothing outside the action menu and Settings.
 
 ## Tips

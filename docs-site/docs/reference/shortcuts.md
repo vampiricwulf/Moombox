@@ -172,7 +172,7 @@ Mouse clicks and the wheel only move the selection.
 | Notification editor: ++space++ / `m` | Toggle an option or event / toggle an event's mention. |
 | Restart Required box: ++enter++ / ++esc++ | Restart now / close without restarting. |
 
-Settings also accepts mouse clicks.
+Settings also accepts mouse clicks, and the wheel scrolls the section.
 
 ### Help (`?`) and release notes (`R N`)
 
