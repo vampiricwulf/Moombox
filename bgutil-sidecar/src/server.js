@@ -116,12 +116,17 @@ export function _setStepTimeoutForTest(ms) {
 }
 
 // withTimeout settles as promise does, or rejects with "<label> timed out"
-// once ms pass first. The timer is cleared when either settles, and a late
-// rejection of promise is caught here, so it is never an unhandled rejection.
+// once ms pass first; that error carries timedOut = true. The timer is
+// cleared when either settles, and a late rejection of promise is caught
+// here, so it is never an unhandled rejection.
 export function withTimeout(promise, ms, label) {
     let timer;
     const guard = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+        timer = setTimeout(() => {
+            const err = new Error(`${label} timed out after ${ms} ms`);
+            err.timedOut = true;
+            reject(err);
+        }, ms);
     });
     const p = Promise.resolve(promise);
     p.catch(() => {});
@@ -697,11 +702,17 @@ export function _retireForTest(entry) {
 }
 
 // Mint with an entry, counting the mint so a retired entry's client is not
-// shut down under it.
+// shut down under it. A mint that times out drops the entry from the cache
+// when it is still the cached one: its VM has stopped calling back, so every
+// later caller would wait out the same timeout until the entry expired. The
+// next mint builds a new minter, whose generation retires this entry.
 export async function mintWith(entry, binding) {
     entry.inUse = (entry.inUse ?? 0) + 1;
     try {
         return await withTimeout(entry.minter.mintAsWebsafeString(binding), stepTimeoutMs, "mint");
+    } catch (e) {
+        if (e?.timedOut && cachedMinter === entry) invalidateIT();
+        throw e;
     } finally {
         if (--entry.inUse === 0 && entry.retired) {
             setImmediate(() => {

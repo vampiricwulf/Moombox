@@ -70,3 +70,38 @@ test("a hung BotGuard step does not block the next generation", { timeout: 10_00
         _setStepTimeoutForTest();
     }
 });
+
+// A cached minter whose mint timed out used to stay cached, so every later
+// non-fresh caller waited out the same timeout until the entry expired. The
+// timed-out mint now drops it, and the next caller builds a new minter.
+//
+// Mutant: the catch in mintWith removed (the second getOrCreateMinter returns
+// the hung entry and never calls its factory).
+test("a mint that timed out drops its minter from the cache", { timeout: 10_000 }, async () => {
+    _setStepTimeoutForTest(50);
+    try {
+        invalidateIT();
+        const entry = (mint) => ({
+            minter: { mintAsWebsafeString: mint },
+            bgClient: { shutdown: async () => {} },
+            expiresAt: Date.now() + 3_600_000,
+            webPoSignalOutput: [],
+            globalName: "g",
+            inUse: 0,
+            retired: false,
+        });
+        const hung = entry(never);
+        const { m } = await getOrCreateMinter(null, null, false, async () => hung);
+        assert.equal(m, hung);
+
+        await assert.rejects(mintWith(m, "binding"), /mint timed out after 50 ms/);
+
+        const fresh = entry(async () => "tok");
+        const { m: next } = await getOrCreateMinter(null, null, false, async () => fresh);
+        assert.equal(next, fresh, "the timed-out minter was still served from the cache");
+        assert.equal(await mintWith(next, "binding"), "tok");
+    } finally {
+        _setStepTimeoutForTest();
+        invalidateIT();
+    }
+});
