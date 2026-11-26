@@ -17,6 +17,9 @@
 # run over the packages with the most goroutines. The frontend gate fails when
 # web/tests/node_modules has no jsdom (run `npm ci` in web/tests): without it
 # the DOM suites skip and the suite would pass with most of its tests unrun.
+# Without internal/cipher/testdata/player_cb017549.js (gitignored: copy it
+# from the main checkout, or run fetch-cipher-fixture.sh) the tests that feed
+# the sidecar a real YouTube player skip, and a SKIP line says so.
 # It writes no stand-ins: the suite needs the real blobs (new-worktree.sh
 # copies them), and it stops before the tests when one is an empty stand-in.
 # Run one --full at a time on a machine; two full suites side by side time
@@ -277,6 +280,9 @@ if [ "$mode" = full ]; then
 		gate "sidecar npm test" node_sidecar
 	else
 		skip "sidecar npm test" "no bgutil-sidecar/node_modules: npm ci && node build.mjs there"
+	fi
+	if [ ! -f internal/cipher/testdata/player_cb017549.js ]; then
+		skip "real-player cipher tests" "no internal/cipher/testdata/player_cb017549.js: bash .github/scripts/fetch-cipher-fixture.sh"
 	fi
 	gate "go test ./..." go test -count=1 -timeout 900s ./...
 	gate "go test -race (worker, web, tui, monitor, database, cmd)" go test -count=1 -race -timeout 900s \
