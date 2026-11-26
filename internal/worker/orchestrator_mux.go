@@ -617,7 +617,9 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 // swept — and a later Mux action retries it WHILE THE DIR STILL HOLDS
 // RECOGNISED MEDIA; an aside-only dir is not offered the Mux action at all,
 // because HasSegmentFiles (discoverStagingMedia) does not know the suffix.
-// Either way it never fails the job, whose own recording muxed fine.
+// Either way it never fails the job, whose own recording muxed fine. A copy
+// that returned an error is reported in JobContext.FinalizeMuxFailed, which a
+// split finalize reads during a shutdown (errFinalizeCutShortByShutdown).
 //
 // Returns the sibling outputs it wrote, oldest recording first. Finalize
 // ignores them (its own chat, thumbnail and description handling is about the
@@ -663,6 +665,7 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 				continue
 			}
 			// An FFmpeg the shutdown signalled is not a failed copy (R3-8).
+			jobCtx.FinalizeMuxFailed = true
 			o.muxFailed("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
 				"the set-aside recording stays in staging for a later Mux action",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
@@ -1461,6 +1464,14 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 	delete(updates, "percent")
 }
 
+// errFinalizeCutShortByShutdown is what a split finalize returns, with nothing
+// written, when one of its own FFmpeg runs failed while the worker was
+// stopping (JobContext.FinalizeMuxFailed, DownloadWorker.shuttingDown). Every
+// caller leaves the row as it is, Muxing, for the next start's re-mux: MuxJob
+// by its shuttingDown branch, processJob beside its cancellation (owner
+// ruling RV-1).
+var errFinalizeCutShortByShutdown = errors.New("the finalize was cut short by the shutdown")
+
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.
 // Individual segment .mp4 files are already muxed; this method copies assets and updates the job.
 // result is the download result the finalize was handed (muxAndFinalize's;
@@ -1536,6 +1547,21 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// muxAndFinalize returns into this function before its own call, so a job
 	// muxes its asides exactly once whichever shape it finalizes in.
 	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
+
+	// One of this finalize's own FFmpeg runs failed (a recovered part's mux,
+	// the merge's concat, a set-aside recording's copy) and Moombox is
+	// shutting down: the failure is read as the shutdown's, as MuxJob reads
+	// a failed single-file mux (owner rulings R3-8 and RV-1). Something that
+	// signals the whole process tree kills FFmpeg while this context is
+	// still live, each of those runs swallows its failure, and the job was
+	// then written Finished without the part, or with its parts unmerged and
+	// staging reclaimed. Returned before the finishing mark, so no status is
+	// written: the row stays Muxing with its staging and the next start's
+	// re-mux runs the work again. A finalize whose work all succeeded inside
+	// the stop's wait finishes as before.
+	if jobCtx.FinalizeMuxFailed && o.stopping() {
+		return errFinalizeCutShortByShutdown
+	}
 
 	// The parts are muxed (and merged): from here the job ends Finished, and
 	// a Cancel is answered "already finishing" (owner ruling R-C1), as in
@@ -2446,7 +2472,13 @@ func segDirsOf(stagingDir string, includeTombstoned bool) []stagedSeg {
 // file's mtime approximates the segment end, and an ffprobe of the raw
 // stream supplies dimensions and duration. Best-effort — individual
 // failures are logged and skipped so the rest of the recovery proceeds.
+//
+// It is where a finalize's mux work starts, so it sets
+// JobContext.FinalizeMuxFailed to whether THIS pass left a part unmuxed:
+// muxFromStaging runs it and then muxAndFinalize runs it again, and a part
+// the second pass muxed is no longer a failure.
 func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx *JobContext) {
+	jobCtx.FinalizeMuxFailed = false
 	segDirs := stagedSegDirs(jobCtx.StagingDir)
 	if len(segDirs) == 0 {
 		return // no part splits — nothing to recover
@@ -2510,6 +2542,7 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		// accurate as this raw stream's container metadata), clamped so the
 		// span never precedes the job's download start.
 		if seg, muxErr := o.muxSegment(ctx, jobCtx, sd.idx, 0, unixEnd, quality, media); muxErr != nil {
+			jobCtx.FinalizeMuxFailed = true
 			o.partMuxFailed("failed to mux recovered segment", "segment", sd.idx, "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
 			o.logger.Info("recovered unmuxed quality segment", "segment", sd.idx, "file", seg.Filename, "jobID", jobCtx.Job.ID)

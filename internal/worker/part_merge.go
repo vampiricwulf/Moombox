@@ -29,6 +29,13 @@ type partMerger struct {
 	replace    func(jobID string, segs []database.Segment) error
 	updateFile func(id int, filename, filePath, chatFile string) error
 	rename     func(oldpath, newpath string) error
+
+	// concatFailed is set when a run's concat-copy returned an error: the
+	// one FFmpeg run of the merge, which a shutdown that signals the whole
+	// process tree kills. The merge still returns its input untouched; the
+	// finalize reads this to tell a merge that was cut short from one that
+	// had nothing to do (JobContext.FinalizeMuxFailed).
+	concatFailed bool
 }
 
 // mergeSameFormatParts opportunistically concat-copies contiguous runs of
@@ -36,7 +43,9 @@ type partMerger struct {
 // spec). Decisions come from ffprobe on the actual files — the Segment
 // rows' quality metadata lacks audio parameters — and any probe, concat, or
 // db-replace failure returns the input untouched: the merge is an
-// improvement, never a gate on finalize. A per-run chat-merge failure is a
+// improvement, never a gate on finalize (a concat that failed is reported in
+// JobContext.FinalizeMuxFailed, which only a finalize during a shutdown
+// reads). A per-run chat-merge failure is a
 // narrower, run-scoped version of the same identity guarantee: THAT run's
 // media is not merged either, so its parts/rows/chat files all stay exactly
 // as they were, while any OTHER run in the same finalize still merges
@@ -67,7 +76,11 @@ func (o *DownloadOrchestrator) mergeSameFormatParts(ctx context.Context, jobCtx 
 		// and forces the undo path, for no reason at all.
 		rename: utils.ReplaceFile,
 	}
-	return pm.merge(ctx, jobCtx.Job.ID, jobCtx.StagingDir, segments)
+	merged := pm.merge(ctx, jobCtx.Job.ID, jobCtx.StagingDir, segments)
+	if pm.concatFailed {
+		jobCtx.FinalizeMuxFailed = true
+	}
+	return merged
 }
 
 // mergeRun tracks one contiguous multi-part run through the merge/commit/
@@ -229,6 +242,7 @@ func (pm *partMerger) merge(ctx context.Context, jobID, stagingDir string, segme
 		videoTemp := filepath.Join(dir, fmt.Sprintf("%s - merged%d.mp4", base, runIdx))
 
 		if err := pm.concat(ctx, inputs, videoTemp); err != nil {
+			pm.concatFailed = true
 			pm.logger.Debug("part merge: concat failed, aborting merge", "err", err, "jobID", jobID, "run", runIdx)
 			return abort()
 		}

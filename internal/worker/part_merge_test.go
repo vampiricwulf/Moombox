@@ -350,6 +350,11 @@ func TestPartMergerMerge_FailureAborts(t *testing.T) {
 			if tc.concatErr != nil && replaceCalled {
 				t.Error("db replace must not be called after a concat failure")
 			}
+			// Only the FFmpeg run is reported to the finalize (owner ruling
+			// RV-1): a shutdown kills that, never the DB write.
+			if pm.concatFailed != (tc.concatErr != nil) {
+				t.Errorf("concatFailed = %v after %s", pm.concatFailed, tc.name)
+			}
 			if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
 				t.Errorf("part1 mutated by aborted merge: content=%q err=%v", b, err)
 			}
