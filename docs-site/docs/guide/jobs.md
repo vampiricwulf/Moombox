@@ -411,8 +411,10 @@ A YouTube job deleted before you upgraded to the release that tells deleted
 jobs apart holds back only finished videos (see [Storage](storage.md)). A
 Twitch VOD or live broadcast you added by URL before the release that
 records it has no entry, so deleting it does not hold it back. The same
-goes for a Twitch channel job that started recording its broadcast before
-the release that keeps the broadcast's stream ID on the job.
+goes for a Twitch channel job whose recording had already ended before
+the release that keeps the broadcast's stream ID on the job. A job still
+recording when you upgraded picks the stream ID up at the restart, so its
+delete does leave the entry.
 
 ### Watched
 
