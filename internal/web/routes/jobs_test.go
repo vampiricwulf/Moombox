@@ -1075,10 +1075,12 @@ func TestJobDelete404(t *testing.T) {
 // added by URL (which no monitor ever recorded in history) is held back from
 // re-detection once deleted, exactly as a monitor-created one is, and its row
 // shows under Orphaned (owner ruling R4-3). A Twitch job's delete writes no
-// row: only the Twitch monitor records those.
+// row: only the Twitch monitor records those. Nor does an import placeholder's
+// (imp_ and eight hex digits): no monitor can find that ID again.
 //
 // Mutants: the route back on plain DeleteJob (no row, the stream is found
-// again); the Twitch early return dropped (a stray row keyed by the tw_ ID).
+// again); the Twitch early return dropped (a stray row keyed by the tw_ ID);
+// the video-ID shape check dropped (a stray row keyed by the imp_ ID).
 func TestJobDeleteLeavesAURLAddedYouTubeJobsHistoryRow(t *testing.T) {
 	f := newJobsFixture(t)
 	f.addJob(t, "urlAdded001", func(j *database.Job) {
@@ -1090,7 +1092,10 @@ func TestJobDeleteLeavesAURLAddedYouTubeJobsHistoryRow(t *testing.T) {
 		j.VideoID = "123456"
 		j.Status = database.StatusCancelled
 	})
-	for _, id := range []string{"urlAdded001", "tw_123456"} {
+	f.addJob(t, "imp_0a1b2c3d", func(j *database.Job) {
+		j.Status = database.StatusFinished
+	})
+	for _, id := range []string{"urlAdded001", "tw_123456", "imp_0a1b2c3d"} {
 		if rec := doRequest(t, f.router, "DELETE", "/api/jobs/"+id, nil); rec.Code != http.StatusOK {
 			t.Fatalf("delete %s: want 200, got %d", id, rec.Code)
 		}

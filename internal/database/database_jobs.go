@@ -313,10 +313,12 @@ func (db *Database) DeleteJob(id string) error {
 // (whose row AddToHistory already wrote). Removing the row from the Orphaned
 // list reopens the video. A YouTube job's ID is its video ID, the key history
 // uses. A Twitch job is deleted as DeleteJob does: only the Twitch monitor
-// writes its rows. DeleteJob stays for the deletes that are not the
-// operator's (an import rolling back its own row).
+// writes its rows. So is a job whose ID is not a YouTube video ID (an
+// import's "imp_" placeholder): no monitor can find it again, so its row
+// would only clutter the Orphaned list. DeleteJob stays for the deletes that
+// are not the operator's (an import rolling back its own row).
 func (db *Database) DeleteJobLeavingHistory(job *Job) error {
-	if job.Platform == "twitch" {
+	if job.Platform == "twitch" || !isYouTubeVideoID(job.ID) {
 		return db.DeleteJob(job.ID)
 	}
 	deleted, err := db.deleteJobLeavingHistoryTx(job.ID)
@@ -325,6 +327,24 @@ func (db *Database) DeleteJobLeavingHistory(job *Job) error {
 	}
 	db.notifyJobDeleted(job.ID)
 	return nil
+}
+
+// isYouTubeVideoID reports whether id has a YouTube video ID's shape, the
+// only IDs a YouTube monitor finds: exactly 11 characters from [A-Za-z0-9_-]
+// (utils' videoIDRegex).
+func isYouTubeVideoID(id string) bool {
+	if len(id) != 11 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // deleteJobLeavingHistoryTx runs DeleteJobLeavingHistory's transaction under
