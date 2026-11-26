@@ -117,8 +117,10 @@ func launchAndSupervise() {
 
 	// boot is the one-shot record of a freshly applied update's first boot
 	// and of the rollback artifact its restart named. The loop drives it
-	// only through its methods (postUpdateBoot).
+	// only through its methods (postUpdateBoot). A fresh start arms it when
+	// an applied update's restart never happened (armInterruptedUpdate).
 	var boot postUpdateBoot
+	boot.armInterruptedUpdate(exePath, version)
 	// Crash supervision state: consecutive abnormal exits (reset whenever a
 	// child survives launcherHealthyWindow) and the exit code that triggered
 	// the pending respawn (passed to the child so it can notify the operator
@@ -327,19 +329,21 @@ func forwardStop(goos string, p stoppable, sig os.Signal) {
 // postUpdateBoot is the launcher's one-shot record of a freshly applied
 // update's first boot, kept from the restart that applied the update to the
 // exit that judges the boot. launchAndSupervise holds one and drives it only
-// through judge, restarted and recoverFailedBoot. The loop spawns processes and
+// through armInterruptedUpdate, judge, restarted and recoverFailedBoot. The loop spawns processes and
 // exits the launcher, so no test runs it; the bookkeeping that decides which
 // file a failed boot is judged and rolled back by lives here, where one does.
 type postUpdateBoot struct {
 	// armed marks the next spawn as the first boot of a freshly applied
 	// update (set when an exit-42 restart found a .old binary — config
-	// restarts never create one). If that boot fails quickly, the launcher
+	// restarts never create one — or at a fresh start that finds an applied
+	// update never booted, armInterruptedUpdate). If that boot fails quickly, the launcher
 	// rolls back to the artifact, or PRESERVES it with recovery instructions,
 	// instead of deleting it on the way out. Consumed by the next child exit
 	// regardless of outcome.
 	armed bool
 	// artifact is that update's rollback artifact, as handleUpdateRestart
-	// named it at the restart that armed the boot: the boot is judged and
+	// named it at the restart that armed the boot (<exe>.old itself for a
+	// boot armInterruptedUpdate armed): the boot is judged and
 	// rolled back by this file, never by which names happen to be on disk
 	// when it exits. On Windows the launcher's own ~ image outlives the sweep
 	// of a second update's .old, and it is two versions back.
@@ -381,6 +385,46 @@ func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor t
 	b.armed = wasFirst && ranFor < postUpdateFailureWindow
 }
 
+// armInterruptedUpdate arms the first child of a fresh launcher start as the
+// first boot of an update that was applied but never booted, and reports
+// whether it did. ApplyUpdate swaps the binary and writes the .update-pending
+// breadcrumb before the restart; a stop in the restart's drain (a closed
+// console, a logoff or shutdown, SIGTERM, Ctrl+C in a headless run) or a
+// killed launcher ends Moombox there, and the restart that arms the boot in
+// the loop never runs. Without this, the next start's first boot of that
+// release was an ordinary fresh launch: a quick failure took the fail-fast
+// arm and the launcher exited with no rollback, although the previous binary
+// was sitting at .old (owner ruling R3-10).
+//
+// It arms only when both are on disk: the breadcrumb naming exactly
+// runningVersion — this binary is the release the update installed, so a
+// binary the launcher rolled back to (whose breadcrumb names the release it
+// replaced) never arms — and <exe>.old, which is then the artifact. It is
+// used where it is, not renamed as handleUpdateRestart renames it on Windows:
+// nothing holds it on a fresh start, and the ~ name is deleted by
+// deferDeleteOldLauncher on any later propagated exit and by cleanupOrphans
+// at the next start, so a stop or an exit 3 during this boot would destroy
+// the artifact that survives today as .old.
+//
+// The boot is then judged exactly as a restart-armed one: a stop the launcher
+// forwarded propagates and keeps .old (and the next start arms again), an
+// exit 3 (a port in use, a config it cannot load) keeps .old with the honest
+// notice and is not rolled back, a boot that reached its milestone swept .old
+// and is past rollback, and any other quick failure is rolled back
+// automatically.
+func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bool {
+	tag := pendingUpdateTag(exePath)
+	if tag == "" || tag != "v"+runningVersion {
+		return false
+	}
+	artifact := exePath + updater.OldSuffix
+	if _, err := os.Stat(artifact); err != nil {
+		return false
+	}
+	b.armed, b.artifact, b.tag = true, artifact, tag
+	return true
+}
+
 // recoverFailedBoot handles a first post-update boot that failed (code -1: the
 // binary would not even start): it rolls back to the recorded artifact and
 // reports true when the restored binary is to be respawned, as a known-good
@@ -415,7 +459,8 @@ func (b *postUpdateBoot) recoverFailedBoot(exePath string, code int) bool {
 // pendingUpdateTag reads the release tag the .update-pending breadcrumb
 // names, "" when there is none. The launcher reads it at the restart that
 // applies an update, while it is certainly there: ApplyUpdate writes it just
-// before that restart.
+// before that restart. A fresh start reads it too, for an update whose
+// restart never happened (armInterruptedUpdate).
 func pendingUpdateTag(exePath string) string {
 	raw, err := os.ReadFile(exePath + updater.PendingVersionSuffix)
 	if err != nil {
