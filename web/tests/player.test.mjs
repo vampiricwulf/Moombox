@@ -442,7 +442,8 @@ test("refreshing the job list mid-playback never re-selects the playing video", 
   assert.deepEqual(selections, [], "no re-selection");
 
   // An sl-change that arrives WHILE the option list is being rebuilt (the
-  // rebuild awaits the select) must be ignored, not treated as a user pick.
+  // rebuild awaits the select) carrying the value the rebuild writes back is
+  // the rebuild's own, not a user pick.
   let sawRead, release;
   const read = new Promise((r) => { sawRead = r; });
   const gate = new Promise((r) => { release = r; });
@@ -451,16 +452,55 @@ test("refreshing the job list mid-playback never re-selects the playing video", 
   const rebuilding = h.player.loadPlayerJobList();
   await read;
   await h.flush();
-  select.value = "j2";
   select.dispatchEvent(new h.window.Event("sl-change"));
   release();
   await rebuilding;
   await h.flush();
 
-  assert.deepEqual(selections, [], "a mid-rebuild sl-change is not a user pick");
+  assert.deepEqual(selections, [], "the rebuild's own sl-change is not a user pick");
   assert.equal(select.value, "j1");
   assert.equal(h.video.src, playingSrc);
 });
+
+// web-modules-1: a pick made inside the rebuild's option-mutation window (the
+// await on the select's updateComplete) used to be dropped, and the rebuild
+// then wrote back the value it had read before the pick.
+//
+// Mutants: return from the listener without keeping the pick; keep it but
+// never apply it after the write-back; apply a kept pick the new list lacks.
+for (const [name, rebuiltJobs, kept] of [
+  ["still listed", ["j1", "j2"], true],
+  ["gone from the new list", ["j1"], false],
+]) {
+  test(`a pick made while the picker writes its options is applied (${name})`, { skip }, async () => {
+    const j1 = finished("j1");
+    const h = harness.makePlayer({ jobs: [j1, finished("j2")], archived: [], watchState: {} });
+    const select = h.select();
+    await h.player.loadPlayerJobList();
+    await h.selectJob("j1");
+    select.value = "j1";
+
+    h.http.on("GET /api/jobs", () => rebuiltJobs.map((id) => finished(id)));
+    let sawRead, release;
+    const read = new Promise((r) => { sawRead = r; });
+    const gate = new Promise((r) => { release = r; });
+    Object.defineProperty(select, "updateComplete", { configurable: true, get() { sawRead(); return gate; } });
+    const rebuilding = h.player.loadPlayerJobList();
+    await read;
+    await h.flush();
+
+    // The operator picks j2 while the rebuild waits on the select.
+    select.value = "j2";
+    select.dispatchEvent(new h.window.Event("sl-change"));
+    release();
+    await rebuilding;
+    await h.flush();
+
+    const want = kept ? "j2" : "j1";
+    assert.equal(select.value, want, "the picker names the newest pick it still lists");
+    assert.equal(h.player.playerJob?.id, want, "and that recording plays");
+  });
+}
 
 // ── 10. Seek event order (Phases 3+4 fix wave, F1) ──────────────────────────
 

@@ -397,6 +397,15 @@ export class PlayerController {
      */
     this._rebuildToken = 0;
     this._rebuildsActive = 0;
+    /**
+     * A pick the operator made inside a rebuild's option-mutation window,
+     * where the listener cannot act on it (the rebuild is about to write back
+     * the value it read): the rebuild that completes applies it.
+     * `_restoringValue` is the value that rebuild writes back, so an sl-change
+     * carrying it is the rebuild's own, not a pick.
+     */
+    this._pickDuringRebuild = null;
+    this._restoringValue = null;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -423,20 +432,15 @@ export class PlayerController {
 
     // Job selection
     jobSelect.addEventListener("sl-change", async () => {
-      if (this._rebuildsActive > 0) return;
       const val = jobSelect.value;
+      if (this._rebuildsActive > 0) {
+        // Kept for the rebuild to apply once it has written the option list
+        // (loadPlayerJobList); the value it writes back is its own event.
+        if (val && val !== this._restoringValue) this._pickDuringRebuild = val;
+        return;
+      }
       if (val) {
-        // Await the load, then hand the keyboard over (see
-        // focusPlayerSurface). In a `finally`: a load that throws must not
-        // leave focus parked on the select, where every shortcut is swallowed
-        // and the user cannot tell why.
-        try {
-          await this.onPlayerJobSelect(val);
-        } catch (e) {
-          console.error("player: job select failed", e?.message ?? e);
-        } finally {
-          focusPlayerSurface();
-        }
+        await this._loadPick(val);
       } else {
         this.clearPlayer();
       }
@@ -1390,6 +1394,7 @@ export class PlayerController {
       // only user-driven paths emit it), so this never interrupts playback.
       // Guard against any synthetic sl-change firing mid-rebuild anyway.
       this._rebuildsActive++;
+      this._restoringValue = currentValue;
       try {
         select.querySelectorAll("sl-option").forEach((o) => o.remove());
 
@@ -1412,6 +1417,16 @@ export class PlayerController {
         this._rebuildsActive--;
       }
 
+      // A pick made inside the mutation window (this rebuild's, or a
+      // superseded one's) was overwritten by the write-back above and never
+      // loaded: apply it now, when it is still in the list.
+      const pick = this._pickDuringRebuild;
+      this._pickDuringRebuild = null;
+      if (pick && all.some((j) => j.id === pick)) {
+        select.value = pick;
+        await this._loadPick(pick);
+      }
+
       // Show/hide empty state. Both lines are set in both arms: the subtext
       // ("Choose from the dropdown above…") used to stay put when the list
       // was empty, pointing at a dropdown with nothing in it.
@@ -1432,6 +1447,22 @@ export class PlayerController {
       // The half-failed list toasts above; a total failure (server
       // unreachable) must too, or the picker just sits stale.
       this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
+    }
+  }
+
+  /**
+   * Load the recording the operator picked, then hand the keyboard over (see
+   * focusPlayerSurface). In a `finally`: a load that throws must not leave
+   * focus parked on the select, where every shortcut is swallowed and the
+   * user cannot tell why.
+   */
+  async _loadPick(jobId) {
+    try {
+      await this.onPlayerJobSelect(jobId);
+    } catch (e) {
+      console.error("player: job select failed", e?.message ?? e);
+    } finally {
+      focusPlayerSurface();
     }
   }
 
