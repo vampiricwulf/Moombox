@@ -123,7 +123,7 @@ direct loopback connection (see
 | `POST` | `/api/auth/login` | Body `{password}`. Sets the session and client-token cookies. |
 | `POST` | `/api/auth/logout` | Ends the session, revokes this browser's client token, clears both cookies. Open dashboards reconnect their live connection, and one that is no longer signed in is refused. |
 | `POST` | `/api/auth/set-password` | Body `{currentPassword, newPassword}`. Set or change the password (8–128 characters). Needs a logged-in session or a local/private address; the first password needs a session or this machine. |
-| `POST` | `/api/auth/remove-password` | Body `{currentPassword}`. Removes the password and resets access to `localhost`. |
+| `POST` | `/api/auth/remove-password` | Body `{currentPassword}`. Removes the password. From `external`/`public` it also resets access to `localhost` and answers `networkAccessChanged: true`; `lan` and `localhost` are left as they are. |
 | `GET` | `/api/client-tokens` | List remembered clients: `id`, `tokenPrefix`, `label`, `createdAt`, `lastUsedAt`, shortened `lastIp`. |
 | `DELETE` | `/api/client-tokens/{id}` | Revoke one remembered client (`{id}` is the token's ID). |
 
