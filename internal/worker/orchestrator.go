@@ -787,7 +787,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Mux and finalize (B5: includes ffprobe metadata)
 	if err := o.muxAndFinalize(ctx, jobCtx, result); err != nil {
-		if ctx.Err() != nil {
+		// A row deleted after its archive was written says so through the
+		// error, whatever the delete did to ctx: processJob reclaims staging
+		// on it (writeFinished).
+		if _, gone := finishedRowGone(err); !gone && ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return err
