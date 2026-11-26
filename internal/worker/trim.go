@@ -83,7 +83,16 @@ type TrimEvent struct {
 	// state stays "failed" so a page that does not read this field still
 	// takes the trim off its running list.
 	Stopped bool `json:"stopped,omitempty"`
+	// StopReason says which, on a Stopped event: TrimStopOperator or
+	// TrimStopJobDeleted. A page branches on it, never on Error's wording.
+	StopReason string `json:"stopReason,omitempty"`
 }
+
+// The StopReason values of a Stopped TrimEvent.
+const (
+	TrimStopOperator   = "operator"
+	TrimStopJobDeleted = "job_deleted"
+)
 
 // trimFailedReason is what a trim that broke tells the user; its detail
 // (paths, FFmpeg's stderr) stays in the log and the trim_error embed. The
@@ -166,6 +175,9 @@ type TrimService struct {
 	// NewDownloadWorker; nil: never). prepare refuses a trim while it does
 	// (owner decision CI-1: the import's re-mux never overlaps a trim).
 	archiveRewriting func(jobID string) bool
+	// shuttingDown reports whether Moombox's stop has begun
+	// (DownloadWorker.shuttingDown, set by NewDownloadWorker; nil: never).
+	shuttingDown func() bool
 	// progressInterval is trimProgressInterval; a field so a test can take
 	// every report, or none.
 	progressInterval time.Duration
@@ -439,6 +451,22 @@ func (ts *TrimService) setArchiveRewriting(fn func(jobID string) bool) {
 	ts.archiveRewriting = fn
 }
 
+// setShuttingDown installs the worker's "the stop has begun" predicate.
+func (ts *TrimService) setShuttingDown(fn func() bool) {
+	ts.activeMu.Lock()
+	defer ts.activeMu.Unlock()
+	ts.shuttingDown = fn
+}
+
+// shutdownBegun reports whether Moombox's stop has begun, by the worker's
+// predicate (owner ruling R3-8).
+func (ts *TrimService) shutdownBegun() bool {
+	ts.activeMu.Lock()
+	fn := ts.shuttingDown
+	ts.activeMu.Unlock()
+	return fn != nil && fn()
+}
+
 // release gives back the job's trim slot and the Stop wait it counts in.
 func (ts *TrimService) release(jobID string) {
 	ts.activeMu.Lock()
@@ -610,15 +638,18 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 			// Asked for by the operator, so not answered as a failure. Read
 			// off the request, not the context: the stop cancels the context
 			// from a goroutine of its own, which may not have run yet.
-			ev.State, ev.Error, ev.Stopped = TrimStateFailed, trimStoppedReason, true
+			ev.State, ev.Error, ev.Stopped, ev.StopReason = TrimStateFailed, trimStoppedReason, true, TrimStopOperator
 			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimStopped, err)
 		case errors.Is(context.Cause(ctx), ErrTrimJobDeleted), ts.jobGone(job.ID):
 			// The second: the row went between the encode's end and the
 			// record (AddTrim then fails on the foreign key), before the
 			// subscription above could cancel anything.
-			ev.State, ev.Error, ev.Stopped = TrimStateFailed, trimJobDeletedReason, true
+			ev.State, ev.Error, ev.Stopped, ev.StopReason = TrimStateFailed, trimJobDeletedReason, true, TrimStopJobDeleted
 			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimJobDeleted, err)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, ts.shutdownBegun():
+			// The second: an FFmpeg the shutdown signalled directly
+			// (systemd's default KillMode) failed before Stop cancelled
+			// ts.ctx. That is the shutdown, not a broken trim (R3-8).
 			ev.State, ev.Error = TrimStateFailed, trimInterruptedReason
 			err = fmt.Errorf("%w: %w", errTrimInterrupted, err)
 		default:

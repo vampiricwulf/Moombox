@@ -580,6 +580,9 @@ func NewDownloadWorker(
 	// archive (ClaimChapterImport has the other half).
 	if trims != nil {
 		trims.setArchiveRewriting(w.chapterImportRunning)
+		// And whether the stop has begun: a trim whose FFmpeg the shutdown
+		// killed is interrupted, not failed (R3-8).
+		trims.setShuttingDown(w.shuttingDown)
 	}
 	// And a finalize waits for one (owner decision PR-M5): it writes the
 	// archive the import's re-mux is about to rename its copy over.

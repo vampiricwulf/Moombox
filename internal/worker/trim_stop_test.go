@@ -33,8 +33,8 @@ func TestDeletingTheJobStopsItsTrim(t *testing.T) {
 		t.Fatalf("DeleteJob: %v", err)
 	}
 	ev := r.events.wait(t, TrimStateFailed)
-	if ev.Error != trimJobDeletedReason {
-		t.Errorf("the deleted job's trim event says %q, want %q", ev.Error, trimJobDeletedReason)
+	if ev.Error != trimJobDeletedReason || ev.StopReason != TrimStopJobDeleted {
+		t.Errorf("the deleted job's trim event says %q (stopReason %q), want %q (%q)", ev.Error, ev.StopReason, trimJobDeletedReason, TrimStopJobDeleted)
 	}
 	if got := r.files(t); len(got) != 0 {
 		t.Errorf("the deleted job's trim left %v in trim/", got)
@@ -113,7 +113,7 @@ func TestStopTrimStopsARunningTrim(t *testing.T) {
 		t.Fatalf("StopTrim: %v", err)
 	}
 	ev := r.events.wait(t, TrimStateFailed)
-	if !ev.Stopped || ev.Error != trimStoppedReason || ev.ID != task.ID {
+	if !ev.Stopped || ev.Error != trimStoppedReason || ev.StopReason != TrimStopOperator || ev.ID != task.ID {
 		t.Errorf("stopped trim's event = %+v, want trim %q stopped with %q", ev, task.ID, trimStoppedReason)
 	}
 	if got := r.files(t); len(got) != 0 {
@@ -233,5 +233,27 @@ func TestCreateTrimStartedNamesTheTrimBeforeItEncodes(t *testing.T) {
 	}
 	if err := <-done; !errors.Is(err, ErrTrimStopped) {
 		t.Errorf("CreateTrimStarted of a stopped trim: err = %v, want ErrTrimStopped", err)
+	}
+}
+
+// TestATrimFailingDuringShutdownIsInterrupted: systemd's default KillMode
+// signals a trim's FFmpeg directly, so it fails before Stop cancels the
+// service. Once the stop has begun that is the shutdown, not a broken trim:
+// it is reported as interrupted and sends no trim_error (owner ruling R3-8).
+//
+// Mutant: drop shutdownBegun from run's outcome — trim_error is sent.
+func TestATrimFailingDuringShutdownIsInterrupted(t *testing.T) {
+	r := newTrimRig(t, filepath.Join(t.TempDir(), "no-ffmpeg-here"))
+	r.ts.setShuttingDown(func() bool { return true })
+
+	if _, err := r.ts.StartTrim(r.job, 60, 300); err != nil {
+		t.Fatalf("StartTrim: %v", err)
+	}
+	ev := r.events.wait(t, TrimStateFailed)
+	if ev.Error != trimInterruptedReason || ev.Stopped {
+		t.Errorf("a trim that failed during shutdown: event = %+v, want %q", ev, trimInterruptedReason)
+	}
+	if n := len(r.rec.ByEvent("trim_error")); n != 0 {
+		t.Errorf("a trim that failed during shutdown sent trim_error %d times", n)
 	}
 }
