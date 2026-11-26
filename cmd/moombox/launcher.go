@@ -756,7 +756,10 @@ func classifyPostUpdateExit(code int) postUpdateVerdict {
 // was armed at a fresh start (armInterruptedUpdate), the broken binary at the
 // plain name is this launcher's own image instead: the move aside renames it
 // to .failed, which is legal for the same reason, and the launcher runs from
-// .failed until it exits. The remove fallback cannot delete a mapped image,
+// .failed until it exits. That .failed therefore outlives the restored
+// release's healthy boot: CleanupOldBinary cannot delete a running image (it
+// says so at Debug) and removes the file at the first milestone after this
+// launcher has exited and Moombox has been started again. The remove fallback cannot delete a mapped image,
 // so if the move aside never succeeds the rollback ends in the manual
 // instructions.
 func attemptAutoRollback(exePath, backup string, exitCode int) bool {
