@@ -6,9 +6,9 @@ Where the last upstream review left off, so the next one (a local session, a sch
 
 ## Last review
 
-- **Date:** 2026-11-19
-- **Last port:** `f59c110` — fix(constants): move the randomized Chrome major window to 151-157 ← yt-dlp `d432ab874` (#17930); and `96e79e4` — fix(youtube): web_embedded takes the web family's GVS token and follows tv ← yt-dlp `ee2559128` (#18051)
-- **Ported into:** `internal/constants/constants.go` (`chromeMajorMin`/`chromeMajorMax`); `internal/youtube/types.go` (`GvsTokenRequired`, `AuthLevelTVAuth`/`AuthLevelWebEmbedded`), `internal/youtube/player_api_strategy.go` (authed cascade order), with comments in the worker's GVS strategies
+- **Date:** 2026-11-26
+- **Last port:** `c431eab` — fix(cipher,youtube): ejs re-vendored for the players its pin threw on; a `tcl` page's STS and media are not used ← ejs `40b7a7d` (#81), `1c493d6` (#77), `3b6be39` (#60); yt-dlp `b2e6bb0dd` (#18126), `f31e4c27a` (#18129)
+- **Ported into:** `bgutil-sidecar/vendor/ejs/` (the VERSION file and the solver sources), `bgutil-sidecar/package.json` (meriyah), `bgutil-sidecar/src/cipher.js` (`withEjsGlobalsRestored`); `internal/youtube/player_api_strategy.go` (`mainVariantSTS`, `dropOtherVariantMedia`, `extractSTS`)
 
 ## Upstream repos — last reviewed commit
 
@@ -16,15 +16,15 @@ A cloud session has no `references/` (it is gitignored). Clone what the review n
 
 ```bash
 git clone --filter=blob:none https://github.com/yt-dlp/yt-dlp.git /tmp/yt-dlp
-git -C /tmp/yt-dlp log --oneline 412e7f0a4b0588fe884a02b344ac66a06538475b..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
+git -C /tmp/yt-dlp log --oneline da452a569fb3d04091468d920f9b9e68512e0373..HEAD -- yt_dlp/extractor/youtube yt_dlp/extractor/twitch.py yt_dlp/downloader yt_dlp/networking yt_dlp/cookies.py
 ```
 
 Locally, `bash references/update-all.sh` pulls all seven and prints two things per repo: the "new commits" of that pull, which are only those since the local clone's previous pull, and a "since last review" line counting the commits after the SHA below, which it reads from this table. The SHAs below are the durable record and the review range. If the script cannot read a row (it reports that) or the table's layout changes, compare against the SHAs by hand. A clone, fetch or pull that fails is reported as FAILED and the script exits 1.
 
 | Repo | Clone URL | Last reviewed | Commit date | Notes |
 |---|---|---|---|---|
-| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `2d596f4882a2d6e6414836bccd9fd3fb1e1534a2` | 2026-11-17 | past release 2026.10.26 |
-| ejs | https://github.com/yt-dlp/ejs.git | `d48c6303a5a6455a42ef9e0b445149cadea51279` | 2026-10-26 | CI-only commits past the vendored pin |
+| yt-dlp | https://github.com/yt-dlp/yt-dlp.git | `da452a569fb3d04091468d920f9b9e68512e0373` | 2026-11-24 | past release 2026.11.23 |
+| ejs | https://github.com/yt-dlp/ejs.git | `c47fb1b54215afa4f6a3d557ad65bb724022f6ba` | 2026-11-25 | the vendored pin; past release 0.8.0, which lacks `40b7a7d` and `1c493d6` |
 | BgUtils | https://github.com/LuanRT/BgUtils.git | `f842f8a14435a35800ff469d315bb1a7e6d7a64a` | 2026-10-23 | dev-dependency bump only |
 | bgutil-ytdlp-pot-provider | https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git | `26475e9d3665b972c4aeb83b4dbaafcf64b88438` | 2026-10-07 | |
 | moonarchive | https://github.com/nosoop/moonarchive.git | `0da99f26c3da3cf1c22e230be1eafc08a0369927` | 2026-08-08 | |
@@ -37,9 +37,9 @@ These are what actually ships. A repo's *Last reviewed* SHA can be ahead of its 
 
 | Source | Pin | Where |
 |---|---|---|
-| ejs | `6f8587bb7009a1fc81038538071d2cb66b8b8ed0` | the VERSION file in `bgutil-sidecar/vendor/ejs/` |
+| ejs | `c47fb1b54215afa4f6a3d557ad65bb724022f6ba` | the VERSION file in `bgutil-sidecar/vendor/ejs/` |
 | bgutils-js | `^4.0.3` | `bgutil-sidecar/package.json` |
-| meriyah / astring | `6.1.4` / `1.9.0` (lockstep with ejs's own `package.json`) | `bgutil-sidecar/package.json` |
+| meriyah / astring | `7.4.2` / `1.9.0` (lockstep with ejs's own `package.json`) | `bgutil-sidecar/package.json` |
 
 ## Open upstream items
 
@@ -47,6 +47,8 @@ Reviewed and not ported. Newest first. Remove an entry when it is ported (and ad
 
 | Upstream | What | Moombox exposure | Status |
 |---|---|---|---|
+| yt-dlp `b2e6bb0dd` (#18126) and `f31e4c27a` (#18129), both marked temporary upstream ("Revert to `return sts` immediately when reworking STS/variant handling") | The STS cut to five digits and the webpage's player response skipped, until upstream handles the `tcl` player variants properly (ejs `1c493d6` can already solve them) | Ported 2026-11-26 as `mainVariantSTS` and `dropOtherVariantMedia`, and it carries upstream's own caveat: if a regular variant ever states an STS longer than five digits the cut is wrong, and every player call then asks for the wrong cipher. No `tcl` watch page could be fetched from the reviewing session (its IP was sent to the captcha), so the media drop is tested against a built fixture, not a capture. | Follow upstream's rework when it lands: watch `_extract_signature_timestamp` and `_skipped_webpage_data` in `extractor/youtube/_video.py`. |
+| yt-dlp `7940e14e3` (#17866) | A new `ios_producer` client (`IOS_PRODUCER` 0.147.945, client name 92, no player JS, H.264 and mp4a only), asked for a "made for kids" video visionos or android_vr refused, signed out only | Moombox's cookieless chain has no made-for-kids fallback at all: it does not attempt upstream's web_embedded one either (see the chain's comment in `internal/youtube/player_api_strategy.go`). Such a video signed out ends on the refusal. | Waiting on the owner: a new client is a cascade design decision (its place, its `AuthLevel`, H.264-only quality). |
 | yt-dlp `_extract_client_version` / `_extract_context` (`extractor/youtube/_base.py:744-759`) | The web client's version and context are read from the page ytcfg (`INNERTUBE_CLIENT_VERSION`, `INNERTUBE_CONTEXT`); the pinned table is only the fallback | Moombox always sends the pinned table (`internal/constants/constants.go`), which equals upstream's fallback table. A port must also hand the same version to the sidecar's `/att/get` context (`internal/constants/sidecar_version_test.go` keeps the two equal today), keep the constant for probe-only calls, web_embedded and web_creator, and pass the `MOOMBOX_LIVE_*` gates, since a newer version can change which formats come back. | Owner ruled 2026-11-12 (R2-Y1): the pinned table stays; no request change. |
 | yt-dlp `c7fb478d2` (issue #17666) | web_embedded can go SABR-only (itag 18 only); upstream gets HLS 91–96 back with a Safari UA | Swapping the UA on its own does nothing here: the port has three parts. | Owner deferred 2026-10-02. |
 
@@ -56,6 +58,7 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-11-26 | `c431eab` | ejs `40b7a7d` (#81, prototype helpers kept by `modifyPlayer`), `1c493d6` (#77, `tcl` variants: `extractArray`, the pool solver, `window.location` in `setupNodes`), `3b6be39` (#60, meriyah 6.1.4 → 7.4.2); yt-dlp `b2e6bb0dd` (#18126, `int(str(sts)[:5])` in `_extract_signature_timestamp`) and `f31e4c27a` (#18129, `player_response` always in `_skipped_webpage_data`) | The vendored ejs moves from `6f8587bb` to `c47fb1b`: the old pin threw `a.addOnDisposeCallback is not a function` on the main variant of the players from `05a4ffc0` on (`b485e332` live on the day), leaving every sidecar solve to fail. The sidecar hides the JSDOM window from each ejs call, since the new `setupNodes` assigns `window.location` and JSDOM took that for a navigation of BotGuard's page. A page ytcfg's STS is cut to its first five digits, the main variant's (`mainVariantSTS`), and a watch page stating a longer one has its own player response's formats and manifests left out (`dropOtherVariantMedia`): narrower than upstream, which skips that response for every page |
 | 2026-11-19 | `f59c110` | yt-dlp `d432ab874` (#17930: `random_user_agent`'s `CHROME_MAJOR_VERSION_RANGE` 145-151 → 151-157, `utils/networking.py`) | The randomized desktop Web UA draws its Chrome major from 151-157 |
 | 2026-11-19 | `96e79e4` | yt-dlp `ee2559128` (#18051, closes #17989: `web_embedded` gets `**WEB_PO_TOKEN_POLICIES`, `_base.py`; `_DEFAULT_AUTHED_CLIENTS = (tv_samsung, web_embedded, web)`, `_video.py`) | `GvsTokenRequired` answers true for `web_embedded` (tokenised on every path, mandatory unless Premium, so a failed mint drops its copies for token-free ones); `AuthLevelTVAuth` 1 ahead of `AuthLevelWebEmbedded` 2, so tv wins the authed tie and a web_embedded winner carries the token-free shadow; the authed cascade asks TV before web_embedded |
 | 2026-11-14 | `59a2b8af` | yt-dlp `YoutubeDLCookieJar.load` and `get_cookie_header`, `_extract_firefox_cookies`, `_extract_chrome_cookies` (`yt_dlp/cookies.py` at `43a45ae37`): no list of cookie names, every row loaded, a request carries each cookie whose domain and path match | Owner ruling KA-7: a row `www.youtube.com` is sent, on path `/`, is kept and sent under any name (`wwwYouTubeRow`) by `Load`, the `Cookie` header, the browser export and the reply renewals; plain `SIDCC` was the case. google.com rows stay kept by name, and a media host is sent the rows kept by name only (`GetYouTubeMediaCookieHeader`) |
@@ -173,11 +176,12 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 Replace this section on each review. It is the reason the SHAs above moved past these commits.
 
-- yt-dlp `412e7f0a4..2d596f488` (2026-11-19 review), besides the two ported commits:
-  - `6c6d09761` (#18058, post-live fragment generation: read `X-Head-Seqnum` off a HEAD answered 5xx) — already Moombox's shape: the head probe (`probeHeadAt`, `internal/engine/downloader_fetch.go`) and every segment fetch (`noteHeadSeqFromResponse`) read the header whatever the status.
-  - `fcfd814ff` (#18059, drops the post-live `last_seq -= 2` truncation from `8c1f07d81`) — Moombox never truncated: it fetches up to the head and only tolerates ending two short of it (`EndOfStreamHeadMargin`).
-  - `5aecc65a2` (#18063, a `post_live` notice raised from debug to screen) — message only.
-  - `e6275c2b7` (twitter:spaces), `8f9e23a47` (facebook) — other extractors.
-  - `2d596f488`, `f38fb253b`, `9cd944f34`, `c8dfd5776` — docs, build and CI.
-- ejs, BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python: nothing new; every HEAD is still the *Last reviewed* SHA above.
-- Open items: `c7fb478d2` is unchanged upstream (`ee2559128` changes web_embedded's token policy and order, not its UA); R2-Y1 stands.
+- yt-dlp `2d596f488..da452a569` (2026-11-26 review), besides the two ported commits:
+  - `fa9a87158` (#18124, closes #18123: `_DEFAULT_PLAYER_JS_VARIANT` `main` → `tv`) — upstream's way around ejs 0.8.0 throwing on the main variant. The ejs vendored here now solves main: checked against the live `b485e332` and `92eef845` players, whose main, es6 and tv variants give one answer and whose goja answers match the sidecar's. Moombox stays on main (`internal/cipher/player_url.go`).
+  - `6859de80b` (#18131, `web` out of `_DEFAULT_CLIENTS`) — the signed-out cascade here never asked `web`; `_DEFAULT_AUTHED_CLIENTS` is unchanged upstream.
+  - `f66c9c725` (#18092, live adaptive formats not made `dashy`) — a yt-dlp format-type option Moombox has no counterpart of.
+  - `da452a569` (#17937, `remove_dot_segments`, `normalize_url` for `file:`), `1507b2693` (#17857, `find_xpath_attr`) — generic utilities; nothing here normalises a URL through them.
+  - `696c0673e` (cleanup), `6f73a8d16` (release 2026.11.23), `28b379d66`, `4adbf698d` (docs), and the other extractors (`3b737b81c`, `4b91f5d70`, `a38fc9a11`, `0107be441`, `bd9f2b877`, `79a40f7ba`, `38a5fb16d`, `91361cca6`, `49b0a3fc7`, `01c58db00`).
+- ejs `d48c6303..c47fb1b`, besides the three re-vendored: `181a67b` (dev dependencies), `bb1090e`, `6b6f7b4`, `e19cf40`, `c47fb1b` (CI, Python packaging). The goja fallback (`internal/cipher/`) needed no change: it compiles the whole player and its answers match on the live players.
+- BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python: nothing new; every HEAD is still the *Last reviewed* SHA above.
+- Open items: `c7fb478d2` is unchanged upstream; R2-Y1 stands.
