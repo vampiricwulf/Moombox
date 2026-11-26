@@ -327,6 +327,12 @@ The ping shows as text but nobody is notified
     check that the event is in the target's mention list and the role can be
     mentioned.
 
+A notification failed to send
+:   The log has an error ("notification send failed") naming the event, the
+    title and the target as `target=#2`: its place in the list of
+    notification targets, counting from 1, muted ones included. Press that
+    target's test button to see why it fails.
+
 Discovery notifications are missing after a re-scan
 :   They may have been dropped because the target's backlog filled up; the
     log has a warning ("notification queue full — shedding notifications")

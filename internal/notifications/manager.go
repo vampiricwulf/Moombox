@@ -361,6 +361,11 @@ type notificationTarget struct {
 	// resolution differs from today's (legacyResolvedURL). Read only on a
 	// miss, so a job opened before the upgrade keeps editing its message.
 	legacyMsgKeys []string
+	// position is the 1-based index in cfg.Notifications of the entry that
+	// built this target (the first, when spellings collapsed): what log lines
+	// name it by ("target #2"), counted over the whole list, muted and
+	// rejected entries included, because that is the list the operator sees.
+	position int
 }
 
 // sender is one delivery destination.
@@ -529,7 +534,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 	// simply never dedupes rather than colliding on "".
 	seen := make(map[string]int, len(cfg.Notifications))
 	collapsed := 0
-	for _, nc := range cfg.Notifications {
+	for i, nc := range cfg.Notifications {
 		url := nc.URL
 		if url == "" {
 			continue
@@ -710,6 +715,7 @@ func buildTargets(cfg *config.MoomboxConfig, logger interface {
 			mode:           normalizeTargetMode(nc.Mode),
 			msgKey:         msgKey,
 			legacyMsgKeys:  legacyMsgKeys,
+			position:       i + 1,
 		})
 	}
 	// One line per config load, carrying the COUNT and nothing else. The
@@ -791,6 +797,8 @@ func (m *Manager) applyTargets(built []notificationTarget) {
 			// both UIs, written to the file, and then ignored until restart —
 			// the same defect setEvents exists to prevent for the filter.
 			q.setMention(t)
+			// Restamped: a survivor matches by key, and its entry may have moved.
+			q.position.Store(int32(t.position))
 			bind(q)
 			next = append(next, q)
 			byKey[t.key] = q
