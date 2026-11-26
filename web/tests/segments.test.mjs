@@ -17,6 +17,13 @@ function fakeVideo() {
     set: (s) => { src = s; v.paused = true; v.currentTime = 0; },
   });
   v.play = () => { v.paused = false; v.plays++; return Promise.resolve(); };
+  // The signals listeners were added with, to count the ones still attached.
+  v.signals = [];
+  const add = v.addEventListener.bind(v);
+  v.addEventListener = (type, fn, opts) => {
+    if (opts?.signal) v.signals.push(opts.signal);
+    add(type, fn, opts);
+  };
   return v;
 }
 
@@ -106,4 +113,21 @@ test("a part that fails to load drops the pending seek", () => {
   assert.equal(video.currentTime, 40, "a seek in the failed part sets the position itself");
   video.dispatchEvent(new Event("loadeddata"));
   assert.equal(video.plays, 0, "no stale resume");
+});
+
+// A seek across parts adds a loadeddata and an error listener. When the part
+// loaded, only the loadeddata one went away: one error listener stayed on the
+// element for every such seek, for as long as the page lived.
+//
+// Mutant: the loadeddata handler drops the controller without aborting it.
+test("a cross-part seek that lands leaves no listener behind", () => {
+  const video = fakeVideo();
+  const seg = twoParts(video);
+  for (const target of [90, 10, 100]) {
+    seg.seekToGlobalTime(target, video);
+    video.dispatchEvent(new Event("loadeddata"));
+  }
+  assert.equal(video.currentTime, 40, "the last seek landed");
+  assert.equal(video.signals.length, 6, "precondition: two listeners a seek");
+  assert.equal(video.signals.filter((s) => !s.aborted).length, 0, "listeners still attached");
 });
