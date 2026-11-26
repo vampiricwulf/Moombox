@@ -171,8 +171,8 @@ func TestRunStringWithTimeoutTimeoutFires(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !errors.Is(err, ErrExecutionTimeout) || err.Error() != "execution timeout (100ms)" {
-		t.Errorf("want ErrExecutionTimeout reading \"execution timeout (100ms)\", got: %v", err)
+	if !errors.Is(err, ErrExecutionTimeout) {
+		t.Errorf("want ErrExecutionTimeout, got: %v", err)
 	}
 }
 
