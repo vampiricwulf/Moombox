@@ -74,7 +74,7 @@ func extractIfNeeded(cacheDir string) error {
 // extractPayload is extractIfNeeded with the payload passed in: the stamp the
 // cache dir must carry, the gzipped Node binary and the gzipped sidecar
 // tarball. Split out so the extraction rules can be tested against a payload
-// built in the test, not only against the ~36 MB embedded one.
+// built in the test, not only against the embedded one.
 func extractPayload(cacheDir, wantStamp string, nodeGz, sidecarTarGz []byte) error {
 	stampPath := filepath.Join(cacheDir, "version.txt")
 

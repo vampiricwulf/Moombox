@@ -55,9 +55,26 @@ From top to bottom the screen has:
 4. The **status bar** (one row).
 5. The **feedback line**, which appears over the bottom of the Logs panel for a few seconds after an action.
 
-The TUI needs a terminal of at least 60 columns by 20 rows. In a smaller
-window it shows only `Terminal too small` with the required size until you
-enlarge it.
+This layout needs a terminal of at least 60 columns by 20 rows. A smaller
+terminal, down to 30 columns by 6 rows, gets a **compact layout** instead:
+the task list fills the screen, one line per job (a status tag such as
+`DOWN`, `LIVE` or `DONE`, the title, and a percent, elapsed time or
+countdown), with a one-line status bar and the feedback line under it.
+Navigation, selection, the `/` filter and the job chords (with their
+confirms) work there.
+
+In the compact layout most overlays open in a plain form without a border
+that fills the screen: Settings, the action menu, Add Video, Trim, Import
+Archive, Help, the release notes, the job log, Statistics, client tokens,
+orphaned items, the yt-dlp plugin status and the cookie file import. Import
+Chapters does too from 30 columns by 10 rows. The cookie login (`E L`),
+first-run setup and the FFmpeg check need the full layout and answer
+`Enlarge the terminal to 60x20 for this`. An overlay that is open when the
+terminal shrinks below what it needs is kept, and comes back when the
+terminal grows again.
+
+Below 30 columns or 6 rows the screen shows only `Terminal too small` with
+the size Moombox needs, and only ++ctrl+c++ works until you enlarge it.
 
 One panel has focus at a time; its border is highlighted. Press ++tab++ to move
 focus forward (Tasks → Details → Logs) and ++shift+tab++ to move back, or click
@@ -414,7 +431,7 @@ not every key is in the TUI, and some are only in the dashboard or
 - ++esc++ closes. With unsaved changes it asks `Save changes? [Y]es / [N]o / [Esc] Cancel`.
 - On the Network section, from a toggle or choice row, `` ` `` sets or changes the dashboard password and `~` removes it.
 - On the Paths section's **FFmpeg path** row, ++ctrl+o++ opens the FFmpeg check to install FFmpeg.
-- **Channels**: `A` adds, ++enter++ edits, `D` removes a channel. Removing asks whether to keep the channel's jobs (++enter++) or also delete its pending ones (`P`, offered only when it has pending jobs); any other key cancels. The removal, and the deletion of pending jobs, happen when you save.
+- **Channels**: `A` adds, ++enter++ edits, `D` removes a channel, and ++shift+up++ / ++shift+down++ move the selected channel up or down the list (on this section ++shift+down++ does not jump to the buttons). The new order is saved when you save. Removing asks whether to keep the channel's jobs (++enter++) or also delete its pending ones (`P`, offered only when it has pending jobs); any other key cancels. The removal, and the deletion of pending jobs, happen when you save.
 - **Integrations** (notification webhooks): `A` adds, ++enter++ edits, `D` deletes, `T` sends a test. In the editor, ++space++ toggles options and events, and `m` toggles the mention for an event.
 
 If a saved change needs a restart, a **Restart Required** box offers
@@ -487,7 +504,9 @@ or ++enter++ saves, any other key goes back. See [Chapters](chapters.md).
 ### Job log (`O L`)
 
 Shows the selected job's own log lines (the same per-job log as the
-dashboard's job dialog), refreshed every second. It works like the Logs panel:
+dashboard's job dialog, with the same limits: kept in memory only, and for
+ended jobs only the 200 that ended most recently since Moombox started),
+refreshed every second. It works like the Logs panel:
 arrows, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++ and the mouse wheel
 scroll; `/` searches with `n` / `N`; ++end++ follows new lines. ++esc++ clears a
 search first, then closes; `Q` closes at once.
@@ -543,7 +562,8 @@ See [Statistics](statistics.md).
 
 - Click a panel to focus it. Click a task row to select it; click the archive divider to expand or collapse it.
 - The wheel scrolls the panel under the pointer, three rows a notch (in Tasks it moves the cursor).
-- In the action menu, clicks and the wheel move the selection only. Settings can be clicked. Other overlays ignore the mouse, except the job log, which scrolls.
+- In the action menu, clicks and the wheel move the selection only. Settings can be clicked, and the wheel scrolls its section.
+- The wheel works in every other overlay that has something to scroll: text (Help, the release notes, the job log, the FFmpeg check's script review) scrolls three rows a notch, and a list or table moves its cursor one row. Statistics scrolls three rows a notch in the compact layout and has nothing to scroll in the full one. The cookie file import and the yt-dlp plugin screen have nothing to scroll and ignore the mouse. Clicks do nothing outside the action menu and Settings.
 
 ## Tips
 

@@ -33,9 +33,9 @@ func requireBlobs(t *testing.T) {
 	}
 }
 
-// sharedSidecarCache is ONE extraction for the whole package. The payload is
-// ~36 MB and every Start that has to extract it cost about ten seconds on
-// the Windows CI runner (Defender scans each file as it lands), which made
+// sharedSidecarCache is ONE extraction for the whole package. Every Start
+// that has to extract the embedded payload cost about ten seconds on the
+// Windows CI runner (Defender scans each file as it lands), which made
 // six otherwise-quick tests a 75-second package. Tests run one after another
 // and each stops its own sidecar before the next starts, so the extracted
 // tree is shared safely. Created on first use, removed by TestMain.
@@ -74,7 +74,7 @@ func startSidecar(t *testing.T) *Sidecar {
 
 	s := New(Config{
 		CacheDir:       cacheDir,
-		StartupTimeout: 30 * time.Second, // first-launch extracts ~36 MB
+		StartupTimeout: 30 * time.Second, // first launch extracts the embedded payload
 		RequestTimeout: 30 * time.Second,
 		Logger:         &testLogger{t: t},
 	})

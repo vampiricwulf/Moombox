@@ -169,9 +169,9 @@ const (
 	// ChatFinished is a capture that completed.
 	ChatFinished ChatStatus = "finished"
 	// ChatIncomplete is a capture that ENDED WITHOUT COMPLETING — the
-	// downloader returned an error (a Twitch VOD paging stall, an IRC session
-	// that exhausted its reconnect budget, a panic) instead of running out of
-	// chat to fetch, a user Cancel cut it off, or a download Error
+	// downloader returned an error (a Twitch VOD paging stall, a panic; never
+	// a spent IRC reconnect budget, which only slows the retries) instead of
+	// running out of chat to fetch, a user Cancel cut it off, or a download Error
 	// stopped it (R-E1, R-H1) — so messages can be missing. Its resume sidecar is
 	// kept in staging. The value is the label: both UIs render it verbatim
 	// (warning colour), and "error" was not reused for it — nothing writes

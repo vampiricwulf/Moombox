@@ -20,7 +20,7 @@ import (
 //
 // It breaks and repairs the package's shared extraction rather than
 // extracting one of its own — which cost one more cold extraction of the
-// ~36 MB payload, the slowest step in this package. Should the repair not
+// embedded payload, the slowest step in this package. Should the repair not
 // happen, the cleanup drops the stamp, so the next test's Start re-extracts
 // instead of running the broken tree.
 //

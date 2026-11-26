@@ -370,10 +370,14 @@ Below that, sections appear when they have something to show:
 - **Job Logs** — the log lines Moombox collected for this job, oldest first.
   They are kept in memory only: a restart empties them, and a long-running
   job keeps only its most recent lines (the buffer holds up to 200 and is
-  cut back to the latest 100 when it overflows). Loaded when the dialog
-  opens and reloaded when the job's status changes; "No logs for this job
-  yet." when there are none. (The terminal UI shows the same lines with
-  `O L`.)
+  cut back to the latest 100 when it overflows). Of the jobs that have ended
+  (`Finished`, `Error` or `Cancelled`), only the 200 that ended most
+  recently since Moombox started keep their lines (a job with no lines does
+  not count); for an older one, read `moombox.log` (see
+  [Storage and files](storage.md#logs)). The section is refreshed every
+  second while the dialog is open and the browser tab is visible; "No logs
+  for this job yet." when there are none. (The terminal UI shows the same
+  lines with `O L`.)
 
 ### Footer buttons
 
@@ -517,9 +521,10 @@ ask first.
     warns that this is captured footage that is deleted too. A `Finished`
     job's staging that still holds a set-aside recording is never listed
     here, however old it is. Such a folder shows up only when its job is
-    not `Finished` (for example `Error`, `Cancelled`, `COOKIES?` or
-    `Queued`) or the job no longer exists. Consider **Recover** in the job's
-    details first.
+    `Error` or `Cancelled`, or the job no longer exists; the folders that
+    are never listed are in
+    [Orphaned files](storage.md#orphaned-files). Consider **Recover** in the
+    job's details first.
 
 If something stopped being an orphan since the list was drawn (a job now
 uses it), the delete is refused with "No longer an orphan. Refresh the list."

@@ -89,7 +89,7 @@ COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/moombox-entrypoint
 RUN mkdir -p /data && chmod 777 /data
 WORKDIR /data
 
-# HOME=/data keeps the sidecar's one-time ~36 MB extraction on the volume
+# HOME=/data keeps the sidecar's one-time extraction (roughly 150 MB) on the volume
 # instead of re-extracting on every container recreation. MOOMBOX_NO_TUI
 # keeps the app headless even when the container is started with a TTY.
 ENV HOME=/data \

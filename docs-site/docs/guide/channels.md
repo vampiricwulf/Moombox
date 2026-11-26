@@ -85,7 +85,9 @@ instead, see [Adding one video or stream by hand](#adding-one-video-or-stream-by
 !!! warning "Plain text is not checked"
     Anything that is not a URL or an @handle is stored exactly as you typed
     it. A typo in a channel ID or Twitch login is accepted, and you only find
-    out when the monitors keep failing to reach the channel (see
+    out when the monitors keep failing to reach the channel: a mistyped
+    Twitch login is flagged **Checks failing** in the channel list after 3
+    failed checks, while a mistyped YouTube ID may never be flagged (see
     [Channel health](#channel-health)). Pasting the channel's URL avoids
     this.
 
@@ -120,7 +122,9 @@ created. Changing them affects new jobs only.
 Each channel in **Settings → Channels** is a card showing the platform tag,
 the display name and ID, the filter pattern, and a badge for each option that
 is on: **Include VODs**, **Past VODs**, **Fill ad breaks**, **Archive
-clips**, **Quality: …**. On the card:
+clips**, **Quality: …**. A red **Checks failing** badge means the monitors
+cannot reach the channel (see [Channel health](#channel-health)). On the
+card:
 
 - the **switch** enables or disables monitoring at once (a disabled card is
   dimmed);
@@ -135,7 +139,9 @@ Changes made here are saved immediately; they do not go through the
 ### In the terminal UI
 
 In **Settings → Channels**: ++up++ / ++down++ select a channel, ++enter++
-edits it, ++a++ adds one, ++d++ removes one. Changes are kept in the overlay
+edits it, ++a++ adds one, ++d++ removes one, and ++shift+up++ /
+++shift+down++ move the selected channel up or down the list (the
+dashboard's drag). Changes are kept in the overlay
 until you save it. If you edit a channel in the TUI while someone changes the
 same channel in the dashboard, the TUI's save writes only the fields you
 changed, so the other edit survives.
@@ -392,7 +398,25 @@ is still checked; look at the channel ID only if it lasts. When the channel answ
   recovery message still arrives after a restart.
 
 To receive these alerts, add a notification target with those events; see
-[Notifications](notifications.md). The per-channel counters are also in the
+[Notifications](notifications.md).
+
+You do not have to wait for the alert, and it needs no notification target:
+**Settings → Channels** flags a channel much sooner, in both UIs. The flag
+appears once the channel has failed **3 checks in a row** on every monitor
+that has checked it: the one Twitch monitor, or for YouTube both RSS and
+DECAPI when both are on.
+
+- Dashboard: a red **Checks failing** badge on the channel card, followed by
+  the last check's error.
+- TUI: `(failing)` after the channel's row, with the last check's error
+  inside the brackets when there is one (`(failing: …)`).
+
+One successful check clears it. A disabled channel is not checked and is
+never flagged. For a YouTube channel with DECAPI on, do not rely on the flag
+(or the alert) to catch a mistyped channel ID: DECAPI answers for an ID it
+does not know, and Moombox counts that as a successful check.
+
+The per-channel counters are also in the
 `channelHealth` field of `GET /api/status` ([API](../reference/api.md)).
 
 The history backfill shows its own progress:

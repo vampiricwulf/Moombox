@@ -359,8 +359,9 @@
 # ─── BotGuard PO Token Sidecar ─────────────────────────────────────────────
 # Moombox bundles a Node.js + JSDOM + bgutils-js subprocess that produces
 # real PO tokens for YouTube. The sidecar binds locally only and runs
-# automatically when needed; first launch extracts ~36 MB of embedded
-# blobs to the user cache directory (one-time, ~3-5s):
+# automatically when needed; first launch extracts the embedded
+# payload, roughly 115-150 MB depending on platform, to the user cache
+# directory (one-time, ~3-5s):
 # %LOCALAPPDATA%\Moombox\sidecar on Windows, ~/.cache/Moombox/sidecar on
 # Linux.
 #
