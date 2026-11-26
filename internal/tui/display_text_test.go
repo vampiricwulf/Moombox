@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/list"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -107,4 +109,21 @@ func TestFeedbackConfirmAndLogHeaderQuoteTheTitleClean(t *testing.T) {
 	l.SetSize(80, 24)
 	l.Open(job)
 	assertNoControl(t, "job log header", l.log.title)
+}
+
+// The action menu's job rows and its refusal lines quote the title too.
+// Mutant: menuJobDelegate.Render or menuRefusal taking job.Title raw.
+func TestActionMenuJobRowAndRefusalQuoteTheTitleClean(t *testing.T) {
+	job := &database.Job{ID: "j", Title: hostileTitle, Status: database.StatusDownloading}
+	l := list.New([]list.Item{menuJobItem{job: job}}, menuJobDelegate{}, 80, 10)
+	var buf bytes.Buffer
+	menuJobDelegate{}.Render(&buf, l, 0, menuJobItem{job: job})
+	assertNoControl(t, "menu job row", buf.String())
+	if strings.Contains(buf.String(), "\n") {
+		t.Errorf("the menu row took more than one line: %q", buf.String())
+	}
+
+	item := &ActionMenuItem{Chord: "A X", Label: "Cancel Job", HintLabel: "Cancel"}
+	assertNoControl(t, "refusal, status changed", menuRefusal(item, "A X", nil, job))
+	assertNoControl(t, "refusal, filter", menuRefusal(item, "A X", job, job))
 }

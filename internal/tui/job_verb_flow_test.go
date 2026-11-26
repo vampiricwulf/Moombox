@@ -539,3 +539,19 @@ func TestABatchCancelAnswerLeavesAnArmedConfirmPromptAlone(t *testing.T) {
 		t.Errorf("a refusal must be shown whatever holds the line: %q", app.feedback.msg)
 	}
 }
+
+// The keys an operator presses reach the same run: A X X over a selection
+// returns the command from the chord handler, and its answer ends the run.
+// Mutant: a caller of dispatchAction dropping the command (busy for good).
+func TestABatchCancelByItsKeysEndsItsRun(t *testing.T) {
+	var calls []string
+	app := cancelApp(&calls)
+	app.taskList.ToggleSelection("q1")
+	app.taskList.ToggleSelection("q2")
+	for _, r := range "axx" {
+		pressApply(app, tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if len(calls) != 2 || app.jobVerb.busy || app.feedback.msg != "Cancelled 2 jobs" {
+		t.Errorf("calls %v, busy %v, line %q", calls, app.jobVerb.busy, app.feedback.msg)
+	}
+}
