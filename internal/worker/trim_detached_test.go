@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -15,36 +14,20 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/ffmpegtest"
 	"github.com/vampiricwulf/Moombox/internal/notifications/notificationtest"
 )
 
-// gatedFFmpeg is a stand-in FFmpeg for the trim service: it records the
-// output it was given (its last argument) in dir/outputs, writes a few bytes
-// there the way a real encode opens its output at once, reports 24 s encoded
-// on stderr the way FFmpeg's stats line does, and then waits for dir/gate. With dir/fail present it then fails as FFmpeg does; otherwise it
-// finishes the file. It gives up after 30 s, so a run nothing stops (a broken
-// Stop) cannot outlive the test binary. Its sibling ffprobe does not exist,
-// so the audio-bitrate probe falls back to its default without running
-// anything.
+// gatedFFmpeg is the stand-in FFmpeg for the trim service (ffmpegtest.Gated:
+// the test binary run again as the encoder, on every platform). It records
+// the output it was given in dir/outputs, writes a few bytes there, reports
+// 24 s encoded, and then waits for dir/gate. With dir/fail present it then
+// fails as FFmpeg does; otherwise it finishes the file. It gives up after
+// 30 s. Its sibling ffprobe does not exist, so the audio-bitrate probe falls
+// back to its default without running anything.
 func gatedFFmpeg(t *testing.T) (ffmpeg, dir string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stand-in for FFmpeg")
-	}
-	dir = t.TempDir()
-	ffmpeg = filepath.Join(dir, "ffmpeg")
-	script := "#!/bin/sh\n" +
-		"for a; do out=\"$a\"; done\n" +
-		"printf '%s\\n' \"$out\" >> '" + dir + "/outputs'\n" +
-		"printf partial > \"$out\"\n" +
-		"printf 'frame=120 fps=60 q=28.0 size=256kB time=00:00:24.00 bitrate=87.4kbits/s speed=12x\\r' >&2\n" +
-		"i=0; while [ ! -e '" + dir + "/gate' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n" +
-		"if [ -e '" + dir + "/fail' ]; then echo 'Error writing trailer: No space left on device' >&2; echo 'Conversion failed!' >&2; exit 1; fi\n" +
-		"printf whole > \"$out\"\n"
-	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return ffmpeg, dir
+	return ffmpegtest.Gated(t)
 }
 
 // touch creates name in dir: the gate opens, or the next encode fails.

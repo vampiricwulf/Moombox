@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/ffmpegtest"
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -28,6 +29,9 @@ var realImportProbeDuration = importProbeDuration
 // run, which is most of what an import test cost. The tests that are about the
 // probe put the real one back (useRealImportProbe).
 func TestMain(m *testing.M) {
+	// First: a process started as the trim tests' stand-in FFmpeg acts it
+	// out and exits.
+	ffmpegtest.RunIfStandIn()
 	web.SetPasswordHashCostForTesting(16)
 	// A display exists, so a Linux runner with no DISPLAY reaches the
 	// auto-setup/start answers these tests are about (owner ruling R4-7's
