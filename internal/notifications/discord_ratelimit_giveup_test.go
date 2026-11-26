@@ -10,7 +10,7 @@ import (
 // A 429 the delivery ENDS on — Retry-After past the cap, missing, or the
 // ladder's last attempt — used to leave the bucket unarmed: noteBucket skips
 // every 429, so the queue's next item POSTed straight into the same limit,
-// and the one after it, and a Retry-After of 45 s dropped every queued alert
+// and the one after it, and a long Retry-After dropped every queued alert
 // within milliseconds. The give-up now arms the bucket, so the next item
 // waits. A 429 the ladder honours and gets past arms nothing.
 //
@@ -23,7 +23,7 @@ func TestA429TheDeliveryGivesUpOnArmsTheBucket(t *testing.T) {
 		resetAfter string
 		atLeast    time.Duration
 	}{
-		{"Retry-After past the cap", "45", "", discordRetryAfterCap - time.Second},
+		{"Retry-After past the wait cap", "90", "", discordRetryAfterCap - time.Second},
 		{"no Retry-After", "", "", discordRetryAfterCap - time.Second},
 		{"Reset-After only", "", "20", 19 * time.Second},
 	} {
@@ -66,5 +66,49 @@ func TestA429TheLadderGetsPastArmsNothing(t *testing.T) {
 	}
 	if w := d.bucketWait(); w > 0 {
 		t.Errorf("bucket wait = %s after a delivered retry, want none", w)
+	}
+}
+
+// R4-9: a 429 asking for more than discordRetryAfterCap but no more than
+// discordRetryAfterWaitCap is waited out once, so the notification at the
+// head of the queue is delivered instead of dropped. A second long wait in the
+// same ladder is past the budget and gives up.
+//
+// Mutants: the 429 check back on discordRetryAfterCap (no wait, delivered
+// fails); the budget left at discordMaxSleepTotal (the 45 s wait gives up).
+func TestA429RetryAfterUpToTheWaitCapIsWaitedOutOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		limited   int // how many requests are answered 429 before a 204
+		delivered bool
+		hits      int
+	}{
+		{"one 45 s wait, then delivered", 1, true, 2},
+		{"a second 45 s wait gives up", 2, false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sleeps := recordDiscordSleeps(t)
+			hits := 0
+			f := newFakeDiscord(t, func(n int, _ recordedReq, rw http.ResponseWriter) {
+				hits = n + 1
+				if n < tc.limited {
+					rw.Header().Set("Retry-After", "45")
+					rw.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				rw.WriteHeader(http.StatusNoContent)
+			})
+			d := &DiscordWebhook{URL: f.URL()}
+			err := d.Send(One("t", "d", 0, nil, SendOptions{}))
+			if (err == nil) != tc.delivered {
+				t.Fatalf("Send err = %v, want delivered=%v", err, tc.delivered)
+			}
+			if hits != tc.hits {
+				t.Errorf("requests = %d, want %d", hits, tc.hits)
+			}
+			if got := sleeps(); len(got) != 1 || got[0] != 45*time.Second {
+				t.Errorf("sleeps = %v, want exactly one 45s wait", got)
+			}
+		})
 	}
 }

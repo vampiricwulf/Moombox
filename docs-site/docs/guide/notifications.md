@@ -283,8 +283,9 @@ the network is slow:
 - **Order.** Each target delivers in order, one message at a time, so a
   job's notifications never arrive out of order.
 - **Retries.** Each message gets up to 3 attempts, with a 15-second timeout
-  per attempt. Discord's rate limits are respected (Moombox waits when
-  Discord says to). A permanent refusal, such as a deleted webhook, is not
+  per attempt. Discord's rate limits are respected: Moombox waits when
+  Discord says to, up to 60 seconds once per message. A message Discord
+  asks to hold back longer than that is dropped. A permanent refusal, such as a deleted webhook, is not
   retried.
 - **Backlog limit.** Each target holds at most 256 waiting messages. If it
   fills (for example Discord is slow during a big channel re-scan), the
