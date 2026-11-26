@@ -10,7 +10,8 @@ import (
 //
 // With PathIsQuoted, this is the ONLY constraint Moombox places on a
 // user-supplied path value (paths.*, cookies.cookie_file,
-// cookies.browser_profile_dir, network.tls_*_path). Absolute paths — POSIX
+// cookies.browser_profile_dir, network.tls_*_path, and the output-directory
+// overrides through OutputDirOverrideRule). Absolute paths — POSIX
 // "/data/output", Windows "C:\Moombox\data", UNC "\\server\share" — are
 // legitimate and must be accepted: the Docker image seeds every path field
 // as "/data/...", the TUI has always accepted absolute values, and
@@ -89,7 +90,8 @@ func UnquotePath(p string) string {
 // PathIsQuoted reports whether p, its surrounding spaces aside, is wrapped in
 // a matching pair of quotes — what UnquotePath takes off. A settings path
 // field (paths.*, cookies.cookie_file, cookies.browser_profile_dir,
-// network.tls_*_path) refuses such a value in both UIs and both setup
+// network.tls_*_path, and through OutputDirOverrideRule a channel's
+// output_directory and Add Video's per-job one) refuses such a value in both UIs and both setup
 // wizards: nothing downstream takes the quotes off, so `"E:\Archive"` has no
 // volume on Windows — it is a relative directory whose name holds `"` and
 // `:`, and every mux fails to create it. Refused rather than silently
@@ -100,6 +102,43 @@ func UnquotePath(p string) string {
 func PathIsQuoted(p string) bool {
 	p = strings.TrimSpace(p)
 	return UnquotePath(p) != p
+}
+
+// The ends of the two path refusals, as both UIs word them after the
+// field's name: "Output directory cannot be wrapped in quotes".
+const (
+	PathRuleQuoted    = "cannot be wrapped in quotes"
+	PathRuleTraversal = "cannot contain a .. segment"
+)
+
+// OutputDirOverrideRule returns the path rule an output-directory override
+// breaks — PathRuleQuoted or PathRuleTraversal — or "" when it breaks none.
+// The overrides are a channel's channels[].output_directory and Add Video's
+// per-job outputDirectory; every writer of either calls this one check: the
+// TUI Settings channel editor and setup wizard channel step, POST
+// /api/config/channels, PUT /api/config's channels[] (and /api/setup/complete's),
+// and POST /api/jobs. Nothing downstream takes quotes off, so a pasted
+// `"D:\Archives\VTuber"` made the job fail at mux, after the whole download
+// (Windows), or put its files under a directory named with the quotes (Linux).
+//
+// stored is the value already saved for the same channel ("" for a new
+// channel or a job): a value equal to it, spaces aside, passes, so one
+// stored before the rule (or hand-edited into config.toml) does not make
+// every later save of that channel fail on a field nobody touched. Unlike
+// paths.*, the ".." rule follows the same new-value rule: channel overrides
+// never had it, so one may already be stored.
+func OutputDirOverrideRule(dir, stored string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == strings.TrimSpace(stored) {
+		return ""
+	}
+	if PathIsQuoted(dir) {
+		return PathRuleQuoted
+	}
+	if PathHasTraversal(dir) {
+		return PathRuleTraversal
+	}
+	return ""
 }
 
 // SetupDirError is MakeSetupDirs' refusal: the directory that could not be

@@ -99,9 +99,9 @@ and never leaves the server.
 - **Changing or removing** asks for the current password and works from this
   machine, the LAN, or a logged-in session.
 - **Effects:** setting or changing the password logs out every other session
-  and revokes every remembered client; removing it logs everyone out and puts
-  `network_access` back to `localhost` (from the TUI, only when it was
-  `external`/`public`).
+  and revokes every remembered client; removing it logs everyone out and,
+  when access was `external`/`public`, puts `network_access` back to
+  `localhost`; `lan` and `localhost` stay as they are.
 - **Forgotten password:** stop Moombox, replace the `password_hash` value in
   `config.toml` with a new plain password, and start it again.
 

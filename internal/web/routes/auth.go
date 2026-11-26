@@ -327,7 +327,15 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 			return
 		}
 		cfg.Network.PasswordHash = ""
-		cfg.Network.NetworkAccess = "localhost" // Reset to safe default
+		// Back to localhost only from External/Public, as the TUI does
+		// (owner ruling R4-2): there the password is what guards the
+		// dashboard. On LAN a password guards nothing (IsAuthRequired), and
+		// a reset there answered 403 to every LAN client at once, the
+		// caller included — on Docker, every client.
+		networkReset := config.IsExternalAccess(oldAccess)
+		if networkReset {
+			cfg.Network.NetworkAccess = "localhost"
+		}
 		if err := store.SaveLocked(); err != nil {
 			cfg.Network.PasswordHash = oldHash
 			cfg.Network.NetworkAccess = oldAccess
@@ -346,12 +354,16 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + web.EffectiveClientIP(store, req))
+			if networkReset {
+				deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + web.EffectiveClientIP(store, req))
+			} else {
+				deps.Logger.Info("[Auth] Password removed from " + web.EffectiveClientIP(store, req))
+			}
 		}
 
 		jsonResponse(rw, map[string]any{
 			"success":              true,
-			"networkAccessChanged": true,
+			"networkAccessChanged": networkReset,
 		})
 	})
 }

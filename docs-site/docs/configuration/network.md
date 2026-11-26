@@ -133,9 +133,10 @@ Rules that apply when you change it:
   password is set (the dashboard says *"A password must be set before
   enabling external access. Set one in Settings → Network → Password."*). Set
   the password first.
-- **Removing the password resets access.** Removing it from the dashboard
-  sets `network_access` back to `localhost` in the same save; removing it
-  from the TUI does so when access was `external` or `public`.
+- **Removing the password resets access from `external`.** Removing it from
+  the dashboard or the TUI while access is `external` or `public` sets
+  `network_access` back to `localhost` in the same save. On `lan` and
+  `localhost` access stays as it is: there the password guards nothing.
 - **A hand-edited `external`/`public` with no password still starts**, so a
   deployment fronted by an authenticating proxy keeps working, but Moombox
   logs a `SECURITY` warning at every start, and both UIs show a red banner
@@ -303,8 +304,8 @@ Password rules (the same on every surface):
 What a change does: setting or changing the password logs out every other
 browser and revokes every remembered client (see
 [`client_token_ttl_days`](#networkclient_token_ttl_days)); removing it logs
-everyone out and resets `network_access` to `localhost` (the TUI resets it
-only from `external`/`public`).
+everyone out and, from `external`/`public` only, resets `network_access` to
+`localhost`.
 
 **Setting a password by hand** (first password inside Docker, or a forgotten
 password): stop Moombox, put the plain password in the file, and start it

@@ -873,8 +873,10 @@ export class MoomboxApp {
   }
 
   /**
-   * The server's status_changed frame: cookie authentication, a re-login flag
-   * or the sidecar's health changed. The frame carries nothing; the status is
+   * The server's status_changed frame: cookie authentication, a re-login flag,
+   * the sidecar's health or the active cookie platforms (a Settings save in
+   * either UI) changed; that last is why _applyAuthStatus takes
+   * activePlatforms from the answer. The frame carries nothing; the status is
    * read again, so the badges are only ever drawn from an answer this tab
    * asked for. One read is in flight at a time, and frames that arrive during
    * it ask for one more after it, however many they were. Only the fields

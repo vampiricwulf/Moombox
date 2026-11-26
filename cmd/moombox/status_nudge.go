@@ -3,8 +3,9 @@ package main
 import "github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 
 // statusChangedFrame is the WebSocket frame that tells an open dashboard its
-// status has changed: cookie authentication, a re-login flag or the BotGuard
-// sidecar's health. It carries no payload (owner ruling R2-D1). The tab
+// status has changed: cookie authentication, a re-login flag, the BotGuard
+// sidecar's health or the active cookie platforms (a Settings save in either
+// UI). It carries no payload (owner ruling R2-D1). The tab
 // answers by reading GET /api/status again, so the cookie badge stays a
 // per-request surface: every word it shows comes from a fetch the tab made,
 // never from a pushed copy (docs/spec/user-interfaces.md, the cookie status
@@ -30,6 +31,17 @@ func (s *runState) nudgeDashboardStatus() {
 // nudged to read its status again; the TUI's badges are sent again, which
 // does not block and is a no-op without a TUI.
 func (s *runState) reloginChanged() {
+	s.nudgeDashboardStatus()
+	s.resendTUICookieStatus()
+}
+
+// activePlatformsChanged tells both UIs that cookies.active_platforms changed
+// (ConfigRoutesCallbacks.OnActivePlatformsChange, a dashboard save). The set
+// decides which platform badges and Re-login warnings each UI draws: the
+// dashboards read it from /api/status, so they are nudged; the TUI's status
+// line is sent again. A TUI save nudges the dashboards from its own
+// OnSaveConfig block, since the TUI redraws its badges from config.
+func (s *runState) activePlatformsChanged() {
 	s.nudgeDashboardStatus()
 	s.resendTUICookieStatus()
 }
