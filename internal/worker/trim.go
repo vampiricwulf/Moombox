@@ -97,6 +97,16 @@ const trimInterruptedReason = "Moombox stopped before the trim finished"
 // cannot say so.
 var errTrimInterrupted = errors.New("the trim was stopped before it finished")
 
+// trimJobDeletedReason is a trim cut short because its job was deleted while
+// it encoded: whoever deleted the job wants none of its trims, so nothing
+// failed and no trim_error is sent.
+const trimJobDeletedReason = "The job was deleted before the trim finished"
+
+// errTrimJobDeleted is the cause run's context is cancelled with when the
+// trim's job is deleted mid-encode; the error run returns wraps it beside
+// errTrimInterrupted.
+var errTrimJobDeleted = errors.New("the job was deleted")
+
 // trimProgressInterval is the least time between two "running" events of
 // one trim. FFmpeg reports progress about twice a second and the dashboard's
 // bar needs no more; RunningTrims always has the latest figure.
@@ -265,9 +275,10 @@ func (ts *TrimService) StartTrim(job *database.Job, startTime, endTime float64) 
 			}
 		}()
 		if _, err := ts.run(ts.ctx, plan, nil); err != nil {
-			if ts.ctx.Err() != nil {
-				// Stop cut it short: Moombox is stopping, nothing failed.
-				ts.logger.Info("trim interrupted by shutdown", "jobID", job.ID, "trimID", task.ID)
+			if errors.Is(err, errTrimInterrupted) {
+				// Cut short — Moombox is stopping, or the job was deleted —
+				// nothing failed.
+				ts.logger.Info("trim interrupted", "jobID", job.ID, "trimID", task.ID, "reason", err.Error())
 				return
 			}
 			ts.logger.Error("Failed to create trim", "jobID", job.ID, "trimID", task.ID, "error", err.Error())
@@ -489,9 +500,23 @@ func partialTrimPath(trimPath string) string {
 // after the slot is free.
 func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(float64)) (rec *database.TrimRecord, err error) {
 	job := plan.job
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer context.AfterFunc(ts.ctx, cancel)()
+	// The cause says why the trim was cut short: nil (context.Canceled) for
+	// the caller or Stop, errTrimJobDeleted for a deleted job.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	defer context.AfterFunc(ts.ctx, func() { cancel(nil) })()
+	// A trim is of a Finished job, which no delete path cancels anything for:
+	// without this, deleting the job let FFmpeg encode to the end, then the
+	// record failed on the trims foreign key, the clip was removed and Trim
+	// Failed was sent for a job that no longer exists. Unsubscribed after the
+	// outcome below has run (defers run last-in first-out).
+	if ts.db != nil {
+		defer ts.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+			if deleted.JobID == job.ID {
+				cancel(errTrimJobDeleted)
+			}
+		})()
+	}
 
 	// No trim row names the file until the encode is done, which for a long
 	// range is a long time to be an unreferenced file in trim/. The claim is
@@ -516,6 +541,12 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 		switch {
 		case err == nil:
 			ev.State, ev.Trim = TrimStateFinished, rec
+		case errors.Is(context.Cause(ctx), errTrimJobDeleted), ts.jobGone(job.ID):
+			// The second: the row went between the encode's end and the
+			// record (AddTrim then fails on the foreign key), before the
+			// subscription above could cancel anything.
+			ev.State, ev.Error = TrimStateFailed, trimJobDeletedReason
+			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, errTrimJobDeleted, err)
 		case ctx.Err() != nil:
 			ev.State, ev.Error = TrimStateFailed, trimInterruptedReason
 			err = fmt.Errorf("%w: %w", errTrimInterrupted, err)
@@ -657,6 +688,16 @@ func (ts *TrimService) encodeSingle(ctx context.Context, plan *trimPlan, out str
 // to answer to, sends those itself (DownloadOrchestrator.sendTrimFailed).
 func (ts *TrimService) sendTrimFailed(job *database.Job, err error) {
 	sendTrimFailed(ts.notifier, job, err)
+}
+
+// jobGone reports whether jobID's row is known to be gone: a read that
+// failed says nothing, so it is not taken as gone.
+func (ts *TrimService) jobGone(jobID string) bool {
+	if ts.db == nil {
+		return false
+	}
+	j, err := ts.db.GetJob(jobID)
+	return err == nil && j == nil
 }
 
 // DeleteTrim deletes a trim record and its file.

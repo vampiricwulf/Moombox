@@ -432,6 +432,8 @@ split recording.
 The trim runs on the server: you can close the dialog or the page and it
 keeps going. Its progress bar shows in the job's **Trims** section, and a
 toast reports "Trim *start – end* of "*title*" created" or "… failed: *reason*".
+Deleting the job stops its running trim at once and removes the unfinished
+file; no Trim Failed notification is sent for it.
 
 A trim is refused when:
 

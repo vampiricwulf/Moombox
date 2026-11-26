@@ -897,8 +897,9 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 
 // failPostDownloadTrim logs a post-download trim that made no file and sends
 // Trim Failed for it — unless the job is gone: a job deleted before its trim
-// ran, or while it ran (its context is cancelled, so the trim stops), is one
-// whoever deleted it wants none of.
+// ran, or while it ran (the trim service cancels a trim whose job is deleted,
+// whichever context it runs under — the mux root of a re-claimed finalize
+// included), is one whoever deleted it wants none of.
 func (o *DownloadOrchestrator) failPostDownloadTrim(job *database.Job, trimErr error) {
 	if fresh, err := o.db.GetJob(job.ID); err == nil && fresh == nil {
 		o.logger.Info("post-download trim dropped: the job was deleted", "jobID", job.ID, "err", trimErr)
