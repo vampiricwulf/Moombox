@@ -145,7 +145,8 @@ skipping, and a genuine fault in the harness is then a failure rather than a
 silent skip.
 
 Without jsdom the run ends with `fail 0` and the DOM tests counted under
-`skipped`; with it, `skipped 0`.
+`skipped`; with it, `skipped 0`. `local-gate.sh --full` does not accept that
+run: its frontend gate fails when `web/tests/node_modules/jsdom` is absent.
 
 ## The player harness
 

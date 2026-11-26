@@ -14,10 +14,13 @@
 #
 # --full adds the frontend node suite, the sidecar's `npm test` (skipped when
 # bgutil-sidecar/node_modules is absent), `go test -count=1 ./...` and a race
-# run over the packages with the most goroutines. It writes no stand-ins: the
-# suite needs the real blobs (new-worktree.sh copies them), and it stops
-# before the tests when one is an empty stand-in. Run one --full at
-# a time on a machine; two full suites side by side time each other out.
+# run over the packages with the most goroutines. The frontend gate fails when
+# web/tests/node_modules has no jsdom (run `npm ci` in web/tests): without it
+# the DOM suites skip and the suite would pass with most of its tests unrun.
+# It writes no stand-ins: the suite needs the real blobs (new-worktree.sh
+# copies them), and it stops before the tests when one is an empty stand-in.
+# Run one --full at a time on a machine; two full suites side by side time
+# each other out.
 #
 # Each gate prints one PASS, FAIL or SKIP line; everything the commands print
 # goes to the log named on the first line (local-gate.log in this worktree's
@@ -264,7 +267,12 @@ if [ "$mode" = full ]; then
 		exit 1
 	fi
 	echo "PASS  embed blobs are real"
-	gate "frontend node suite" node_frontend
+	if [ -d web/tests/node_modules/jsdom ]; then
+		gate "frontend node suite" node_frontend
+	else
+		echo "FAIL  frontend node suite (no web/tests/node_modules/jsdom: npm ci in web/tests)"
+		failed=1
+	fi
 	if [ -d bgutil-sidecar/node_modules ]; then
 		gate "sidecar npm test" node_sidecar
 	else
