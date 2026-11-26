@@ -273,6 +273,12 @@ func TestCleanupOrphansResumesOnceASupersededMarkerIsCleared(t *testing.T) {
 	if err := os.WriteFile(exePath+"~", []byte("the launcher image a later update replaced"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// With a .old beside it the ~ is not the update's artifact (the second
+	// update of one launcher lifetime), so RV-10's rename does not apply and
+	// the marker alone is what keeps the ~.
+	if err := os.WriteFile(exePath+updater.OldSuffix, []byte("the binary this update replaced"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	cleanupOrphans(exePath, "9.9.9")
 	if _, err := os.Stat(exePath + "~"); err != nil {
@@ -383,6 +389,59 @@ func TestAnUpdatesFirstBootEndingBeforeItsMilestoneStaysArmed(t *testing.T) {
 			if !armed || !next.atFreshStart || next.artifact != exePath+updater.OldSuffix {
 				t.Errorf("next start: armed=%v atFreshStart=%v artifact=%q, want it armed at its own start with .old",
 					armed, next.atFreshStart, next.artifact)
+			}
+		})
+	}
+}
+
+// RV-10 has no exception for a failed-update marker left by an EARLIER update.
+// That marker stands until a later update reaches its milestone, so it is on
+// disk during the first boot of the first update after any rolled-back one,
+// and the start's sweep used to return at it before the rename: the update
+// most in need of the rollback was the one left unarmed. A marker older than
+// the breadcrumb no longer stops the rename. One that is not older is this
+// update's own failed launch, whose instructions name the ~, and still does.
+//
+// Mutants: cleanupOrphans returning at any marker (the older-marker case has
+// no .old and is not armed); cleanupOrphans ignoring markers for the rename
+// (the newer-marker case moves the ~ the marker points at).
+func TestAnEarlierUpdatesFailureMarkerDoesNotDisarmTheNextUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		markerAge time.Duration // relative to the breadcrumb
+		wantArmed bool
+	}{
+		{"marker older than the breadcrumb", -48 * time.Hour, true},
+		{"marker newer than the breadcrumb", time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exePath, boot := firstUpdateRestarted(t)
+			captureStderr(t, func() { boot.recoverFailedBoot(exePath, exitCodeStartupError) })
+			marker := exePath + updater.UpdateFailedMarkerSuffix
+			writeReleases(t, map[string]string{marker: "an update failed"})
+			applied := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(exePath+updater.PendingVersionSuffix, applied, applied); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(marker, applied.Add(tc.markerAge), applied.Add(tc.markerAge)); err != nil {
+				t.Fatal(err)
+			}
+
+			cleanupOrphans(exePath, "2.0.1")
+			var next postUpdateBoot
+			armed := next.armInterruptedUpdate(exePath, "2.0.1")
+			if armed != tc.wantArmed {
+				t.Errorf("next start armed = %v, want %v", armed, tc.wantArmed)
+			}
+			at, gone := exePath+updater.LauncherImageSuffix, exePath+updater.OldSuffix
+			if tc.wantArmed {
+				at, gone = gone, at
+			}
+			if !bytesEqualFile(t, at, "N") {
+				t.Errorf("the previous binary must be at %s", at)
+			}
+			if _, err := os.Stat(gone); !os.IsNotExist(err) {
+				t.Errorf("%s is on disk (stat: %v), want the previous binary under one name only", gone, err)
 			}
 		})
 	}

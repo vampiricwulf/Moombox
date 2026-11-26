@@ -567,6 +567,42 @@ func pendingUpdateTag(exePath string) string {
 	return strings.TrimSpace(string(raw))
 }
 
+// failedMarkerPredatesBreadcrumb reports whether the .update-failed marker at
+// markerPath was written before the .update-pending breadcrumb at pendingPath:
+// it records the failure of an EARLIER update than the one the breadcrumb
+// names, which ApplyUpdate wrote after a swap that worked. False when either
+// file is missing and when the two are equally old. A marker written after the
+// breadcrumb is that update's own failure: restoreUpdateBreadcrumb rewrites
+// the breadcrumb before the marker is written. The one age test for both
+// readers: the boot that deletes a superseded marker
+// (clearSupersededFailureMarker) and the launcher's question below.
+func failedMarkerPredatesBreadcrumb(markerPath, pendingPath string) bool {
+	mi, err := os.Stat(markerPath)
+	if err != nil {
+		return false
+	}
+	pi, err := os.Stat(pendingPath)
+	return err == nil && mi.ModTime().Before(pi.ModTime())
+}
+
+// failureMarkerHoldsLauncherImage reports whether a failed-update marker on
+// disk still speaks for the Windows ~ image, so that the start must leave the
+// ~ where the marker's instructions say it is. Any .update-broken marker does,
+// and so does an .update-failed marker that is not older than the breadcrumb.
+// An .update-failed marker older than the breadcrumb does not: it is an
+// earlier update's, it stands until a later update reaches its milestone, and
+// the restart that applied the update the breadcrumb names has since replaced
+// the ~ it pointed at with the binary that update replaced.
+func failureMarkerHoldsLauncherImage(exePath string) bool {
+	failed := exePath + updater.UpdateFailedMarkerSuffix
+	for _, marker := range updater.FailureMarkers(exePath) {
+		if marker != failed || !failedMarkerPredatesBreadcrumb(marker, exePath+updater.PendingVersionSuffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // restoreUpdateBreadcrumb writes the .update-pending breadcrumb naming tag,
 // the release whose first boot failed, back beside the binary. A boot that
 // failed before its milestone has not removed it, and this rewrites the same

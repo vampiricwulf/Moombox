@@ -148,6 +148,12 @@ var launcherWarnf = func(format string, args ...any) {
 // as the update's first boot, exactly as for an update applied and never
 // booted. The rollback so stays armed, start after start, until the release
 // reaches its milestone, which resolves the breadcrumb and then sweeps .old.
+// A failed-update marker stops this rename only while it still speaks for the
+// ~ (failureMarkerHoldsLauncherImage): an .update-broken marker, or an
+// .update-failed one this update's own failed launch wrote. The marker of an
+// EARLIER failed update, which stands until a later update has started
+// properly, does not: the first update after a failed one is then kept and
+// armed like any other. Such a marker still keeps the ~ from being removed.
 // A .old already there is the artifact itself (the second update of one
 // launcher lifetime, whose rename to ~ failed): the ~ beside it is one
 // version older and is removed as before. The breadcrumb can be trusted for
@@ -155,11 +161,8 @@ var launcherWarnf = func(format string, args ...any) {
 // (resolveLandedUpdateBreadcrumb). A ~ that cannot be renamed is left where
 // it is.
 func cleanupOrphans(exePath, runningVersion string) {
-	if len(updater.FailureMarkers(exePath)) > 0 {
-		return
-	}
 	image := exePath + updater.LauncherImageSuffix
-	if pendingUpdateTag(exePath) == "v"+runningVersion {
+	if pendingUpdateTag(exePath) == "v"+runningVersion && !failureMarkerHoldsLauncherImage(exePath) {
 		oldPath := exePath + updater.OldSuffix
 		if _, err := os.Stat(oldPath); err != nil {
 			if _, err := os.Stat(image); err == nil {
@@ -171,13 +174,19 @@ func cleanupOrphans(exePath, runningVersion string) {
 			}
 		}
 	}
+	if len(updater.FailureMarkers(exePath)) > 0 {
+		return
+	}
 	os.Remove(image)
 }
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
 // On Windows the launcher cannot delete its own running binary, so we
 // rename the just-superseded .old to ~ to free the .old name for the
-// next update. The ~ file is then deferred-cleaned on launcher exit.
+// next update. The ~ file is then deferred-cleaned on launcher exit, unless
+// it is still the rollback artifact of a release that has not reached its
+// started milestone (postUpdateBoot.keepsLauncherImage, owner ruling RV-10),
+// in which case the next start renames it back to .old (cleanupOrphans).
 //
 // Returns that update's rollback artifact — the file the binary it replaced
 // now survives as — or "" when no .old existed: config-change restarts never

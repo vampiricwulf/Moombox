@@ -532,7 +532,9 @@ func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPr
 // The marker is what keeps the Windows launcher's hands off the old launcher
 // image (`~`): cleanupOrphans and deferDeleteOldLauncher both decline while
 // it exists, because after a failed update `~` is the rollback binary its
-// instructions point at. A later successful update makes those instructions
+// instructions point at. (The one thing cleanupOrphans still does under a
+// marker this same test finds superseded is rename the `~` of an update that
+// has not started yet back to .old, owner ruling RV-10.) A later successful update makes those instructions
 // stale — `~` is now simply the image this update replaced — so a marker left
 // in place kept every later update's `~` on disk, and kept arming
 // shouldSkipPendingVersion for a failure long since resolved. The
@@ -543,12 +545,7 @@ func clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersi
 		return "", nil
 	}
 	marker := exePath + updater.UpdateFailedMarkerSuffix
-	mi, err := os.Stat(marker)
-	if err != nil {
-		return "", nil
-	}
-	pi, err := os.Stat(pendingPath)
-	if err != nil || !mi.ModTime().Before(pi.ModTime()) {
+	if !failedMarkerPredatesBreadcrumb(marker, pendingPath) {
 		return "", nil
 	}
 	if err := os.Remove(marker); err != nil {
