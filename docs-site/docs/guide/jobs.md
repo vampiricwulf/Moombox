@@ -426,8 +426,10 @@ batch-capable chords (++a++ ++x++, ++a++ ++r++, ++a++ ++i++, ++a++ ++d++,
   TUI (*Check Monitors Now*) runs every monitor at once.
 - **Something failed overnight.** Open the job's details and its *Job Logs*
   (TUI: ++o++ ++l++). Per-job logs are kept in memory only — the most
-  recent 100 to 200 lines per job — so after a restart, or for older
-  lines, read `moombox.log` instead (see
+  recent 100 to 200 lines per job, and for ended jobs only the 200 that
+  ended most recently since Moombox started — so after a restart, for
+  older lines, or for an older job that shows *No logs for this job yet.*,
+  read `moombox.log` instead (see
   [Storage and files](storage.md#logs)).
 - **Before deleting staging by hand**, check the job's status: the staging
   of an `Error` or `Cancelled` job is what Resume and Mux work from, and it

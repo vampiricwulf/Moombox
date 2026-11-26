@@ -370,10 +370,14 @@ Below that, sections appear when they have something to show:
 - **Job Logs** — the log lines Moombox collected for this job, oldest first.
   They are kept in memory only: a restart empties them, and a long-running
   job keeps only its most recent lines (the buffer holds up to 200 and is
-  cut back to the latest 100 when it overflows). Loaded when the dialog
-  opens and reloaded when the job's status changes; "No logs for this job
-  yet." when there are none. (The terminal UI shows the same lines with
-  `O L`.)
+  cut back to the latest 100 when it overflows). Of the jobs that have ended
+  (`Finished`, `Error` or `Cancelled`), only the 200 that ended most
+  recently since Moombox started keep their lines (a job with no lines does
+  not count); for an older one, read `moombox.log` (see
+  [Storage and files](storage.md#logs)). The section is refreshed every
+  second while the dialog is open and the browser tab is visible; "No logs
+  for this job yet." when there are none. (The terminal UI shows the same
+  lines with `O L`.)
 
 ### Footer buttons
 

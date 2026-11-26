@@ -504,7 +504,9 @@ or ++enter++ saves, any other key goes back. See [Chapters](chapters.md).
 ### Job log (`O L`)
 
 Shows the selected job's own log lines (the same per-job log as the
-dashboard's job dialog), refreshed every second. It works like the Logs panel:
+dashboard's job dialog, with the same limits: kept in memory only, and for
+ended jobs only the 200 that ended most recently since Moombox started),
+refreshed every second. It works like the Logs panel:
 arrows, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++ and the mouse wheel
 scroll; `/` searches with `n` / `N`; ++end++ follows new lines. ++esc++ clears a
 search first, then closes; `Q` closes at once.
