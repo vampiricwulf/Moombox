@@ -402,8 +402,9 @@ same tab if you want it archived again. What stays depends on the job:
   any channel added with `moombox add`) leaves an entry for the broadcast
   it recorded, named `tw_` and Twitch's stream ID. The entry appears when
   you delete the job, not before, and holds that broadcast back from the
-  live check. A job you delete before it has started recording a broadcast
-  leaves no entry.
+  live check. A job that has never started recording a broadcast
+  leaves no entry; a reinitialized job still leaves the entry of the
+  broadcast it recorded before.
 - **An import of a Twitch recording, or one with no video ID in its file
   name,** leaves no entry.
 
