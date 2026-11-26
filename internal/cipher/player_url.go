@@ -7,9 +7,15 @@ import "regexp"
 // extractor/youtube/_video.py, chosen by _DEFAULT_PLAYER_JS_VARIANT. That
 // default came in with _construct_player_url (b7b7910d9, #14430), was 'tv'
 // from 1a895c18a (#15818) and is 'main' again since 04d6974f5 (#16269), which
-// is what b77c9304e runs. It is the one shape every Moombox player fetch
-// takes — the sidecar's (playerURLForID), and since the watch page's URL is
-// rewritten to it (CanonicalPlayerURL), STS's and the goja fallback's too.
+// is what b77c9304e runs. fa9a87158 (#18124) made it 'tv' once more, because
+// the ejs release yt-dlp ships (0.8.0) throws on the main variant of the
+// players from 05a4ffc0 on; the ejs vendored here since 2026-11-26 (c47fb1b,
+// with 40b7a7d's prototype helpers) solves it, so Moombox stays on main. A
+// page may itself run another variant, one of the `tcl` ones, whose STS and
+// answers differ: youtube.mainVariantSTS. The main variant is the one shape
+// every Moombox player fetch takes — the sidecar's (playerURLForID), and
+// since the watch page's URL is rewritten to it (CanonicalPlayerURL), STS's
+// and the goja fallback's too.
 const mainVariantPath = "player_ias.vflset/en_US/base.js"
 
 // playerPathIDRe is yt-dlp's _extract_player_info, `/s/player/(?P<id>[a-fA-F0-9]{8,})/`:

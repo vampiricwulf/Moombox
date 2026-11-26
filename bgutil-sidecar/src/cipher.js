@@ -44,8 +44,22 @@ const EJS_GLOBALS = ["location", "XMLHttpRequest", "self", "document", "navigato
 // returns still needs its own globals afterwards. A restore that throws is
 // logged and the rest still restored: one stuck property must not leave the
 // others polluted, nor replace fn's own error.
+//
+// globalThis.window is taken away for the length of the call. Since ejs
+// 1c493d6 (#77) setupNodes ends with `globalThis.window.location =
+// globalThis.location`; with the JSDOM window still there that assignment is
+// a navigation of BotGuard's page to watch?v=yt-dlp-wins, which JSDOM refuses
+// with a "Not implemented: navigation" error on stderr at every solve. With
+// no window, setupNodes makes `window` the global object itself, the shape
+// ejs has in the process of its own upstream gives it, and the assignment
+// lands on a global this function restores.
 function withEjsGlobalsRestored(fn) {
     const saved = EJS_GLOBALS.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    try {
+        delete globalThis.window;
+    } catch (e) {
+        process.stderr.write(`[bgutil-sidecar:warn] ejs: could not hide globalThis.window: ${e?.message ?? e}\n`);
+    }
     try {
         return fn();
     } finally {

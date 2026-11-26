@@ -95,6 +95,43 @@ test("a real ejs solve leaves the JSDOM page's globals as they were", () => {
     assertSameGlobals(before, "an ejs solve");
 });
 
+// Since ejs 1c493d6 (#77) setupNodes ends with `globalThis.window.location =
+// globalThis.location`. Left the JSDOM window, that is a navigation of
+// BotGuard's page, which JSDOM refuses with a "Not implemented: navigation"
+// error on stderr at every solve; cipher.js takes the window away first, so
+// ejs's `window` is the global object, as in a process of its own.
+//
+// Mutant: the `delete globalThis.window` in withEjsGlobalsRestored removed
+// (the solve sees the JSDOM window and JSDOM reports the navigation).
+test("an ejs solve runs with its own window and never navigates the JSDOM page", () => {
+    const jsdomWindow = globalThis.window;
+    const before = snapshot();
+    const windowProbe = `${vendoredSetupNodes()}
+_result.n = (x) => x + (globalThis.window === globalThis ? "-ownwindow" : "-pagewindow");
+_result.sig = null;`;
+    _setEjsForTest((input) => {
+        if (input.type === "player") {
+            return { ...ejsMain({ type: "preprocessed", preprocessed_player: windowProbe, requests: [] }), preprocessed_player: windowProbe };
+        }
+        return ejsMain(input);
+    });
+    const reported = [];
+    const origError = console.error;
+    console.error = (...args) => reported.push(args.map((a) => String(a?.message ?? a)).join(" "));
+    let nResults;
+    try {
+        ({ nResults } = solveCipher({ playerID: "p-window", playerJS: "js", nChallenges: ["abc"] }));
+    } finally {
+        console.error = origError;
+    }
+
+    assert.equal(nResults.abc, "abc-ownwindow", "ejs must not be handed the JSDOM window");
+    assert.deepEqual(reported.filter((m) => /navigation/i.test(m)), [], "the solve must not try to navigate the JSDOM page");
+    assert.equal(globalThis.window, jsdomWindow, "the JSDOM window must be back after the solve");
+    assert.equal(jsdomWindow.location.href, "https://www.youtube.com/");
+    assertSameGlobals(before, "an ejs solve");
+});
+
 // Mutant: the restore moved out of finally (a throwing ejs leaves the
 // globals polluted).
 test("the globals are restored when ejs throws, and its error still surfaces", () => {

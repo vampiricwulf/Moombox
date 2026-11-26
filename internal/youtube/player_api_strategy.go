@@ -651,6 +651,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			p.logger.Warn("[PlayerApi] watch-page player response rejected", slog.String("error", wpErr.Error()))
 			wpParsed = nil
 		} else if wpParsed != nil {
+			p.dropOtherVariantMedia(wpParsed, ytcfg)
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPageAuth)
 			stampManifestSources(wpParsed, "watch_page")
 		}
@@ -1122,6 +1123,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 			p.logger.Warn("[PlayerApi] watch-page player response rejected", slog.String("error", wpErr.Error()))
 			wpParsed = nil
 		} else if wpParsed != nil {
+			p.dropOtherVariantMedia(wpParsed, wp.Ytcfg)
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPagePublic)
 			stampManifestSources(wpParsed, "watch_page")
 		}
@@ -1279,13 +1281,17 @@ func finalizeVideoInfo(ctx context.Context, result, wpParsed *VideoInfo, formatP
 // extraction a ~3 MB player fetch the page already answered. And like
 // upstream (`if player_url else None`, _video.py:2942) no player URL means no
 // STS at all: one would only ask for signatures nothing here can solve.
+//
+// ytcfg's STS is cut to the main variant's (mainVariantSTS): the page may run
+// a player variant Moombox never solves with.
 func (p *PlayerAPI) extractSTS(ctx context.Context, ytcfg *YtcfgData) int {
 	if ytcfg == nil || ytcfg.PlayerURL == "" {
 		return 0
 	}
 	if ytcfg.STS > 0 {
-		p.logger.Debug("[PlayerApi] Got signature timestamp from ytcfg", "sts", ytcfg.STS)
-		return ytcfg.STS
+		sts := mainVariantSTS(ytcfg.STS)
+		p.logger.Debug("[PlayerApi] Got signature timestamp from ytcfg", "sts", sts, "page_sts", ytcfg.STS)
+		return sts
 	}
 	playerURL := ytcfg.PlayerURL
 	if p.cipherSolver == nil {
@@ -1301,6 +1307,64 @@ func (p *PlayerAPI) extractSTS(ctx context.Context, ytcfg *YtcfgData) int {
 	}
 	p.logger.Debug("[PlayerApi] Got signature timestamp", "sts", n)
 	return n
+}
+
+// mainVariantSTSMax is the largest signature timestamp a regular player
+// variant states: five digits (20779). A page served one of the `tcl`
+// variants (player_ias_tcl, player_es6_tcl, ...) states its player's own,
+// the same five digits with three more behind them (20779001), and that
+// player's signature and n functions give other answers than the regular
+// variants of the same player id do.
+const mainVariantSTSMax = 99999
+
+// mainVariantSTS is the signature timestamp of the player Moombox solves
+// with — always the main variant (cipher.CanonicalPlayerURL) — given the one
+// a page's ytcfg states: its first five digits. A page on a `tcl` variant
+// states an eight-digit one; sent as it is, YouTube answers with signatures
+// and n challenges for that variant, which the main variant's functions
+// solve wrongly, and every media URL is then refused.
+//
+// yt-dlp b2e6bb0dd (#18126), `return int(str(sts)[:5])` in
+// _extract_signature_timestamp, which upstream marks temporary: it holds
+// only while no regular variant states more than five digits. When upstream
+// reworks its STS and variant handling, this follows.
+func mainVariantSTS(sts int) int {
+	for sts > mainVariantSTSMax {
+		sts /= 10
+	}
+	return sts
+}
+
+// pageRunsOtherVariant reports whether the page ytcfg was read off runs a
+// player variant whose challenges the main variant does not answer: its STS
+// is longer than a regular variant's (mainVariantSTS).
+func pageRunsOtherVariant(ytcfg *YtcfgData) bool {
+	return ytcfg != nil && ytcfg.STS > mainVariantSTSMax
+}
+
+// dropOtherVariantMedia takes the formats and manifests out of the watch
+// page's own player response when the page runs a player variant Moombox
+// does not solve with (pageRunsOtherVariant). YouTube built that response
+// for the page's player, so its signature and n challenges are that
+// variant's; the player calls, which go out with the main variant's STS,
+// are the ones whose formats can be solved. Everything else the page says —
+// the title, the live status, the playability verdict — stays.
+//
+// yt-dlp f31e4c27a (#18129) skips the webpage's player response altogether
+// while its STS workaround stands (_skipped_webpage_data); Moombox keeps the
+// response for what it reads off it besides media, and drops the media only
+// on a page that states the longer STS.
+func (p *PlayerAPI) dropOtherVariantMedia(info *VideoInfo, ytcfg *YtcfgData) {
+	if info == nil || !pageRunsOtherVariant(ytcfg) {
+		return
+	}
+	p.logger.Debug("[PlayerApi] watch page runs another player variant; its formats and manifests are not used",
+		"page_sts", ytcfg.STS, "formats", len(info.Formats))
+	info.Formats = nil
+	info.DashManifestURL = ""
+	info.HlsManifestURL = ""
+	info.DashManifestAvailableAt = time.Time{}
+	info.HlsManifestAvailableAt = time.Time{}
 }
 
 // fetchWithClientProbe is fetchWithClient for PROBE-ONLY calls — the monitor's
