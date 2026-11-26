@@ -42,13 +42,13 @@ func funcBody(t *testing.T, file, name string) (*token.FileSet, *ast.BlockStmt) 
 // tag comes from.
 //
 // Mutants: the childRestart arm passing "" for the tag
-// (`boot.restarted(handleUpdateRestart(exePath), "", wasFirstAfterUpdate, ranFor)`)
+// (`boot.restarted(boot.restartArtifact(exePath, wasFirstAfterUpdate), "", wasFirstAfterUpdate, ranFor)`)
 // — restoreUpdateBreadcrumb has nothing to restore and a late Windows
 // rollback again skips nothing and is announced as an update; passing ""
 // for the artifact — no boot is ever armed and no failed update is rolled
 // back.
 func TestTheLauncherArmsTheBootWithTheBreadcrumbsRelease(t *testing.T) {
-	const want = "boot.restarted(handleUpdateRestart(exePath), pendingUpdateTag(exePath), wasFirstAfterUpdate, ranFor)"
+	const want = "boot.restarted(boot.restartArtifact(exePath, wasFirstAfterUpdate), pendingUpdateTag(exePath), wasFirstAfterUpdate, ranFor)"
 	fset, body := funcBody(t, "launcher.go", "launchAndSupervise")
 	var found []string
 	ast.Inspect(body, func(n ast.Node) bool {

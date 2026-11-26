@@ -232,8 +232,10 @@ func launchAndSupervise() {
 			// Linux just reports .old. restarted arms the next boot with
 			// that artifact and the release the breadcrumb names, or
 			// carries a still-unproven boot forward across a config
-			// restart.
-			boot.restarted(handleUpdateRestart(exePath), pendingUpdateTag(exePath), wasFirstAfterUpdate, ranFor)
+			// restart. Inside a boot armInterruptedUpdate armed, a restart
+			// that applied no new update keeps .old where it is
+			// (restartArtifact).
+			boot.restarted(boot.restartArtifact(exePath, wasFirstAfterUpdate), pendingUpdateTag(exePath), wasFirstAfterUpdate, ranFor)
 			continue
 
 		case childPostUpdateFailure:
@@ -330,7 +332,7 @@ func forwardStop(goos string, p stoppable, sig os.Signal) {
 // postUpdateBoot is the launcher's one-shot record of a freshly applied
 // update's first boot, kept from the restart that applied the update to the
 // exit that judges the boot. launchAndSupervise holds one and drives it only
-// through armInterruptedUpdate, judge, restarted and recoverFailedBoot. The loop spawns processes and
+// through armInterruptedUpdate, judge, restartArtifact, restarted and recoverFailedBoot. The loop spawns processes and
 // exits the launcher, so no test runs it; the bookkeeping that decides which
 // file a failed boot is judged and rolled back by lives here, where one does.
 type postUpdateBoot struct {
@@ -357,6 +359,30 @@ type postUpdateBoot struct {
 	// the sweep (postUpdatePastRollback), so a release that crashes 30 s in is
 	// still rolled back. recoverFailedBoot writes it back from here.
 	tag string
+	// atFreshStart marks a record armInterruptedUpdate made: its artifact is
+	// .old itself, which a restart inside that boot keeps where it is
+	// (restartArtifact) instead of renaming it to ~ as handleUpdateRestart
+	// does on Windows. A restart that arms a new update clears it.
+	atFreshStart bool
+}
+
+// restartArtifact answers for an exit-42 restart what handleUpdateRestart
+// answers, except inside a boot armInterruptedUpdate armed: while that boot
+// still counts as the update's first (wasFirst) and the breadcrumb still names
+// its release, no new update was applied, so the restart is a config restart
+// of the same binary. It reports "" and leaves .old alone, and restarted
+// carries the boot forward with .old as its artifact. Renaming .old to ~ there
+// would hand the artifact to deferDeleteOldLauncher, which deletes the ~ on
+// the next propagated exit: a stop after a settings restart would lose the
+// rollback .old kept.
+func (b *postUpdateBoot) restartArtifact(exePath string, wasFirst bool) string {
+	if b.atFreshStart && wasFirst && b.tag != "" &&
+		b.artifact == exePath+updater.OldSuffix && pendingUpdateTag(exePath) == b.tag {
+		if _, err := os.Stat(b.artifact); err == nil {
+			return ""
+		}
+	}
+	return handleUpdateRestart(exePath)
 }
 
 // judge decides one child exit by the recorded artifact (judgeChildExit) and
@@ -380,7 +406,7 @@ func (b *postUpdateBoot) judge(wasRespawn bool, code int, ranFor time.Duration, 
 // is not armed.
 func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor time.Duration) {
 	if artifact != "" {
-		b.armed, b.artifact, b.tag = true, artifact, tag
+		b.armed, b.artifact, b.tag, b.atFreshStart = true, artifact, tag, false
 		return
 	}
 	b.armed = wasFirst && ranFor < postUpdateFailureWindow
@@ -422,7 +448,7 @@ func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bo
 	if _, err := os.Stat(artifact); err != nil {
 		return false
 	}
-	b.armed, b.artifact, b.tag = true, artifact, tag
+	b.armed, b.artifact, b.tag, b.atFreshStart = true, artifact, tag, true
 	return true
 }
 
@@ -446,7 +472,7 @@ func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bo
 // version the .update-pending breadcrumb names, shouldSkipPendingVersion is
 // false and the release is not marked skipped.
 func (b *postUpdateBoot) recoverFailedBoot(exePath string, code int) bool {
-	b.armed = false
+	b.armed, b.atFreshStart = false, false
 	if classifyPostUpdateExit(code) == postUpdateRollback {
 		restoreUpdateBreadcrumb(exePath, b.tag)
 		if attemptAutoRollback(exePath, b.artifact, code) {

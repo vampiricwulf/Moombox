@@ -146,27 +146,45 @@ func TestAFreshStartArmsOnlyAnUpdateNeverBooted(t *testing.T) {
 // code the child exits with — a restart it had pending included — and an
 // exit 3 (a port in use, a config it cannot load) is the environment, not the
 // release. Both leave .old and the plain name as they are and write no
-// rollback marker, and the next fresh start arms again.
+// rollback marker, and the next fresh start arms again. So does a stop after
+// the boot restarted itself for a settings change: that restart keeps .old
+// and the boot stays armed with it.
 //
 // Mutants: armInterruptedUpdate renaming .old to ~ as handleUpdateRestart does
-// on Windows — the ~ is deleted on the way out and .old is gone; the stop
+// on Windows — the ~ is deleted on the way out and .old is gone; the childRestart
+// arm calling handleUpdateRestart instead of restartArtifact (Windows) — the
+// restart renames .old to ~ and the stop deletes it; the stop
 // checked after the post-update rule in classifyChildExit — the stop is
 // rolled back.
 func TestAStopDuringAnInterruptedUpdatesBootKeepsOld(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
+		restart     bool // the boot first restarts itself (exit 42: settings, setup)
 		code        int
 		terminating bool
 	}{
-		{"stop over a pending restart", exitCodeRestart, true},
-		{"stop the child exited 1 for", 1, true},
-		{"startup error", exitCodeStartupError, false},
+		{"stop over a pending restart", false, exitCodeRestart, true},
+		{"stop the child exited 1 for", false, 1, true},
+		{"startup error", false, exitCodeStartupError, false},
+		{"stop after a settings restart", true, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exePath := interruptedUpdate(t)
 			var boot postUpdateBoot
 			if !boot.armInterruptedUpdate(exePath, "2.0.1") {
 				t.Fatal("the boot must be armed")
+			}
+			if tc.restart {
+				// What the loop's childRestart arm does with an exit 42 that
+				// applied no new update.
+				action, wasFirst := boot.judge(false, exitCodeRestart, 5*time.Second, false, 0)
+				if action != childRestart {
+					t.Fatalf("exit 42: action = %v, want a restart", action)
+				}
+				boot.restarted(boot.restartArtifact(exePath, wasFirst), pendingUpdateTag(exePath), wasFirst, 5*time.Second)
+				if !boot.armed || boot.artifact != exePath+updater.OldSuffix {
+					t.Fatalf("after the restart: armed=%v artifact=%q, want the boot still armed with .old", boot.armed, boot.artifact)
+				}
 			}
 			action, _ := boot.judge(false, tc.code, 5*time.Second, tc.terminating, 0)
 			switch action {
