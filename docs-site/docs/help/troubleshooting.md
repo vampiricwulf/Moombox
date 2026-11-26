@@ -467,9 +467,10 @@ The cookie guide has its own table of messages:
 
 - **"failed to update cookie file — renewed session cookies are in memory
   only and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
-  It tries again every minute but logs this warning at most once an hour, so
-  search a long enough stretch of the log. Until then the renewed session
-  lives in memory only: it keeps working until Moombox restarts, then is lost.
+  It tries again every minute but logs this warning at most once an hour (the
+  line starts with `youtube session renewal:`), so search a long enough
+  stretch of the log. Until a write succeeds, the renewed session lives in
+  memory only: it keeps working until Moombox restarts, then is lost.
   In Docker this is almost always a `cookies.txt` bind-mounted on its own or
   read-only; keep it inside the `/data` volume instead. Elsewhere, check the
   file's permissions.
