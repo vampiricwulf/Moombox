@@ -102,6 +102,11 @@ If you believe this is in error (the previous instance crashed), wait a few seco
   another session, for example a scheduled task set to run whether or not
   you are logged on.
 
+A failure that is not another instance (a home directory that cannot be
+written, a filesystem without file locks) prints its own cause and no *wait
+a few seconds* line; see
+[One instance per user](../reference/cli.md#one-instance-per-user).
+
 More on the lock: [Command line](../reference/cli.md).
 
 ### "Startup error: load config: failed to parse config …"

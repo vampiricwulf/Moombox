@@ -30,8 +30,9 @@ import (
 // launcher_unix.go.
 func launchAndSupervise() {
 	if err := acquireSingleInstanceLock(); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
-		fmt.Fprintln(os.Stderr, "If you believe this is in error (the previous instance crashed), wait a few seconds and try again.")
+		for _, line := range instanceLockRefusal(err) {
+			fmt.Fprintln(os.Stderr, line)
+		}
 		os.Exit(1)
 	}
 	defer releaseSingleInstanceLock()
