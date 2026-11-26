@@ -259,3 +259,32 @@ func TestAStopRefusedWhileTheDialogIsHiddenFreesS(t *testing.T) {
 		t.Errorf("S after the reshow asked %d times in all, want 2", len(*asked))
 	}
 }
+
+// TestMenuTrimChosenAfterTheBackgroundTrimEndedSaysSo: the action menu is
+// built when it opens. Opened during a background trim it lists Trim Video
+// with no job needed; if that trim ends while the menu is open, choosing it
+// had no trim to bring back and no job to open one for, and did nothing
+// without a word.
+//
+// Mutant: drop dispatchAction's A T else arm (the trim's own result stays on
+// the feedback line and the choice goes unanswered).
+func TestMenuTrimChosenAfterTheBackgroundTrimEndedSaysSo(t *testing.T) {
+	a, _ := trimRunningApp(t, "trim_A_1", nil)
+	pressTrim(a, keyEsc)
+	a.actionMenu.SetSize(a.width, a.height)
+	a.actionMenu.Open(a.buildMenuItems())
+	for i, it := range a.actionMenu.mainList.Items() {
+		if mi, ok := it.(menuActionItem); ok && mi.action != nil && mi.action.Chord == "A T" {
+			a.actionMenu.mainList.Select(i)
+		}
+	}
+	a.Update(createTrimResultMsg{Filename: "clip.mp4"})
+
+	a.keyActionMenu(tea.KeyPressMsg{}, keyEnter)
+	if a.actionMenu.IsVisible() || a.trimDlg.IsVisible() {
+		t.Fatalf("menu visible=%v, trim dialog visible=%v, want both closed", a.actionMenu.IsVisible(), a.trimDlg.IsVisible())
+	}
+	if !strings.Contains(a.feedback.msg, "The trim has ended") {
+		t.Errorf("feedback = %q, want a line saying the trim has ended", a.feedback.msg)
+	}
+}

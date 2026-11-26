@@ -391,6 +391,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		if job != nil {
 			a.openTrimForJob(job)
+		} else {
+			// Only the action menu gets here: it listed A T with no job
+			// while a trim ran in the background, and that trim has ended
+			// since. (The chord path rebuilds the items on every key.)
+			a.setFeedback("The trim has ended: choose Trim Video again")
+			return a, nil
 		}
 	case "A O":
 		a.filesDlg.SetSize(a.width, a.height)
