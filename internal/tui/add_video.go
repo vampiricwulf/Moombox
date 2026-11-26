@@ -1133,7 +1133,7 @@ func (m *AddVideoModel) renderConfirm(w, _ int) string {
 
 	lines = append(lines, fmt.Sprintf("  Video ID:  %s", m.videoID))
 	if m.formats != nil && m.formats.Title != "" {
-		lines = append(lines, fmt.Sprintf("  Title:     %s", truncateString(m.formats.Title, w-14)))
+		lines = append(lines, fmt.Sprintf("  Title:     %s", truncateString(displayText(m.formats.Title), w-14)))
 	}
 	lines = append(lines, "")
 

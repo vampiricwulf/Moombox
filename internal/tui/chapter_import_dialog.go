@@ -166,7 +166,7 @@ func (m *ChapterImportDialogModel) SetSize(w, h int) {
 // at). The returned command is the textarea's focus plus that preview's tick.
 func (m *ChapterImportDialogModel) Open(job *database.Job) tea.Cmd {
 	m.visible = true
-	m.jobID, m.title = job.ID, job.Title
+	m.jobID, m.title = job.ID, displayText(job.Title)
 	m.step = chapterImportStepEdit
 	m.view, m.previewErr, m.saveErr = nil, "", ""
 	m.previewTop = 0
@@ -555,7 +555,7 @@ func (a *App) saveChaptersCmd(save int) tea.Cmd {
 // restoreChaptersCmd runs OnRestoreChapters for job (A U).
 func (a *App) restoreChaptersCmd(job *database.Job) tea.Cmd {
 	fn := a.OnRestoreChapters
-	id, title := job.ID, job.Title
+	id, title := job.ID, displayText(job.Title)
 	return safeCmdOr(func() tea.Msg {
 		v, err := fn(id)
 		return chapterSaveResultMsg{Title: title, Restore: true, View: v, Err: err}

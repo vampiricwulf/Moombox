@@ -302,7 +302,7 @@ func (m *ActionMenuModel) bareView() string {
 				return ""
 			}
 			icon := StatusIcon(string(ji.job.Status))
-			title := truncateString(ji.job.Title, max(w-ansi.StringWidth(icon)-1, 1))
+			title := truncateString(displayText(ji.job.Title), max(w-ansi.StringWidth(icon)-1, 1))
 			if i == sel {
 				return bareMenuSelected().Render(padToWidth(icon+" "+title, w))
 			}
@@ -337,7 +337,7 @@ func (m *ActionMenuModel) bareConfirmView() string {
 	sheet := bareSheet{left: YellowBoldStyle.Render(truncateString(m.pendingLabel+"?", w))}
 	if ji, ok := m.jobList.SelectedItem().(menuJobItem); ok {
 		icon := StatusIcon(string(ji.job.Status))
-		sheet.body = []string{icon + " " + truncateString(ji.job.Title, max(w-ansi.StringWidth(icon)-1, 1))}
+		sheet.body = []string{icon + " " + truncateString(displayText(ji.job.Title), max(w-ansi.StringWidth(icon)-1, 1))}
 	}
 	if !m.bareConfirmFits() {
 		// Armed in a larger terminal: what it deletes cannot be shown

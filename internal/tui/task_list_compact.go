@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -174,19 +173,7 @@ func (m *TaskListModel) renderCompactJob(job *database.Job, selected, archived b
 		titleW = room - figW - 1
 	}
 
-	title := job.Title
-	if title == "" {
-		title = job.VideoID
-	}
-	// A tab measures as no cells and is drawn as several, and any other
-	// control character has no business on the row: each is one space, so
-	// the title is measured as it is drawn.
-	title = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, title)
+	title := displayTitle(job)
 	title = truncateString(title, titleW)
 	title += strings.Repeat(" ", max(titleW-ansi.StringWidth(title), 0))
 

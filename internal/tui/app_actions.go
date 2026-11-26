@@ -205,7 +205,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if a.jobVerbBusy() {
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, job.Title)
+			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, displayText(job.Title))
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
@@ -233,7 +233,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if a.jobVerbBusy() {
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, job.Title)
+			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, displayText(job.Title))
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
@@ -245,7 +245,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 					a.setFeedbackWithSeverity(fmt.Sprintf("Mux failed: %s", err), severityError)
 				}
 			} else {
-				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
+				a.setFeedback(fmt.Sprintf("Muxing: %s", displayText(job.Title)))
 			}
 		}
 	case "A S":
@@ -256,7 +256,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				// The recordings are consumed within seconds; drop the memo so
 				// the details panel stops offering them.
 				a.invalidateAsides(job.ID)
-				a.setFeedback(fmt.Sprintf("Recovering set-aside recordings: %s", job.Title))
+				a.setFeedback(fmt.Sprintf("Recovering set-aside recordings: %s", displayText(job.Title)))
 			}
 		}
 	case "A X":
@@ -306,9 +306,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if ok, err := a.OnCancelJob(job.ID); err != nil {
 				a.setFeedbackWithSeverity(err.Error(), severityError)
 			} else if ok {
-				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+				a.setFeedback(fmt.Sprintf("Cancelled: %s", displayText(job.Title)))
 			} else {
-				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", job.Title), severityWarning)
+				a.setFeedbackWithSeverity(fmt.Sprintf("Not cancelled — %s had already ended", displayText(job.Title)), severityWarning)
 			}
 		}
 	case "A D":
@@ -345,12 +345,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			// delete in any state, so nothing after this line would stop one
 			// aimed at a job that is recording.
 			if !isDeletableStatus(job.Status) {
-				a.setFeedbackWithSeverity(fmt.Sprintf("Delete Job not done: %s is now %s", job.Title, job.Status), severityWarning)
+				a.setFeedbackWithSeverity(fmt.Sprintf("Delete Job not done: %s is now %s", displayText(job.Title), job.Status), severityWarning)
 				return a, nil
 			}
-			a.setFeedback(fmt.Sprintf("Deleting: %s", job.Title))
+			a.setFeedback(fmt.Sprintf("Deleting: %s", displayText(job.Title)))
 			deleteFn := a.OnDeleteJob
-			id, title := job.ID, job.Title
+			id, title := job.ID, displayText(job.Title)
 			return a, safeCmd(func() tea.Msg {
 				deleteFn(id)
 				return deleteJobsResultMsg{Count: 1, Title: title}
@@ -410,7 +410,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A U":
 		if job != nil && a.OnRestoreChapters != nil {
-			a.setFeedback(fmt.Sprintf("Restoring the original chapters: %s", job.Title))
+			a.setFeedback(fmt.Sprintf("Restoring the original chapters: %s", displayText(job.Title)))
 			return a, a.restoreChaptersCmd(job)
 		}
 	case "A K":
@@ -571,7 +571,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "O F":
 		if job != nil && a.OnOpenFolder != nil {
 			a.OnOpenFolder(job.ID)
-			a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
+			a.setFeedback(fmt.Sprintf("Opening folder for: %s", displayText(job.Title)))
 		}
 	case "O S":
 		if job != nil {
@@ -834,7 +834,7 @@ func streamURL(j *database.Job) string {
 func (a *App) openTrimForJob(job *database.Job) {
 	if jobverbs.TrimmableStatus(job.Status) && job.OutputFile != "" {
 		a.trimDlg.SetSize(a.width, a.height)
-		a.trimDlg.Open(job.ID, job.Title)
+		a.trimDlg.Open(job.ID, displayText(job.Title))
 		var lenSec float64
 		var fSize int64
 		if job.LengthSeconds != nil {
