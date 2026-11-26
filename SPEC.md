@@ -115,7 +115,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
 9. **CipherSolver** — YouTube signature/n-parameter decryption, 10-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
-11. **TrimService** — FFmpeg-based clip extraction from finished recordings; ahead of the worker, which runs every job's post-download trim through it
+11. **TrimService** — FFmpeg-based clip extraction from finished recordings; ahead of the worker, which runs every job's post-download trim through it; a running trim is stopped by its job's deletion and by the operator's Stop (`StopTrim`, from the dashboard's running-trim row and the TUI trim dialog's `S`), neither of which sends `trim_error`
 12. **DownloadWorker** — Job queue (100 lifecycle + N VOD download slots), backlog scheduler, stream processor, orchestrator
 13. **FeedMonitor + BackfillWorker** — YouTube RSS/membership discovery into the persistent feed-history store; serial full-catalog backfill scans
 14. **DECAPIMonitor** — DECAPI live-check polling for YouTube
