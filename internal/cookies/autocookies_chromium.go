@@ -154,7 +154,18 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	// Wait for CDP to be available (use a timeout context so this doesn't block forever)
 	cdpCtx, cdpCancel := context.WithTimeout(context.Background(), cdpPollTimeout)
 	defer cdpCancel()
-	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
+	// The browser gone before CDP answered (a headless host, a crash at
+	// start) ends the wait at once with ErrBrowserExitedEarly instead of a
+	// 15 s timeout. "Gone" is setupBrowserLiveLocked's answer for THIS
+	// process: the spawned process exited AND its Job Object or process
+	// group is empty, so a launcher behind a shim that hands off and exits is
+	// still waited for, and no answer from the job counts as alive.
+	browserGone := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.setupProcess == proc && !s.setupBrowserLiveLocked()
+	}
+	if err := waitForCDP(cdpCtx, port, cdpPollTimeout, browserGone); err != nil {
 		// killSetupProcess only signals the OS process; setupProcess,
 		// cdpPort, and setupBrowser remain populated on the struct, so a
 		// follow-up StartSetup would see "setup already in progress" and
@@ -318,7 +329,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	cdpCtx, cancel := context.WithTimeout(ctx, cdpRefreshTimeout)
 	defer cancel()
 
-	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
+	if err := waitForCDP(cdpCtx, port, cdpPollTimeout, nil); err != nil {
 		return "", false, err
 	}
 
@@ -420,7 +431,10 @@ func navigateAllPlatforms(ctx context.Context, port int, platforms []string,
 
 // --- CDP helpers (minimal implementation) ---
 
-func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
+// waitForCDP polls the CDP endpoint on port until it answers 200, ctx ends or
+// timeout passes. browserGone, when not nil, is asked after each failed poll:
+// true ends the wait with ErrBrowserExitedEarly, since nothing will answer.
+func waitForCDP(ctx context.Context, port int, timeout time.Duration, browserGone func() bool) error {
 	deadline := time.Now().Add(timeout)
 	delay := 200 * time.Millisecond
 	const maxDelay = 2 * time.Second
@@ -436,6 +450,9 @@ func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 			if resp.StatusCode == 200 {
 				return nil
 			}
+		}
+		if browserGone != nil && browserGone() {
+			return ErrBrowserExitedEarly
 		}
 		time.Sleep(delay)
 		// Exponential backoff: 200ms -> 400ms -> 800ms -> 1600ms -> 2000ms (capped)

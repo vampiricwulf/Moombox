@@ -83,6 +83,10 @@ const fakeSetupHandoffDelay = 150 * time.Millisecond
 // asks a real handle how many processes it holds, and faking the probe
 // (jobReports) skips the very thing under test.
 func TestMain(m *testing.M) {
+	// A display exists, so a Linux runner with no DISPLAY drives StartSetup
+	// as Windows does; TestStartSetupRefusesAHostWithNoDisplay answers the
+	// other way.
+	SetHostLacksDisplayForTesting(false)
 	if isFakeSetupChild(os.Args) {
 		// The stand-in browser: it does nothing but stay alive inside the job
 		// until something closes the handle.
