@@ -407,7 +407,7 @@ func (m *AddVideoModel) bareConfirmView() string {
 	}
 	// The video's title is the first thing to give way.
 	if m.formats != nil && m.formats.Title != "" && h-2-len(sheet.body)-errRows >= 1 {
-		sheet.body = append([]string{DimStyle.Render(truncateString(m.formats.Title, w))}, sheet.body...)
+		sheet.body = append([]string{DimStyle.Render(truncateString(displayText(m.formats.Title), w))}, sheet.body...)
 	}
 	sheet.errorUnder(errText, ErrorStyle, w, h)
 	return sheet.render(w, h)

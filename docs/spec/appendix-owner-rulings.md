@@ -136,3 +136,11 @@ Where the build departs from the wording of a ruling, on purpose:
 - **KA-7 and KA-6.** The retry to a media host after a 403 sends the rows the jar keeps by name, which is what it sent before KA-7, and none of the rows kept only for their scope.
 - **KA-4, the run is six and spaced.** The ruling first said three consecutive signed-out page verdicts; the run is six (`livenessDeadRun`), because a flicker at the 26% signed-out share of the October 2026 log would complete three by chance several times a day. The membership probe delivers one verdict a channel within seconds, so three channels would complete the run in one feed cycle; the run counts verdicts at least 5 minutes apart (`livenessRunSpacing`). It also counts from the last recovery a page verdict fired, fires once per stretch of signed-out pages, and stands down on the base window and for a recovery the API check decided. Both numbers were set by the orchestrating session on 2026-11-13 and reported to the owner.
 - **KA-6, the retry does not prove its cause.** A media 403 that would have cleared on any second ask looks the same as one that needed the cookies. The cookies stay on for the rest of that download either way, and the Warn says what happened without naming a cause.
+
+## Improvement sweep 3, 2026-11-25
+
+No design spec was ever in the tree for this one: the owner's rulings were the brief. Its ids are written `R3-1` and on, so they cannot be taken for the `R3` of the earlier chains above.
+
+- **R3-15** — a batch Cancel (`A X` over a selection) runs off the TUI update loop under the shared job-verb busy state, and while it runs a new Resume, Reinitialize or Cancel is refused with a line saying Cancel is still running. A single-job Cancel stays synchronous, and the `A R` staging probe stays where it is.
+
+See user-interfaces.md § The Chord System.

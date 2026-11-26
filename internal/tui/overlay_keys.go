@@ -301,13 +301,13 @@ func (a *App) keyActionMenu(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd
 func menuRefusal(item *ActionMenuItem, chord string, picked, job *database.Job) string {
 	label := menuActionLabel(item, chord)
 	if picked == nil || picked.ID != job.ID || picked.Status != job.Status {
-		return fmt.Sprintf("%s not done: %s is now %s", label, job.Title, job.Status)
+		return fmt.Sprintf("%s not done: %s is now %s", label, displayText(job.Title), job.Status)
 	}
 	reason := item.DisabledReason
 	if reason == "" {
 		reason = "no eligible jobs"
 	}
-	return fmt.Sprintf("%s not done for %s: %s", label, job.Title, reason)
+	return fmt.Sprintf("%s not done for %s: %s", label, displayText(job.Title), reason)
 }
 
 // menuActionLabel names a menu action on a refusal line: the item's label, or

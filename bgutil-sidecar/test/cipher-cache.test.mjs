@@ -176,6 +176,9 @@ test("a non-string answer throws and caches nothing", () => {
 
 const FIXTURE = new URL("../../internal/cipher/testdata/player_cb017549.js", import.meta.url);
 const BUNDLE = new URL("../vendor/ejs.bundle.js", import.meta.url);
+// CI sets this only once .github/scripts/fetch-cipher-fixture.sh put the
+// fixture in place; with it, a missing fixture fails instead of skipping.
+const REQUIRE_FIXTURE = process.env.MOOMBOX_REQUIRE_CIPHER_FIXTURE === "1";
 
 // The ejs result is a rope of the player's pieces; held as is, every later
 // solve flattens a copy of it on V8's heap. The entry must hold a flat string.
@@ -192,7 +195,9 @@ const BUNDLE = new URL("../vendor/ejs.bundle.js", import.meta.url);
 // Node 24).
 test("an entry is stored flat, and off the heap when reloaded from disk", (t) => {
     if (!fs.existsSync(BUNDLE) || !fs.existsSync(FIXTURE)) {
-        t.skip("ejs bundle or player_cb017549.js fixture absent");
+        const why = "ejs bundle or player_cb017549.js fixture absent (bash .github/scripts/fetch-cipher-fixture.sh downloads the fixture)";
+        if (REQUIRE_FIXTURE) assert.fail(`${why} with MOOMBOX_REQUIRE_CIPHER_FIXTURE=1`);
+        t.skip(why);
         return;
     }
     const cipherURL = new URL("../src/cipher.js", import.meta.url).href;

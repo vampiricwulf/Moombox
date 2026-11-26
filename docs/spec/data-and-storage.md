@@ -1397,7 +1397,7 @@ Moombox itself still never deletes it on any of these answers. It is checked ahe
 
 **Moombox sets permissions on the files it writes and on a folder at the moment Moombox itself creates it; it never changes the permissions of a folder that already existed** (owner ruling, 2026-11-19: "I don't really like messing with permissions that aren't our responsibility"). This supersedes owner decision O-K's dedicated-directory rule on every platform. Up to v2.9.9 every cookie write and every settings save applied `utils.ApplyUserOnlyDACL` to the file's parent folder — `icacls <dir> /inheritance:r /grant:r <user>:(OI)(CI)F` on Windows, `chmod 0700` on POSIX. O-K (2026-09-17) limited the POSIX half to a folder holding nothing but the secrets, because in the image that parent is `/data` and the chmod undid the Dockerfile's deliberate `chmod 777 /data`; Windows stayed unconditional, and with the default `cookie_file = "./cookies.txt"` the parent is the install folder, so `/inheritance:r` removed every inherited entry — SYSTEM and Administrators included — from the output tree, the staging tree, the database and the log, and logged nothing. Neither writer touches its folder now: there is no lockdown, no gate, no memo and no goroutine in `writeFileAtomic` or `config.Save`, whatever the folder holds.
 
-**The files are restricted on every write, whatever the folder.** `writeFileAtomic` (so `cookies.txt`, and `SaveMeta`'s sidecar, which goes through it) and `config.Save` each chmod their temp file to 0600 and then call `utils.RestrictFileToOwner` on it, before the rename. On Windows that sets a PROTECTED DACL (nothing inherited from the folder) granting full control to exactly three principals — the account the process runs as, `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` — with Win32 calls and no process spawn (`internal/utils/winsec_windows.go`); elsewhere it does nothing, 0600 being the same restriction. SYSTEM and Administrators are kept on purpose: both can take the file whatever its DACL says, and dropping them breaks backup and recovery for no gain. A rename keeps a file's DACL, so the target ends up with the temp file's (`TestReplaceFileKeepsTheRestrictedDACL` reads it back, over an existing target and a new one). A failure is Debug-logged and does not fail the write: a volume without ACLs still gets its file.
+**The files are restricted on every write, whatever the folder.** `writeFileAtomic` (so `cookies.txt`, and `SaveMeta`'s sidecar, which goes through it) and `config.Save` each chmod their temp file to 0600 and then call `utils.RestrictFileToOwner` on it while it is still empty: before any secret byte is written to it, and so before the rename. (Restricting after the write would leave the full file on disk under the folder's inherited permissions on Windows, and a kill in that window would leave it so.) On Windows that sets a PROTECTED DACL (nothing inherited from the folder) granting full control to exactly three principals — the account the process runs as, `NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` — with Win32 calls and no process spawn (`internal/utils/winsec_windows.go`); elsewhere it does nothing, 0600 being the same restriction. SYSTEM and Administrators are kept on purpose: both can take the file whatever its DACL says, and dropping them breaks backup and recovery for no gain. A rename keeps a file's DACL, so the target ends up with the temp file's (`TestReplaceFileKeepsTheRestrictedDACL` reads it back, over an existing target and a new one). A failure is Debug-logged and does not fail the write: a volume without ACLs still gets its file. The self-signed TLS private key Moombox generates is restricted the same way at creation, and an existing generated key once per start; see "Private key permissions" in `security.md`.
 
 **A folder Moombox has to create for either file is created for its owner.** Every cookie-side site that needs the cookie file's folder (the refresh, the browser login's finish, the import, the first-run carry and `SaveMeta`) goes through `createCookieDir` (`internal/cookies/cookie_files.go`), and `config.Save` does the same for the config file's folder: `utils.MkdirOwnerOnly` (`internal/utils/mkdir_owner.go`), which leaves an existing folder exactly as it is and creates a missing one mode 0700 on POSIX — that folder alone: a missing parent is created with the ordinary 0755, since it is not the secret's folder and may come to hold the output tree. Nothing chmods afterwards. On Windows the mode means nothing and no ACL call is made: the new folder inherits its parent's permissions, and the file restriction above is what protects the secret. These sites are rarely the ones that create the folder. With the default `./cookies.txt` and a `config.toml` beside the binary it is the working directory, which exists. And `initConfigAndLogger` opens the log file before the first save or cookie write, so a missing folder that also holds the log is created by the logger first, mode 0755; the first-run wizards' `MakeSetupDirs` likewise creates the output and staging folders, and any missing parent, 0755 before they save.
 
@@ -1754,16 +1754,21 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 
 ```
 %LOCALAPPDATA%/Moombox/sidecar/
-├── moombox-sidecar[.exe]            (the Node binary, ~83 MB extracted from the platform's gzipped ~33-44 MB node-<goos>-<goarch>.gz)
+├── moombox-sidecar[.exe]            (the Node binary: at v24.22.3, ~94 MB on Windows and ~123-127 MB on Linux, extracted from the platform's gzipped ~36-46 MB node-<goos>-<goarch>.gz)
 ├── package.json
 ├── package-lock.json
 ├── version.txt                      (the embedded Node manifest + "sidecar@<sha256 of sidecar.tar.gz>" — cache-invalidation key)
 ├── src/
 │   ├── server.js                    (~900 lines, JSON-RPC server)
 │   ├── cipher.js                    (ejs signature/n solving)
-│   └── homepage.js                  (homepage challenge extraction)
-└── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~17 MB)
+│   ├── homepage.js                  (homepage challenge extraction)
+│   └── player-store.js              (the players' disk store; MOOMBOX_SIDECAR_PLAYER_DIR)
+├── vendor/                          (the vendored ejs solver)
+├── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~19 MB)
+└── players/                         (the players the sidecar has prepared, player-store.js; MOOMBOX_SIDECAR_PLAYER_DIR)
 ```
+
+All told the first extraction is roughly 115 MB on Windows, ~146 MB on linux-amd64 and ~142 MB on linux-arm64; the operator docs say "roughly 115-150 MB" so the figure survives a Node pin bump.
 
 ### Lifecycle
 

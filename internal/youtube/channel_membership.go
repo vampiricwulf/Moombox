@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -77,17 +79,32 @@ var ytInitialDataAnchors = []*regexp.Regexp{
 // timestamp — a past item shows only "Streamed N <unit> ago"). Age is 0 for a
 // live/upcoming/unrecognized item (treated as "now"), so it always ranks into
 // the cap; only a proven past VOD gets a non-zero Age and can be crowded out.
+//
+// Marked says the item carries an explicit live or upcoming marker
+// (itemMarked). It never changes Age: it only lets the backfill scanner tell
+// an Age-0 item YouTube labelled live or upcoming from one the parser could
+// not read.
 type MembershipVideo struct {
 	VideoID string
 	Title   string
 	Age     time.Duration // ~time since it streamed; 0 = live/upcoming/now
+	Marked  bool          // explicit live or upcoming marker present
 }
 
 // relativeAgeRe matches YouTube's relative published text, e.g. "Streamed 2
 // years ago" / "3 weeks ago". Localized to en (we send Accept-Language: en).
 // Its PRESENCE marks a past stream/upload; its ABSENCE means the item is live,
 // upcoming, or unrecognized — all treated as "now" (see itemAge).
-var relativeAgeRe = regexp.MustCompile(`(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago`)
+//
+// It is anchored at both ends and applied to ONE string value at a time
+// (findAgeText), never to the serialized item: a title, an accessibility
+// label or a description snippet that merely contains "3 years ago" is a
+// longer string and cannot match. Unanchored, such a title dated an upcoming
+// members stream years in the past, outside every archive window, and nothing
+// ever probed it. The only prefixes are the two YouTube puts in front of the
+// age in a listing. A text this no longer recognises reads as "now": the item
+// is in scope and probed, which is the safe direction (owner ruling R3-2).
+var relativeAgeRe = regexp.MustCompile(`^(?:(?:Streamed|Premiered)\s+)?(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$`)
 
 // membershipPageBase is the origin the /membership probe fetches from. A
 // package var rather than a const solely so tests can point it at an httptest
@@ -260,13 +277,13 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	case map[string]any:
 		if lv, ok := n["lockupViewModel"].(map[string]any); ok {
 			if cid := getStr(lv, "contentId"); len(cid) == 11 {
-				addVideo(cid, lockupTitle(lv), itemAge(lv), seen, out)
+				addVideo(cid, lockupTitle(lv), itemAge(lv), itemMarked(lv), seen, out)
 			}
 		}
 		for _, key := range []string{"videoRenderer", "gridVideoRenderer", "playlistVideoRenderer"} {
 			if r, ok := n[key].(map[string]any); ok {
 				if vid := getStr(r, "videoId"); len(vid) == 11 {
-					addVideo(vid, rendererTitle(r), itemAge(r), seen, out)
+					addVideo(vid, rendererTitle(r), itemAge(r), itemMarked(r), seen, out)
 				}
 			}
 		}
@@ -280,12 +297,12 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	}
 }
 
-func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out *[]MembershipVideo) {
+func addVideo(id, title string, age time.Duration, marked bool, seen map[string]struct{}, out *[]MembershipVideo) {
 	if _, dup := seen[id]; dup {
 		return
 	}
 	seen[id] = struct{}{}
-	*out = append(*out, MembershipVideo{VideoID: id, Title: title, Age: age})
+	*out = append(*out, MembershipVideo{VideoID: id, Title: title, Age: age, Marked: marked})
 }
 
 // itemAge estimates how long ago a membership item streamed, for recency
@@ -300,8 +317,10 @@ func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out
 // "N <unit> ago" — "Started streaming 2 hours ago" — so that text counts as
 // live in its own right, beside the badges: without it a live item whose badge
 // markup had changed would rank by its elapsed time and could sink below dated
-// VODs and be dropped from the cap. Scanning the serialized item is
-// layout-agnostic (lockup and classic renderers both work).
+// VODs and be dropped from the cap. The age text is looked for in every string
+// value of the item, so it is layout-agnostic (lockup and classic renderers
+// both work), but only a value that is the age text and nothing else counts
+// (relativeAgeRe).
 func itemAge(item map[string]any) time.Duration {
 	b, err := json.Marshal(item)
 	if err != nil {
@@ -318,30 +337,135 @@ func itemAge(item map[string]any) time.Duration {
 		return 0
 	}
 	// A "Streamed N <unit> ago" text marks a PAST stream → rank by that age.
-	if m := relativeAgeRe.FindStringSubmatch(s); m != nil {
-		n, _ := strconv.Atoi(m[1])
-		var unit time.Duration
-		switch m[2] {
-		case "second":
-			unit = time.Second
-		case "minute":
-			unit = time.Minute
-		case "hour":
-			unit = time.Hour
-		case "day":
-			unit = 24 * time.Hour
-		case "week":
-			unit = 7 * 24 * time.Hour
-		case "month":
-			unit = 30 * 24 * time.Hour
-		case "year":
-			unit = 365 * 24 * time.Hour
-		}
-		return time.Duration(n) * unit
+	if age, ok := findAgeText(item); ok {
+		return age
 	}
 	// No live badge and no past-time text → upcoming or unrecognized → "now",
 	// so live/upcoming catching never depends on a single fragile badge marker.
 	return 0
+}
+
+// itemMarkers are the key/value pairs that mark a listing item live or
+// upcoming, each one a structural field of the item. yt-dlp reads three of
+// them (extractor/youtube/_tab.py): the classic renderers' "LIVE" time-status
+// overlay style and BADGE_STYLE_TYPE_LIVE_NOW badge, and the lockup's
+// THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE thumbnail badge style. The "UPCOMING"
+// overlay style is not read upstream (yt-dlp dates a classic upcoming item by
+// upcomingEventData), and the live icon name is the one Moombox's own live
+// check already keyed on; neither has been seen in a capture here.
+var itemMarkers = map[string][]string{
+	"style":      {"LIVE", "UPCOMING", "BADGE_STYLE_TYPE_LIVE_NOW"},
+	"badgeStyle": {"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"},
+	"imageName":  {"LIVE"},
+}
+
+// itemMarked reports whether a listing item carries an EXPLICIT live or
+// upcoming marker: one of itemMarkers, a classic renderer's upcomingEventData
+// (the scheduled start), or a lockup thumbnail badge whose text is "Upcoming".
+//
+// It is deliberately narrower than itemAge's "anything not dated is now". The
+// backfill scanner uses it to let a tab that lists only live or upcoming
+// streams through its parser-failure arm, so it must not be satisfiable by
+// text the channel wrote: every marker is a key, or a whole value under a
+// named key, and a title is neither. The live wording "Started streaming" is
+// left out for that reason (owner ruling R3-3).
+func itemMarked(node any) bool {
+	switch n := node.(type) {
+	case map[string]any:
+		if _, ok := n["upcomingEventData"]; ok {
+			return true
+		}
+		for key, values := range itemMarkers {
+			if v, ok := n[key].(string); ok && slices.Contains(values, v) {
+				return true
+			}
+		}
+		if badge, ok := n["thumbnailBadgeViewModel"].(map[string]any); ok {
+			if strings.EqualFold(getStr(badge, "text"), "upcoming") {
+				return true
+			}
+		}
+		for _, v := range n {
+			if itemMarked(v) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if itemMarked(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findAgeText looks through an item for a string VALUE that is, as a whole,
+// YouTube's relative age text, and returns the age it states. Keys are walked
+// in sorted order so the answer does not depend on map iteration.
+//
+// One field is read by name as well: a playlist row's videoInfo, which yt-dlp
+// documents as a single string like "50K views • 10 years ago"
+// (extractor/youtube/_tab.py). When it arrives as one simpleText the age is
+// its last "•" segment. A title cannot reach that field.
+func findAgeText(node any) (time.Duration, bool) {
+	switch n := node.(type) {
+	case string:
+		return parseAgeText(n)
+	case map[string]any:
+		if joined := getDeepStr(n, "videoInfo", "simpleText"); joined != "" {
+			if i := strings.LastIndex(joined, "•"); i >= 0 {
+				joined = joined[i+len("•"):]
+			}
+			if age, ok := parseAgeText(joined); ok {
+				return age, true
+			}
+		}
+		keys := make([]string, 0, len(n))
+		for k := range n {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if age, ok := findAgeText(n[k]); ok {
+				return age, true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if age, ok := findAgeText(v); ok {
+				return age, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// parseAgeText reads one whole relative age text ("Streamed 2 years ago").
+func parseAgeText(text string) (time.Duration, bool) {
+	m := relativeAgeRe.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	var unit time.Duration
+	switch m[2] {
+	case "second":
+		unit = time.Second
+	case "minute":
+		unit = time.Minute
+	case "hour":
+		unit = time.Hour
+	case "day":
+		unit = 24 * time.Hour
+	case "week":
+		unit = 7 * 24 * time.Hour
+	case "month":
+		unit = 30 * 24 * time.Hour
+	case "year":
+		unit = 365 * 24 * time.Hour
+	}
+	return time.Duration(n) * unit, true
 }
 
 // lockupTitle reads the title from a lockupViewModel:

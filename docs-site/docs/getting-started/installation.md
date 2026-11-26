@@ -231,10 +231,15 @@ Things to know:
 - The default dashboard port, 774, is below 1024. On most Linux systems an
   ordinary user may not bind such ports, so without
   `AmbientCapabilities=CAP_NET_BIND_SERVICE` Moombox fails on 774 and on the
-  ten ports after it, and the log reports "port 774 (and nearby ports) already
-  in use" even though nothing else is using them. Either keep that line or
+  ten ports after it with "permission denied". Either keep that line or
   set [`network.port`](../configuration/network.md#networkport) to 1024 or
   above before you start the service.
+- The service user needs a writable home directory: the single-instance lock
+  (`~/.local/share/moombox`) and the BotGuard helper's runtime
+  (`~/.cache/Moombox`) live there. Create the account with one
+  (`useradd -m moombox`), or add `Environment=HOME=/srv/moombox` under
+  `[Service]`. Without it Moombox exits at once with `create lock dir …:
+  permission denied`.
 - A startup failure (a configuration it cannot read, a port it cannot bind)
   exits with code 3. `Restart=on-failure` will retry it; fix the cause shown
   in `journalctl -u moombox`.

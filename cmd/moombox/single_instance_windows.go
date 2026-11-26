@@ -68,7 +68,7 @@ func acquireSingleInstanceLock() error {
 		// (existing) named mutex so we don't leak a kernel object, then
 		// signal the conflict.
 		procCloseHandle.Call(handle)
-		return fmt.Errorf("another moombox instance is already running in this session")
+		return instanceRunningError("another moombox instance is already running in this session")
 	}
 
 	singleInstanceHandle = handle
@@ -148,7 +148,7 @@ func acquireCrossSessionLock() error {
 	if r == 0 {
 		if errno, ok := callErr.(syscall.Errno); ok && errno == errLockViolation {
 			syscall.CloseHandle(h)
-			return fmt.Errorf("another moombox instance is already running (cross-session lock held)")
+			return instanceRunningError("another moombox instance is already running (cross-session lock held)")
 		}
 		fmt.Fprintf(os.Stderr, "warning: cross-session lock failed (%v) — continuing with session mutex only\n", callErr)
 		syscall.CloseHandle(h)

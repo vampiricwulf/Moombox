@@ -10,7 +10,8 @@ import (
 // The chat replay renders BTTV / 7TV / FFZ emotes as <img> from their CDNs
 // (internal/twitch/emotes.go). A CSP img-src that omits a host makes the
 // browser refuse the image silently and the player falls back to the emote
-// code as text — the whole emote pipeline looked dead in the field.
+// code as text — the whole emote pipeline looked dead in the field. YouTube
+// chat replays store standard emoji as Noto Emoji PNGs on fonts.gstatic.com.
 func TestSecurityHeadersCSPAdmitsEmoteCDNs(t *testing.T) {
 	h := SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	rec := httptest.NewRecorder()
@@ -27,7 +28,7 @@ func TestSecurityHeadersCSPAdmitsEmoteCDNs(t *testing.T) {
 	}
 	for _, host := range []string{
 		"https://cdn.betterttv.net", "https://cdn.7tv.app", "https://cdn.frankerfacez.com",
-		"https://*.jtvnw.net", "https://yt3.ggpht.com", "https://i.ytimg.com",
+		"https://*.jtvnw.net", "https://yt3.ggpht.com", "https://i.ytimg.com", "https://fonts.gstatic.com",
 	} {
 		if !strings.Contains(imgSrc, " "+host) {
 			t.Errorf("img-src lacks %s: %q", host, imgSrc)
@@ -90,7 +91,7 @@ func TestSecurityHeadersCSPIsByteForByte(t *testing.T) {
 		"font-src 'self' https://cdn.jsdelivr.net; " +
 		"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net " +
 		"https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com " +
-		"https://cdn.jsdelivr.net; " +
+		"https://cdn.jsdelivr.net https://fonts.gstatic.com; " +
 		"connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:; " +
 		"frame-src https://www.youtube-nocookie.com https://player.twitch.tv; " +
 		"object-src 'none'; " +

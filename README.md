@@ -186,11 +186,11 @@ Docker-specific behavior:
   it and the seeded config points at `/data/cookies.txt`, so there is no
   extra volume line to add. **Do not bind-mount the file individually**
   (`- ./cookies.txt:/data/cookies.txt`): Moombox keeps the YouTube
-  session alive by rewriting `cookies.txt` about every 30 minutes with
-  the values YouTube rotates back, and it does so with a temp file plus a
-  rename. A rename cannot replace a single-file bind mount, so the
-  write-back fails with only a warning in the log and the session quietly
-  ages out. When the session does die, open Settings → Cookies
+  session alive by writing the values YouTube renews back to
+  `cookies.txt`, and it does so with a temp file plus a rename. A rename
+  cannot replace a single-file bind mount, so the write-back fails with
+  only a warning in the log; the renewed session lives on in memory and
+  is lost at the next restart. When the session does die, open Settings → Cookies
   in the dashboard and paste (or upload) a fresh Netscape export: Moombox
   merges it into `cookies.txt`, reloads it immediately and tells you whether
   it authenticates. Overwriting `./data/cookies.txt` on the host works too and

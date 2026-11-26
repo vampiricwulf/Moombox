@@ -588,6 +588,12 @@ func (s *Server) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("TLS setup: %w", err)
 		}
+		// Once per start, here and not in the certificate reload or the
+		// redirect's load-only path: a key Moombox generated before it
+		// restricted the file itself gets the restriction now.
+		if len(tlsConfig.Certificates) > 0 {
+			restrictOwnGeneratedKey(s.cfg, keyPath, &tlsConfig.Certificates[0], s.logger)
+		}
 		s.server.TLSConfig = tlsConfig
 		scheme = "https"
 	}
@@ -604,21 +610,14 @@ func (s *Server) Start(ctx context.Context) error {
 		s.doShutdown()
 	}()
 
-	// Try the preferred port, then probe nearby ports
-	ln, err := net.Listen("tcp", addr)
+	// Try the preferred port, then probe nearby ports (listenNearby).
+	ln, err := listenNearby(host, port, func(a string) (net.Listener, error) { return net.Listen("tcp", a) },
+		func(first error) {
+			s.logger.Warn(classifyBindError(first).probeMessage(), "port", port, "error", first.Error())
+		},
+		func(used int) { s.logger.Info("using alternative port", "port", used) })
 	if err != nil {
-		s.logger.Warn("port in use, probing nearby ports", "port", port)
-		for offset := 1; offset <= 10; offset++ {
-			candidate := fmt.Sprintf("%s:%d", host, port+offset)
-			ln, err = net.Listen("tcp", candidate)
-			if err == nil {
-				s.logger.Info("using alternative port", "port", port+offset)
-				break
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("port %d (and nearby ports) already in use: %w", port, err)
-		}
+		return err
 	}
 
 	// Cross-scheme redirect on the single configured port: each accepted

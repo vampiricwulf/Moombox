@@ -2,6 +2,7 @@ package goja
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -66,6 +67,12 @@ func NewRuntimeForCipher(userAgent string) (*goja.Runtime, error) {
 	return vm, nil
 }
 
+// ErrExecutionTimeout is what RunStringWithTimeout's error wraps when the
+// bound ran out, so a caller can tell a timeout from a script error or a
+// cancelled context with errors.Is. The message is unchanged:
+// "execution timeout (<bound>)".
+var ErrExecutionTimeout = errors.New("execution timeout")
+
 // RunStringWithTimeout runs JavaScript source on the given runtime with
 // a timeout AND context cancellation. On timeout or ctx-cancel,
 // vm.Interrupt is fired to abort the in-flight execution; the helper
@@ -77,7 +84,7 @@ func NewRuntimeForCipher(userAgent string) (*goja.Runtime, error) {
 //
 // Returns:
 //   - the value from vm.RunString on success
-//   - nil + a "execution timeout" error on timeout
+//   - nil + an error wrapping ErrExecutionTimeout on timeout
 //   - nil + ctx.Err() on context cancellation
 //   - nil + the underlying error on RunString failure
 //
@@ -116,7 +123,7 @@ func RunStringWithTimeout(ctx context.Context, vm *goja.Runtime, code string, ti
 		// no JS is mid-flight when the flag is dropped.
 		<-done
 		vm.ClearInterrupt()
-		return nil, fmt.Errorf("execution timeout (%v)", timeout)
+		return nil, fmt.Errorf("%w (%v)", ErrExecutionTimeout, timeout)
 	case <-ctx.Done():
 		vm.Interrupt("context cancelled")
 		<-done

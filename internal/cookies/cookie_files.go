@@ -85,8 +85,9 @@ var cookieTempFileSweepOnce sync.Once
 // permissions inherited from wherever the file happens to live, so the FILE is
 // restricted on every write: the Chmod to 0600 on the temp file below, and
 // restrictFileToOwner on it (on Windows a protected DACL for the current user,
-// SYSTEM and Administrators; nothing elsewhere). The rename carries both to
-// the target.
+// SYSTEM and Administrators; nothing elsewhere). Both run right after the temp
+// file is created, before any cookie byte is written to it. The rename carries
+// both to the target.
 //
 // The file's FOLDER is never touched here (owner ruling, 2026-11-19, which
 // supersedes owner decision O-K): Moombox sets permissions on the files it
@@ -102,6 +103,21 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("create temp cookie file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	// Both restrictions go on while the temp file is still EMPTY, the order
+	// config.Save uses. On Windows the mode means nothing for access and a new
+	// file inherits its folder's permissions, so restricting only after the
+	// write would put the whole session on disk, synced, readable by whoever
+	// the folder admits, and a kill in that window would leave it so.
+	if err := tmpFile.Chmod(perm); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp cookie file: %w", err)
+	}
+	// Hardening, not a condition of the write: a volume without ACLs (FAT,
+	// some network shares) still gets its cookie file.
+	if err := restrictFileToOwner(tmpPath); err != nil {
+		slog.Debug("could not restrict cookie file to its owner", "path", path, "err", err)
+	}
 	if _, err := tmpFile.Write(data); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
@@ -119,15 +135,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp cookie file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp cookie file: %w", err)
-	}
-	// Hardening, not a condition of the write: a volume without ACLs (FAT,
-	// some network shares) still gets its cookie file.
-	if err := restrictFileToOwner(tmpPath); err != nil {
-		slog.Debug("could not restrict cookie file to its owner", "path", path, "err", err)
 	}
 	if err := utils.ReplaceFile(tmpPath, path); err != nil {
 		os.Remove(tmpPath)

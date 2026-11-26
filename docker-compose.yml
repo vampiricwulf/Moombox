@@ -46,13 +46,14 @@ services:
       #
       # Do not bind-mount the file on its own (e.g.
       # "- ./cookies.txt:/data/cookies.txt"). Moombox keeps the YouTube
-      # session alive by rewriting cookies.txt roughly every 30 minutes with
-      # the values YouTube rotates back, and it writes a temp file and
-      # renames it over the original. A rename cannot replace a single-file
-      # bind mount, so the write-back fails, only a warning is logged, and
-      # the session quietly ages out until downloads start failing for a
-      # reason that looks nothing like a mount problem. Adding ":ro" breaks
-      # it the same way.
+      # session alive by writing the values YouTube renews back to
+      # cookies.txt, using a temp file renamed over the original. A rename
+      # cannot replace a single-file bind mount, so the write-back fails
+      # with only a warning in the log; the renewed session lives on in
+      # memory and is lost at the next restart (an image update, a host
+      # reboot), after which downloads start failing for a reason that
+      # looks nothing like a mount problem. Adding ":ro" breaks it the same
+      # way.
     # environment:
     #   # Time zone for ${start_date}/${start_time} in new filenames and for
     #   # log timestamps (the image ships tzdata; unset means UTC). Archives

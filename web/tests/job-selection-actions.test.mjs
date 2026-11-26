@@ -256,3 +256,35 @@ test("a running batch marks the bar busy, and focus goes back to the list when i
   assert.equal(bar.hasAttribute("aria-busy"), false, "the bar stayed busy after the batch");
   assert.equal(h.document.activeElement?.dataset.jobId, "e3", "focus was left on the page");
 });
+
+// A batch read no answer: a refused job's reason was thrown away and the
+// toast said only "4 of 5 succeeded. 1 failed.", while the TUI's batch line
+// names the first refusal (verbRefusals). The toast names it now; an answer
+// with no reason keeps the bare count.
+//
+// MUTANTS: the reason not read (the bare count comes back); the last refusal
+// named instead of the first.
+test("a batch toast names the first refusal reason the server gave", { skip }, async () => {
+  const refusals = {
+    e2: harness.response({ status: 409, body: { error: "This job's staging is busy (recover asides in progress); try again once it is done" } }),
+    e3: harness.response({ status: 409, body: { error: "Another reason" } }),
+  };
+  const h = await boot({ "DELETE /api/jobs/:id": ({ params }) => refusals[params.id] ?? { success: true } });
+  h.app.jobs = ["e1", "e2", "e3"].map((id) => fin({ id, videoId: id, status: "Error" }));
+  h.app.renderJobs();
+  for (const j of h.app.jobs) h.app._selectedTaskJobs.add(j.id);
+  h.app.showConfirm = async () => true;
+  const texts = () => h.toasts().map((t) => t.textContent.trim());
+
+  await h.app.batchAction("delete");
+  await h.flush();
+  assert.ok(texts().includes("1 of 3 succeeded. 2 failed: This job's staging is busy (recover asides in progress); try again once it is done"),
+    `toasts: ${JSON.stringify(texts())}`);
+
+  refusals.e2 = harness.response({ status: 500 });
+  delete refusals.e3;
+  for (const j of h.app.jobs) h.app._selectedTaskJobs.add(j.id);
+  await h.app.batchAction("delete");
+  await h.flush();
+  assert.ok(texts().includes("2 of 3 succeeded. 1 failed."), `toasts: ${JSON.stringify(texts())}`);
+});

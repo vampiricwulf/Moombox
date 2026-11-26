@@ -18,6 +18,18 @@ import (
 
 var pluginURLRe = regexp.MustCompile(`(?:DEFAULT_BASE_URL|_MOOMBOX_URL)\s*=\s*["'](https?)://[^:]+:(\d+)["']`)
 
+// PluginVersion is the version marker Generate writes into the plugin file
+// (MOOMBOX_PLUGIN_VERSION). Raise it whenever the generated code changes in a
+// way an installed file should pick up: Status reports a file with a lower
+// marker, or none, as Outdated, and both UIs offer the rewrite.
+//
+// 1 is every file written before the marker existed (they carry none).
+// 2: the HTTPS flavour stopped sending its 127.0.0.1 requests through the
+// system or environment proxy.
+const PluginVersion = 2
+
+var pluginVersionRe = regexp.MustCompile(`(?m)^MOOMBOX_PLUGIN_VERSION\s*=\s*(\d+)`)
+
 // ParseInstalled extracts the scheme and port from a plugin file's DEFAULT_BASE_URL line.
 func ParseInstalled(content string) (scheme string, port int) {
 	m := pluginURLRe.FindStringSubmatch(content)
@@ -26,6 +38,18 @@ func ParseInstalled(content string) (scheme string, port int) {
 	}
 	fmt.Sscanf(m[2], "%d", &port)
 	return m[1], port
+}
+
+// parseVersion reads a plugin file's MOOMBOX_PLUGIN_VERSION marker; 0 when it
+// has none (a file written before the marker existed).
+func parseVersion(content string) int {
+	m := pluginVersionRe.FindStringSubmatch(content)
+	if m == nil {
+		return 0
+	}
+	var v int
+	fmt.Sscanf(m[1], "%d", &v)
+	return v
 }
 
 // Info is what GET /api/ytdlp-plugin/status reports and what the TUI's E Y
@@ -60,6 +84,20 @@ type Info struct {
 	// InstalledPort is nil, and without this flag the state renders as a healthy
 	// install in both UIs.
 	Unparseable bool `json:"unparseable"`
+	// Outdated is an installed, parseable file whose MOOMBOX_PLUGIN_VERSION
+	// marker is older than PluginVersion, or missing: this Moombox would write
+	// different code, so both UIs offer the rewrite. False for an unparseable
+	// file, which already says to reinstall, and for a PortMismatch, which
+	// already says to rewrite (the one rewrite fixes both): each state shows
+	// one reason, and the bare E Y form has no row to spare for two.
+	Outdated bool `json:"outdated"`
+}
+
+// UpToDate reports an installed file that a rewrite would not change: it
+// parses, points at this process's port and scheme, and carries the current
+// marker. The install route's "already installed" answer is this predicate.
+func (i Info) UpToDate() bool {
+	return i.Installed && !i.Unparseable && !i.PortMismatch && !i.Outdated
 }
 
 // Status reads the installed plugin file, if any, and reports it against the
@@ -95,6 +133,7 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 				info.InstalledPort = &parsed
 				info.InstalledScheme = scheme
 				info.PortMismatch = p != port || scheme != expectedScheme
+				info.Outdated = !info.PortMismatch && parseVersion(string(data)) < PluginVersion
 			} else {
 				// A file we cannot read the base URL out of. Reported rather
 				// than treated as a healthy install: reinstalling is the fix,
@@ -174,11 +213,23 @@ func Generate(port int, httpsEnabled bool) string {
 	// directly with a custom SSL context for localhost calls. yt-dlp's request
 	// handler pipeline does not support ssl_context as an extension, so we
 	// bypass it entirely for these simple localhost HTTP calls.
+	//
+	// The opener is built with ProxyHandler({}) — no proxy, whatever
+	// HTTPS_PROXY/ALL_PROXY or the Windows Internet Options say — exactly as
+	// the HTTP flavour passes proxies={'all': None}. urlopen(context=...)
+	// keeps the default ProxyHandler, which sent https://127.0.0.1 to the
+	// proxy as a CONNECT the proxy cannot answer.
+	//
+	// A urllib failure to reach the server (URLError, a socket timeout: both
+	// OSError) is raised as yt-dlp's TransportError, so the HTTPS flavour gets
+	// the same "Make sure Moombox is running" warning the HTTP one does. An
+	// HTTP error status (HTTPError, itself a URLError) is passed on as it is:
+	// the server answered, so it is not "not reachable".
 	sslImports := ""
 	sslSetup := ""
 	sslHelper := ""
 	if httpsEnabled {
-		sslImports = "\nimport ssl\nimport urllib.request"
+		sslImports = "\nimport ssl\nimport urllib.error\nimport urllib.request"
 		sslSetup = `
 
 def _make_localhost_ssl_context():
@@ -188,14 +239,23 @@ def _make_localhost_ssl_context():
     return ctx
 
 _LOCALHOST_SSL_CTX = _make_localhost_ssl_context()
+_LOCALHOST_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=_LOCALHOST_SSL_CTX),
+)
 `
 		// Helper that uses stdlib urllib for HTTPS localhost requests,
 		// since yt-dlp's networking stack doesn't support custom SSL contexts.
 		sslHelper = `
     def _localhost_request(self, url, data=None, headers=None, timeout=10):
-        """Make a direct HTTP(S) request to localhost, bypassing yt-dlp's networking."""
+        """Make a direct HTTPS request to localhost, bypassing yt-dlp's networking and any proxy."""
         req = urllib.request.Request(url, data=data, headers=headers or {})
-        return urllib.request.urlopen(req, timeout=timeout, context=_LOCALHOST_SSL_CTX)
+        try:
+            return _LOCALHOST_OPENER.open(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except OSError as e:
+            raise TransportError(cause=e) from e
 `
 	}
 
@@ -240,6 +300,9 @@ from yt_dlp.extractor.youtube.pot.provider import (
 from yt_dlp.extractor.youtube.pot.utils import WEBPO_CLIENTS, get_webpo_content_binding
 from yt_dlp.networking.common import Request
 from yt_dlp.networking.exceptions import TransportError
+
+# Read by Moombox to tell an installed file it would write differently.
+MOOMBOX_PLUGIN_VERSION = %d
 %s
 
 @register_provider
@@ -347,5 +410,5 @@ def moombox_getpot_preference(provider, request):
 
 
 __all__ = [MoomboxPTP.__name__, moombox_getpot_preference.__name__]
-`, sslImports, sslSetup, baseURL, sslHelper)
+`, sslImports, PluginVersion, sslSetup, baseURL, sslHelper)
 }

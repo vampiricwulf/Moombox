@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"fmt"
 	"hash/crc32"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // The zip-bomb guards and extractZipEntry's partial-file cleanup had no test:
@@ -194,4 +197,23 @@ func TestImportBadChecksumLeavesNothingBehind(t *testing.T) {
 		t.Errorf("a bad-CRC video: %d %s, want an error", rec.Code, rec.Body.String())
 	}
 	assertNothingImported(t, f, "a bad-CRC video")
+}
+
+// TestImportNamesAreRefusedAsBrowsers pins cookies.ImportWrittenSuffixes,
+// the list the browser-path name rule refuses (owner ruling R3-5), equal to
+// what the import itself can write: its video extensions, the chat suffix,
+// the extraction partial and the upload spool. An extension added to the
+// import without the browser rule, or the other way round, fails here.
+func TestImportNamesAreRefusedAsBrowsers(t *testing.T) {
+	want := map[string]bool{importChatSuffix: true, importPartialExt: true, importSpoolExt: true}
+	for ext := range importVideoExts {
+		want[ext] = true
+	}
+	got := map[string]bool{}
+	for _, s := range cookies.ImportWrittenSuffixes {
+		got[s] = true
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("cookies.ImportWrittenSuffixes = %v; the import writes %v", got, want)
+	}
 }

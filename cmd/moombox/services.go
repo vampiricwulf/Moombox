@@ -879,8 +879,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// signature-ciphered format (sig solving is sidecar-only), wait for the
 	// supervisor below to bring the sidecar back.
 	//
-	// First launch extracts ~36 MB of embedded blobs to
-	// %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s); subsequent
+	// First launch extracts the embedded payload (roughly 115-150 MB,
+	// depending on platform) to %LOCALAPPDATA%/Moombox/sidecar
+	// (one-time, ~3-5s); subsequent
 	// launches reuse the cached extraction (sub-second).
 	//
 	// Set [bgutils] use_sidecar = false in config.toml to disable.
@@ -1139,7 +1140,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 		items := make([]monitor.TabItem, len(page.Items))
 		for i, it := range page.Items {
-			items[i] = monitor.TabItem{VideoID: it.VideoID, Title: it.Title, Age: it.Age}
+			items[i] = monitor.TabItem{VideoID: it.VideoID, Title: it.Title, Age: it.Age, Marked: it.Marked}
 		}
 		return &monitor.TabPage{Items: items, Continuation: page.Continuation}, nil
 	}

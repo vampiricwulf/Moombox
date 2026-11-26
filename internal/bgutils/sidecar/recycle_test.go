@@ -359,10 +359,7 @@ func TestStopDuringARecycleReleasesWaiters(t *testing.T) {
 // TestSidecarTellsTheChildWhereToKeepPreparedPlayers: a real child given a
 // player writes its prepared copy under <cacheDir>/players.
 func TestSidecarTellsTheChildWhereToKeepPreparedPlayers(t *testing.T) {
-	playerJS, err := os.ReadFile(filepath.Join("..", "..", "cipher", "testdata", "player_cb017549.js"))
-	if err != nil {
-		t.Skipf("cipher fixture missing: %v", err)
-	}
+	playerJS := readCipherFixture(t)
 	cacheDir := sharedCacheDir(t)
 	playersDir := filepath.Join(cacheDir, "players")
 	if err := os.RemoveAll(playersDir); err != nil {

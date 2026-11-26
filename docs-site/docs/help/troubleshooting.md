@@ -102,6 +102,11 @@ If you believe this is in error (the previous instance crashed), wait a few seco
   another session, for example a scheduled task set to run whether or not
   you are logged on.
 
+A failure that is not another instance (a home directory that cannot be
+written, a filesystem without file locks) prints its own cause and no *wait
+a few seconds* line; see
+[One instance per user](../reference/cli.md#one-instance-per-user).
+
 More on the lock: [Command line](../reference/cli.md).
 
 ### "Startup error: load config: failed to parse config …"
@@ -115,16 +120,25 @@ Values that parse but are out of range do **not** stop startup; they are
 replaced and logged. See
 [Configuration → Values Moombox cannot use](../configuration/index.md#values-moombox-cannot-use).
 
-### "port … (and nearby ports) already in use"
+### "already in use" or "cannot bind port"
 
-When the dashboard port is taken, Moombox logs *port in use, probing nearby
-ports* and tries the next ten ports; the one it found is logged as *using
-alternative port*, and the *Web dashboard available at …* line gives the
-address. Only when all eleven are taken does it fail:
+When the dashboard port cannot be bound, Moombox logs why (*port in use,
+probing nearby ports* for a taken port) and tries the next ten ports; the one
+it found is logged as *using alternative port*, and the *Web dashboard
+available at …* line gives the address. Only when all eleven fail does it
+stop:
 
-- **Without the TUI** (headless, Docker, systemd), Moombox prints
-  `Error: port 774 (and nearby ports) already in use: …` and
-  `Web dashboard is unavailable.`, and exits with code 3.
+- **Without the TUI** (headless, Docker, systemd), Moombox prints the reason
+  and `Web dashboard is unavailable.`, and exits with code 3. The reason is
+  one of:
+    - `Error: port 774 (and nearby ports) already in use: …`: another
+      program has the port.
+    - `Error: cannot bind port 774: permission denied - on Linux ports below
+      1024 need CAP_NET_BIND_SERVICE; set network.port to 1024 or above: …`:
+      see the note below.
+    - `Error: could not bind port 774 (or the ten after it): …`: anything
+      else, such as a bind address this machine does not have; the end of
+      the line gives the system's reason.
 - **With the TUI**, it keeps running without a dashboard and logs *Web server
   failed, continuing in TUI-only mode*.
 
@@ -132,12 +146,10 @@ Free the port, or change [`network.port`](../configuration/network.md#networkpor
 In Docker, the port inside the container must match the published port and
 the health check.
 
-!!! note "Linux: permission denied, not a busy port"
+!!! note "Linux: permission denied"
     On Linux an ordinary user usually cannot bind ports below 1024, and the
     default `774` and the ten ports Moombox tries after it are all below 1024.
-    Moombox still reports this as *port 774 (and nearby ports) already in
-    use*; the end of the message reads `bind: permission denied` instead of
-    `address already in use`. Freeing the port will not help. Set
+    Freeing the port will not help. Set
     [`network.port`](../configuration/network.md#networkport) to 1024 or
     above, or grant the binary the `CAP_NET_BIND_SERVICE` capability (for
     example `sudo setcap cap_net_bind_service=+ep ./moombox`, repeated after
@@ -438,9 +450,10 @@ If it never starts:
 
 - On Linux it needs **glibc**; on Alpine and other musl systems it cannot run.
   Use a glibc distribution or the Docker image.
-- It unpacks about 36 MB into your cache folder on first start
-  (`%LOCALAPPDATA%\Moombox\sidecar` or `~/.cache/Moombox/sidecar`). A full or
-  read-only cache folder stops it.
+- It unpacks roughly 115 to 150 MB, depending on platform, into your cache
+  folder on first start (`%LOCALAPPDATA%\Moombox\sidecar` or
+  `~/.cache/Moombox/sidecar`), and later keeps the YouTube players it prepares
+  there too. A full or read-only cache folder stops it.
 - If it is killed for memory, raise
   [`memory.sidecar_hard_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_hard_limit_mb)
   (restart required).
@@ -471,8 +484,12 @@ If Twitch has rotated out the built-in Client-ID, set a current one in
 The cookie guide has its own table of messages:
 [Cookies and sign-in](../guide/cookies.md). The ones met most often:
 
-- **"failed to update cookie file — rotated session cookies were discarded
-  and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+- **"failed to update cookie file — renewed session cookies are in memory
+  only and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+  It tries again every minute but logs this warning at most once an hour (the
+  line starts with `youtube session renewal:`), so search a long enough
+  stretch of the log. Until a write succeeds, the renewed session lives in
+  memory only: it keeps working until Moombox restarts, then is lost.
   In Docker this is almost always a `cookies.txt` bind-mounted on its own or
   read-only; keep it inside the `/data` volume instead. Elsewhere, check the
   file's permissions.
@@ -512,6 +529,13 @@ drive's permissions as well, until Moombox writes it again. After the
 command, change and save any setting once (that rewrites `config.toml`), and
 refresh or re-import your cookies (that rewrites `cookies.txt`). Each file is
 restricted again the moment it is written.
+
+If HTTPS is on with the self-signed certificate Moombox generated, its
+private key (`moombox.key`) is restricted again at the next start, with
+nothing for you to do. That happens only when `tls_cert_path` and
+`tls_key_path` are both empty and the certificate is Moombox's own. A
+certificate and key you supplied yourself are never changed: set their
+permissions as you see fit.
 
 Current versions never change the permissions of a folder that already
 exists. They restrict `cookies.txt` and `config.toml` themselves instead

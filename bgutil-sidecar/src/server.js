@@ -96,9 +96,42 @@ const FETCH_TIMEOUT_MS = 30_000;
 // timeout does NOT cancel this generation, so the next mint would queue
 // behind a request already known dead. Every fetch's abort signal is derived
 // from whatever remains of this budget instead of a flat 30s. 75s leaves
-// headroom under 90s for the BotGuard pass itself, which is CPU work with no
-// fetch of its own.
+// headroom under 90s for the BotGuard pass itself, which has no fetch of its
+// own but is not only CPU work: see STEP_TIMEOUT_MS.
 const GENERATION_BUDGET_MS = 75_000;
+// Per-step ceiling for the three awaits that settle only when Google's VM
+// calls back: the BotGuard snapshot, WebPoMinter.create and a mint. bgutils'
+// own 3 s timeout covers only the call into the VM, not the callback, so a VM
+// that never calls back left the generation pending for good: serializeChain
+// held every later generation, minterInflight never drained, and both of the
+// parent's recycles (which need generationsInFlight == 0) were held off,
+// while the event loop still answered the parent's pings. A fixed bound, not
+// what is left of GENERATION_BUDGET_MS: a generation whose fetches were slow
+// must not be failed at the snapshot for lack of time. A timed-out step takes
+// the normal failure path (the client is shut down).
+const STEP_TIMEOUT_MS = 10_000;
+let stepTimeoutMs = STEP_TIMEOUT_MS;
+export function _setStepTimeoutForTest(ms) {
+    stepTimeoutMs = ms ?? STEP_TIMEOUT_MS;
+}
+
+// withTimeout settles as promise does, or rejects with "<label> timed out"
+// once ms pass first; that error carries timedOut = true. The timer is
+// cleared when either settles, and a late rejection of promise is caught
+// here, so it is never an unhandled rejection.
+export function withTimeout(promise, ms, label) {
+    let timer;
+    const guard = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const err = new Error(`${label} timed out after ${ms} ms`);
+            err.timedOut = true;
+            reject(err);
+        }, ms);
+    });
+    const p = Promise.resolve(promise);
+    p.catch(() => {});
+    return Promise.race([p, guard]).finally(() => clearTimeout(timer));
+}
 // The homepage fetch is an OPTIMIZATION — every failure path falls back — so
 // it gets a tight ceiling rather than a share of the full budget. It must
 // never be the reason a mint misses its deadline: the mid-download 403
@@ -567,10 +600,42 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
         globalName: challenge.globalName,
         globalObject: globalThis,
     });
-    // From here on a failure shuts the client down: nothing else holds it.
+    const { minter, estimatedTtlSecs, webPoSignalOutput } = await snapshotAndMinter(
+        bgClient,
+        (botguardResponse) => fetchIntegrityToken(botguardResponse, deadline),
+    );
+    return {
+        minter,
+        // Shut down by retire() once this entry is replaced and no mint
+        // is using it.
+        bgClient,
+        expiresAt: Date.now() + estimatedTtlSecs * 1000,
+        webPoSignalOutput,
+        // Tracked so getOrCreateMinter can free the stale interpreter VM when
+        // YouTube rotates globalName between regenerations (see below).
+        globalName: challenge.globalName,
+        minterSource,
+        // Whether a homepage ytcfg (EVENT_ID) was paired into this minter.
+        // minterSource alone no longer says: a non-homepage source can still
+        // have had one injected in principle, and the whole point of the
+        // provenance line is diagnosing a 403 months from now.
+        ytcfgPaired: ytObj !== null,
+        inUse: 0,
+        retired: false,
+    };
+}
+
+// Steps 4 (the snapshot) to 6 of generateMinter for a client it created:
+// fetchIT posts the snapshot to GenerateIT. A failure, a timed-out step
+// included, shuts the client down: nothing else holds it.
+export async function snapshotAndMinter(bgClient, fetchIT) {
     try {
         const webPoSignalOutput = [];
-        const botguardResponse = await bgClient.snapshot({ webPoSignalOutput });
+        const botguardResponse = await withTimeout(
+            bgClient.snapshot({ webPoSignalOutput }),
+            stepTimeoutMs,
+            "BotGuard snapshot",
+        );
 
         // 5. POST the snapshot to GenerateIT to receive an integrity token.
         const [
@@ -578,7 +643,7 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
             estimatedTtlSecs,
             mintRefreshThreshold,
             websafeFallbackToken,
-        ] = await fetchIntegrityToken(botguardResponse, deadline);
+        ] = await fetchIT(botguardResponse);
         if (!integrityToken) {
             throw new Error(
                 `GenerateIT empty integrityToken (websafeFallback=${!!websafeFallbackToken})`,
@@ -586,29 +651,15 @@ async function generateMinter(challenge, deadline, homepageAttempted = false) {
         }
 
         // 6. Build the per-binding minter once; reuse for every binding until expiry.
-        const minter = await WebPoMinter.create(
-            { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
-            webPoSignalOutput,
+        const minter = await withTimeout(
+            WebPoMinter.create(
+                { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
+                webPoSignalOutput,
+            ),
+            stepTimeoutMs,
+            "WebPoMinter.create",
         );
-        return {
-            minter,
-            // Shut down by retire() once this entry is replaced and no mint
-            // is using it.
-            bgClient,
-            expiresAt: Date.now() + estimatedTtlSecs * 1000,
-            webPoSignalOutput,
-            // Tracked so getOrCreateMinter can free the stale interpreter VM when
-            // YouTube rotates globalName between regenerations (see below).
-            globalName: challenge.globalName,
-            minterSource,
-            // Whether a homepage ytcfg (EVENT_ID) was paired into this minter.
-            // minterSource alone no longer says: a non-homepage source can still
-            // have had one injected in principle, and the whole point of the
-            // provenance line is diagnosing a 403 months from now.
-            ytcfgPaired: ytObj !== null,
-            inUse: 0,
-            retired: false,
-        };
+        return { minter, estimatedTtlSecs, webPoSignalOutput };
     } catch (e) {
         shutdownClient(bgClient);
         throw e;
@@ -651,11 +702,17 @@ export function _retireForTest(entry) {
 }
 
 // Mint with an entry, counting the mint so a retired entry's client is not
-// shut down under it.
+// shut down under it. A mint that times out drops the entry from the cache
+// when it is still the cached one: its VM has stopped calling back, so every
+// later caller would wait out the same timeout until the entry expired. The
+// next mint builds a new minter, whose generation retires this entry.
 export async function mintWith(entry, binding) {
     entry.inUse = (entry.inUse ?? 0) + 1;
     try {
-        return await entry.minter.mintAsWebsafeString(binding);
+        return await withTimeout(entry.minter.mintAsWebsafeString(binding), stepTimeoutMs, "mint");
+    } catch (e) {
+        if (e?.timedOut && cachedMinter === entry) invalidateIT();
+        throw e;
     } finally {
         if (--entry.inUse === 0 && entry.retired) {
             setImmediate(() => {
@@ -705,6 +762,9 @@ export function invalidateIT(sessions = false) {
 // `inflight` request counter in the stdin loop below, which tracks
 // in-progress RPC dispatches.)
 const minterInflight = new Map(); // challengeKey -> { generation: Promise, mayReuse }
+export function _generationsInFlightForTest() {
+    return minterInflight.size;
+}
 let serializeChain = Promise.resolve();
 
 // /att/get callers (challenge === null) legitimately share one minter —

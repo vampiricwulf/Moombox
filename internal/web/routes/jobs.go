@@ -705,7 +705,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		// A Twitch channel video list or collection (owner decision D18)
 		// queues one VOD job per video rather than making one job.
 		if body.Platform == "twitch" && body.TwitchType == TwitchListingType {
-			if body.OutputDirectory != "" && strings.Contains(body.OutputDirectory, "..") {
+			if config.PathHasTraversal(body.OutputDirectory) {
 				jsonError(rw, "output directory must not contain path traversal", http.StatusBadRequest)
 				return
 			}
@@ -754,7 +754,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			jsonError(rw, "end time must be greater than start time", http.StatusBadRequest)
 			return
 		}
-		if body.OutputDirectory != "" && strings.Contains(body.OutputDirectory, "..") {
+		if config.PathHasTraversal(body.OutputDirectory) {
 			jsonError(rw, "output directory must not contain path traversal", http.StatusBadRequest)
 			return
 		}

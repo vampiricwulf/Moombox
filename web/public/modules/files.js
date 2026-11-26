@@ -1,7 +1,7 @@
 /**
  * Files Controller — Files tab (orphaned output files + orphaned feed-history entries)
  */
-import { formatBytes, formatRelativeTime } from "./utils.js";
+import { formatBytes, formatRelativeTime, historyEntryUrl } from "./utils.js";
 
 /**
  * How many history rows a DELETE /api/history/orphaned answer says went. The
@@ -281,7 +281,12 @@ export class FilesController {
       const row = document.createElement("div");
       row.className = "history-row";
       const vid = this.app.escapeHtml(entry.videoId);
-      const vidStr = `<a class="history-vid" href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener" title="${vid}">${vid}</a>`;
+      // History is keyed by job ID: only an ID that names a page is a link
+      // (a YouTube video, a Twitch VOD); a Twitch live or clip ID is text.
+      const url = historyEntryUrl(entry.videoId);
+      const vidStr = url
+        ? `<a class="history-vid" href="${this.app.escapeHtml(url)}" target="_blank" rel="noopener" title="${vid}">${vid}</a>`
+        : `<span class="history-vid" title="${vid}">${vid}</span>`;
       const addedStr = `<span data-timestamp="${this.app.escapeHtml(entry.addedAt)}" title="${new Date(entry.addedAt).toLocaleString()}">${this.app.escapeHtml(formatRelativeTime(entry.addedAt))}</span>`;
       const deleteBtn = `<sl-icon-button name="trash" label="Remove ${vid}" class="history-delete-btn" data-video-id="${vid}"></sl-icon-button>`;
       row.innerHTML = vidStr + addedStr + deleteBtn;

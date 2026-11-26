@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -566,5 +567,84 @@ func TestFetchChannelTabPage_AlertEnvelopeIsError(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("expected exactly 1 request (the failed harvest), got %d", got)
+	}
+}
+
+// browseUploadsPlaylistWrappedPage is the uploads-playlist page with its
+// continuation token wrapped in a commandExecutorCommand, the shape yt-dlp
+// has read on playlist pages since 6a6d97b2c (#12777). Hand-written from
+// upstream's traversal path (_extract_continuation_ep_data), not a capture.
+const browseUploadsPlaylistWrappedPage = `{
+  "contents": {"twoColumnBrowseResultsRenderer": {"tabs": [
+    {"tabRenderer": {"selected": true, "content": {"sectionListRenderer": {"contents": [
+      {"itemSectionRenderer": {"contents": [{"playlistVideoListRenderer": {"contents": [
+        {"playlistVideoRenderer": {"videoId": "uploadVid01", "title": {"runs": [{"text": "upload one"}]}}},
+        {"continuationItemRenderer": {"trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN", "continuationEndpoint": {
+          "clickTrackingParams": "CTP",
+          "commandExecutorCommand": {"commands": [
+            {"clickTrackingParams": "CTP", "playlistVotingRefreshPopupCommand": {"command": {}}},
+            {"clickTrackingParams": "CTP", "continuationCommand": {"token": "PLWRAPPED2", "request": "CONTINUATION_REQUEST_TYPE_BROWSE"}}
+          ]}}}}
+      ]}}]}}
+    ]}}}}
+  ]}}
+}`
+
+// A playlist page whose continuation token sits inside a
+// commandExecutorCommand must page on: read as no token, the uploads-playlist
+// fallback finished a topic channel's backlog scan after its first page and
+// recorded it complete (owner ruling R3-4).
+func TestFetchChannelTabPage_UploadsPlaylistWrappedContinuation(t *testing.T) {
+	var calls atomic.Int32
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Write([]byte(browseHomeSelectedPage))
+			return
+		}
+		w.Write([]byte(browseUploadsPlaylistWrappedPage))
+	})
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "videos", "")
+	if err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	if page.Continuation != "PLWRAPPED2" {
+		t.Errorf("continuation: want PLWRAPPED2 from the commandExecutorCommand, got %q", page.Continuation)
+	}
+}
+
+// A continuation item whose token no known path reaches ends the tab as
+// before, with no error, but is named in a Warn so a shape YouTube changed
+// shows in the log instead of passing as a clean end (owner ruling R3-4).
+func TestFetchChannelTabPage_UnreadableContinuationIsLogged(t *testing.T) {
+	const page2 = `{"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": [
+	  {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "vodMember03", "title": {"runs": [{"text": "older vod"}]}}}}},
+	  {"continuationItemRenderer": {"continuationEndpoint": {"someNewCommand": {"token": "UNREAD"}}}}
+	]}}]}`
+	s := newBrowseTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(page2))
+	})
+	logger := &warnCapturingLogger{}
+	s.logger = logger
+
+	page, err := s.FetchChannelTabPage(context.Background(), "UCbrowsetest0000000000ab", "streams", "TOK2")
+	if err != nil {
+		t.Fatalf("FetchChannelTabPage: %v", err)
+	}
+	if page.Continuation != "" || len(page.Items) != 1 {
+		t.Fatalf("want the page's item and no continuation, got %+v", page)
+	}
+	if len(logger.warns) != 1 {
+		t.Fatalf("warns = %q, want one naming the continuation item", logger.warns)
+	}
+	for _, want := range []string{"UCbrowsetest0000000000ab", "streams", "someNewCommand"} {
+		if !strings.Contains(logger.warns[0], want) {
+			t.Errorf("warn %q does not name %q", logger.warns[0], want)
+		}
+	}
+	if strings.Contains(logger.warns[0], "UNREAD") {
+		t.Errorf("warn %q carries a value from the item", logger.warns[0])
 	}
 }

@@ -61,6 +61,9 @@ func (m *YtdlpDialogModel) bareStatusRows(w, rows int) []string {
 	if m.info.Unparseable {
 		out = append(out, YellowStyle.Render("Not recognized: I reinstalls"))
 	}
+	if m.info.Outdated {
+		out = append(out, YellowStyle.Render("Outdated: I updates it"))
+	}
 	if m.info.PortMismatch {
 		text := "Mismatch: I rewrites it"
 		if w >= 40 {

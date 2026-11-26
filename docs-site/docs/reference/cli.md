@@ -247,6 +247,14 @@ and exits with code 1. On Windows the first line reads
 The lock is held by the operating system and released
 when the process ends, so a crash never leaves a stale lock behind.
 
+Any other failure to take the lock is printed as its own cause, without the
+*wait a few seconds* line, and also exits with code 1: for example
+`create lock dir …: permission denied` (a home directory the user cannot
+write), or on Linux `lock …: no locks available` (a filesystem that does not
+support file locks, such as an NFS mount with no lock service). Waiting does
+not fix these; fix the directory, or point `HOME` somewhere that can hold
+the lock.
+
 - On **Linux** it is a lock on `~/.local/share/moombox/moombox.lock`.
 - On **Windows** it is a per-session mutex plus a lock on
   `%LOCALAPPDATA%\moombox\moombox.lock`, so an interactive copy and a
