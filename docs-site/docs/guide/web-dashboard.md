@@ -215,7 +215,11 @@ Every batch action asks for confirmation first. Jobs that do not qualify are
 skipped silently (selecting ten jobs and pressing **Delete** deletes only the
 ones that can be deleted). If some jobs change state while the confirmation
 is open, they are skipped and a toast says how many. The result toast reads
-"Deleted: 5 jobs" or "4 of 5 succeeded. 1 failed."
+"Deleted: 5 jobs" or, when some were refused, "4 of 5 succeeded. 1 failed:"
+followed by the first reason the server gave (for example "This job's
+staging is busy … try again once it is done"), as the TUI's batch line does.
+A request that got no answer, or a refusal with no reason, leaves the count
+alone: "4 of 5 succeeded. 1 failed."
 
 Tasks and Archived keep separate selections.
 
