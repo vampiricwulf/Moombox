@@ -178,7 +178,7 @@ direct loopback connection (see
 | `POST` | `/api/jobs/{id}/chapters/restore` | Bring back the chapters the first import replaced. |
 | `GET` | `/api/jobs/{id}/trims` | Trim clips made from the job. |
 | `POST` | `/api/jobs/{id}/trims` | Shared. Start a trim clip. |
-| `DELETE` | `/api/jobs/{id}/trims/{trimId}` | Delete a trim clip. |
+| `DELETE` | `/api/jobs/{id}/trims/{trimId}` | Delete a trim clip, or stop one still running. |
 
 ### Status, monitors and logs
 

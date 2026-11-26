@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -84,5 +85,153 @@ func TestTrimWhoseJobVanishedBeforeItsRecordSendsNothing(t *testing.T) {
 	}
 	if got := r.files(t); len(got) != 0 {
 		t.Errorf("the trim left %v in trim/", got)
+	}
+}
+
+// TestStopTrimStopsARunningTrim: a running trim had no stop but a restart of
+// Moombox. StopTrim — what the dashboard's Stop and the TUI dialog's key call
+// — kills FFmpeg, removes the partial file, stores nothing, sends no
+// trim_error, and marks the outcome stopped so neither UI calls it a failure.
+//
+// Mutants: drop run's stopRequested case — the event reads as an interrupted
+// trim, not a stopped one; drop StopTrim's id check — a stale id stops the
+// job's current trim.
+func TestStopTrimStopsARunningTrim(t *testing.T) {
+	ffmpeg, _ := gatedFFmpeg(t) // the gate never opens
+	r := newTrimRig(t, ffmpeg)
+
+	task, err := r.ts.StartTrim(r.job, 60, 300)
+	if err != nil {
+		t.Fatalf("StartTrim: %v", err)
+	}
+	waitForCond(t, 10*time.Second, "the encode to open its output", func() bool { return len(r.files(t)) > 0 })
+
+	if err := r.ts.StopTrim(r.job.ID, "trim_"+r.job.ID+"_1"); !errors.Is(err, ErrTrimNotFound) {
+		t.Errorf("StopTrim with another id: err = %v, want ErrTrimNotFound", err)
+	}
+	if err := r.ts.StopTrim(r.job.ID, task.ID); err != nil {
+		t.Fatalf("StopTrim: %v", err)
+	}
+	ev := r.events.wait(t, TrimStateFailed)
+	if !ev.Stopped || ev.Error != trimStoppedReason || ev.ID != task.ID {
+		t.Errorf("stopped trim's event = %+v, want trim %q stopped with %q", ev, task.ID, trimStoppedReason)
+	}
+	if got := r.files(t); len(got) != 0 {
+		t.Errorf("a stopped trim left %v in trim/", got)
+	}
+	if n := len(r.rec.ByEvent("trim_error")); n != 0 {
+		t.Errorf("a stopped trim sent trim_error %d times", n)
+	}
+	if rows, _ := r.db.GetTrimsForJob(r.job.ID); len(rows) != 0 {
+		t.Errorf("a stopped trim stored %d rows", len(rows))
+	}
+	if err := r.ts.StopTrim(r.job.ID, task.ID); !errors.Is(err, ErrTrimNotFound) {
+		t.Errorf("StopTrim of a trim that has ended: err = %v, want ErrTrimNotFound", err)
+	}
+}
+
+// TestStopTrimIsRefusedOnceTheClipIsBeingSaved: once the encode is whole
+// the clip is moved into place and recorded without a stop point, so a stop
+// then is refused as a conflict rather than answered "stopped" for a trim
+// that is stored anyway; and a stop that came first ends the trim there.
+//
+// Mutants: drop StopTrim's saving check — the late stop is accepted; drop
+// beginSaving's requested check — the stopped trim goes on to be saved.
+func TestStopTrimIsRefusedOnceTheClipIsBeingSaved(t *testing.T) {
+	r := newTrimRig(t, "ffmpeg-not-run")
+
+	plan, err := r.ts.prepare(r.job, 60, 300)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if !r.ts.beginSaving(plan) {
+		t.Fatal("beginSaving refused a trim nobody stopped")
+	}
+	err = r.ts.StopTrim(r.job.ID, plan.task.ID)
+	if refused, ok := errors.AsType[*TrimRefusedError](err); !ok || !refused.Conflict {
+		t.Errorf("StopTrim while the clip is saved: err = %v, want a conflict", err)
+	}
+	r.ts.release(r.job.ID)
+
+	plan, err = r.ts.prepare(r.job, 60, 300)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := r.ts.StopTrim(r.job.ID, plan.task.ID); err != nil {
+		t.Fatalf("StopTrim: %v", err)
+	}
+	if r.ts.beginSaving(plan) {
+		t.Error("beginSaving let a stopped trim be saved")
+	}
+	r.ts.release(r.job.ID)
+}
+
+// TestStoppedPostDownloadTrimSendsNothing: a post-download trim shows in the
+// running list like any other, so it can be stopped. One cut short by the
+// shutdown is told as Trim Failed (nobody asked for it from a dialog); one
+// the operator stopped is an answer they gave, and sends nothing.
+//
+// Mutant: drop postDownloadTrim's ErrTrimStopped return — Trim Failed is sent.
+func TestStoppedPostDownloadTrimSendsNothing(t *testing.T) {
+	ffmpeg, _ := gatedFFmpeg(t) // the gate never opens
+	r := newTrimRig(t, ffmpeg)
+	o := &DownloadOrchestrator{db: r.db, logger: discardLogger{}, notifier: r.rec, trims: r.ts}
+
+	start := 60.0
+	job := *r.job
+	job.StartTime = &start
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		o.postDownloadTrim(t.Context(), &job)
+	}()
+	waitForCond(t, 10*time.Second, "the post-download encode to open its output", func() bool { return len(r.files(t)) > 0 })
+	rs := r.ts.RunningTrims()
+	if len(rs) != 1 {
+		t.Fatalf("RunningTrims = %+v, want the post-download trim", rs)
+	}
+	if err := r.ts.StopTrim(r.job.ID, rs[0].ID); err != nil {
+		t.Fatalf("StopTrim: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the post-download trim outlived StopTrim")
+	}
+	if n := len(r.rec.ByEvent("trim_error")); n != 0 {
+		t.Errorf("a post-download trim the operator stopped: trim_error sent %d times", n)
+	}
+	if got := r.files(t); len(got) != 0 {
+		t.Errorf("the stopped post-download trim left %v in trim/", got)
+	}
+}
+
+// TestCreateTrimStartedNamesTheTrimBeforeItEncodes: the TUI's dialog stops
+// its trim by id, so it must learn the id while the encode runs, not when it
+// returns.
+//
+// Mutant: call started after run — the id arrives only once the trim is over.
+func TestCreateTrimStartedNamesTheTrimBeforeItEncodes(t *testing.T) {
+	ffmpeg, _ := gatedFFmpeg(t) // the gate never opens
+	r := newTrimRig(t, ffmpeg)
+
+	ids := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.ts.CreateTrimStarted(t.Context(), r.job, 60, 300, func(task TrimTask) { ids <- task.ID }, nil)
+		done <- err
+	}()
+	var id string
+	select {
+	case id = <-ids:
+	case <-time.After(10 * time.Second):
+		r.ts.Stop()
+		t.Fatal("no trim id while the encode runs")
+	}
+	if err := r.ts.StopTrim(r.job.ID, id); err != nil {
+		t.Fatalf("StopTrim(%q): %v", id, err)
+	}
+	if err := <-done; !errors.Is(err, ErrTrimStopped) {
+		t.Errorf("CreateTrimStarted of a stopped trim: err = %v, want ErrTrimStopped", err)
 	}
 }

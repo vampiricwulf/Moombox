@@ -660,6 +660,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | POST | `/api/jobs/{id}/reinitialize` | Start a job over: delete its staging and record afresh |
 | DELETE | `/api/jobs/{id}` | Delete job |
 | POST | `/api/jobs/{id}/trims` | Start a trimmed clip — answers 202 at once; the encode runs on the server, and its progress and result arrive as `trim_status` WebSocket messages |
+| DELETE | `/api/jobs/{id}/trims/{trimId}` | Delete a trim, or stop one still running |
 | POST | `/api/import` | Import zip archive |
 | GET | `/api/config` | Get configuration |
 | PUT | `/api/config` | Update configuration |

@@ -887,6 +887,12 @@ func (o *DownloadOrchestrator) postDownloadTrim(ctx context.Context, job *databa
 	// it does not count as a failure. But nobody asked for this trim from a
 	// dialog, so both are told here: one Trim Failed per failed post-download
 	// trim, as before.
+	// One the operator stopped (StopTrim) is an answer they gave: nothing to
+	// tell them.
+	if errors.Is(trimErr, ErrTrimStopped) {
+		o.logger.Info("post-download trim stopped by the operator", "jobID", job.ID)
+		return
+	}
 	_, refused := errors.AsType[*TrimRefusedError](trimErr)
 	if refused || errors.Is(trimErr, errTrimInterrupted) {
 		o.failPostDownloadTrim(job, trimErr)
