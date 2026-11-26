@@ -183,8 +183,10 @@ func TestSweep_ParserArmBackOffYieldsToAWiderScan(t *testing.T) {
 		}
 	}
 	narrow := refFor(backfillTestCh(), 3, false)
-	if !sweep(narrow) || !sweep(narrow) {
-		t.Fatal("the first two arm failures must each scan")
+	for i := range 2 {
+		if !sweep(narrow) {
+			t.Fatalf("arm failure %d did not scan; the first two must each scan", i+1)
+		}
 	}
 	if sweep(narrow) {
 		t.Fatal("the same scan was retried inside the back-off")
