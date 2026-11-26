@@ -91,6 +91,19 @@ func ValidateBrowserPathQuick(path, browserType string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%q is not a regular file", path)
 	}
+	// Stat, and the exec that follows, go through links, so the name rule
+	// also reads the file a link leads to. Linux hands every client links it
+	// did not have to create: /proc/self/fd/<N> and /dev/fd/<N> name each
+	// file Moombox holds open, an archive a client is downloading included.
+	// A path whose target cannot be resolved is refused rather than judged
+	// by its own name alone.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolving %q: %w", path, err)
+	}
+	if suffix := importWrittenSuffix(resolved); suffix != "" {
+		return fmt.Errorf("%q leads to %q, which ends in %q, a name an import writes: %w", path, resolved, suffix, errImportWrittenName)
+	}
 	// Windows has no executable bit, and CreateProcess runs a PE whatever its
 	// extension — so without a check a LAN client could have this run a file
 	// it planted (POST /api/import writes uploads as "<title> [<id>].mp4").

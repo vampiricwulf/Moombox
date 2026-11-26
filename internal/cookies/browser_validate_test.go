@@ -130,3 +130,38 @@ func TestValidateBrowserPathQuickRefusesAnExecutableImportName(t *testing.T) {
 		t.Errorf("an executable file named like an import was accepted: %v", err)
 	}
 }
+
+// A link whose own name passes leads to an imported file: Stat and exec
+// follow it, so the rule reads the target's name too. On Linux a client
+// needs no symlink of its own for this: /proc/self/fd/<N> names any file
+// Moombox holds open.
+func TestValidateBrowserPathQuickRefusesALinkToAnImportName(t *testing.T) {
+	exe := ""
+	if runtime.GOOS == "windows" {
+		exe = ".exe" // Windows wants the path itself to end in .exe
+	}
+	dir := t.TempDir()
+	planted := filepath.Join(dir, "planted [abc].mp4")
+	if err := os.WriteFile(planted, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "firefox"+exe)
+	if err := os.Symlink(planted, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := ValidateBrowserPathQuick(link, "firefox"); !errors.Is(err, errImportWrittenName) {
+		t.Errorf("a link named firefox leading to an imported file was accepted: %v", err)
+	}
+	// A link to a real executable still passes, as /usr/bin/firefox does.
+	real := filepath.Join(dir, "firefox-bin"+exe)
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok := filepath.Join(dir, "brave"+exe)
+	if err := os.Symlink(real, ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateBrowserPathQuick(ok, "brave"); err != nil {
+		t.Errorf("a link to an executable not named like an import was refused: %v", err)
+	}
+}
