@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,10 @@ const fakeSetupHandoffDelay = 150 * time.Millisecond
 // asks a real handle how many processes it holds, and faking the probe
 // (jobReports) skips the very thing under test.
 func TestMain(m *testing.M) {
+	// A display exists, so a Linux runner with no DISPLAY drives StartSetup
+	// as Windows does; TestStartSetupRefusesAHostWithNoDisplay answers the
+	// other way.
+	SetHostLacksDisplayForTesting(false)
 	if isFakeSetupChild(os.Args) {
 		// The stand-in browser: it does nothing but stay alive inside the job
 		// until something closes the handle.
@@ -94,6 +99,11 @@ func TestMain(m *testing.M) {
 	}
 	if isFakeSetupLaunch(os.Args) {
 		os.Exit(runFakeSetupBrowser(os.Getenv(fakeBrowserModeEnv)))
+	}
+	if isFakeChromiumLaunch(os.Args) {
+		// The stand-in Chromium: it exits at once and hands nothing off, as a
+		// browser with no display does, so its CDP endpoint never answers.
+		os.Exit(0)
 	}
 	// Nor does any test pay the post-kill drain: every one that reaches it
 	// kills or finds exited a fixture process (Pid -1, or a made-up PID
@@ -127,6 +137,15 @@ func isFakeSetupLaunch(args []string) bool {
 		}
 	}
 	return sawNewInstance
+}
+
+// isFakeChromiumLaunch recognises a Chromium-family launch of this test
+// binary: only those argvs carry --remote-debugging-port, and no go test flag
+// does.
+func isFakeChromiumLaunch(args []string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		return strings.HasPrefix(a, "--remote-debugging-port=")
+	})
 }
 
 // runFakeSetupBrowser is the setup stub's whole body.

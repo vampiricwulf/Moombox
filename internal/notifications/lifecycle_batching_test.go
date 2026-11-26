@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestEditModeTargetNeverBatches: the ruling excludes edit-mode targets from
-// the 5 s found/added/auth window. Without this an edit-mode target's first
+// TestEditModeTargetNeverBatches: an edit-mode target keeps its lifecycle
+// events (found, added) out of the 5 s window (batchableIn). Without this an edit-mode target's first
 // two lifecycle events would arrive as one two-embed message with no id to
 // edit afterwards.
 func TestEditModeTargetNeverBatches(t *testing.T) {
@@ -195,4 +195,39 @@ func TestSetModeSwapsUnderOneHold(t *testing.T) {
 			t.Errorf("emitted %d messages, want the one embed delivered exactly once", got)
 		}
 	})
+}
+
+// TestEditModeTargetBatchesPerJobAuth is R4-10: the per-job "Authentication
+// Required" is never a lifecycle message, so an edit-mode target folds a dead
+// cookie's burst into one post with one ping, as a separate-mode target does.
+// A job's next lifecycle event still goes out at once, and flushes the window
+// first when it holds that job's alarm, so the alarm is not read after it.
+//
+// Mutant: Add's old edit-mode early return (every embed emitted at once) —
+// the two alarms arrive as two pings.
+func TestEditModeTargetBatchesPerJobAuth(t *testing.T) {
+	clock := &fakeBatchClock{}
+	var emitted []Message
+	b := newBatcher(batchWindow, clock, func(m Message) { emitted = append(emitted, m) }, testLogger{})
+	b.setMode(ModeEdit)
+	ping := &AllowedMentions{Parse: []string{"everyone"}}
+
+	b.Add(Embed{Title: "Authentication Required", Opts: SendOptions{Event: "auth", JobID: "yt_1"}}, "@everyone", ping)
+	b.Add(Embed{Title: "Authentication Required", Opts: SendOptions{Event: "auth", JobID: "yt_2"}}, "@everyone", ping)
+	if len(emitted) != 0 {
+		t.Fatalf("edit-mode per-job auth went out at once (%d messages), want it held in the window", len(emitted))
+	}
+	clock.fire()
+	if len(emitted) != 1 || len(emitted[0].Embeds) != 2 || emitted[0].Mention != "@everyone" {
+		t.Fatalf("window close: got %d message(s) %+v, want one two-embed message with one ping", len(emitted), emitted)
+	}
+
+	// The job's alarm, then its next lifecycle event inside the same window.
+	emitted = nil
+	b.Add(Embed{Title: "Authentication Required", Opts: SendOptions{Event: "auth", JobID: "yt_3"}}, "", nil)
+	b.Add(Embed{Title: "Download Starting", Opts: SendOptions{Event: "downloading", JobID: "yt_3"}}, "", nil)
+	if len(emitted) != 2 || emitted[0].Embeds[0].Title != "Authentication Required" ||
+		emitted[1].Embeds[0].Title != "Download Starting" {
+		t.Fatalf("got %+v, want the job's alarm flushed ahead of its lifecycle event", emitted)
+	}
 }

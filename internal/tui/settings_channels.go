@@ -131,10 +131,16 @@ func valuesToChannel(vals map[string]string, existing *config.ChannelConfig) con
 	return ch
 }
 
-// validateChannelValues checks the numeric overrides before a save so a
-// typo produces a field error instead of a silently-cleared override.
-// Bounds match config.Validate's global monitors bounds.
-func validateChannelValues(vals map[string]string) string {
+// validateChannelValues checks the overrides before a save so a typo
+// produces a field error instead of a silently-cleared override. Bounds
+// match config.Validate's global monitors bounds. The output directory takes
+// the path rules every writer shares (config.OutputDirOverrideRule) against
+// storedDir, the edited channel's saved value ("" for a new channel), so an
+// override saved before the rule does not block an unrelated edit.
+func validateChannelValues(vals map[string]string, storedDir string) string {
+	if rule := config.OutputDirOverrideRule(vals["output_directory"], storedDir); rule != "" {
+		return "Output directory " + rule
+	}
 	check := func(key, label string, min, max int) string {
 		s := strings.TrimSpace(vals[key])
 		if s == "" {
@@ -150,6 +156,15 @@ func validateChannelValues(vals map[string]string) string {
 		return msg
 	}
 	return check("archive_slots", "Archive slots", 1, 100)
+}
+
+// storedChannelDir is the output directory of the channel being edited, ""
+// when the editor is adding one (index past the list).
+func storedChannelDir(chs []config.ChannelConfig, index int) string {
+	if index >= 0 && index < len(chs) {
+		return chs[index].OutputDirectory
+	}
+	return ""
 }
 
 func (m *SettingsModel) handleChannelKey(key string) string {
@@ -251,7 +266,7 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 			m.errorMsg = "Channel ID is required"
 			return ""
 		}
-		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+		if msg := validateChannelValues(m.channelEditValues, storedChannelDir(m.channels, m.channelIndex)); msg != "" {
 			m.errorMsg = msg
 			m.status = saveError
 			return ""

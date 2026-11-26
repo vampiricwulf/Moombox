@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,6 +81,11 @@ type targetQueue struct {
 	// are held under — what Manager.forgetInOrder drops on this queue. Fixed
 	// for the queue's life: it is derived from key, and a survivor keeps both.
 	msgKey string
+	// position is the target's 1-based place in [[notifications]]
+	// (notificationTarget.position), what every log line names it by
+	// (label). Atomic rather than under mu: a Reload restamps it on a
+	// survivor whose entry moved, and log lines read it with mu held or not.
+	position atomic.Int32
 	// shuttingDown is the Manager's flag, shared by pointer. When it is set,
 	// deliveries make a single attempt instead of running the retry ladder.
 	shuttingDown *atomic.Bool
@@ -209,6 +215,7 @@ func newTargetQueue(t notificationTarget, logger interface {
 		wake:           make(chan struct{}, 1),
 		done:           make(chan struct{}),
 	}
+	q.position.Store(int32(t.position))
 	// The coalescing stage sits in front of THIS queue. It lives on the queue,
 	// not on the notificationTarget that built it, because applyTargets keeps a
 	// surviving target's queue and throws the freshly built target away — a
@@ -326,6 +333,14 @@ func (q *targetQueue) setMention(t notificationTarget) {
 	q.mu.Unlock()
 }
 
+// label is how a log line names this target: "#2" for the second entry of
+// [[notifications]], which an operator can count to in either Settings
+// list. Never the URL, its token or the msgKey hash: the URL is the
+// credential, and the hash is shown nowhere an operator could match it.
+func (q *targetQueue) label() string {
+	return "#" + strconv.Itoa(int(q.position.Load()))
+}
+
 // setDispatch rebinds the decision function on a target that survived a
 // Reload — the twin of setEvents and setMention, and required for the same
 // reason: applyTargets keeps a survivor's queue and discards the freshly
@@ -411,7 +426,7 @@ func (q *targetQueue) enqueue(it queued) {
 		q.mu.Unlock()
 		it.letGo()
 		q.logger.Warn("dropping notification — the target is shutting down",
-			"event", it.msg.logEvent(), "title", it.msg.logTitle())
+			"target", q.label(), "event", it.msg.logEvent(), "title", it.msg.logTitle())
 		return
 	}
 	// A message arriving while the monitor reports offline will wait for the
@@ -433,7 +448,7 @@ func (q *targetQueue) enqueue(it queued) {
 	if started {
 		n := len(q.items) - q.steps + 1
 		defer q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
-			"queued", n)
+			"target", q.label(), "queued", n)
 	}
 	if len(q.items)-q.steps < notificationQueueCap {
 		q.items = append(q.items, it)
@@ -458,7 +473,7 @@ func (q *targetQueue) enqueue(it queued) {
 		it.letGo()
 		if warn {
 			q.logger.Warn("notification queue full — shedding notifications",
-				"cap", notificationQueueCap, "dropped_newest", nNewest,
+				"target", q.label(), "cap", notificationQueueCap, "dropped_newest", nNewest,
 				"dropped_oldest_low_priority", nOldest,
 				"event", it.msg.logEvent(), "title", it.msg.logTitle())
 		}
@@ -472,7 +487,7 @@ func (q *targetQueue) enqueue(it queued) {
 	dropped.letGo()
 	if warn {
 		q.logger.Warn("notification queue full — shedding notifications",
-			"cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
+			"target", q.label(), "cap", notificationQueueCap, "dropped_oldest_low_priority", nOldest,
 			"dropped_newest", nNewest,
 			"event", dropped.msg.logEvent(), "title", dropped.msg.logTitle())
 	}
@@ -550,7 +565,7 @@ func (q *targetQueue) enqueueControl(fn func()) bool {
 func (q *targetQueue) runControl(fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			q.logger.Error("panic in notification queue step", "panic", fmt.Sprint(r))
+			q.logger.Error("panic in notification queue step", "target", q.label(), "panic", fmt.Sprint(r))
 		}
 	}()
 	fn()
@@ -628,7 +643,7 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 			q.runControl(fn)
 		}
 		if n > 0 {
-			q.logger.Warn("notification target removed — discarding its queued notifications", "dropped", n)
+			q.logger.Warn("notification target removed — discarding its queued notifications", "target", q.label(), "dropped", n)
 		}
 		return queued{}, false, true
 	}
@@ -647,10 +662,10 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 			q.delivering = true // the report below is handed to run
 		}
 		q.mu.Unlock()
-		q.logger.Info("connectivity restored — delivering the notifications held through the outage")
+		q.logger.Info("connectivity restored — delivering the notifications held through the outage", "target", q.label())
 		if n > 0 {
 			q.logger.Warn("notification queue held through an outage dropped its oldest — reporting it to the target",
-				"dropped", n, "cap", notificationQueueCap)
+				"target", q.label(), "dropped", n, "cap", notificationQueueCap)
 			return queued{msg: heldDropReport(n), tier: TierNormal}, true, false
 		}
 		// Looked at again from the top: the lock was let go for the log line,
@@ -667,7 +682,7 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		q.mu.Unlock()
 		if started {
 			q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
-				"queued", n)
+				"target", q.label(), "queued", n)
 		}
 		return queued{}, false, false
 	}
@@ -685,7 +700,7 @@ func (q *targetQueue) pop() (it queued, ok, exit bool) {
 		q.mu.Unlock()
 		if report {
 			q.logger.Warn("notification queue drained — totals for what it shed while full",
-				"dropped_oldest_low_priority", nOldest, "dropped_newest", nNewest)
+				"target", q.label(), "dropped_oldest_low_priority", nOldest, "dropped_newest", nNewest)
 		}
 		return queued{}, false, closing
 	}
@@ -728,7 +743,7 @@ func (q *targetQueue) closeOfflineLocked() (it queued, ok, exit bool) {
 	}
 	if len(dropped) > 0 || heldDropped > 0 {
 		q.logger.Warn("shutting down while the connectivity monitor reports offline — discarding this target's held notifications",
-			"dropped", len(dropped), "dropped_while_held", heldDropped)
+			"target", q.label(), "dropped", len(dropped), "dropped_while_held", heldDropped)
 	}
 	return queued{}, false, true
 }
@@ -773,7 +788,7 @@ func (q *targetQueue) noteOffline() {
 	q.mu.Unlock()
 	if started {
 		q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
-			"queued", n)
+			"target", q.label(), "queued", n)
 	}
 }
 
@@ -832,7 +847,7 @@ func (q *targetQueue) awaitOutage(d time.Duration) outageResult {
 	q.mu.Unlock()
 	if started {
 		q.logger.Info("connectivity monitor reports offline — holding this target's notifications until it returns",
-			"queued", n+1)
+			"target", q.label(), "queued", n+1)
 	}
 	for {
 		if q.retired() {
@@ -869,7 +884,7 @@ func (q *targetQueue) run() {
 	defer close(q.done)
 	defer func() {
 		if r := recover(); r != nil {
-			q.logger.Error("panic in notification sender loop", "panic", fmt.Sprint(r))
+			q.logger.Error("panic in notification sender loop", "target", q.label(), "panic", fmt.Sprint(r))
 		}
 	}()
 	// This goroutine is the one that runs the sender's retry ladder, so it is
@@ -901,7 +916,8 @@ func (q *targetQueue) run() {
 func (q *targetQueue) deliver(it queued) {
 	defer func() {
 		if r := recover(); r != nil {
-			q.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
+			q.logger.Error("panic in notification sender", "target", q.label(),
+				"event", it.msg.logEvent(), "title", it.msg.logTitle(), "panic", fmt.Sprint(r))
 		}
 	}()
 	if it.ctl != nil {
@@ -917,6 +933,7 @@ func (q *targetQueue) deliver(it queued) {
 	// already have spent.
 	err := q.dispatchFor(it.msg)
 	if err != nil {
-		q.logger.Error("notification send failed", "err", err)
+		q.logger.Error("notification send failed", "target", q.label(),
+			"event", it.msg.logEvent(), "title", it.msg.logTitle(), "err", err)
 	}
 }

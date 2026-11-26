@@ -279,12 +279,14 @@ In edit mode:
   *Failed* / *Cancelled*, **and** a separate message is posted (this is the
   one that can ping). If no message is open for the job yet, they are simply
   posted.
-- Everything else (`auth`, `live_edge`, trims, all System events) is always
-  its own message.
+- Everything else (`auth`, `live_edge`, trims, all System events) is never
+  put into the job's message: it is posted, as on any other target.
 - Discord does not notify on edits, so only new posts can ping — the
   event that creates the job's message, and the separate posts above.
-- The 5-second batching (see the guide) is off for this target: every
-  notification goes out on its own.
+- The 5-second batching (see the guide) applies only to per-job
+  *Authentication Required* on this target, so one expired cookie that
+  stops several jobs still posts once and pings once. `found` and `added`
+  start the job's message, so they go out at once.
 - The message ID is stored with the job, so a restart keeps editing the same
   message (its History starts again). If someone deletes the message in
   Discord, the next event posts a new one.

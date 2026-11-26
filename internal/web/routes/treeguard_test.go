@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
@@ -28,6 +29,10 @@ var realImportProbeDuration = importProbeDuration
 // probe put the real one back (useRealImportProbe).
 func TestMain(m *testing.M) {
 	web.SetPasswordHashCostForTesting(16)
+	// A display exists, so a Linux runner with no DISPLAY reaches the
+	// auto-setup/start answers these tests are about (owner ruling R4-7's
+	// refusal is TestAutoSetupStartRefusesAHostWithNoDisplay's).
+	cookies.SetHostLacksDisplayForTesting(false)
 	importProbeDuration = func(context.Context, string, string) float64 { return 0 }
 	os.Exit(treeguard.Run(m))
 }

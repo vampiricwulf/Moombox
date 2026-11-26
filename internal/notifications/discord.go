@@ -28,10 +28,22 @@ const (
 	// the pre-emptive empty-bucket sleep — rather than parking a target's
 	// whole queue into next week.
 	discordRetryAfterCap = 30 * time.Second
+	// discordRetryAfterWaitCap is how long a 429's Retry-After may be waited
+	// out (owner ruling R4-9): Discord's per-channel webhook limit can ask for
+	// more than discordRetryAfterCap, and dropping the alert at the head of
+	// the queue for it lost a notification the queue behind would have waited
+	// for anyway. Used only at the 429 check; discordRetryAfterCap still
+	// bounds waitForBucket and the give-up arming. A 429's wait may take the
+	// ladder's cumulative sleep past discordMaxSleepTotal up to this cap, so the
+	// worst hold one notification puts on its queue is ~3x15s requests + 60s = ~105s.
+	// A longer, missing or malformed Retry-After still drops at once.
+	discordRetryAfterWaitCap = 60 * time.Second
 	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding one
 	// notification's worst-case hold on its target's queue at ~3x15s requests
-	// + 30s sleep = ~75s. Two large Retry-After waits would exceed it — a
-	// webhook still rate-limited after one honored wait gives up instead.
+	// + 30s sleep = ~75s, or ~105s when a 429's wait takes the sleep up to
+	// discordRetryAfterWaitCap, which only a 429 may do. Two large Retry-After
+	// waits would exceed it — a webhook still rate-limited after one honored
+	// wait gives up instead.
 	//
 	// The PRE-EMPTIVE empty-bucket wait (waitForBucket, ≤ discordRetryAfterCap
 	// per attempt) is deliberately outside this budget, so the true worst-case
@@ -462,9 +474,9 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			// would slip past a Duration-space cap check and turn the sleep
 			// into a zero-delay hammer. !(secs > 0) is deliberately NaN-proof.
 			secs, parseErr := strconv.ParseFloat(r.retryAfter, 64)
-			if parseErr != nil || !(secs > 0) || secs > discordRetryAfterCap.Seconds() {
-				// Missing, malformed, or absurd Retry-After — surface the
-				// 429 directly rather than guessing a sleep.
+			if parseErr != nil || !(secs > 0) || secs > discordRetryAfterWaitCap.Seconds() {
+				// Missing, malformed, or past discordRetryAfterWaitCap —
+				// surface the 429 directly rather than guessing a sleep.
 				return nil, fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
 			}
 			lastErr = fmt.Errorf("discord rate limited (retry-after: %s)", r.retryAfter)
@@ -491,7 +503,17 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			}
 			return nil, fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
 		}
-		if slept+delay > discordMaxSleepTotal {
+		// A 429's wait may take the cumulative sleep up to
+		// discordRetryAfterWaitCap, so a long Retry-After is waited out after a
+		// 5xx backoff too (up to what is left of the cap); a second
+		// long one is past it and gives up, and a 5xx backoff after a long
+		// wait is past discordMaxSleepTotal and gives up. Either way the
+		// cumulative sleep never exceeds discordRetryAfterWaitCap.
+		budget := discordMaxSleepTotal
+		if r.status == http.StatusTooManyRequests && err == nil {
+			budget = max(budget, discordRetryAfterWaitCap)
+		}
+		if slept+delay > budget {
 			// Cumulative-sleep budget exhausted (e.g. a second large
 			// Retry-After) — bound this target queue's hold instead of
 			// waiting out an extended rate-limit.
@@ -583,11 +605,10 @@ func (d *DiscordWebhook) bucketWait() time.Duration {
 
 // noteRateLimitGiveUp arms the empty-bucket deadline from a 429 that ENDS a
 // delivery: the ladder gave up on it, or its Retry-After was missing,
-// malformed or past discordRetryAfterCap. noteBucket leaves every 429 to the
+// malformed or past discordRetryAfterWaitCap. noteBucket leaves every 429 to the
 // ladder, so with nothing recorded the queue's next item POSTed straight into
-// the same limit, and the one after it — a Retry-After of 45 s (Discord's
-// per-channel webhook limit commonly asks 30-60 s) dropped every queued alert
-// within milliseconds. The window is the Retry-After, else
+// the same limit, and the one after it — a Retry-After past the wait cap
+// dropped every queued alert within milliseconds. The window is the Retry-After, else
 // X-RateLimit-Reset-After, else the cap, and never more than the cap, which
 // waitForBucket enforces anyway. A no-op for anything but a 429.
 func (d *DiscordWebhook) noteRateLimitGiveUp(r discordResponse) {

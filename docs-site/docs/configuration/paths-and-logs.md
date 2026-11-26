@@ -45,7 +45,8 @@ log_max_files = 5
 Both UIs apply the same two rules to every path field when you change it:
 a path with a `..` segment is refused, and a path wrapped in quotes (as
 Explorer's *Copy as path* produces) is refused rather than silently
-unquoted — remove the quotes. In the web dashboard these settings are under
+unquoted — remove the quotes. The same two rules apply to a channel's own
+[output directory](channels.md#channelsoutput_directory). In the web dashboard these settings are under
 **Settings → Paths** and **Settings → Logs**; in the terminal UI, open
 Settings with ++grave++ and pick the **Paths** or **Logs** section.
 

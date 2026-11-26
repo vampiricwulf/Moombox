@@ -2921,7 +2921,15 @@ export class SettingsController {
 
         if (response.ok) {
           dialog.hide();
-          this.app.showToast("Password removed. Network access set to Localhost Only.", "success");
+          // The server goes back to Localhost Only from External or Public
+          // only (owner ruling R4-2); networkAccessChanged says whether it did.
+          const data = await response.json().catch(() => ({}));
+          this.app.showToast(
+            data.networkAccessChanged
+              ? "Password removed. Network access set to Localhost Only."
+              : "Password removed.",
+            "success",
+          );
           // Reset flag so loadSecurityStatus clears the form fields
           this._securityStatusLoaded = false;
           this.loadSecurityStatus();
