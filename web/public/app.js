@@ -5476,6 +5476,9 @@ export class MoomboxApp {
     if (targets.length === 0) return;
 
     let succeeded, failed;
+    // The first refusal's reason, as the TUI's batch line names it
+    // (verbRefusals): "" when no refused answer carried one.
+    let firstRefusal = "";
     if (action === "watched" || action === "unwatched") {
       // Single batch API call
       try {
@@ -5516,6 +5519,14 @@ export class MoomboxApp {
         const results = await Promise.allSettled(targets.map(j => counted(apiCall(j.id))));
         succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
         failed = targets.length - succeeded;
+        // A refusal answers {"error": reason} (a staging-busy 409, "No
+        // staging files found" on Resume…). A request that never got an
+        // answer, or an answer with no reason, keeps the bare count.
+        const refused = results.find(r => r.status === "fulfilled" && r.value && !r.value.ok);
+        if (refused) {
+          const data = await refused.value.json().catch(() => null);
+          if (typeof data?.error === "string") firstRefusal = data.error.trim();
+        }
       } finally {
         // Before the bar is drawn again below (_clearSelectionUI), which
         // turns the buttons back on.
@@ -5544,7 +5555,8 @@ export class MoomboxApp {
       const verb = verbs[action] || action;
       this.showToast(`${verb}: ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
     } else {
-      this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
+      const reason = firstRefusal ? `: ${firstRefusal}` : ".";
+      this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed${reason}`, "warning");
     }
   }
 

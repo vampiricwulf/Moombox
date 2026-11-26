@@ -396,7 +396,8 @@ in [Chapters](chapters.md).
 ### When two actions collide
 
 Some actions cannot run on a job while another one is working it. A refused
-action changes nothing; the dashboard shows the reason as an error toast and
+action changes nothing; the dashboard shows the reason as an error toast (a
+batch action names the first refusal in its result toast) and
 the TUI on its feedback line:
 
 | Message | Why | What to do |

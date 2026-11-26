@@ -701,11 +701,7 @@ func (m *TaskListModel) SelectAtOffset(y int) bool {
 func (m *TaskListModel) resetMarquee() {
 	// A compact row cuts its title with an ellipsis and never scrolls it.
 	if job := m.SelectedJob(); job != nil && !m.compact {
-		title := job.Title
-		if title == "" {
-			title = job.VideoID
-		}
-		m.marquee.Reset(title, m.titleWidth(job))
+		m.marquee.Reset(displayTitle(job), m.titleWidth(job))
 	} else {
 		m.marquee.Reset("", 0)
 	}
@@ -1478,10 +1474,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	titleWidth := m.titleWidth(job)
 
 	// Prepare title
-	title := job.Title
-	if title == "" {
-		title = job.VideoID
-	}
+	title := displayTitle(job)
 	if selected && m.marquee.NeedsScroll() {
 		// The marquee window was sized at resetMarquee time; the percent
 		// text can have grown since (9→10%, 99→100%), shrinking titleWidth.

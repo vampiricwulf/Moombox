@@ -142,7 +142,7 @@ func (d menuJobDelegate) Render(w io.Writer, m list.Model, index int, item list.
 	contentW := m.Width()
 	statusStyle := lipgloss.NewStyle().Foreground(StatusColor(string(j.Status)))
 	icon := StatusIcon(string(j.Status))
-	title := truncateString(j.Title, contentW-19)
+	title := truncateString(displayText(j.Title), contentW-19)
 	line := fmt.Sprintf("  %s %s %s", icon, statusStyle.Render(padRight(StatusLabel(string(j.Status)), 13)), title)
 	if index == m.Index() {
 		line = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(

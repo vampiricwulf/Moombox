@@ -197,6 +197,12 @@ those, for example `Press D to confirm delete 3 jobs (3s)`, and the result
 line says how many were done and how many the server refused, with the first
 reason. `A W` marks all the eligible jobs watched unless every one already is,
 in which case it unmarks them. After a batch the selection is cleared.
+A batch Resume, Reinitialize or Cancel runs in the background with a line such
+as `Cancelling 40 jobs...` while it works, and only one runs at a time: while
+a batch Cancel runs, a new Resume, Reinitialize or Cancel is refused with
+`Cancel is still running: wait for it to finish` (and likewise while a Resume
+or Reinitialize runs, for those and for a batch Cancel). A single job's Cancel
+is done at once.
 ++esc++ clears the selection (and cancels any armed chord). Rows hidden in a
 collapsed archive are dropped from the selection.
 
@@ -340,7 +346,7 @@ The dashboard shows the same summary before its Reinitialize.
 | `A I I` | **Reinitialize Job**: reset the job to start again from scratch. Batch-capable. | `Error`, `Cancelled`, `COOKIES?`. |
 | `A M M` | **Mux Job**: build the output file from what is staged. | `Error` or `Cancelled` with staged segments; `Finished` with an unmuxed part left in staging. |
 | `A S S` | **Recover Set-aside Recordings**: mux each set-aside recording into its own file beside the archive, carry a kept chat capture beside the first, then clear staging if nothing unmuxed is left. | Jobs that are not active (`Upcoming`, `Live`, `Downloading`, `Muxing`) and have set-aside recordings. |
-| `A X X` | **Cancel Job**. Batch-capable. | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?`. |
+| `A X X` | **Cancel Job**. Batch-capable; a batch runs in the background, and while it runs a new Resume, Reinitialize or Cancel is refused. | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?`. |
 | `A D D` | **Delete Job**. Batch-capable. | `Finished`, `Error`, `Cancelled`, `COOKIES?`. Cancel an active job first. |
 | `A W` | **Toggle Watched**: adds or removes the dim `•`. Batch-capable. | `Finished`. |
 | `A T` | **Trim Video**: cut a clip from the archive. | `Finished` jobs with an output file. One trim runs at a time. |
