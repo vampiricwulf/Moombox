@@ -146,10 +146,13 @@ func (m *ImportDialogModel) SetSize(w, h int) {
 	}
 }
 
-// SetError sets the error and goes back to metadata step.
+// SetError sets the error and goes back to metadata step, with the field
+// marked "> " focused again: Enter blurred it to start the import, and a
+// refusal is exactly where the operator is told to change something.
 func (m *ImportDialogModel) SetError(err string) {
 	m.errorMsg = err
 	m.step = importStepMeta
+	m.syncToTextInput()
 }
 
 // UpdateComponents routes tea.Msg to the active component.

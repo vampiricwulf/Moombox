@@ -98,3 +98,37 @@ func TestImportRefusalReasonReachesTheDialog(t *testing.T) {
 		t.Errorf("dialog error %q, want %q", a.importDlg.errorMsg, reason)
 	}
 }
+
+// imports-5: after a refused import the metadata step's marked field takes
+// typing again — Enter blurred the input to start the import, and the
+// refusal must give the focus back, not leave a field marked "> " that
+// ignores every key until Tab.
+//
+// Mutant: SetError setting the step without refocusing the active field.
+func TestImportRefusalKeepsTheFieldTypeable(t *testing.T) {
+	for _, focus := range []int{0, 1} {
+		a := NewApp()
+		a.width, a.height = 100, 40
+		a.importDlg.SetSize(100, 40)
+		a.importDlg.visible, a.importDlg.step = true, importStepMeta
+		a.importDlg.filePath = "a.zip"
+		a.importDlg.title, a.importDlg.channel = "Old", "Chan"
+		a.importDlg.metaFocus = focus
+		a.importDlg.syncToTextInput()
+
+		a.Update(keyMsg("enter"))
+		if a.importDlg.step != importStepImporting {
+			t.Fatalf("focus %d: Enter left the step at %v", focus, a.importDlg.step)
+		}
+		a.Update(importAnsweredWith(t, a, http.StatusBadRequest, `{"error":"refused"}`))
+		a.Update(keyMsg("x"))
+		got := a.importDlg.title
+		want := "Oldx"
+		if focus == 1 {
+			got, want = a.importDlg.channel, "Chanx"
+		}
+		if got != want {
+			t.Errorf("focus %d: typed after a refusal, field = %q, want %q", focus, got, want)
+		}
+	}
+}
