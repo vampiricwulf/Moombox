@@ -367,6 +367,9 @@ export class PlayerController {
     this.nico = new NicoScheduler({ lanes: this._lanes, indexAfter, seedCursorIndex });
     /** @type {Set<Animation>} every in-flight overlay animation */
     this._nicoAnims = new Set();
+    // The video is playing but waiting for data (`waiting` until `playing`):
+    // the overlay holds its flight as it does on a pause.
+    this._nicoStalled = false;
     this._nicoDroppedShown = 0;
     this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
@@ -541,6 +544,9 @@ export class PlayerController {
     // pill. Un-anchored the intervening tick does nothing; `seeked` below
     // re-anchors at the target.
     video.addEventListener("seeking", () => {
+      // A seek clears the overlay; a wait for the new position fires its own
+      // `waiting`, so an older stall must not outlive it.
+      this._nicoStalled = false;
       this.clearNicoOverlay();
       this.nico.unanchor();
     });
@@ -560,12 +566,30 @@ export class PlayerController {
     // animations simply follow the video — the cursor is NEVER advanced here
     // (doing so skipped every message that was due while paused).
     video.addEventListener("pause", () => {
+      this._nicoStalled = false;
       if (video.ended) return; // end-of-media pause: let in-flight text finish
       for (const a of this._nicoAnims) a.pause();
     });
 
     video.addEventListener("play", () => {
+      this._nicoStalled = false;
       for (const a of this._nicoAnims) a.play();
+    });
+
+    // A buffering stall fires no `pause`: the picture freezes while the
+    // animations, on the document clock, would fly on. `waiting` holds them
+    // (and makes anything placed meanwhile start held, see ctx.paused in
+    // spawnNicoMessages) until `playing` says the picture moves again.
+    video.addEventListener("waiting", () => {
+      if (video.paused || video.ended) return;
+      this._nicoStalled = true;
+      for (const a of this._nicoAnims) a.pause();
+    });
+
+    video.addEventListener("playing", () => {
+      const wasStalled = this._nicoStalled;
+      this._nicoStalled = false;
+      if (wasStalled && !video.paused) for (const a of this._nicoAnims) a.play();
     });
 
     video.addEventListener("ratechange", () => {
@@ -588,6 +612,7 @@ export class PlayerController {
 
     // Never freeze the overlay at end of media — let in-flight text fly out.
     video.addEventListener("ended", () => {
+      this._nicoStalled = false;
       for (const a of this._nicoAnims) a.play();
     });
 
@@ -2532,7 +2557,7 @@ export class PlayerController {
       stageW,
       laneHeight,
       rate: video.playbackRate || 1,
-      paused: video.paused && !video.ended,
+      paused: (video.paused && !video.ended) || this._nicoStalled,
       overlay,
     };
 

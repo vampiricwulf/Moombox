@@ -804,6 +804,47 @@ test("a message is consumed a tick early and the animation delay holds its entry
   assert.equal(anim.el.style.left, "1280px", "parked at the right edge for the whole delay");
 });
 
+// A buffering stall fires no `pause`, so the overlay's animations, on the
+// document clock, flew on over a frozen picture. `waiting` holds them and
+// `playing` lets them go; a message placed during the stall starts held; a
+// paused video is never resumed by either event.
+//
+// Mutants: drop the waiting or the playing listener; leave _nicoStalled out
+// of ctx.paused.
+test("the overlay holds its flight while the video stalls to buffer", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(5000, "first"), msg(6000, "during the stall")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  h.video.paused = false;
+  h.tick(4100);
+  const first = h.anims.at(-1);
+  assert.equal(first.state, "running");
+
+  h.video.dispatchEvent(new h.window.Event("waiting"));
+  assert.equal(first.state, "paused", "a stall holds the flight");
+
+  // A tick during the wait (a re-anchor, the seed) places its message held.
+  h.tick(5100);
+  const second = h.anims.at(-1);
+  assert.notEqual(second, first);
+  assert.equal(second.state, "paused", "placed during the stall, so it starts held");
+
+  h.video.dispatchEvent(new h.window.Event("playing"));
+  assert.deepEqual([first.state, second.state], ["running", "running"], "the picture moves again");
+
+  // Paused by the operator: a wait and its end resume nothing.
+  h.video.paused = true;
+  h.video.dispatchEvent(new h.window.Event("pause"));
+  h.video.dispatchEvent(new h.window.Event("waiting"));
+  h.video.dispatchEvent(new h.window.Event("playing"));
+  assert.deepEqual([first.state, second.state], ["paused", "paused"], "a paused video stays held");
+});
+
 test("a message first seen after it entered starts that far into its flight", { skip }, async () => {
   const h = harness.makePlayer({
     jobs: [finished("j1", { chatFilename: "chat.json" })],
