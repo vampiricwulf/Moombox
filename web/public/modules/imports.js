@@ -131,6 +131,18 @@ export class ImportController {
     if (el) el.textContent = max ? ` (max ${formatBytes(max)})` : "";
   }
 
+  /**
+   * Refuses a file over the server's cap with a toast; true when it did.
+   * The server would refuse it too, but only once the upload began, and a
+   * browser may report that answer as a network error.
+   */
+  _refuseOversize(file) {
+    const max = this._maxBytes();
+    if (!max || file.size <= max) return false;
+    this.app.showToast(`${file.name} is ${formatBytes(file.size)}; an archive import takes at most ${formatBytes(max)}`, "warning");
+    return true;
+  }
+
   setImportFile(file) {
     // Swapping the file mid-upload hid the progress bar and its Cancel button
     // while the old file kept uploading.
@@ -142,12 +154,9 @@ export class ImportController {
       if (fileInput) fileInput.value = "";
       return;
     }
-    // A file over the server's cap is refused here, before a byte is sent:
-    // the server would refuse it too, but only once the upload began, and a
-    // browser may report that answer as a network error.
-    const max = this._maxBytes();
-    if (max && file.size > max) {
-      this.app.showToast(`${file.name} is ${formatBytes(file.size)}; an archive import takes at most ${formatBytes(max)}`, "warning");
+    // A file over the server's cap is refused here, before a byte is sent.
+    // Before the first status read has brought the cap, uploadImport checks.
+    if (this._refuseOversize(file)) {
       const fileInput = document.getElementById("import-file-input");
       if (fileInput) fileInput.value = "";
       return;
@@ -214,8 +223,27 @@ export class ImportController {
     document.getElementById("import-channel").value = "";
   }
 
-  uploadImport() {
-    if (!this.importFile || this.importUploading) return;
+  async uploadImport() {
+    if (!this.importFile || this.importUploading || this._capChecking) return;
+    // The cap comes with the status read; a file chosen before the first one
+    // answered was taken unchecked. Read it once before sending anything.
+    // With the cap known this path never awaits, so the upload starts in
+    // the click's own turn.
+    if (this._maxBytes() === null) {
+      this._capChecking = true;
+      try {
+        await this.app.loadStatus?.();
+      } catch {
+        // No cap to check against: the server's own check still stands.
+      } finally {
+        this._capChecking = false;
+      }
+      if (!this.importFile || this.importUploading) return;
+      if (this._refuseOversize(this.importFile)) {
+        this.clearImportFile();
+        return;
+      }
+    }
 
     this.importUploading = true;
     this._bodySent = false;

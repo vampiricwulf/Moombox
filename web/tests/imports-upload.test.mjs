@@ -190,3 +190,30 @@ test("a file over the server's upload cap is refused before uploading", { skip }
   h.app.imports.setImportFile(atCap);
   assert.equal(h.app.imports.importFile, atCap, "a file at the cap was refused");
 });
+
+// imports-3 (fix round): a file chosen before the first status read brought
+// the cap was taken unchecked and sent, and the server's 413 can reach the
+// browser as a network error. Import now reads the status once first.
+//
+// Mutants: uploadImport without the status read (the big file is sent);
+// the read but no size check after it; a refusal that leaves the file chosen.
+test("a file chosen before the cap is known is checked before it is sent", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: {} } });
+  assert.equal(h.app.importMaxBytes, undefined, "precondition: no cap yet");
+  globalThis.XMLHttpRequest = PendingXHR;
+  PendingXHR.last = null;
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+  assert.ok(h.app.imports.importFile, "precondition: taken unchecked");
+
+  h.http.on("GET /api/status", () => ({ importMaxBytes: 10 }));
+  await h.app.imports.uploadImport();
+  assert.equal(PendingXHR.last, null, "the oversize file was sent");
+  assert.equal(h.app.imports.importFile, null, "the refused file stays chosen");
+  assert.ok(h.toasts().some((t) => /big\.zip is 11B; an archive import takes at most 10B/.test(t.textContent)));
+
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(10)], "ok.zip"));
+  await h.app.imports.uploadImport();
+  assert.ok(PendingXHR.last, "a file within the cap was not sent");
+  assert.equal(h.app.imports.importUploading, true);
+});
