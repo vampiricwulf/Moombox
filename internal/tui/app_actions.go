@@ -200,12 +200,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedbackWithSeverity("No resumable jobs in selection", severityWarning)
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnResumeJob, ids, "")
+			return a, a.runJobVerb(chord, applied(a.OnResumeJob), ids, "")
 		} else if job != nil && a.OnResumeJob != nil {
 			if a.jobVerbBusy() {
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnResumeJob, []string{job.ID}, displayText(job.Title))
+			return a, a.runJobVerb(chord, applied(a.OnResumeJob), []string{job.ID}, displayText(job.Title))
 		}
 	case "A I":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
@@ -228,12 +228,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.setFeedbackWithSeverity("No reinitializable jobs in selection", severityWarning)
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnReinitializeJob, ids, "")
+			return a, a.runJobVerb(chord, applied(a.OnReinitializeJob), ids, "")
 		} else if job != nil && a.OnReinitializeJob != nil {
 			if a.jobVerbBusy() {
 				return a, nil
 			}
-			return a, a.runJobVerb(chord, a.OnReinitializeJob, []string{job.ID}, displayText(job.Title))
+			return a, a.runJobVerb(chord, applied(a.OnReinitializeJob), []string{job.ID}, displayText(job.Title))
 		}
 	case "A M":
 		if job != nil && a.OnMuxJob != nil {
@@ -261,48 +261,33 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A X":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
-			// ended counts the jobs the list showed cancellable that had
-			// finished, failed or been cancelled by the time the cancel
-			// reached them: OnCancelJob leaves those as they ended.
-			count, ended := 0, 0
-			var refused verbRefusals
+			// One committed row write per job, and a selection can be the
+			// whole list: the cancels run as a command (runJobVerb, owner
+			// ruling R3-15), under the one busy state Resume and
+			// Reinitialize use. Which jobs are eligible is decided here.
+			if a.cancelBusy(true) {
+				return a, nil
+			}
+			var ids []string
 			for _, id := range a.taskList.SelectedIDs() {
 				j := a.taskList.GetJobByID(id)
-				if j == nil {
+				if j == nil || !jobverbs.Cancellable(j.Status) {
 					continue
 				}
-				if !jobverbs.Cancellable(j.Status) {
-					continue
-				}
-				switch ok, err := a.OnCancelJob(id); {
-				case err != nil:
-					refused.add(err)
-				case ok:
-					count++
-				default:
-					ended++
-				}
+				ids = append(ids, id)
 			}
 			a.taskList.ClearSelection()
-			switch {
-			case refused.n > 0:
-				// A refusal (a job already finishing) is the line's news, in
-				// red, after what became of the rest — the ended jobs too.
-				done := "Cancelled " + jobCount(count)
-				if ended > 0 {
-					done += "; " + jobCount(ended) + " had already ended"
-				}
-				a.setBatchFeedback(done, refused)
-			case ended > 0 && count > 0:
-				a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
-			case ended > 0:
-				a.setFeedbackWithSeverity("Not cancelled: "+jobCount(ended)+" had already ended", severityWarning)
-			case count > 0:
-				a.setFeedback("Cancelled " + jobCount(count))
-			default:
+			if len(ids) == 0 {
 				a.setFeedbackWithSeverity("No cancellable jobs in selection", severityWarning)
+				return a, nil
 			}
+			return a, a.runJobVerb(chord, a.OnCancelJob, ids, "")
 		} else if job != nil && a.OnCancelJob != nil {
+			// One write: it stays on the update loop. It is refused only
+			// while a batch Cancel runs.
+			if a.cancelBusy(false) {
+				return a, nil
+			}
 			if ok, err := a.OnCancelJob(job.ID); err != nil {
 				a.setFeedbackWithSeverity(err.Error(), severityError)
 			} else if ok {

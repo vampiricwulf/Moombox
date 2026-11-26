@@ -420,6 +420,13 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 		a.disarmChord()
 		return a, nil, true
 	}
+	// A Cancel is refused before its confirm too, under the same rule as in
+	// dispatchAction (cancelBusy): a batch while any run is in flight, a
+	// single job while a batch Cancel runs.
+	if chord == "A X" && a.cancelBusy(item.SupportsBatch && a.taskList.SelectedCount() > 0) {
+		a.disarmChord()
+		return a, nil, true
+	}
 
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
 	if item.NeedsConfirm && item.NeedsJob {

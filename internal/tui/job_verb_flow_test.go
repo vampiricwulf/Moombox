@@ -353,3 +353,189 @@ func TestSettingsRestartPromptNamesARunInFlight(t *testing.T) {
 		}
 	}
 }
+
+// dispatchApply dispatches chord, runs the command it returns and delivers
+// that command's message, as the program would.
+func dispatchApply(a *App, chord string, job *database.Job) {
+	if _, cmd := a.dispatchAction(chord, job); cmd != nil {
+		if res := cmd(); res != nil {
+			a.Update(res)
+		}
+	}
+}
+
+// cancelApp is a list of cancellable rows, as a backlog leaves them.
+func cancelApp(calls *[]string) *App {
+	app := NewApp()
+	app.OnCancelJob = func(id string) (bool, error) { *calls = append(*calls, id); return true, nil }
+	app.OnResumeJob = func(string) error { return nil }
+	app.OnReinitializeJob = func(string) error { return nil }
+	app.HasStagingFiles = func(string) bool { return true }
+	app.taskList.SetJobs([]*database.Job{
+		{ID: "q1", Title: "Queued one", Status: database.StatusQueued, Platform: "youtube", CreatedAt: "2026-11-25T10:00:00Z"},
+		{ID: "q2", Title: "Queued two", Status: database.StatusQueued, Platform: "youtube", CreatedAt: "2026-11-25T09:00:00Z"},
+		{ID: "e", Title: "Errored", Status: database.StatusError, Platform: "youtube", CreatedAt: "2026-11-25T08:00:00Z"},
+	})
+	return app
+}
+
+// A batch Cancel is one committed row write per job, and a selection can be
+// the whole list: the dispatch must not call OnCancelJob, the command does
+// (owner ruling R3-15). Mutant: the batch arm calling OnCancelJob inline.
+func TestABatchCancelRunsInACommand(t *testing.T) {
+	var calls []string
+	app := cancelApp(&calls)
+	app.taskList.ToggleSelection("q1")
+	app.taskList.ToggleSelection("q2")
+	app.taskList.ToggleSelection("e") // not cancellable: left out
+	_, cmd := app.dispatchAction("A X", nil)
+	if len(calls) != 0 {
+		t.Fatalf("the batch cancelled %v on the update goroutine", calls)
+	}
+	if cmd == nil || !app.jobVerb.busy {
+		t.Fatalf("no command, or not busy (%v)", app.jobVerb.busy)
+	}
+	if app.feedback.msg != "Cancelling 2 jobs..." {
+		t.Errorf("dispatch line = %q", app.feedback.msg)
+	}
+	if app.taskList.SelectedCount() != 0 {
+		t.Error("the selection must clear at dispatch")
+	}
+	app.Update(cmd())
+	if len(calls) != 2 || app.jobVerb.busy || app.feedback.msg != "Cancelled 2 jobs" {
+		t.Errorf("after the answer: calls %v, busy %v, line %q", calls, app.jobVerb.busy, app.feedback.msg)
+	}
+
+	// Nothing cancellable: answered at once, no run begun.
+	app.taskList.ToggleSelection("e")
+	if _, cmd := app.dispatchAction("A X", nil); cmd != nil || app.jobVerb.busy {
+		t.Error("a selection with nothing cancellable started a run")
+	}
+	if app.feedback.msg != "No cancellable jobs in selection" {
+		t.Errorf("line = %q", app.feedback.msg)
+	}
+
+	// A single job's Cancel is one write and stays synchronous.
+	calls = nil
+	if _, cmd := app.dispatchAction("A X", app.taskList.GetJobByID("q1")); cmd != nil || len(calls) != 1 {
+		t.Errorf("single Cancel: cmd %v, calls %v; want it done at dispatch", cmd != nil, calls)
+	}
+}
+
+// While a batch Cancel runs, a new Resume, Reinitialize or Cancel (single or
+// batch) is refused with a line saying Cancel is still running, and starts
+// nothing; the refused batch keeps its selection. While a Resume runs, a
+// batch Cancel is refused (one busy state) but a single job's Cancel still
+// runs. Mutants: cancelBusy refusing a single Cancel beside a Resume, or
+// letting one through beside a batch Cancel; the batch arm skipping the
+// busy check.
+func TestABatchCancelSharesTheOneBusyState(t *testing.T) {
+	var calls []string
+	app := cancelApp(&calls)
+	app.taskList.ToggleSelection("q1")
+	app.taskList.ToggleSelection("q2")
+	_, first := app.dispatchAction("A X", nil)
+
+	refused := func(what string, chord string, job *database.Job) {
+		t.Helper()
+		app.clearFeedback()
+		if _, cmd := app.dispatchAction(chord, job); cmd != nil {
+			t.Errorf("%s started while a batch Cancel ran", what)
+		}
+		if !strings.HasPrefix(app.feedback.msg, "Cancel is still running") || app.feedback.sev != severityWarning {
+			t.Errorf("%s: line = %q (sev %v), want the busy refusal", what, app.feedback.msg, app.feedback.sev)
+		}
+	}
+	refused("Resume", "A R", app.taskList.GetJobByID("e"))
+	refused("Reinitialize", "A I", app.taskList.GetJobByID("e"))
+	refused("single Cancel", "A X", app.taskList.GetJobByID("q1"))
+	app.taskList.ToggleSelection("q1")
+	refused("batch Cancel", "A X", nil)
+	if app.taskList.SelectedCount() != 1 {
+		t.Error("a refused batch must keep its selection")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("calls %v before the run's command ran", calls)
+	}
+	app.Update(first())
+	if len(calls) != 2 || app.jobVerb.busy {
+		t.Fatalf("after the answer: calls %v, busy %v", calls, app.jobVerb.busy)
+	}
+
+	// Beside a Resume: a batch Cancel is refused, a single one runs.
+	_, resume := app.dispatchAction("A R", app.taskList.GetJobByID("e"))
+	if resume == nil {
+		t.Fatal("premise lost: Resume did not start")
+	}
+	app.clearFeedback()
+	if _, cmd := app.dispatchAction("A X", nil); cmd != nil || !strings.HasPrefix(app.feedback.msg, "Resume is still running") {
+		t.Errorf("a batch Cancel beside a Resume: cmd %v, line %q", cmd != nil, app.feedback.msg)
+	}
+	calls = nil
+	app.dispatchAction("A X", app.taskList.GetJobByID("q2"))
+	if len(calls) != 1 {
+		t.Errorf("a single Cancel beside a Resume was refused: line %q", app.feedback.msg)
+	}
+}
+
+// The A X chord is refused before its confirm is armed while it would be
+// refused at dispatch, so the operator does not answer a prompt only to be
+// told no. Mutant: no Cancel check in the chord handler.
+func TestCancelChordIsRefusedBeforeItsConfirmWhileABatchCancelRuns(t *testing.T) {
+	var calls []string
+	app := cancelApp(&calls)
+	app.taskList.ToggleSelection("q1")
+	app.dispatchAction("A X", nil)
+
+	pressRune(app, 'a')
+	pressRune(app, 'x')
+	if app.chord.prefix != "" || app.chord.action != "" {
+		t.Error("the chord must be disarmed by the refusal")
+	}
+	if !strings.HasPrefix(app.feedback.msg, "Cancel is still running") {
+		t.Errorf("line = %q, want the busy refusal", app.feedback.msg)
+	}
+}
+
+// A batch Cancel's answer that lands on an armed confirm leaves it alone;
+// a refusal is still shown. Mutant: finishJobVerb writing the cancel count
+// whatever holds the line.
+func TestABatchCancelAnswerLeavesAnArmedConfirmPromptAlone(t *testing.T) {
+	var calls []string
+	app := cancelApp(&calls)
+	app.OnCancelJob = func(id string) (bool, error) { return id != "q2", nil } // q2 ended meanwhile
+	app.OnDeleteJob = func(string) {}
+	app.taskList.ToggleSelection("q1")
+	app.taskList.ToggleSelection("q2")
+	_, cmd := app.dispatchAction("A X", nil)
+	app.taskList.GoToStart()
+	for i := 0; i < 5; i++ {
+		if j := app.taskList.SelectedJob(); j != nil && j.ID == "e" {
+			break
+		}
+		app.taskList.MoveDown()
+	}
+	if j := app.taskList.SelectedJob(); j == nil || j.ID != "e" {
+		t.Fatalf("premise lost: the cursor is not on the Error row (%v)", j)
+	}
+	pressRune(app, 'a')
+	pressRune(app, 'd')
+	prompt := app.feedback.msg
+	if !strings.Contains(prompt, "Press D to confirm") {
+		t.Fatalf("no delete prompt armed: %q", prompt)
+	}
+	app.Update(cmd())
+	if app.feedback.msg != prompt || app.chord.action == "" {
+		t.Errorf("the answer replaced the armed prompt with %q", app.feedback.msg)
+	}
+
+	app = cancelApp(&calls)
+	app.OnCancelJob = func(string) (bool, error) { return false, errors.New("Not cancelled — the job is already finishing") }
+	app.taskList.ToggleSelection("q1")
+	_, cmd = app.dispatchAction("A X", nil)
+	pressRune(app, 'a')
+	app.Update(cmd())
+	if !strings.Contains(app.feedback.msg, "already finishing") || app.feedback.sev != severityError {
+		t.Errorf("a refusal must be shown whatever holds the line: %q", app.feedback.msg)
+	}
+}

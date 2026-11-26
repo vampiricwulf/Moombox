@@ -227,14 +227,16 @@ type (
 		Filename string
 		Err      string
 	}
-	// jobVerbResultMsg is the answer of a Resume or Reinitialize run
-	// (runJobVerb, job_verb_flow.go). Gen is the run it answers; Title is
-	// set for a single job, a batch reports Count and Refused.
+	// jobVerbResultMsg is the answer of a Resume, Reinitialize or batch
+	// Cancel run (runJobVerb, job_verb_flow.go). Gen is the run it answers;
+	// Title is set for a single job, a batch reports Count, Ended (jobs a
+	// Cancel found already ended) and Refused.
 	jobVerbResultMsg struct {
 		Gen     uint64
-		Chord   string // "A R" or "A I"
+		Chord   string // "A R", "A I" or "A X"
 		Title   string
 		Count   int
+		Ended   int
 		Refused verbRefusals
 	}
 	// deleteJobsResultMsg reports completion of an async job delete.
@@ -804,6 +806,8 @@ type App struct {
 	// ended since the list last showed it is left as it ended. err is a
 	// refusal to report in red — a Cancel that reached a job whose finalize
 	// has written its archive (worker.ErrAlreadyFinishing, owner ruling R-C1).
+	// A single job's Cancel calls it on the update loop; a batch calls it
+	// from a command's goroutine (runJobVerb, job_verb_flow.go).
 	OnCancelJob func(jobID string) (bool, error)
 	OnDeleteJob func(jobID string)
 	// OnSetWatched marks jobs watched/unwatched (the A W chord); the Web's
