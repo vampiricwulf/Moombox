@@ -1363,7 +1363,7 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 		select {
 		case <-ctx.Done():
 			wait.Stop()
-			return nil, fmt.Errorf("the recording was written to %s, but the job was stopped before it could be marked Finished; staging is kept, use Mux to record it", written)
+			return nil, o.finishedNotWritten(jobID, fmt.Errorf("the recording was written to %s, but the job was stopped before it could be marked Finished; staging is kept, use Mux to record it", written))
 		case <-wait.C:
 		}
 		o.logger.Warn("the Finished write did not land; trying it again",
@@ -1371,7 +1371,18 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 		// Applied, the next pass reads the Finished row and returns it.
 		o.db.UpdateJobFieldsUnlessTerminal(jobID, updates)
 	}
-	return nil, fmt.Errorf("the recording was written to %s, but the database refused to mark the job Finished; staging is kept, use Mux to record it", written)
+	return nil, o.finishedNotWritten(jobID, fmt.Errorf("the recording was written to %s, but the database refused to mark the job Finished; staging is kept, use Mux to record it", written))
+}
+
+// finishedNotWritten logs writeFinished's failure, naming the archive and
+// pointing at Mux, and returns it. The log line is the record that cannot be
+// lost: a caller whose job context was cancelled (a Cancel the finishing mark
+// re-claimed the row from) returns ctx.Err() in its place, and processJob's
+// cancellation path then records nothing of it. The row is left Muxing for
+// the boot re-mux in that case; this line says where the file is meanwhile.
+func (o *DownloadOrchestrator) finishedNotWritten(jobID string, err error) error {
+	o.logger.Error("the job could not be marked Finished: "+err.Error(), "jobID", jobID)
+	return err
 }
 
 // finishedRowGoneError is writeFinished's answer for a row deleted after its

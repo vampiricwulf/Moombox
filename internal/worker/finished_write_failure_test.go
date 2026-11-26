@@ -166,6 +166,30 @@ func TestAFinishedWriteOnADeletedRowIsACancel(t *testing.T) {
 	}
 }
 
+// A Finished write still refused after its retries is logged at Error,
+// naming the file and pointing at Mux. The finalize's caller may hand back
+// ctx.Err() in its place (a Cancel the finishing mark re-claimed the row
+// from), and processJob's cancellation path then records nothing of it, so
+// the log line is the one record that cannot be dropped.
+//
+// Mutant: finishedNotWritten logs nothing (or the exhausted path skips it).
+func TestAFinishedWriteThatNeverLandsIsLogged(t *testing.T) {
+	w, db, _, _, dbPath := finishedWriteFixture(t, false)
+	db.UpdateJobFields("j-fw", map[string]any{"status": database.StatusMuxing})
+	failJobWritesWhere(t, dbPath, `NEW.status = 'Finished'`)
+	log := &levelLogger{}
+	w.orchestrator.logger = log
+
+	_, err := w.orchestrator.writeFinished(context.Background(), "j-fw",
+		map[string]any{"status": database.StatusFinished}, "out.mp4")
+	if err == nil {
+		t.Fatal("writeFinished = nil, want the refusal")
+	}
+	if log.count("ERROR", "out.mp4") != 1 || log.count("ERROR", "use Mux") != 1 {
+		t.Errorf("log = %v, want one Error line naming out.mp4 and pointing at Mux", log.lines)
+	}
+}
+
 // The wait between attempts ends with the job's context: a shutdown or a
 // delete does not sit out the retries.
 //
