@@ -726,12 +726,15 @@ func TestItemAgeIgnoresAgeTextInsideOtherText(t *testing.T) {
 	page := `{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[
 		{"tabRenderer":{"selected":true,"tabIdentifier":"TAB_ID_SPONSORSHIPS","content":{"richGridRenderer":{"contents":[
 			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"upLockup001",
+				"contentImage":{"thumbnailViewModel":{"overlays":[{"thumbnailBottomOverlayViewModel":{"badges":[
+					{"thumbnailBadgeViewModel":{"text":"Upcoming"}}]}}]}},
 				"rendererContext":{"accessibilityContext":{"label":"Watching my debut from 3 years ago by Some Channel"}},
 				"metadata":{"lockupMetadataViewModel":{"title":{"content":"Watching my debut from 3 years ago"}}}}}}},
 			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"upClassic02",
 				"title":{"runs":[{"text":"Watching my debut from 3 years ago"}],
 					"accessibility":{"accessibilityData":{"label":"Watching my debut from 3 years ago by Some Channel"}}},
-				"descriptionSnippet":{"runs":[{"text":"clips from 5 days ago"}]}}}}},
+				"descriptionSnippet":{"runs":[{"text":"clips from 5 days ago"}]},
+				"upcomingEventData":{"startTime":"1784000000"}}}}},
 			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"pastTitle03",
 				"title":{"runs":[{"text":"Watching my debut from 3 years ago"}]},
 				"publishedTimeText":{"simpleText":"Streamed 2 weeks ago"}}}}},
@@ -758,6 +761,11 @@ func TestItemAgeIgnoresAgeTextInsideOtherText(t *testing.T) {
 	for _, v := range videos {
 		if v.Age != want[v.VideoID] {
 			t.Errorf("%s: Age = %v, want %v", v.VideoID, v.Age, want[v.VideoID])
+		}
+		// The two upcoming items are scheduled members streams; their marker
+		// is what lets a page of them through the parser-failure arm.
+		if up := v.VideoID == "upLockup001" || v.VideoID == "upClassic02"; up != v.Marked {
+			t.Errorf("%s: Marked = %v, want %v", v.VideoID, v.Marked, up)
 		}
 	}
 }
