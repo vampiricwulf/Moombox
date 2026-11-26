@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -98,7 +100,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"script-src 'self' https://cdn.jsdelivr.net; "+
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
-				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net; "+
+				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.betterttv.net https://cdn.7tv.app https://cdn.frankerfacez.com https://cdn.jsdelivr.net https://fonts.gstatic.com; "+
 				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:; "+
 				"frame-src https://www.youtube-nocookie.com https://player.twitch.tv; "+
 				"object-src 'none'; "+
@@ -131,6 +133,117 @@ func SecurityHeaders(next http.Handler) http.Handler {
 func CSRFMiddleware(store *config.Store, internalToken string, logger interface {
 	Warn(msg string, args ...any)
 }) func(http.Handler) http.Handler {
+	return csrfMiddleware(store, internalToken, logger, &refusalLogBudget{
+		now:   time.Now,
+		after: func(d time.Duration, f func()) { time.AfterFunc(d, f) },
+	})
+}
+
+// csrfRefusalLogBudget and csrfRefusalLogWindow bound the "CSRF: origin
+// refused" line (owner ruling R3-7): the first csrfRefusalLogBudget refusals
+// of each window log as they come, and the rest are counted into one
+// "suppressed N more" line when the window ends.
+const (
+	csrfRefusalLogBudget = 5
+	csrfRefusalLogWindow = time.Minute
+)
+
+// refusalLogBudget is ONE budget for the whole middleware, not one per
+// address: behind an unlisted reverse proxy every client shares an address,
+// and a peer that rotates addresses (IPv6) would get a fresh budget from each.
+// It decides only what is logged, never whether a request is refused.
+type refusalLogBudget struct {
+	now   func() time.Time
+	after func(time.Duration, func())
+
+	// flushFn reports what the window suppressed; csrfMiddleware sets it.
+	flushFn func()
+
+	mu         sync.Mutex
+	windowEnd  time.Time
+	logged     int
+	suppressed int
+	timerArmed bool
+	// armedFor is the windowEnd the summary timer was armed against. A
+	// refusal that rolls the window before that timer fires leaves it armed;
+	// when it fires it finds armedFor behind windowEnd and re-arms for the
+	// new window instead of reporting part of it.
+	armedFor time.Time
+}
+
+// admit counts one refusal. It reports whether this refusal gets its own
+// line, and the suppressed count of a window that has ended and was not yet
+// reported (0 when there is none). arm, when non-nil, starts the summary
+// timer; the caller runs it after the lock is released.
+func (b *refusalLogBudget) admit() (logThis bool, endedSuppressed int, arm func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	if !now.Before(b.windowEnd) {
+		endedSuppressed, b.suppressed = b.suppressed, 0
+		b.windowEnd = now.Add(csrfRefusalLogWindow)
+		b.logged = 0
+	}
+	if b.logged < csrfRefusalLogBudget {
+		b.logged++
+		return true, endedSuppressed, nil
+	}
+	b.suppressed++
+	if !b.timerArmed {
+		b.timerArmed = true
+		b.armedFor = b.windowEnd
+		d := b.windowEnd.Sub(now)
+		arm = func() { b.after(d, b.flushFn) }
+	}
+	return false, endedSuppressed, arm
+}
+
+// take runs when the summary timer fires. It returns and clears the
+// suppressed count and disarms the timer, so the timer and the next refusal
+// never both report the same window. A timer armed for a window that a later
+// refusal has already rolled (and reported) reports nothing while the new
+// window is open: it is re-armed for the new window's end when that window
+// has suppressed refusals (rearm, which the caller runs after the lock is
+// released), and disarmed otherwise. Each window's count is one line.
+func (b *refusalLogBudget) take() (n int, rearm func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	if !b.armedFor.Equal(b.windowEnd) && now.Before(b.windowEnd) {
+		if b.suppressed == 0 {
+			b.timerArmed = false
+			return 0, nil
+		}
+		b.armedFor = b.windowEnd
+		d := b.windowEnd.Sub(now)
+		return 0, func() { b.after(d, b.flushFn) }
+	}
+	b.timerArmed = false
+	n = b.suppressed
+	b.suppressed = 0
+	return n, nil
+}
+
+func csrfMiddleware(store *config.Store, internalToken string, logger interface {
+	Warn(msg string, args ...any)
+}, budget *refusalLogBudget) func(http.Handler) http.Handler {
+	reportSuppressed := func(n int) {
+		if n > 0 {
+			logger.Warn(fmt.Sprintf("CSRF: origin refused: suppressed %d more in the last minute", n))
+		}
+	}
+	budget.flushFn = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Warn("CSRF: refusal summary panicked", "panic", r)
+			}
+		}()
+		n, rearm := budget.take()
+		reportSuppressed(n)
+		if rearm != nil {
+			rearm()
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
@@ -188,14 +301,22 @@ func CSRFMiddleware(store *config.Store, internalToken string, logger interface 
 				// this the operator sees only the browser's console error
 				// (Arc 5 Task 1 follow-up). The value is client-chosen, so it
 				// is clipped before it reaches the dashboard's log panel. This
-				// middleware runs ahead of the IP gate and of every per-route
-				// rate limiter, so an unauthenticated peer can fire this line
-				// once per request; volume is bounded only by the logger's
-				// fixed-size ring buffer and its file rotation
-				// (internal/logger/logger.go).
-				logger.Warn("CSRF: origin refused",
-					"origin", clipForLog(origin),
-					"host", clipForLog(comparedHost))
+				// middleware runs after the IP and Host gates but ahead of
+				// authentication and of every per-route rate limiter, so any
+				// peer those gates admit (every address on external/public)
+				// can fire this line once per request without logging in.
+				// The budget caps the volume: the first few refusals each
+				// minute log, the rest become one "suppressed N more" line.
+				logThis, endedSuppressed, arm := budget.admit()
+				reportSuppressed(endedSuppressed)
+				if logThis {
+					logger.Warn("CSRF: origin refused",
+						"origin", clipForLog(origin),
+						"host", clipForLog(comparedHost))
+				}
+				if arm != nil {
+					arm()
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))

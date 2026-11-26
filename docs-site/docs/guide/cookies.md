@@ -472,8 +472,9 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
 !!! warning "Docker: do not mount `cookies.txt` on its own"
     Moombox replaces `cookies.txt` by renaming a new file over it. A
     single-file bind mount (or a `:ro` mount) cannot be replaced that way, so
-    the write-back fails, only a warning is logged, and the session slowly
-    ages out. Keep the file inside the mounted `/data` folder instead.
+    the write-back fails and only a warning is logged. The renewed session
+    lives on in memory and is lost at the next restart. Keep the file inside
+    the mounted `/data` folder instead.
 
 ## Troubleshooting
 

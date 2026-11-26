@@ -184,10 +184,11 @@ test("updateActiveIndicator writes nothing when the count has not changed", { sk
 });
 
 // chat_status "incomplete" is written when a capture stopped short — a Twitch
-// VOD whose cursor paging stalled, an IRC session that exhausted its reconnect
-// budget. The badge text is the raw value in both code paths; only the variant
-// is mapped, and an unmapped value silently falls through to "neutral", which
-// reads as "nothing to see here" for the one status that asks for action.
+// VOD whose cursor paging stalled, a chat capture that ended in an error, a
+// Cancel or a download Error. The badge text is the raw value in both code
+// paths; only the variant is mapped, and an unmapped value silently falls
+// through to "neutral", which reads as "nothing to see here" for the one
+// status that asks for action.
 //
 // Both paths read the one table, utils.js CHAT_STATUS_VARIANTS
 // (chatStatusVariant), so they can no longer disagree with each other.

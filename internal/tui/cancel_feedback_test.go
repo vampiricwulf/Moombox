@@ -50,7 +50,7 @@ func TestCancelChordReportsACancelThatDidNotHappen(t *testing.T) {
 		for _, id := range ids {
 			a.taskList.ToggleSelection(id)
 		}
-		a.dispatchAction("A X", nil)
+		dispatchApply(a, "A X", nil)
 		return a
 	}
 	t.Run("batch, one ended", func(t *testing.T) {
@@ -94,7 +94,7 @@ func TestCancelChordShowsAlreadyFinishingInRed(t *testing.T) {
 	})
 	a.taskList.ToggleSelection("fin")
 	a.taskList.ToggleSelection("live")
-	a.dispatchAction("A X", nil)
+	dispatchApply(a, "A X", nil)
 	want := "Cancelled 1 job, 1 refused: " + refusal.Error()
 	if a.feedback.msg != want || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
 		t.Errorf("batch: feedback = %q, want %q in red", a.feedback.msg, want)
@@ -116,7 +116,7 @@ func TestCancelChordShowsAlreadyFinishingInRed(t *testing.T) {
 	for _, id := range []string{"fin", "live", "gone"} {
 		a.taskList.ToggleSelection(id)
 	}
-	a.dispatchAction("A X", nil)
+	dispatchApply(a, "A X", nil)
 	want = "Cancelled 1 job; 1 job had already ended, 1 refused: " + refusal.Error()
 	if a.feedback.msg != want || feedbackColor(a.feedback.msg, a.feedback.sev) != ColorRed {
 		t.Errorf("mixed batch: feedback = %q, want %q in red", a.feedback.msg, want)

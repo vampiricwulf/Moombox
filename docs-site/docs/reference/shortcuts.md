@@ -159,25 +159,26 @@ Mouse clicks and the wheel only move the selection.
 | ++left++ / ++right++ | Toggle, cycle a choice, or step presets. |
 | ++shift+left++ / ++shift+right++ | Previous / next section. |
 | ++tab++ | Next section (wraps). |
-| ++shift+down++ | Go to the **Save & Return** / **Return** buttons. |
+| ++shift+down++ | Go to the **Save & Return** / **Return** buttons (not in the Channels section, where it moves the selected channel down). |
 | Buttons: ++left++ / ++right++, ++enter++, ++up++ | Pick a button, activate it, back to the fields. |
 | ++esc++ | Close (asks to save if there are unsaved changes). |
 | Save prompt: `Y` / `N` / ++esc++ | Save and close / discard and close / keep editing. |
 | Network section, on a non-text row: `` ` `` / `~` | Set or change / remove the dashboard password. |
 | Paths → FFmpeg path row: ++ctrl+o++ | Open the FFmpeg install check. |
 | Channels: `A` / ++enter++ / `D` | Add / edit / remove a channel. |
+| Channels: ++shift+up++ / ++shift+down++ | Move the selected channel up / down the list. Saved when you save. |
 | Channel removal prompt: ++enter++ / `P` / any other key | Remove and keep its jobs / remove and delete its pending jobs (only when it has some) / cancel. Applied when you save. |
 | Integrations: `A` / ++enter++ / `D` / `T` | Add / edit / delete / test a notification webhook. |
 | Notification editor: ++space++ / `m` | Toggle an option or event / toggle an event's mention. |
 | Restart Required box: ++enter++ / ++esc++ | Restart now / close without restarting. |
 
-Settings also accepts mouse clicks.
+Settings also accepts mouse clicks, and the wheel scrolls the section.
 
 ### Help (`?`) and release notes (`R N`)
 
 | Key | Action |
 |---|---|
-| ++up++ / ++down++, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++ | Scroll. |
+| ++up++ / ++down++, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++, wheel | Scroll. |
 | `?`, ++esc++ | Close Help. |
 | ++esc++, `Q` | Close release notes. |
 | `U` | Release notes of a pending update: apply it. |
