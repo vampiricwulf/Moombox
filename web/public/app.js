@@ -4297,11 +4297,16 @@ export class MoomboxApp {
     if (!await this.showConfirm("Stop this trim? What it has encoded so far is discarded.", { okLabel: "Stop", okVariant: "danger" })) {
       return;
     }
+    // It may have ended while the confirm was open; its outcome is toasted.
+    if (!this.runningTrims[trimId]) return;
     this.stoppingTrims.add(trimId);
     const btn = [...document.querySelectorAll("#details-trims [data-stop-trim]")].find((b) => b.dataset.trimId === trimId);
     if (btn) btn.loading = true;
     try {
-      const response = await fetch(`/api/jobs/${jobId}/trims/${trimId}`, { method: "DELETE" });
+      // stop=1: never a delete. A trim that finished as this was sent is
+      // refused (404) rather than its clip deleted — the stored record
+      // carries the running trim's id.
+      const response = await fetch(`/api/jobs/${jobId}/trims/${trimId}?stop=1`, { method: "DELETE" });
       if (!response.ok) {
         throw new Error("Failed to stop trim: " + await serverErrorMessage(response));
       }

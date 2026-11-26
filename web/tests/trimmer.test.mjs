@@ -350,7 +350,8 @@ test("a page reloaded mid-trim shows the trim still running", { skip }, async ()
 
 // Mutants: drop the Stop button from the running row; drop the
 // data-stop-trim delegation (the click sends nothing); drop stopTrim's
-// stoppingTrims check (a second click sends a second DELETE).
+// stoppingTrims check (a second click sends a second DELETE); drop the
+// ?stop=1 (a stop that lands after the trim finished deletes its clip).
 test("a running trim's Stop sends one stop for that trim", { skip }, async () => {
   const r = await trimRace();
   let release;
@@ -363,7 +364,7 @@ test("a running trim's Stop sends one stop for that trim", { skip }, async () =>
   await r.click(stop);
   await r.click(stop);
   const sent = r.h.http.calls.filter((c) => c.method === "DELETE");
-  assert.deepEqual(sent.map((c) => c.url), ["/api/jobs/A/trims/tA"], "Stop sent the wrong requests");
+  assert.deepEqual(sent.map((c) => c.url + c.search), ["/api/jobs/A/trims/tA?stop=1"], "Stop sent the wrong requests");
   release(response({ body: { success: true, stopped: true } }));
   for (let i = 0; i < 6; i++) await r.h.flush();
   assert.equal(r.h.app.stoppingTrims.size, 0, "the stop's busy mark outlived its answer");
@@ -385,7 +386,27 @@ test("a refused stop names the server's reason", { skip }, async () => {
   const r = await trimRace();
   r.h.http.on("DELETE /api/jobs/:id/trims/:trimId", () => response({ status: 409, body: { error: "the trim has finished encoding and is being saved" } }));
   r.h.app.showConfirm = async () => true;
+  trimStatus(r.h, runningFrame("tA", "A", 99));
   await r.h.app.stopTrim("A", "tA");
   await r.h.flush();
   assert.match(said(r.h), /Failed to stop trim: the trim has finished encoding and is being saved/);
+});
+
+// The stored trim carries the running trim's id, so a Stop confirmed after
+// the trim finished, sent anyway, named the clip it had just made.
+//
+// Mutant: drop stopTrim's runningTrims check after the confirm — a DELETE is
+// sent for the finished trim.
+test("a Stop confirmed after its trim finished sends nothing", { skip }, async () => {
+  const r = await trimRace();
+  r.h.http.on("DELETE /api/jobs/:id/trims/:trimId", () => response({ body: { success: true } }));
+  let confirm;
+  r.h.app.showConfirm = () => new Promise((resolve) => { confirm = resolve; });
+  trimStatus(r.h, runningFrame("tA", "A", 90));
+  const pending = r.h.app.stopTrim("A", "tA");
+  trimStatus(r.h, { ...runningFrame("tA", "A", 100), state: "finished", trim: trimRecord("tA", "A", 60, 300) });
+  confirm(true);
+  await pending;
+  await r.h.flush();
+  assert.deepEqual(r.h.http.calls.filter((c) => c.method === "DELETE"), [], "a Stop for a finished trim was sent");
 });

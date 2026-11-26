@@ -442,3 +442,37 @@ func mustGetJob(t *testing.T, db *database.Database, id string) *database.Job {
 	}
 	return j
 }
+
+// TestTrimStopNeverDeletesAStoredTrim: a stored trim carries the id its
+// encode ran under, so a dashboard Stop that lands just after the trim
+// finished named a stored trim, and the DELETE fell through to deleting the
+// clip it had just made. With ?stop=1 (what the dashboard's Stop sends) a
+// trim no longer running is 404 and the stored one is kept; without it the
+// DELETE still deletes.
+//
+// Mutant: drop the handler's stop=1 case — the stored trim is deleted.
+func TestTrimStopNeverDeletesAStoredTrim(t *testing.T) {
+	f := newTrimFixture(t)
+	jobID := f.seedJob(t, "stored12345")
+	if err := f.db.AddTrim(&database.TrimRecord{ID: "trim_stored12345_1", JobID: jobID, StartTime: 1, EndTime: 9,
+		Filename: "trim/x.mp4", CreatedAt: "2026-11-25T00:00:00Z", Duration: 8}); err != nil {
+		t.Fatalf("AddTrim: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/"+jobID+"/trims/trim_stored12345_1?stop=1", nil))
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "no longer running") {
+		t.Errorf("a stop for a trim that has finished: %d %s, want 404 \"the trim is no longer running\"", rec.Code, rec.Body)
+	}
+	if rows, _ := f.db.GetTrimsForJob(jobID); len(rows) != 1 {
+		t.Fatalf("a stop deleted the stored trim: %d rows left", len(rows))
+	}
+
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/"+jobID+"/trims/trim_stored12345_1", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("a plain DELETE of the stored trim: %d %s, want 200", rec.Code, rec.Body)
+	}
+	if rows, _ := f.db.GetTrimsForJob(jobID); len(rows) != 0 {
+		t.Errorf("the plain DELETE kept the stored trim: %d rows", len(rows))
+	}
+}
