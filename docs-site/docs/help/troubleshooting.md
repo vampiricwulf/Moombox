@@ -363,6 +363,13 @@ and the job does not come back on its own. Load cookies from a signed-in
 account that YouTube has age-verified (see
 [Cookies and sign-in](../guide/cookies.md)), then **Reinitialize** the job.
 
+An error that says the recording *was written to …, but the database refused
+to mark the job Finished* means the archive file is complete and only the
+job's record could not be saved, after several tries (a full disk, or another
+program holding `moombox.db`). Nothing was deleted: staging is kept. Fix the
+cause, then press **Mux**; it writes the archive again at the same name and
+records it.
+
 Some Twitch errors recover on their own; the details then show *Retries
 automatically if the broadcast is live again, while the channel is monitored*
 or *Muxes automatically once Twitch confirms the broadcast over, while the

@@ -122,7 +122,8 @@ func TestCleanupStagingAfterMuxKeepsItsLinesInTheJobLog(t *testing.T) {
 // line back down beside its notification) can undo without any test noticing.
 // Same shape as the composer-body pin in internal/web.
 //
-// Mutant this kills: either Info call moved back below its UpdateJobFields.
+// Mutant this kills: either Info call moved back below its writeFinished, the
+// helper that makes the write (and retries one the database refused).
 func TestTheCompletionLineIsLoggedBeforeTheFinishedWrite(t *testing.T) {
 	src, err := os.ReadFile("orchestrator_mux.go")
 	if err != nil {
@@ -147,7 +148,7 @@ func TestTheCompletionLineIsLoggedBeforeTheFinishedWrite(t *testing.T) {
 		body := text[start : start+end]
 
 		logAt := strings.Index(body, tc.logLine)
-		writeAt := strings.Index(body, "UpdateJobFields(jobCtx.Job.ID, updates)")
+		writeAt := strings.Index(body, "o.writeFinished(ctx, jobCtx.Job.ID, updates")
 		if logAt < 0 {
 			t.Errorf("%s no longer logs %s", tc.fn, tc.logLine)
 			continue

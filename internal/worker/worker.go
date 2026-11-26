@@ -1661,7 +1661,17 @@ func (w *DownloadWorker) cleanupStagingAfterMux(jobID, stagingDir string) {
 	// remove is tried again here, before staging a mux-gap record keeps is
 	// kept with it.
 	w.removeStaleRepairedCopies(jobID, stagingDir)
-	fresh, _ := w.db.GetJob(jobID)
+	fresh, err := w.db.GetJob(jobID)
+	if err != nil {
+		// A row that cannot be read is not a row that is gone (GetJob answers
+		// nil, nil for that one, which decideStagingCleanup supports): the
+		// shields below read the row's incomplete tail and chat verdict, and
+		// deleting the recording on a read that failed would decide without
+		// them. Kept; the boot sweep and the staging expiry see it again.
+		w.logger.Warn("preserving staging dir: the job's row could not be read, so nothing says the recording is safe to delete",
+			"path", stagingDir, "jobID", jobID, "err", err)
+		return
+	}
 	v := decideStagingCleanup(w.db, fresh, jobID, stagingDir)
 	switch v.keep {
 	case keepStagingForAsides:
