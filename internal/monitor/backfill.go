@@ -106,11 +106,15 @@ const parserArmRetryInterval = time.Hour
 
 // parserArmState is one channel's run of parser-failure-arm stops: how many
 // scans in a row the arm stopped each tab, and, once any tab reaches two,
-// when the sweep may queue the channel again. In memory only: a restart
-// forgets it and the first scan after boot runs at once.
+// when the sweep may queue the channel again. windowDays and withMembership
+// are what the scan that last failed was asked for: a sweep that asks for
+// more than that is a different scan, and does not wait (Sweep). In memory
+// only: a restart forgets it and the first scan after boot runs at once.
 type parserArmState struct {
-	fails   map[string]int
-	retryAt time.Time
+	fails          map[string]int
+	retryAt        time.Time
+	windowDays     int
+	withMembership bool
 }
 
 // TabPageFetchFunc fetches ONE page of a channel tab ("videos", "streams",
@@ -498,7 +502,8 @@ func (bw *BackfillWorker) runScan(item scanItem) {
 // the record: those keep the every-cycle retry. A tab the arm stopped counts
 // one more failure in a row, a tab it did not stop this time starts over, and
 // from the second failure in a row on one tab the channel's next scan waits
-// parserArmRetryInterval.
+// parserArmRetryInterval. The record keeps what the scan was asked for, so
+// that a sweep asking for more does not wait.
 func (bw *BackfillWorker) noteParserArm(ref ChannelRef, err error) bool {
 	chID := ref.ChID
 	tabs := undatableTabs(err)
@@ -509,7 +514,7 @@ func (bw *BackfillWorker) noteParserArm(ref ChannelRef, err error) bool {
 		return false
 	}
 	prev := bw.parserArm[chID]
-	st := &parserArmState{fails: make(map[string]int, len(tabs))}
+	st := &parserArmState{fails: make(map[string]int, len(tabs)), windowDays: ref.WindowDays, withMembership: ref.WithMembership}
 	repeated := false
 	for _, tab := range tabs {
 		n := 1
@@ -616,7 +621,16 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 			// The parser-failure arm stopped the same tab twice running:
 			// the channel still needs its backfill, and its error state is
 			// still up, but the next attempt waits (parserArmRetryInterval).
-			continue
+			// Unless the config now asks more of the channel than the scan
+			// that failed was asked: a wider window or a membership tab
+			// newly eligible is another scan, whose other tabs can write
+			// rows while the failing one still fails, so the wait ends and
+			// the count starts over, as it does for a scan in flight
+			// (above). The same scan again, or a narrower one, waits.
+			if st.windowDays >= ref.WindowDays && (st.withMembership || !ref.WithMembership) {
+				continue
+			}
+			delete(bw.parserArm, ref.ChID)
 		}
 		if !force {
 			cb, err := bw.db.GetChannelBackfill(ref.ChID)
