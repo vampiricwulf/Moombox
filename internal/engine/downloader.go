@@ -90,6 +90,19 @@ var ErrTruncateBlocked = errors.New("truncate for resume blocked")
 // triggers this — see ensureHlsInit.
 var ErrInitSegmentChanged = errors.New("HLS init segment changed")
 
+// ErrRenditionChanged signals that a SplitOnRenditionChange downloader found
+// its output file holding another rendition than the one it is set up to
+// record: the resume sidecar beside the file names another stream (another
+// itag of the video), or, with no usable sidecar, the rendition marker
+// beside it does (renditionFileSuffix). Appending would write the new
+// rendition's fragments under the old one's ftyp+moov, which no muxer can
+// read back. Start returns it before opening the file, so the staged
+// recording and its sidecar are exactly as they were, and CurrentSeq() is the
+// next segment the capture needs: the caller closes the file as a finished
+// part and records on in a fresh one from there, as it does at a mid-run
+// quality change.
+var ErrRenditionChanged = errors.New("staged recording holds another rendition")
+
 // ErrAdBreakEnded signals that a Twitch stitched-ad break the live loop
 // skipped has ended and DownloaderOptions.SplitOnAdBreak is set: the loop
 // stops before writing the first content segment after the break, its
@@ -851,6 +864,16 @@ type SegmentDownloader struct {
 	// parts — the rule never fires and a refused segment is retried and
 	// verified exactly as before. Assign before Start, like the callbacks.
 	SplitOnRefusedSegment bool
+	// SplitOnRenditionChange says this downloader's caller can close the
+	// staged file as a finished part and record on in a new one: the YouTube
+	// live loop sets it on every downloader it runs (owner ruling R4-1). Start
+	// then refuses to append to a file that holds another rendition — its
+	// sidecar, or with none usable its rendition marker, names another stream
+	// — and returns ErrRenditionChanged instead, and it keeps that marker
+	// beside every file it records. Unset — Twitch, the post-live and VOD
+	// downloads — Start resumes exactly as before and writes no marker.
+	// Assign before Start, like the callbacks.
+	SplitOnRenditionChange bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment body read, and in pieces while a
 	// whole-file chunk is being read (a chunk that breaks off keeps the part
@@ -1149,6 +1172,9 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 	// Check for resume state
 	resuming := false
+	// sidecarNamesOther is whether the resume sidecar named another stream
+	// than this downloader's: read by the rendition check below.
+	sidecarNamesOther := false
 	state, err := d.loadResume()
 	if err == nil && state != nil {
 		// Validate resume identity — see resumeIdentityMismatch for the
@@ -1159,6 +1185,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 				"reason", reason,
 				"savedStreamID", state.StreamID, "currentStreamID", d.opts.StreamID,
 				"savedURLIdentity", streamIdentity(state.BaseURL), "currentURLIdentity", streamIdentity(d.getBaseURL()))
+			sidecarNamesOther = true
 			state = nil
 		}
 		// Validate resume state: file must exist and be at least as large as saved position
@@ -1178,6 +1205,27 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 			d.hlsInitHash = state.InitHash
 			d.directTotalSize = state.TotalSize
 			resuming = true
+		}
+	}
+
+	// A file that holds another rendition is never appended to (owner ruling
+	// R4-1). With no usable sidecar the two fallbacks below would append to
+	// whatever the file holds — the orchestrator's forced seq and the DB's
+	// last seq both name a position, not a rendition — so a
+	// SplitOnRenditionChange downloader checks first: the sidecar that named
+	// another stream, or the rendition marker the file was recorded under.
+	// See renditionChanged.
+	if !resuming && d.SplitOnRenditionChange {
+		if other, staged := d.renditionChanged(sidecarNamesOther); other {
+			// CurrentSeq() is the next segment the capture needs: the DB
+			// fallback's StartSeq is the last one written.
+			if !d.opts.ForceStartSeq && d.currentSeq.Load() > 0 {
+				d.currentSeq.Add(1)
+			}
+			d.logger.Warn("[Downloader] Staged file holds another rendition — not appending; the caller closes it as a part and records on in a new one",
+				"file", d.opts.OutputFile, "stagedRendition", staged,
+				"currentRendition", streamIdentity(d.getBaseURL()), "nextSeq", d.currentSeq.Load())
+			return fmt.Errorf("%w: %s", ErrRenditionChanged, d.opts.OutputFile)
 		}
 	}
 
@@ -1211,7 +1259,9 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 	// Shared no-truncate guard (sweep-2 ENGINE-1/5/6, verifier merge M2).
 	// Reached ONLY when the engine could not resume — a corrupt/stale/
-	// identity-rejected sidecar, a restart that re-probed the stream as
+	// identity-rejected sidecar with no position to append from (with one,
+	// the fallbacks above append, unless the rendition check refused first),
+	// a restart that re-probed the stream as
 	// post-live and re-seeded seq 0, a sidecar the natural end already
 	// cleared. A usable sidecar never lands here: `resuming` is already true
 	// above, the file is truncated to the fsync'd offset and the missing tail
@@ -1313,6 +1363,14 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// discard (discardStagedMedia) reopens d.outputFile, and a method-value
 	// defer would close the stale handle and leak the new one.
 	defer func() { d.outputFile.Close() }()
+	// The file's rendition, for the next Start's renditionChanged: written
+	// before any media, so a file never holds bytes recorded under a marker
+	// that names another rendition. A file appended to on a position alone
+	// (no sidecar, no marker: staged by an older build) is left unmarked —
+	// what it holds is not known.
+	if d.SplitOnRenditionChange && (!resuming || state != nil) {
+		d.writeRenditionMarker()
+	}
 
 	// Download init segment first (only if not resuming and not HLS).
 	//

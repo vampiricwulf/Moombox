@@ -249,9 +249,17 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// segment YouTube keeps refusing (owner decision D8; the split is the
 		// ErrSegmentRefused branch below), and the ones a capped rebuild built
 		// are told where (sameSeqRebuildCap). The HLS loop never reads either.
+		//
+		// Every downloader this loop runs, HLS too, also refuses to append to
+		// a staged file that holds another rendition (owner ruling R4-1): a
+		// restart that chose another itag than its staged part's — settings
+		// changed, or the restart's ladder lacks the old one — ends its Start
+		// with engine.ErrRenditionChanged, and the branch below closes that
+		// part and records on in a new one.
 		for _, d := range []*engine.SegmentDownloader{res.VideoDownloader, res.AudioDownloader} {
 			if d != nil {
 				d.SplitOnRefusedSegment = true
+				d.SplitOnRenditionChange = true
 			}
 		}
 		rebuilds.arm(res)
@@ -281,7 +289,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// stopped streams past it. That split is the job log's alone: it is not a
 	// quality change, so it sends no quality-split notification unless the
 	// quality changed as well.
-	splitPart := func(newQuality QualityInfo, freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int, shortSegment bool, segmentEndTime int64, hole int) (exit bool, err error) {
+	//
+	// And it is the split at a staged part of another rendition (rendition,
+	// owner ruling R4-1: a restart chose another itag than the one its staged
+	// part was recorded in). The caller has set currentQuality to what the
+	// part's file holds; the notification goes out only when that is known
+	// and differs from the new quality — another itag at the same resolution
+	// (a codec change) is the job log's alone, as a refused segment is.
+	splitPart := func(newQuality QualityInfo, freshInfo *youtube.VideoInfo, oldVideoSeq, oldAudioSeq int, shortSegment bool, segmentEndTime int64, hole int, rendition bool) (exit bool, err error) {
 		if hole >= 0 {
 			o.logger.Warn("YouTube kept refusing a segment its stream had moved well past — closing the part at it and continuing in a new one",
 				"seq", hole, "segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
@@ -293,7 +308,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// which of the two the span became: sent first, it said "set aside"
 		// of a span then muxed as a part.
 		setAside := shortSegment && o.setAsideShortSpan(curCtx.StagingDir, jobCtx.Job.ID)
-		if hole < 0 || newQuality.Changed(currentQuality) {
+		if rendition {
+			if currentQuality.Height > 0 && newQuality.Changed(currentQuality) {
+				o.logger.Info("quality split",
+					"from", currentQuality.Label, "to", newQuality.Label,
+					"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
+				o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !setAside)
+			}
+		} else if hole < 0 || newQuality.Changed(currentQuality) {
 			o.logger.Info("quality split",
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
@@ -661,6 +683,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// it and the next starts past it (owner decision D8).
 		var refused *engine.SegmentRefusedError
 		isRefused := errors.As(downloadErr, &refused)
+		// A staged file of another rendition than the one chosen now (owner
+		// ruling R4-1, engine.ErrRenditionChanged): the part is closed as it
+		// stands and the next one records the new rendition from the
+		// position the refusal names.
+		isRenditionChanged := errors.Is(downloadErr, engine.ErrRenditionChanged)
 
 		// The same-seq rebuild cap (sameSeqRebuildCap): past it, an
 		// ErrQualityLost at the sequence the last rebuilds were all stuck at
@@ -676,7 +703,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 		}
 
-		if (qualityChanged || isQualityLost || isRefused) && !rebuildCapped {
+		if (qualityChanged || isQualityLost || isRefused || isRenditionChanged) && !rebuildCapped {
 			segmentEndTime := time.Now().Unix()
 			// A resumed part is never "short" — the timer only measures this
 			// session's slice of it.
@@ -889,7 +916,23 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				var videoMoved, audioMoved bool
 				oldVideoSeq, oldAudioSeq, videoMoved, audioMoved = pastRefusedSegment(hole, oldVideoSeq, oldAudioSeq)
 				noteRefusedHole(result, hole, videoMoved, audioMoved)
-				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, hole); exit {
+				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, hole, false); exit {
+					return result, end(), err
+				}
+				continue
+			}
+
+			// A staged part of another rendition closes whatever quality the
+			// refresh came back at: the refresh only rebuilt the downloaders
+			// that refused it, in the same directory. The part's quality is
+			// what its file holds, not what result was set up to record, so
+			// it is read from the file for the part's row and the split
+			// notification. Never short: it is a resumed part.
+			if isRenditionChanged {
+				o.logger.Warn("the staged part holds another rendition than the one chosen now — closing it as a part and recording on in a new one",
+					"segment", segmentIndex+1, "err", downloadErr, "jobID", jobCtx.Job.ID)
+				currentQuality = o.stagedPartQuality(ctx, result)
+				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, -1, true); exit {
 					return result, end(), err
 				}
 				continue
@@ -928,7 +971,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// Quality actually changed — split into a new segment.
-			if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, segmentEndTime, -1); exit {
+			if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, segmentEndTime, -1, false); exit {
 				return result, end(), err
 			}
 			continue
@@ -1142,7 +1185,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					oldAudioSeq = result.AudioDownloader.CurrentSeq()
 				}
 				shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
-				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, time.Now().Unix(), -1); exit {
+				if exit, err := splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, shortSegment, time.Now().Unix(), -1, false); exit {
 					return result, end(), err
 				}
 				continue

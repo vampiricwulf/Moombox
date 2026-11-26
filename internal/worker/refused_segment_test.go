@@ -298,7 +298,7 @@ func TestLiveLoopSplitsAtARefusedSegment(t *testing.T) {
 	for _, want := range []string{
 		"isRefused := errors.As(downloadErr, &refused)",
 		"if isQualityLost && !qualityChanged {\n\t\t\tif n := rebuilds.note(result); n > sameSeqRebuildCap {\n\t\t\t\trebuildCapped = true",
-		"if (qualityChanged || isQualityLost || isRefused) && !rebuildCapped {",
+		"if (qualityChanged || isQualityLost || isRefused || isRenditionChanged) && !rebuildCapped {",
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("runLiveStreamDownload lacks %q", want)
@@ -313,7 +313,7 @@ func TestLiveLoopSplitsAtARefusedSegment(t *testing.T) {
 	for _, want := range []string{
 		"oldVideoSeq, oldAudioSeq, videoMoved, audioMoved = pastRefusedSegment(hole, oldVideoSeq, oldAudioSeq)",
 		"noteRefusedHole(result, hole, videoMoved, audioMoved)",
-		"splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, hole)",
+		"splitPart(newQuality, freshInfo, oldVideoSeq, oldAudioSeq, false, segmentEndTime, hole, false)",
 		"continue",
 	} {
 		if !strings.Contains(split, want) {

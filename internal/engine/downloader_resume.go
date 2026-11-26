@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -282,4 +283,68 @@ func (d *SegmentDownloader) saveResume() {
 // ClearResume removes the resume state file.
 func (d *SegmentDownloader) ClearResume() {
 	os.Remove(d.opts.ResumeFile)
+}
+
+// renditionFileSuffix names the rendition marker beside a staged file:
+// <OutputFile>.rendition, holding the streamIdentity (videoID/itag) the file
+// is recorded in. A SplitOnRenditionChange downloader writes it when it opens
+// the file, before any media, so a restart that finds no usable sidecar — one
+// before the first sidecar save, or with the sidecar lost — still knows what
+// the file holds (owner ruling R4-1). Nothing else reads it; the staging scans
+// recognise media by name, so it is never mistaken for a recording.
+const renditionFileSuffix = ".rendition"
+
+func (d *SegmentDownloader) renditionFile() string {
+	return d.opts.OutputFile + renditionFileSuffix
+}
+
+// renditionChanged reports whether the staged file holds another rendition
+// than the one this downloader records, and names the staged one for the log.
+// Only a file that holds bytes counts, and only for a download that would
+// append to it: a whole-file download and a DiscardStaged one never append to
+// what they cannot resume. sidecarNamesOther is Start's verdict on the resume
+// sidecar (resumeIdentityMismatch); without one the rendition marker decides,
+// and a file with no marker — staged by an older build — or a URL with no
+// identity to compare is not known to differ.
+func (d *SegmentDownloader) renditionChanged(sidecarNamesOther bool) (bool, string) {
+	if d.opts.IsDirectURL || d.opts.DiscardStaged {
+		return false, ""
+	}
+	if info, err := os.Stat(d.opts.OutputFile); err != nil || info.Size() == 0 {
+		return false, ""
+	}
+	marked := ""
+	if data, err := os.ReadFile(d.renditionFile()); err == nil {
+		marked = strings.TrimSpace(string(data))
+	}
+	if sidecarNamesOther {
+		if marked == "" {
+			marked = "named by the resume sidecar"
+		}
+		return true, marked
+	}
+	current := streamIdentity(d.getBaseURL())
+	if marked == "" || current == "" {
+		return false, ""
+	}
+	return marked != current, marked
+}
+
+// writeRenditionMarker records the rendition this downloader records into
+// beside its output file (renditionFileSuffix). A URL with no identity
+// removes any marker left from an earlier file instead, so a stale one never
+// speaks for this file. A failed write costs only the check on a later
+// restart, so it is logged, not fatal.
+func (d *SegmentDownloader) writeRenditionMarker() {
+	id := streamIdentity(d.getBaseURL())
+	if id == "" {
+		if err := os.Remove(d.renditionFile()); err != nil && !os.IsNotExist(err) {
+			d.logger.Warn("[Downloader] Could not remove a stale rendition marker", "file", d.renditionFile(), "err", err)
+		}
+		return
+	}
+	if err := utils.WriteFileAtomic(d.renditionFile(), []byte(id+"\n"), 0o644); err != nil {
+		d.logger.Warn("[Downloader] Could not record the staged file's rendition; a restart cannot check it",
+			"file", d.renditionFile(), "err", err)
+	}
 }

@@ -152,6 +152,14 @@ part loses the `- part1` suffix.
 A segment YouTube keeps refusing while the stream moves on is skipped the
 same way: the part closes at the hole and the next part starts just after it.
 
+A restart can split a recording too. If Moombox restarts during a live
+stream and now picks a different format than the one it was recording (you
+changed the quality settings before restarting, say, or YouTube no longer
+offers the old one), the part recorded so far is closed and muxed as it is,
+and recording continues in the new format in a new part. Two formats are
+never mixed in one file. The *Quality Split* notification is sent only when
+the resolution changed.
+
 ### Interruptions and the end of a stream
 
 - **Stalls.** When no new segment arrives, Moombox shows *Waiting for next
