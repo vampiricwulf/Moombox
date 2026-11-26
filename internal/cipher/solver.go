@@ -31,7 +31,12 @@ type GojaResolver struct {
 	// elsewhere without the lock would race with mutation. (audit cipher.md H4)
 	solverOrder []string
 	compileSlot compileSlot // serializes compilation to prevent thundering herd
-	logger      interface {
+	// timedOut maps the CacheKey of a player whose compile ran out of
+	// compileTimeout to the time it may be compiled again. Read and written
+	// under timedOutMu; held to maxTimedOutPlayers entries.
+	timedOutMu sync.Mutex
+	timedOut   map[string]time.Time
+	logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -59,6 +64,80 @@ func (c *compileSlot) acquire(ctx context.Context) error {
 }
 
 func (c *compileSlot) release() { <-c.ch }
+
+// compileTimeout bounds the goja run of a whole preprocessed player (the
+// compile): a variable so a test can shorten it. Generous, because a slow
+// arm64 box must still finish a working player well inside it.
+var compileTimeout = 120 * time.Second
+
+// compileRefusal is how long a player whose compile ran out of
+// compileTimeout is refused instead of compiled again. Without it every
+// later request for that player re-ran the script for the full bound while
+// holding the compile slot.
+const compileRefusal = 10 * time.Minute
+
+// maxTimedOutPlayers caps the refusal list. Players rotate a few times a
+// week, so more than a handful at once means the list is being churned;
+// the entry closest to expiry goes first.
+const maxTimedOutPlayers = 16
+
+// resolverNow is the clock of the refusal list, a variable so a test can
+// move past compileRefusal without waiting it out.
+var resolverNow = time.Now
+
+// ErrCompileRefused is what GetSolvers returns for a player whose compile
+// ran out of compileTimeout less than compileRefusal ago.
+var ErrCompileRefused = errors.New("cipher: player compile timed out recently; not compiling it again yet")
+
+// refusedUntil returns when the player under key may be compiled again, or
+// the zero time when it is not refused. An expired entry is dropped.
+func (s *GojaResolver) refusedUntil(key string) time.Time {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	until, ok := s.timedOut[key]
+	if !ok {
+		return time.Time{}
+	}
+	if !resolverNow().Before(until) {
+		delete(s.timedOut, key)
+		return time.Time{}
+	}
+	return until
+}
+
+// refuse records that the player under key timed out compiling.
+func (s *GojaResolver) refuse(key string) {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	now := resolverNow()
+	if s.timedOut == nil {
+		s.timedOut = make(map[string]time.Time)
+	}
+	for k, until := range s.timedOut {
+		if !now.Before(until) {
+			delete(s.timedOut, k)
+		}
+	}
+	for len(s.timedOut) >= maxTimedOutPlayers {
+		var oldest string
+		for k, until := range s.timedOut {
+			if oldest == "" || until.Before(s.timedOut[oldest]) {
+				oldest = k
+			}
+		}
+		delete(s.timedOut, oldest)
+	}
+	s.timedOut[key] = now.Add(compileRefusal)
+}
+
+// refusedErr is the error for a refused player, or nil when it is not.
+func (s *GojaResolver) refusedErr(key, playerID string) error {
+	until := s.refusedUntil(key)
+	if until.IsZero() {
+		return nil
+	}
+	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until.Format(time.RFC3339))
+}
 
 // NewGojaResolver creates a new GojaResolver with the given cache directory.
 func NewGojaResolver(cacheDir string, logger interface {
@@ -125,6 +204,9 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	if ok {
 		return solvers, nil
 	}
+	if err := s.refusedErr(key, playerID); err != nil {
+		return nil, err
+	}
 
 	// Serialize compilation — only one goroutine compiles at a time.
 	// Others wait here then find the result in cache. A caller whose context
@@ -148,12 +230,26 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	if ok {
 		return solvers, nil
 	}
+	// A caller that queued behind a compile that timed out is refused too,
+	// rather than running the same script for the full bound again.
+	if err := s.refusedErr(key, playerID); err != nil {
+		return nil, err
+	}
 
 	// Fetch, preprocess, compile
 	solvers, err := s.compileSolver(ctx, playerURL, playerID)
 	if err != nil {
 		// Don't cache errors — allow retry on next request (may be transient).
 		// The compileSlot serialization prevents thundering herd during this request.
+		// The one exception is a compile that ran out of compileTimeout: the
+		// script on disk is the same next time, so that player is refused for
+		// compileRefusal. A cancelled context is the caller's, not the player's.
+		if errors.Is(err, mbgoja.ErrExecutionTimeout) {
+			s.refuse(key)
+			s.logger.Error("cipher: solver compilation timed out; refusing this player for a while",
+				"playerID", playerID, "timeout", compileTimeout, "refusedFor", compileRefusal)
+			return nil, err
+		}
 		s.logger.Error("cipher: solver compilation failed", "playerID", playerID, "error", err.Error())
 		return nil, err
 	}
@@ -236,7 +332,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	}
 
 	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
-	solvers, err := getFromPrepared(preprocessed)
+	solvers, err := getFromPreparedCtx(ctx, preprocessed)
 	if err != nil {
 		return nil, fmt.Errorf("compile cipher solver for %s: %w", playerID, err)
 	}
@@ -325,7 +421,18 @@ func containsKey(order []string, key string) bool {
 // the containing goroutine, which in the worker would crash the download path
 // it ran on. Wrap the whole thing in a deferred recover so a broken player
 // script produces a clean error return the caller can handle.
-func getFromPrepared(code string) (solvers *Solvers, err error) {
+//
+// getFromPrepared is the context-free form the tests call; compileSolver
+// calls getFromPreparedCtx with the caller's context.
+func getFromPrepared(code string) (*Solvers, error) {
+	return getFromPreparedCtx(context.Background(), code)
+}
+
+// getFromPreparedCtx runs code under compileTimeout and ctx: either one ending
+// interrupts the script (a JS-level loop; a hang inside a native Go call is
+// not reached by an interrupt). A timeout's error wraps
+// mbgoja.ErrExecutionTimeout.
+func getFromPreparedCtx(ctx context.Context, code string) (solvers *Solvers, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			solvers = nil
@@ -348,7 +455,7 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 	}
 
 	// Execute the preprocessed code
-	_, err = vm.RunString(code)
+	_, err = mbgoja.RunStringWithTimeout(ctx, vm, code, compileTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("run preprocessed code: %w", err)
 	}

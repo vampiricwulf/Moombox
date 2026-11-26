@@ -171,8 +171,8 @@ func TestRunStringWithTimeoutTimeoutFires(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !strings.Contains(err.Error(), "execution timeout") {
-		t.Errorf("error should mention timeout, got: %v", err)
+	if !errors.Is(err, ErrExecutionTimeout) || err.Error() != "execution timeout (100ms)" {
+		t.Errorf("want ErrExecutionTimeout reading \"execution timeout (100ms)\", got: %v", err)
 	}
 }
 
@@ -188,8 +188,8 @@ func TestRunStringWithTimeoutContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected context cancellation error")
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected context.Canceled, got: %v", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrExecutionTimeout) {
+		t.Errorf("expected context.Canceled and no timeout, got: %v", err)
 	}
 }
 
