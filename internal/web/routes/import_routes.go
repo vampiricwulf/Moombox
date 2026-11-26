@@ -31,6 +31,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
@@ -226,6 +227,19 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		rec, err := scanImportRecording(zipReader.File)
 		if err != nil {
 			jsonError(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Room for what is extracted, checked before any of it is written
+		// (owner ruling R4-11), by the rule the chapter re-mux's copy uses
+		// (disk.RoomFor): the kept entries' declared sizes plus headroom
+		// free on the output volume, and not taking it to disk_critical —
+		// an import is optional and can be retried, a live capture writing
+		// to the same volume cannot. The spool is already on disk, so the
+		// reading counts it. A volume that cannot be read passes.
+		if msg := importRoomRefusal(store, importsDir, rec.files()); msg != "" {
+			logger.Warn("import: refused, the output volume has no room for it", "dir", importsDir, "reason", msg)
+			jsonError(rw, msg, http.StatusInsufficientStorage)
 			return
 		}
 
@@ -1170,6 +1184,37 @@ func chooseImportStem(importsDir, outputDir, base string, files []*importFile) (
 
 // maxImportUpload caps an import upload (the whole request body).
 const maxImportUpload = 500 * 1024 * 1024
+
+// importDiskSpace reads the output volume an import writes to; a variable so
+// a test can stand one in.
+var importDiskSpace = disk.GetDiskSpace
+
+// importRoomRefusal is the import's disk check (owner ruling R4-11): the
+// operator's words for why the output volume cannot take files — their
+// declared uncompressed sizes plus disk.WriteHeadroom — or "" when it can, or
+// when the volume cannot be read. Both sizes are named.
+func importRoomRefusal(store *config.Store, dir string, files []*importFile) string {
+	var size uint64
+	for _, f := range files {
+		size += f.entry.UncompressedSize64
+	}
+	space, err := importDiskSpace(dir)
+	if err != nil {
+		return ""
+	}
+	var thresholds config.DiskConfig
+	store.Read(func(c *config.MoomboxConfig) { thresholds = c.Disk })
+	short := disk.RoomFor(space, size+disk.WriteHeadroom, thresholds)
+	if short == nil {
+		return ""
+	}
+	need, free := utils.FormatFileSize(int64(short.Need)), utils.FormatFileSize(int64(short.Free))
+	if short.Crosses {
+		return fmt.Sprintf("not enough free space to import: the archive needs %s of the output volume's %s free, which would take it to %.1f%% used, past the disk_critical threshold (%d%%)",
+			need, free, short.AfterPct, short.CriticalPercent)
+	}
+	return fmt.Sprintf("not enough free space to import: the archive needs %s free on the output volume, which has %s", need, free)
+}
 
 // errImportTooLarge is copyWithLimit's answer to a body longer than its limit.
 var errImportTooLarge = errors.New("upload exceeds the import size limit")

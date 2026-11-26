@@ -3,6 +3,7 @@ package routes
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"maps"
@@ -13,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // The zip-bomb guards and extractZipEntry's partial-file cleanup had no test:
@@ -215,5 +218,61 @@ func TestImportNamesAreRefusedAsBrowsers(t *testing.T) {
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("cookies.ImportWrittenSuffixes = %v; the import writes %v", got, want)
+	}
+}
+
+// TestImportRefusesWithoutRoomOnTheOutputVolume is owner ruling R4-11: an
+// import the output volume has no room for — the kept entries' declared
+// sizes plus disk.WriteHeadroom — or that would take it to disk_critical is
+// refused with 507, naming both sizes, before anything is extracted; a volume
+// that cannot be read passes, as the chapter re-mux's check does.
+//
+// Mutants: no check; the need not counting the entries (only the headroom
+// left, the one-byte-short row imports); the critical crossing not checked;
+// an unreadable volume refused.
+func TestImportRefusesWithoutRoomOnTheOutputVolume(t *testing.T) {
+	video := bytes.Repeat([]byte("v"), 1<<20)
+	const total = 1 << 50
+	need := uint64(len(video)) + disk.WriteHeadroom
+	for _, tc := range []struct {
+		name    string
+		space   *disk.DiskSpace
+		err     error
+		created bool
+		words   []string
+	}{
+		{"one byte short", &disk.DiskSpace{Free: need - 1, Total: total, UsedPct: 10}, nil, false,
+			[]string{"not enough free space to import", utils.FormatFileSize(int64(need)), utils.FormatFileSize(int64(need - 1))}},
+		{"exactly enough", &disk.DiskSpace{Free: need, Total: total, UsedPct: 10}, nil, true, nil},
+		{"room, but crossing disk_critical", &disk.DiskSpace{Free: 50 << 30, Total: 100 << 30, UsedPct: 94.9}, nil, false,
+			[]string{"disk_critical", utils.FormatFileSize(int64(need)), utils.FormatFileSize(50 << 30)}},
+		{"the volume cannot be read", nil, errors.New("statfs: no such device"), true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := importDiskSpace
+			t.Cleanup(func() { importDiskSpace = orig })
+			importDiskSpace = func(string) (*disk.DiskSpace, error) { return tc.space, tc.err }
+
+			f := newImportFixture(t)
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			storedEntry(t, zw, guardVideoName, video)
+			rec, _ := importZip(t, f, closeZip(t, zw, &buf))
+			if tc.created {
+				if rec.Code != http.StatusCreated {
+					t.Fatalf("import: %d %s, want 201", rec.Code, rec.Body.String())
+				}
+				return
+			}
+			if rec.Code != http.StatusInsufficientStorage {
+				t.Fatalf("import: %d %s, want 507", rec.Code, rec.Body.String())
+			}
+			for _, w := range tc.words {
+				if !strings.Contains(rec.Body.String(), w) {
+					t.Errorf("refusal %s does not say %q", rec.Body.String(), w)
+				}
+			}
+			assertNothingImported(t, f, tc.name)
+		})
 	}
 }

@@ -502,6 +502,13 @@ directory](../configuration/paths-and-logs.md).
 | Compression ratio | at most 100 : 1 (a higher ratio is refused as a possible zip bomb) |
 | Imports | 5 per minute |
 
+An import is refused before anything is unpacked when the output drive has no
+room for it: it needs the archive's unpacked size plus 256 MB free, and it may
+not take the drive to the [critical disk
+threshold](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). The message names both sizes ("not
+enough free space to import: the archive needs … free on the output volume,
+which has …"). Free some space, or raise the threshold, and import again.
+
 An import is refused when a job with the same video ID already exists ("job
 already exists for video ID: …"). If a file of the same name is already in
 `imports`, the result line says what happened (an identical file is re-used;

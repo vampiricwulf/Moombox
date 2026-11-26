@@ -45,8 +45,9 @@ var ErrArchiveRemuxNoSpace = errors.New("not enough free space to re-mux the arc
 // remuxHeadroom is what the archive's volume must keep free beyond the
 // re-mux's full temporary copy of the archive: the FFMETADATA file, the
 // copy's own index growing past the original's, and room for whatever else
-// writes to the volume (a live capture) while the copy is written.
-const remuxHeadroom = 256 << 20
+// writes to the volume (a live capture) while the copy is written: the
+// headroom every disk.RoomFor caller asks for.
+const remuxHeadroom = disk.WriteHeadroom
 
 // ClaimChapterImport takes the job's per-job claim for a chapter import and
 // returns its release, to be called once the import is done. The claim is
@@ -256,7 +257,8 @@ func (w *DownloadWorker) RemuxArchiveChapters(jobID string, expect database.JobS
 // beside it, so the archive's volume needs the archive's size plus
 // remuxHeadroom free, and the copy must not take the volume to the
 // disk_critical threshold — the reading that closes backlog admission and
-// alerts the operator. Gap-fill (diskCritical) and the mux repair
+// alerts the operator. The check itself is disk.RoomFor, shared with the
+// archive import. Gap-fill (diskCritical) and the mux repair
 // (repairDiskSpace) guard their copies the same way; the import wrote one
 // with no check at all, which on a shared, nearly full volume starved a live
 // capture of the space it was writing into. A volume that cannot be read is
@@ -274,22 +276,19 @@ func (w *DownloadWorker) remuxRoom(path string) error {
 	if err != nil || ds == nil {
 		return nil
 	}
-	need := uint64(info.Size()) + remuxHeadroom
-	if ds.Free < need {
-		return fmt.Errorf("%w: the archive's re-mux needs %s free on its volume, which has %s; the file was not re-muxed",
-			ErrArchiveRemuxNoSpace, utils.FormatFileSize(int64(need)), utils.FormatFileSize(int64(ds.Free)))
-	}
 	var thresholds config.DiskConfig
 	w.readConfig(func(c *config.MoomboxConfig) { thresholds = c.Disk })
-	after := ds.UsedPct
-	if ds.Total > 0 {
-		after += float64(need) / float64(ds.Total) * 100
-	}
-	if thresholds.AtCritical(after) {
+	short := disk.RoomFor(ds, uint64(info.Size())+remuxHeadroom, thresholds)
+	switch {
+	case short == nil:
+		return nil
+	case short.Crosses:
 		return fmt.Errorf("%w: the archive's re-mux would take its volume to %.1f%% used, past the disk_critical threshold (%d%%); the file was not re-muxed",
-			ErrArchiveRemuxNoSpace, after, thresholds.CriticalPercent)
+			ErrArchiveRemuxNoSpace, short.AfterPct, short.CriticalPercent)
+	default:
+		return fmt.Errorf("%w: the archive's re-mux needs %s free on its volume, which has %s; the file was not re-muxed",
+			ErrArchiveRemuxNoSpace, utils.FormatFileSize(int64(short.Need)), utils.FormatFileSize(int64(short.Free)))
 	}
-	return nil
 }
 
 // archiveStillAsRead is the re-mux's last question before its rename: is the
