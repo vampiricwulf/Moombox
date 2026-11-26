@@ -1444,6 +1444,17 @@ export class PlayerController {
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);
+      // The newest rebuild failed before it could apply a pick a superseded
+      // one kept: apply it now from the options already shown, rather than
+      // leave it for a later rebuild to load minutes from now.
+      if (token === this._rebuildToken && this._rebuildsActive === 0) {
+        const pick = this._pickDuringRebuild;
+        this._pickDuringRebuild = null;
+        if (pick && [...select.querySelectorAll("sl-option")].some((o) => o.value === pick)) {
+          select.value = pick;
+          await this._loadPick(pick);
+        }
+      }
       // The half-failed list toasts above; a total failure (server
       // unreachable) must too, or the picker just sits stale.
       this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
@@ -1473,6 +1484,9 @@ export class PlayerController {
 
     // Track selection to detect stale responses from rapid switching
     const selectionId = ++this._selectionSeq;
+    // A pick acted on here is the newest one: a pick an earlier rebuild kept
+    // for later (loadPlayerJobList) is older and must never load over it.
+    this._pickDuringRebuild = null;
 
     // Fetch job details
     // A pick that cannot be opened says why and puts the picker back on what
