@@ -253,7 +253,7 @@ checks the channel's [filter](#filtering-by-title). Then:
 | Upcoming stream or premiere | Creates an `Upcoming` job straight away. The job waits for the start, then records. |
 | Live now | Creates a job that starts recording at once. |
 | Finished stream, upload or finished premiere, published within the archive window | Only with [**Also archive uploads & premieres**](../configuration/channels.md#channelsinclude_non_live_content) on. A video first seen in this or a recent cycle starts at once; an older one is queued as backlog. |
-| Already has a job, unless that job is `Finished` | Skipped. A `Cancelled` or `Error` job counts: cancelling a job is how you stop an unwanted stream from being recorded. |
+| Already has a job | Skipped. A `Cancelled` or `Error` job counts: cancelling a job is how you stop an unwanted stream from being recorded. A `Finished` video is not archived again, though a recording that stopped before the stream ended resumes if the stream comes back live under the same video. |
 | Its job was deleted (it is in the processing history) | Skipped, live or not, until you remove its entry under **Orphaned** ([Storage](storage.md)). A job you added by URL leaves no entry. |
 | A finished video already in the processing history | Skipped. |
 | Members-only and you are not signed in or not a member | Skipped; re-checked later. |
