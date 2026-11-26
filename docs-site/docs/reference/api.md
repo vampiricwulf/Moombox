@@ -134,7 +134,7 @@ direct loopback connection (see
 | `GET` | `/api/jobs` | Active (not archived) jobs. Optional `?offset=` and `?limit=` (1–1000) switch to `{data, pagination}`. |
 | `GET` | `/api/jobs/archived` | Archived jobs (`Finished` jobs older than [`monitors.hide_finished_age_days`](../configuration/monitors.md#monitorshide_finished_age_days)); same pagination. |
 | `GET` | `/api/jobs/{id}` | One job, with the staging facts the details dialog uses. |
-| `POST` | `/api/jobs` | Add a job (Shared). Body at minimum `{url}`: a YouTube video or stream, or a Twitch channel, VOD, clip, video list or collection (a list queues one VOD job per video). Optional fields include `outputDirectory`, `selectedVideoItag`/`selectedAudioItag`, `startTime`/`endTime` and `quality_preference` (Twitch). |
+| `POST` | `/api/jobs` | Add a job (Shared). Body at minimum `{url}`: a YouTube video or stream, or a Twitch channel, VOD, clip, video list or collection (a list queues one VOD job per video). Optional fields include `outputDirectory`, `selectedVideoItag`/`selectedAudioItag`, `startTime`/`endTime` and `quality_preference` (Twitch). `outputDirectory` follows the path rules of `paths.output_directory`: a value wrapped in quotes or with a `..` segment is refused with 400. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
 | `POST` | `/api/jobs/{id}/resume` | Resume a YouTube job from its staging files (from `Error`, `Cancelled`, `COOKIES?`, or `Finished` with an incomplete tail). |
 | `POST` | `/api/jobs/{id}/retry` | Same as `resume`. |
