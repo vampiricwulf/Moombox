@@ -45,6 +45,20 @@ func trimFailureText(err error) string {
 	return "Could not create the trim; the log has the reason"
 }
 
+// trimStoppedText reports whether err is a trim stopped rather than broken —
+// the operator's stop (S, or the dashboard's Stop) or its job deleted while
+// it encoded — and, for the second, why, for the TUI's "Trim stopped: …".
+// Neither is a failure: the service sends no trim_error for them.
+func trimStoppedText(err error) (stopped bool, why string) {
+	switch {
+	case errors.Is(err, worker.ErrTrimStopped):
+		return true, ""
+	case errors.Is(err, worker.ErrTrimJobDeleted):
+		return true, "the job was deleted"
+	}
+	return false, ""
+}
+
 // trimStopError is TrimService.StopTrim's error as the TUI shows it: a
 // refusal as written (the dashboard's 409 shows the same), a trim no longer
 // running as "it has already ended".
@@ -482,8 +496,9 @@ func (s *runState) runTUI() {
 		// (OnStopTrim below).
 		record, err := s.trimSvc.CreateTrimStarted(context.Background(), job, startSec, endSec,
 			func(task worker.TrimTask) { onStarted(task.ID) }, onProgress)
-		if errors.Is(err, worker.ErrTrimStopped) {
-			return "", "", true
+		if stopped, why := trimStoppedText(err); stopped {
+			s.log.Info("Trim stopped", slog.String("jobID", jobID), slog.String("reason", err.Error()))
+			return "", why, true
 		}
 		if err != nil {
 			s.log.Error("Failed to create trim", slog.String("jobID", jobID), slog.String("error", err.Error()))

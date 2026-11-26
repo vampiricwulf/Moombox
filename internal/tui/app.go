@@ -226,7 +226,7 @@ type (
 	createTrimResultMsg struct {
 		Filename string
 		Err      string
-		Stopped  bool // the trim was stopped (S), not failed
+		Stopped  bool // the trim was stopped (S, or its job deleted), not failed; Err says why, if anything
 	}
 	deleteTrimResultMsg struct {
 		JobID    string // the job whose trim dialog asked
@@ -881,7 +881,8 @@ type App struct {
 	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
 	// OnCreateTrim runs a trim and returns once it is done. onStarted is
 	// handed the trim's id before the encode starts (what OnStopTrim takes);
-	// stopped reports a trim OnStopTrim stopped, which is no failure.
+	// stopped reports a trim stopped rather than broken (OnStopTrim, or its
+	// job deleted), which is no failure; errMsg then says why, or is empty.
 	OnCreateTrim func(jobID string, startSec, endSec float64, onStarted func(trimID string), onProgress func(float64)) (filename string, errMsg string, stopped bool)
 	// OnStopTrim stops a running trim (worker.TrimService.StopTrim, the
 	// call the dashboard's Stop makes); its error is written for the user.

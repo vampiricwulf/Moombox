@@ -83,3 +83,22 @@ func TestTUITrimStopErrorSaysWhy(t *testing.T) {
 		t.Errorf("trimStopError(not found) = %v, want \"the trim has already ended\"", got)
 	}
 }
+
+// TestTUITrimStoppedIsNoFailure: a TUI trim whose job was deleted while it
+// encoded (from the dashboard, or after Esc sent the dialog away) came back
+// as "Trim failed: Could not create the trim" and an Error log line; it is
+// reported as stopped, with why, as an operator's stop is.
+//
+// Mutants: drop trimStoppedText's ErrTrimJobDeleted case (the deleted job's
+// trim reads as broken); drop its ErrTrimStopped case.
+func TestTUITrimStoppedIsNoFailure(t *testing.T) {
+	if stopped, why := trimStoppedText(fmt.Errorf("x: %w", worker.ErrTrimStopped)); !stopped || why != "" {
+		t.Errorf("an operator's stop: stopped=%v why=%q", stopped, why)
+	}
+	if stopped, why := trimStoppedText(fmt.Errorf("x: %w", worker.ErrTrimJobDeleted)); !stopped || why != "the job was deleted" {
+		t.Errorf("a deleted job's trim: stopped=%v why=%q", stopped, why)
+	}
+	if stopped, _ := trimStoppedText(errTrimFFmpegFailure); stopped {
+		t.Error("an FFmpeg failure read as stopped")
+	}
+}

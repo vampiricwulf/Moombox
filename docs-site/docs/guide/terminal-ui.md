@@ -460,7 +460,8 @@ encodes, `S` stops the trim (the unfinished file is removed, the dialog closes
 with "Trim stopped", and no Trim Failed notification is sent), and ++esc++
 closes the dialog while the encode carries on in the background. A trim that
 has finished encoding and is being saved can no longer be stopped; the dialog
-says so and the trim completes.
+says so and the trim completes. Deleting the job stops its trim too ("Trim
+stopped: the job was deleted").
 `M` switches to delete mode, which lists the job's existing trims; ++enter++
 twice deletes the selected one.
 

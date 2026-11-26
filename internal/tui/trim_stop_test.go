@@ -135,3 +135,21 @@ func TestCreateTrimCmdKeepsTheStartedTrimsID(t *testing.T) {
 		t.Errorf("a new submit kept the last trim's id %q", a.trimRunningID)
 	}
 }
+
+// TestTrimStoppedWithAReasonSaysIt: a trim whose job was deleted comes back
+// stopped with why; the feedback line says so, not "Trim failed".
+//
+// Mutant: drop the Err from createTrimCmd's stopped result — the reason is
+// lost.
+func TestTrimStoppedWithAReasonSaysIt(t *testing.T) {
+	a := NewApp()
+	a.width, a.height = 100, 40
+	a.OnCreateTrim = func(string, float64, float64, func(string), func(float64)) (string, string, bool) {
+		return "", "the job was deleted", true
+	}
+	a.trimInProgress = true
+	a.Update(a.createTrimCmd("A", 0, 10)())
+	if a.feedback.msg != "Trim stopped: the job was deleted" {
+		t.Errorf("feedback = %q, want \"Trim stopped: the job was deleted\"", a.feedback.msg)
+	}
+}

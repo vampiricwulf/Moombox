@@ -806,7 +806,11 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.trimDlg.IsVisible() {
 				a.trimDlg.Close()
 			}
-			a.setFeedback("Trim stopped")
+			if msg.Err != "" {
+				a.setFeedback("Trim stopped: " + msg.Err)
+			} else {
+				a.setFeedback("Trim stopped")
+			}
 			return a, a.ensureMarqueeTicking()
 		}
 		if a.trimDlg.IsVisible() {

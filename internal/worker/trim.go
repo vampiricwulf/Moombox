@@ -107,10 +107,11 @@ var errTrimInterrupted = errors.New("the trim was stopped before it finished")
 // failed and no trim_error is sent.
 const trimJobDeletedReason = "The job was deleted before the trim finished"
 
-// errTrimJobDeleted is the cause run's context is cancelled with when the
+// ErrTrimJobDeleted is the cause run's context is cancelled with when the
 // trim's job is deleted mid-encode; the error run returns wraps it beside
-// errTrimInterrupted.
-var errTrimJobDeleted = errors.New("the job was deleted")
+// errTrimInterrupted, so a caller (the TUI's wiring) can tell it from a
+// trim that broke.
+var ErrTrimJobDeleted = errors.New("the job was deleted")
 
 // trimStoppedReason is a trim the operator stopped (StopTrim).
 const trimStoppedReason = "Stopped"
@@ -561,7 +562,7 @@ func partialTrimPath(trimPath string) string {
 func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(float64)) (rec *database.TrimRecord, err error) {
 	job := plan.job
 	// The cause says why the trim was cut short: nil (context.Canceled) for
-	// the caller or Stop, errTrimJobDeleted for a deleted job, ErrTrimStopped
+	// the caller or Stop, ErrTrimJobDeleted for a deleted job, ErrTrimStopped
 	// for the operator (StopTrim).
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -577,7 +578,7 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 	if ts.db != nil {
 		defer ts.db.OnJobDeleted(func(deleted *database.JobDeleted) {
 			if deleted.JobID == job.ID {
-				cancel(errTrimJobDeleted)
+				cancel(ErrTrimJobDeleted)
 			}
 		})()
 	}
@@ -611,12 +612,12 @@ func (ts *TrimService) run(ctx context.Context, plan *trimPlan, progressFn func(
 			// from a goroutine of its own, which may not have run yet.
 			ev.State, ev.Error, ev.Stopped = TrimStateFailed, trimStoppedReason, true
 			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimStopped, err)
-		case errors.Is(context.Cause(ctx), errTrimJobDeleted), ts.jobGone(job.ID):
+		case errors.Is(context.Cause(ctx), ErrTrimJobDeleted), ts.jobGone(job.ID):
 			// The second: the row went between the encode's end and the
 			// record (AddTrim then fails on the foreign key), before the
 			// subscription above could cancel anything.
 			ev.State, ev.Error, ev.Stopped = TrimStateFailed, trimJobDeletedReason, true
-			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, errTrimJobDeleted, err)
+			err = fmt.Errorf("%w: %w: %w", errTrimInterrupted, ErrTrimJobDeleted, err)
 		case ctx.Err() != nil:
 			ev.State, ev.Error = TrimStateFailed, trimInterruptedReason
 			err = fmt.Errorf("%w: %w", errTrimInterrupted, err)

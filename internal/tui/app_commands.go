@@ -389,7 +389,7 @@ func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 		}
 		filename, errMsg, stopped := createFn(jobID, startSec, endSec, onStarted, onProgress)
 		if stopped {
-			return createTrimResultMsg{Stopped: true}
+			return createTrimResultMsg{Stopped: true, Err: errMsg}
 		}
 		if errMsg != "" {
 			return createTrimResultMsg{Err: errMsg}
