@@ -363,7 +363,9 @@ type Job struct {
 	// reader is the operator's Delete (DeleteJobLeavingHistory), which leaves
 	// the history row "tw_<this>" so the deleted broadcast is not archived
 	// again. "" (NULL) for every other job, for a manual job that has not
-	// recorded a broadcast, and for every row from before v29.
+	// recorded a broadcast, and for a row whose capture last started before v29
+	// (a row still recording at the upgrade is re-enqueued at boot and gets it
+	// at the restart's live start).
 	//
 	// json:"-": no UI shows it.
 	TwitchStreamID string `json:"-"`
