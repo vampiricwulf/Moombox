@@ -166,6 +166,7 @@ Mouse clicks and the wheel only move the selection.
 | Network section, on a non-text row: `` ` `` / `~` | Set or change / remove the dashboard password. |
 | Paths → FFmpeg path row: ++ctrl+o++ | Open the FFmpeg install check. |
 | Channels: `A` / ++enter++ / `D` | Add / edit / remove a channel. |
+| Channels: ++shift+up++ / ++shift+down++ | Move the selected channel up / down the list. Saved when you save. |
 | Channel removal prompt: ++enter++ / `P` / any other key | Remove and keep its jobs / remove and delete its pending jobs (only when it has some) / cancel. Applied when you save. |
 | Integrations: `A` / ++enter++ / `D` / `T` | Add / edit / delete / test a notification webhook. |
 | Notification editor: ++space++ / `m` | Toggle an option or event / toggle an event's mention. |
@@ -177,7 +178,7 @@ Settings also accepts mouse clicks.
 
 | Key | Action |
 |---|---|
-| ++up++ / ++down++, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++ | Scroll. |
+| ++up++ / ++down++, ++page-up++ / ++page-down++, ++ctrl+u++ / ++ctrl+d++, wheel | Scroll. |
 | `?`, ++esc++ | Close Help. |
 | ++esc++, `Q` | Close release notes. |
 | `U` | Release notes of a pending update: apply it. |

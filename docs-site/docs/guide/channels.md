@@ -135,7 +135,9 @@ Changes made here are saved immediately; they do not go through the
 ### In the terminal UI
 
 In **Settings → Channels**: ++up++ / ++down++ select a channel, ++enter++
-edits it, ++a++ adds one, ++d++ removes one. Changes are kept in the overlay
+edits it, ++a++ adds one, ++d++ removes one, and ++shift+up++ /
+++shift+down++ move the selected channel up or down the list (the
+dashboard's drag). Changes are kept in the overlay
 until you save it. If you edit a channel in the TUI while someone changes the
 same channel in the dashboard, the TUI's save writes only the fields you
 changed, so the other edit survives.
