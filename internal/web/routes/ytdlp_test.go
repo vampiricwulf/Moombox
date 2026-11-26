@@ -16,7 +16,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/ytdlpplugin"
 )
 
-// TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the eight-key
+// TestYtdlpStatusRouteReportsNullPortWhenNotInstalled drives the ten-key
 // wire contract through the actual handler, not just the helper: settings.js's
 // loadYtdlpPluginStatus reads every key, and `installedPort` must arrive as a
 // JSON null (never 0) when no plugin file parsed — a 0 would read as a real
@@ -52,7 +52,7 @@ func TestYtdlpStatusRouteReportsNullPortWhenNotInstalled(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "pluginDir", "portMismatch", "unparseable"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "outdated", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}
@@ -100,5 +100,50 @@ func TestYtdlpInstallRouteReportsTheCause(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &m)
 	if msg, _ := m["error"].(string); !strings.Contains(msg, "create plugin directory") {
 		t.Errorf("error = %q, want the create-directory cause", msg)
+	}
+}
+
+// TestYtdlpInstallRouteRewritesAnOutdatedFile: the dashboard's Update button
+// posts without force; the route's "already installed" short-circuit used to
+// cover any file whose address matched, so an outdated file (no version
+// marker: written by an older Moombox) would never have been replaced.
+//
+// Mutant: the short-circuit back on Installed && !Unparseable && !PortMismatch.
+func TestYtdlpInstallRouteRewritesAnOutdatedFile(t *testing.T) {
+	dir := filepath.Clean(t.TempDir())
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if got := ytdlpplugin.Dir(); got == "" || !strings.HasPrefix(got, dir) {
+		t.Skipf("ytdlpplugin.Dir() is not redirectable on %s (got %q)", runtime.GOOS, got)
+	}
+	if err := os.MkdirAll(filepath.Dir(ytdlpplugin.File()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := "DEFAULT_BASE_URL = 'https://127.0.0.1:7740'\n" // an older Moombox's file: the right address, no marker
+	if err := os.WriteFile(ytdlpplugin.File(), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := chi.NewRouter()
+	YtdlpRoutes(r, func() int { return 7740 }, true)
+	post := func() map[string]any {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/ytdlp-plugin/install", strings.NewReader(`{}`)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("want 200, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		var m map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &m)
+		return m
+	}
+	if m := post(); m["alreadyInstalled"] != false {
+		t.Fatalf("an outdated file was answered alreadyInstalled=%v, want a rewrite", m["alreadyInstalled"])
+	}
+	got, err := os.ReadFile(ytdlpplugin.File())
+	if err != nil || string(got) == old {
+		t.Fatalf("the outdated file was not rewritten (err %v)", err)
+	}
+	if m := post(); m["alreadyInstalled"] != true {
+		t.Errorf("the rewritten file was answered alreadyInstalled=%v, want true", m["alreadyInstalled"])
 	}
 }

@@ -212,10 +212,7 @@ func TestSidecarOnTheEmbeddedPayload(t *testing.T) {
 	// current obfuscation pattern (no static helper-object sig algorithm;
 	// URL passthrough required).
 	t.Run("solve cipher", func(t *testing.T) {
-		playerJS, err := os.ReadFile(filepath.Join("..", "..", "cipher", "testdata", "player_cb017549.js"))
-		if err != nil {
-			t.Skipf("cipher fixture missing: %v (run task 6.1 to download)", err)
-		}
+		playerJS := readCipherFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 

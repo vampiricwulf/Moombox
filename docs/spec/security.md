@@ -616,7 +616,9 @@ The server binds to different addresses based on `network_access`:
 
 ### Port
 
-Default port is 774. If the port is in use, the server probes ports 775 through 784 sequentially, reusing the same host, so a fallback port is dual-stack or loopback-only exactly as the configured one would have been. The first available port is used, and the actual port is logged. It is this run's port only: the config keeps the configured one, and the TUI and the yt-dlp plugin writer read the bound port from the server (`currentWebPort` in `cmd/moombox/routes_wiring.go`).
+Default port is 774. If the port cannot be bound (any `net.Listen` error, not only a taken port: a configured 1014-1023 refused for permission still reaches an unprivileged port this way), the server probes ports 775 through 784 sequentially, reusing the same host, so a fallback port is dual-stack or loopback-only exactly as the configured one would have been. The first available port is used, and the actual port is logged. It is this run's port only: the config keeps the configured one, and the TUI and the yt-dlp plugin writer read the bound port from the server (`currentWebPort` in `cmd/moombox/routes_wiring.go`).
+
+The configured port's own error picks the words of the Warn before the probe and of the error when all eleven fail (`listenNearby`, `classifyBindError`, `bindError`, `internal/web/bind_errors.go`), and that error is the one wrapped. A taken port (EADDRINUSE; WSAEADDRINUSE on Windows, which `syscall.EADDRINUSE` does not match there) reads `port N (and nearby ports) already in use`; permission denied (`os.ErrPermission`: on Linux, a port below 1024 without `CAP_NET_BIND_SERVICE`) reads `cannot bind port N: permission denied` and names the capability and `network.port` 1024 or above; anything else reads `could not bind port N (or the ten after it)`. Owner ruling R3-13: wording only, no fallback to an unprivileged port. The exit code (3, headless) and the TUI-only path are unchanged.
 
 ### Security Warning
 

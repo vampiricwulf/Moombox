@@ -113,7 +113,11 @@ must be writable by the user running Moombox.
 
 ### If the new version fails to start
 
-The launcher watches the first start after an update.
+The launcher watches the first start after an update. That includes an
+update whose restart was cut short, for example because Moombox was stopped
+or the machine shut down while it was restarting: the next time you start
+Moombox, it treats that start as the first one, with the previous binary at
+`<binary>.old` (on Windows too) as the one it rolls back to.
 
 - **The new version crashes or exits with an error within two minutes:** the
   launcher rolls back automatically. The failed binary is kept as
@@ -127,7 +131,8 @@ The launcher watches the first start after an update.
   load, a port it cannot bind, a database it refuses): that is your
   environment, not the release, so there is no rollback. Moombox stops and
   prints where the previous binary still is (`<binary>.old` on Linux,
-  `<binary>~` on Windows). Fix the cause and start Moombox again.
+  `<binary>~` on Windows, `<binary>.old` on both after a restart that was cut
+  short). Fix the cause and start Moombox again.
 - **The rollback itself fails:** the launcher leaves the previous binary where
   it is, writes the recovery steps into `<binary>.update-failed` and prints
   them. Recovery is one rename: put the previous binary (the path the

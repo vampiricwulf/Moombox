@@ -166,8 +166,9 @@ func (m *YtdlpDialogModel) View() string {
 }
 
 // statusRows is the loaded body: the three facts that are always on screen
-// (Installed, Plugin dir, Moombox port) and the four that only exist in some
-// states (Plugin points, Plugin state, Port mismatch, Plugin path).
+// (Installed, Plugin dir, Moombox port) and the ones that only exist in some
+// states (Plugin points, Plugin state — unrecognised or outdated — Mismatch,
+// Plugin path).
 func (m *YtdlpDialogModel) statusRows(contentW int) string {
 	installed := "not installed"
 	if m.info.Installed {
@@ -211,6 +212,12 @@ func (m *YtdlpDialogModel) statusRows(contentW int) string {
 		// occurrence of this state. Two rows reading "Plugin file:" would be a
 		// render bug to anyone reading them.
 		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Plugin state:", "not recognized — I reinstalls it")))
+		b.WriteString("\n")
+	}
+	if m.info.Outdated {
+		// The same row as the unrecognised file's: Status never sets both
+		// (Outdated needs a file that parses), so the label is never doubled.
+		b.WriteString(YellowStyle.Render(fmt.Sprintf("  %-15s %s", "Plugin state:", "outdated — I updates it")))
 		b.WriteString("\n")
 	}
 	if m.info.PortMismatch {

@@ -66,13 +66,14 @@ the password is managed from the same section (see
 The TCP port the dashboard, the REST API, the WebSocket and the yt-dlp
 plugin's PO-token endpoints all share.
 
-If the port is already taken when Moombox starts, it tries the next ten ports
-in turn (`775`, `776`, … `784`) and uses the first one that is free; the log
-says `using alternative port`. The configured value in `config.toml` is not
-changed, so the next start tries `774` again. If none of the eleven ports can
-be bound, the log reports that the port "and nearby ports" are already in
-use: without the terminal UI Moombox exits; with it, Moombox keeps running in
-TUI-only mode with no dashboard.
+If the port cannot be bound when Moombox starts (usually because it is
+already taken), it tries the next ten ports in turn (`775`, `776`, … `784`)
+and uses the first one that works; the log says `using alternative port`. The
+configured value in `config.toml` is not changed, so the next start tries
+`774` again. If none of the eleven ports can be bound, the log says why
+(already in use, permission denied, or the system's own reason): without the
+terminal UI Moombox exits; with it, Moombox keeps running in TUI-only mode
+with no dashboard.
 
 When to change it: another program owns 774, you want a familiar port, or you
 run several services behind one reverse proxy.
@@ -83,8 +84,8 @@ run several services behind one reverse proxy.
 - **yt-dlp plugin**: the installed plugin points at a fixed port. After a
   port change, reinstall it (see [yt-dlp plugin](../guide/ytdlp-plugin.md)).
 - **Linux**: ports below 1024 are privileged on many systems. If an ordinary
-  user cannot bind 774 (the log still calls it "already in use"), pick a port
-  of 1024 or above.
+  user cannot bind 774 (the log says "permission denied" and names
+  `CAP_NET_BIND_SERVICE`), pick a port of 1024 or above.
 
 A value outside 1–65535 is refused by both settings UIs and the API; in a
 hand-edited file it is replaced with `774` at load.

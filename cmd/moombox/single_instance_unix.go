@@ -64,7 +64,7 @@ func acquireSingleInstanceLock() error {
 	// LOCK_EX (exclusive) | LOCK_NB (non-blocking — fail fast if held)
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return fmt.Errorf("another moombox instance is already running, or the last one is still shutting down (lock held on %s)", lockPath)
+		return flockRefusal(lockPath, err)
 	}
 
 	// Truncate and write our PID for human debugging. The lock is on the
@@ -82,6 +82,19 @@ func acquireSingleInstanceLock() error {
 	// with it; it must not stand for this one while its child boots.
 	removeDaemonRecord(heldDaemonRecordPath())
 	return nil
+}
+
+// flockRefusal words a failed LOCK_EX|LOCK_NB. Only EWOULDBLOCK means another
+// process holds the lock — as daemonLockHeld reads it — and only that answer
+// is the "already running" refusal (errInstanceRunning, the text the CLI
+// reference quotes). Any other errno (ENOLCK on a filesystem with no lock
+// support, say) is returned as itself: it is the environment, not another
+// instance, and waiting will not change it.
+func flockRefusal(lockPath string, err error) error {
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return instanceRunningError(fmt.Sprintf("another moombox instance is already running, or the last one is still shutting down (lock held on %s)", lockPath))
+	}
+	return fmt.Errorf("lock %s: %w", lockPath, err)
 }
 
 // daemonLockDir is the directory the lock lives in, for `moombox add`.
