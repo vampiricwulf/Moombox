@@ -295,8 +295,9 @@ You can also read logs without opening the file:
 - the dashboard's **Logs** tab and the TUI's log panel show the most recent
   lines (about 200) and then follow new ones live;
 - each job's own lines are shown in its details (*Job Logs*) and in the
-  TUI's ++o++ ++l++ overlay. These per-job logs are kept in memory only and
-  are lost at a restart — the log file has everything.
+  TUI's ++o++ ++l++ overlay. These per-job logs are kept in memory only:
+  they are lost at a restart, and of the jobs that have ended only the 200
+  that ended most recently keep theirs — the log file has everything.
 
 When reporting a problem, set the level to `DEBUG`, reproduce it, and attach
 the relevant part of `moombox.log`. See
