@@ -406,6 +406,12 @@ export class PlayerController {
      */
     this._pickDuringRebuild = null;
     this._restoringValue = null;
+    /**
+     * The token of a rebuild that failed as the newest one while a superseded
+     * rebuild was still writing options: that one applies the kept pick as
+     * it leaves its window (_applyKeptPickFromShown).
+     */
+    this._failedToken = null;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -442,6 +448,10 @@ export class PlayerController {
       if (val) {
         await this._loadPick(val);
       } else {
+        // Clearing is the newest choice: a pick an earlier rebuild kept for
+        // later (loadPlayerJobList) must not load after it. Not in
+        // clearPlayer itself, which a rebuild calls before it applies one.
+        this._pickDuringRebuild = null;
         this.clearPlayer();
       }
     });
@@ -1415,6 +1425,11 @@ export class PlayerController {
         if (currentValue && all.some((j) => j.id === currentValue)) select.value = currentValue;
       } finally {
         this._rebuildsActive--;
+        // The newest rebuild failed while this one was still in its window,
+        // so it could not apply a kept pick: this one does, on its way out.
+        if (this._rebuildsActive === 0 && this._failedToken === this._rebuildToken) {
+          await this._applyKeptPickFromShown(select);
+        }
       }
 
       // A pick made inside the mutation window (this rebuild's, or a
@@ -1447,17 +1462,30 @@ export class PlayerController {
       // The newest rebuild failed before it could apply a pick a superseded
       // one kept: apply it now from the options already shown, rather than
       // leave it for a later rebuild to load minutes from now.
-      if (token === this._rebuildToken && this._rebuildsActive === 0) {
-        const pick = this._pickDuringRebuild;
-        this._pickDuringRebuild = null;
-        if (pick && [...select.querySelectorAll("sl-option")].some((o) => o.value === pick)) {
-          select.value = pick;
-          await this._loadPick(pick);
-        }
+      // While a superseded rebuild is still writing options, it is left to
+      // that one, which applies it as it leaves its window.
+      if (token === this._rebuildToken) {
+        if (this._rebuildsActive === 0) await this._applyKeptPickFromShown(select);
+        else this._failedToken = token;
       }
       // The half-failed list toasts above; a total failure (server
       // unreachable) must too, or the picker just sits stale.
       this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
+    }
+  }
+
+  /**
+   * Apply a pick a rebuild kept (_pickDuringRebuild) from the options the
+   * picker shows now: the path for when the newest rebuild failed and will
+   * write no list to apply it from.
+   */
+  async _applyKeptPickFromShown(select) {
+    this._failedToken = null;
+    const pick = this._pickDuringRebuild;
+    this._pickDuringRebuild = null;
+    if (pick && [...select.querySelectorAll("sl-option")].some((o) => o.value === pick)) {
+      select.value = pick;
+      await this._loadPick(pick);
     }
   }
 
