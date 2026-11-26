@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -152,4 +153,61 @@ func TestRestartOfAnotherRenditionSplitsIntoANewPart(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRestartPairStopsAtTheRefusedRenditionWithBothNextSegments runs the
+// restart's real downloader pair through runDownloaders, the way the live
+// loop's first run does, for the common trigger: a lowered resolution cap
+// changes the video itag (299 -> 298) and leaves the audio's (140) alone, and
+// the restart came before any resume sidecar (each file has only its
+// rendition marker; the DB's last seq, 42, is the position). The video
+// refuses its file, the audio resumes its own and is cancelled with the
+// group, and the pair stops with engine.ErrRenditionChanged, not the audio's
+// cancellation, both at segment 43 — the positions the live loop builds the
+// new part from — with neither staged file written to.
+//
+// Mutants: drop the engine's rendition check (the video appends and the pair
+// ends on the cancellation); leave the video's refused position at the DB's
+// last seq (42, the new part re-fetches a segment the old one holds).
+func TestRestartPairStopsAtTheRefusedRenditionWithBothNextSegments(t *testing.T) {
+	w, _ := testWorkerSetup(t)
+	root := t.TempDir()
+	staged := func(name, marker string) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".rendition", []byte(marker+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	videoPath := staged("video_stream", "abcdefghijk/299")
+	audioPath := staged("audio_stream", "abcdefghijk/140")
+	downloader := func(path, itag string) *engine.SegmentDownloader {
+		d := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: path, StartSeq: 42, MaxRetries: 1,
+			BaseURL: "http://127.0.0.1:1/videoplayback?id=abcdefghijk.1&itag=" + itag})
+		d.SplitOnRenditionChange = true
+		return d
+	}
+	result := &DownloadResult{VideoDownloader: downloader(videoPath, "298"), AudioDownloader: downloader(audioPath, "140"),
+		VideoPath: videoPath, AudioPath: audioPath, HasVideo: true, HasAudio: true}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := w.orchestrator.runDownloaders(ctx, result)
+	if !errors.Is(err, engine.ErrRenditionChanged) {
+		t.Fatalf("runDownloaders = %v, want the video's refusal of another rendition", err)
+	}
+	if got := result.VideoDownloader.CurrentSeq(); got != 43 {
+		t.Errorf("video CurrentSeq() = %d, want the next segment 43", got)
+	}
+	if got := result.AudioDownloader.CurrentSeq(); got != 43 {
+		t.Errorf("audio CurrentSeq() = %d, want the next segment 43", got)
+	}
+	for _, p := range []string{videoPath, audioPath} {
+		if info, statErr := os.Stat(p); statErr != nil || info.Size() != 4096 {
+			t.Errorf("%s changed: %v, %v", p, info, statErr)
+		}
+	}
 }
