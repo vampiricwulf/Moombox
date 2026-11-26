@@ -1075,7 +1075,9 @@ func TestJobDelete404(t *testing.T) {
 // added by URL (which no monitor ever recorded in history) is held back from
 // re-detection once deleted, exactly as a monitor-created one is, and its row
 // shows under Orphaned (owner ruling R4-3). A Twitch job's delete writes no
-// row: only the Twitch monitor records those. Nor does an import placeholder's
+// row of its own: its row, when it has one, was written when the job was
+// created (the monitor, or worker.RecordManualTwitchAdd, owner ruling RV-3).
+// Nor does an import placeholder's
 // (imp_ and eight hex digits): no monitor can find that ID again.
 //
 // Mutants: the route back on plain DeleteJob (no row, the stream is found

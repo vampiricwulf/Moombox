@@ -211,9 +211,12 @@ func TestPendingAutoAction(t *testing.T) {
 		{"offline reason on a YouTube row", &database.Job{Platform: "youtube", Status: database.StatusError, ParkReason: database.ParkReasonTwitchOffline}, AutoActionNone},
 		{"ended while offline, by its reason", tw(database.StatusError, "ended", database.ParkReasonTwitchEndedOffline), AutoActionNone},
 		{"unreachable", tw(database.StatusError, "dial tcp: no such host", database.ParkReasonTwitchUnreachable), AutoActionRetry},
-		// A manual add never reaches the recovery: the add writes no history
-		// row, so processStreamInfo never finds it HasProcessed (and a
-		// tw_manual_ id is not the tw_<stream id> the monitor builds). Its end
+		// A manual add is never re-initialised. One of a broadcast that was
+		// live at the add is in the history since owner ruling RV-3
+		// (worker.RecordManualTwitchAdd), so processStreamInfo finds it
+		// HasProcessed and asks PendingAutoAction, whose ManuallyAdded term
+		// is what keeps the row out. A tw_manual_ id is not the
+		// tw_<stream id> the monitor builds and is never looked up. Its end
 		// latch is still the mux's: dispatchEndedBroadcasts reads the login
 		// from either id shape.
 		{"manual add, unreachable: no monitor retries it", &database.Job{ID: "tw_manual_x_1", Platform: "twitch", Status: database.StatusError, Error: "dial tcp", ParkReason: database.ParkReasonTwitchUnreachable, ManuallyAdded: true}, AutoActionNone},
