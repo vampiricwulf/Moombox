@@ -1006,6 +1006,41 @@ func TestHasActiveJob(t *testing.T) {
 	}
 }
 
+// Every status but Finished holds a video back from re-detection (owner
+// ruling R4-4); Finished stays eligible for the incomplete-tail resume, and a
+// video with no row is never held.
+func TestHasJobBlockingRedetection(t *testing.T) {
+	t.Parallel()
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if got, err := db.HasJobBlockingRedetection("vid00000001"); err != nil || got {
+		t.Fatalf("no row: got %v, %v; want false", got, err)
+	}
+	if _, err := db.AddJob(&Job{ID: "vid00000001", VideoID: "vid00000001", Status: StatusUpcoming}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		status JobStatus
+		want   bool
+	}{
+		{StatusUpcoming, true},
+		{StatusDownloading, true},
+		{StatusCancelled, true},
+		{StatusError, true},
+		{StatusFinished, false},
+	} {
+		db.UpdateJobFields("vid00000001", map[string]any{"status": tc.status})
+		got, err := db.HasJobBlockingRedetection("vid00000001")
+		if err != nil || got != tc.want {
+			t.Errorf("status %s: got %v, %v; want %v", tc.status, got, err, tc.want)
+		}
+	}
+}
+
 // A manually added Twitch job for an offline channel is
 // `tw_manual_<login>_<ns>` with no stream ID, so only its ID names the
 // channel it waits on. Logins carry underscores, which a LIKE pattern would

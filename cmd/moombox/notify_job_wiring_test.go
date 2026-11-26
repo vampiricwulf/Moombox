@@ -224,3 +224,45 @@ func TestNewJobsAreAnnouncedBeforeTheWorkerHasThem(t *testing.T) {
 		}
 	}
 }
+
+// createYouTubeJob logs "Video found" at Info only for a find that created a
+// job (owner ruling R4-4). Logged ahead of AddJob, it repeated every feed
+// cycle (and every DECAPI cycle) for a video whose job already existed,
+// although nothing was created. Asserted on the source, as above: every Info
+// "Video found" call sits after the `if !added` duplicate branch has returned.
+//
+// Mutant: the Info moved back above AddJob, or into the duplicate branch.
+func TestCreateYouTubeJobLogsVideoFoundOnlyWhenAdded(t *testing.T) {
+	lit, fset := closureAssigned(t, "monitor_callbacks.go", "wireMonitorCallbacks", "createYouTubeJob")
+	dupEnd := token.NoPos
+	ast.Inspect(lit.Body, func(n ast.Node) bool {
+		if is, ok := n.(*ast.IfStmt); ok {
+			if u, ok := is.Cond.(*ast.UnaryExpr); ok && u.Op == token.NOT {
+				if id, ok := u.X.(*ast.Ident); ok && id.Name == "added" {
+					dupEnd = is.End()
+				}
+			}
+		}
+		return true
+	})
+	if dupEnd == token.NoPos {
+		t.Fatal("createYouTubeJob has no `if !added` branch — re-anchor this test rather than deleting it")
+	}
+	infos := 0
+	for _, call := range callsIn(lit.Body)["Info"] {
+		if len(call.Args) == 0 {
+			continue
+		}
+		if bl, ok := call.Args[0].(*ast.BasicLit); !ok || bl.Value != `"Video found"` {
+			continue
+		}
+		infos++
+		if call.Pos() < dupEnd {
+			t.Errorf("Info \"Video found\" at %s is logged before the duplicate branch ends — it repeats for a job that already exists",
+				fset.Position(call.Pos()))
+		}
+	}
+	if infos == 0 {
+		t.Error("createYouTubeJob no longer logs Info \"Video found\" for a created job")
+	}
+}

@@ -78,7 +78,7 @@ func (fm *FeedMonitor) endCheckFor(row database.FeedItem, now time.Time) Confirm
 // walk is the WALK step (spec §8): a SERIAL probe pass over scope (Q1 ∪ Q2
 // ∪ Q3, in Q1's order — concurrent probes would already be in flight past a
 // window boundary before it's known). For each row it applies the probe
-// gates in order — HasActiveJob, term-match, the membership cookie gate,
+// gates in order — HasJobBlockingRedetection, term-match, the membership cookie gate,
 // then the status rule (probe unknown/upcoming/live; vod only via the
 // restart carve-out or a due end re-check; not_a_stream never), then the
 // inconclusive hold (probeHeld) — and, for date-ordered sources, infers when
@@ -130,7 +130,11 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 			continue
 		}
 
-		if active, err := fm.db.HasActiveJob(row.VideoID); err != nil || active {
+		// A job row in any status but Finished means the video is handled:
+		// active, or settled by a Cancel or an Error that no re-detection
+		// acts on (owner ruling R4-4), so it is not probed. Finished stays
+		// eligible for the incomplete-tail resume on re-detection.
+		if held, err := fm.db.HasJobBlockingRedetection(row.VideoID); err != nil || held {
 			skipped++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
 		}

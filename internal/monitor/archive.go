@@ -85,7 +85,8 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		// The §10 decision table, in its order. The first two gates repeat
 		// the walk's (the store and jobs table may have changed between the
 		// passes, and archive must stand alone when the walk was truncated).
-		if active, err := fm.db.HasActiveJob(row.VideoID); err != nil || active {
+		// The job gate holds back every row but Finished (owner ruling R4-4).
+		if held, err := fm.db.HasJobBlockingRedetection(row.VideoID); err != nil || held {
 			gated++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
 		}

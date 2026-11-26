@@ -322,6 +322,32 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	return true, nil
 }
 
+// HasJobBlockingRedetection reports whether a YouTube monitor should leave
+// videoID alone instead of probing it and offering it as found (owner ruling
+// R4-4): a job row for it exists in any status but Finished. An active row is
+// already being worked on; a Cancelled or Error row is the operator's (or the
+// pipeline's) settled answer, and createYouTubeJob's duplicate path never
+// acts on one, so probing it every cycle only spent a player request and
+// logged a "Video found" for nothing. Finished stays eligible: a broadcast
+// that comes back under the same ID re-arms an incomplete-tail job on
+// re-detection. HasActiveJob is the Twitch monitor's gate and stays as it is
+// (its offline auto-retry needs Error rows to pass).
+func (db *Database) HasJobBlockingRedetection(videoID string) (bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var one int
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 FROM jobs WHERE video_id = ? AND status != ? LIMIT 1`,
+		videoID, StatusFinished).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ManualTwitchJobs returns the non-terminal manually added Twitch jobs for
 // login's channel — the `tw_manual_<login>_<ns>` rows the Web add creates when
 // the channel is offline — with ID, Status and StreamStartTime set. Such a row

@@ -1833,9 +1833,6 @@ func (s *runState) wireMonitorCallbacks() {
 				slog.String("source", source), slog.String("videoID", videoID), slog.String("channel", ch.ID))
 			return
 		}
-		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID),
-			slog.String("title", title), slog.String("disposition", d.String()))
-
 		includeNonLive := ch.IncludeNonLiveContent
 		outputDir := resolveOutputDir(ch, s.configStore)
 		thumbnailURL := youtubeThumbnailURL(videoID)
@@ -1880,6 +1877,10 @@ func (s *runState) wireMonitorCallbacks() {
 			return
 		}
 		if !added {
+			// A video that already has a job is not news: Info is kept for
+			// the find that created one (owner ruling R4-4).
+			s.log.Debug("Video found; it already has a job", slog.String("source", source),
+				slog.String("videoID", videoID), slog.String("disposition", d.String()))
 			// Duplicate job — but a broadcast that dropped and came back
 			// under the SAME video ID (interrupted stream, re-detected
 			// live) may be sitting Finished with preserved staging
@@ -1962,6 +1963,8 @@ func (s *runState) wireMonitorCallbacks() {
 				slog.String("source", source), slog.String("videoID", videoID), slog.String("title", title))
 			return
 		}
+		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID),
+			slog.String("title", title), slog.String("disposition", d.String()))
 		// History fires for EVERY disposition — it is what makes
 		// HasProcessed mean "a job was created" (spec §10/§15).
 		s.db.AddToHistory(videoID)
