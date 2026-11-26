@@ -274,7 +274,7 @@ func TestCleanupOrphansResumesOnceASupersededMarkerIsCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleanupOrphans(exePath)
+	cleanupOrphans(exePath, "9.9.9")
 	if _, err := os.Stat(exePath + "~"); err != nil {
 		t.Fatalf("the ~ file went while the marker stood (%v) — this test's premise moved", err)
 	}
@@ -282,8 +282,190 @@ func TestCleanupOrphansResumesOnceASupersededMarkerIsCleared(t *testing.T) {
 	if _, err := clearSupersededFailureMarker(exePath, pendingPath, "v9.9.9", "9.9.9"); err != nil {
 		t.Fatal(err)
 	}
-	cleanupOrphans(exePath)
+	// The boot that clears the marker resolves the breadcrumb in the same
+	// step (finishUpdateBreadcrumb).
+	if err := os.Remove(pendingPath); err != nil {
+		t.Fatal(err)
+	}
+	cleanupOrphans(exePath, "9.9.9")
 	if _, err := os.Stat(exePath + "~"); !os.IsNotExist(err) {
 		t.Errorf("the ~ file survived the sweep after a later update cleared the stale marker (%v)", err)
+	}
+}
+
+// firstUpdateRestarted lays out a first update of a launcher lifetime at the
+// moment its restart has run: the installed release at the plain name, the
+// one it replaced renamed to ~ by handleUpdateRestart, the breadcrumb naming
+// the installed release, and the launcher's record armed with the ~.
+func firstUpdateRestarted(t *testing.T) (exePath string, boot *postUpdateBoot) {
+	t.Helper()
+	exePath = filepath.Join(t.TempDir(), "moombox.exe")
+	writeReleases(t, map[string]string{
+		exePath:                                "N+1",
+		exePath + updater.OldSuffix:            "N",
+		exePath + updater.PendingVersionSuffix: "v2.0.1",
+	})
+	boot = &postUpdateBoot{}
+	boot.restarted(handleUpdateRestart(exePath), pendingUpdateTag(exePath), false, 0)
+	if !boot.armed || boot.artifact != exePath+updater.LauncherImageSuffix {
+		t.Fatalf("after the restart: armed=%v artifact=%q, want the boot armed with the ~", boot.armed, boot.artifact)
+	}
+	return exePath, boot
+}
+
+// recordLauncherImageDeletes swaps the deferred ~ delete for a counter: the
+// real one starts a detached cmd.
+func recordLauncherImageDeletes(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	real := scheduleOldLauncherDelete
+	t.Cleanup(func() { scheduleOldLauncherDelete = real })
+	scheduleOldLauncherDelete = func(string) { n++ }
+	return &n
+}
+
+// Owner ruling RV-10. The first boot of a Windows update ends before its
+// started milestone: it exits 3 (a port in use, a config it cannot load), or
+// it is stopped or quit in its first seconds. The previous binary is the ~
+// the restart renamed .old to. The launcher used to schedule its deletion on
+// a stop or a quit, and the next start swept it after an exit 3 (whose notice
+// had just told the operator it was still there and to start again), so that
+// start ran the unproven release with nothing to roll back to. Now the
+// launcher leaves the ~ on its way out, and the next start renames it back to
+// .old and arms its first child with it, as for an update applied and never
+// booted.
+//
+// Mutants: keepsLauncherImage answering false (the stop and the quit schedule
+// the delete); cleanupOrphans removing the ~ as before (.old is missing and
+// the start is not armed).
+func TestAnUpdatesFirstBootEndingBeforeItsMilestoneStaysArmed(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		code        int
+		terminating bool
+	}{
+		{"startup error", exitCodeStartupError, false},
+		{"stopped", 1, true},
+		{"quit", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exePath, boot := firstUpdateRestarted(t)
+			deletes := recordLauncherImageDeletes(t)
+
+			// What the loop does with the exit.
+			action, _ := boot.judge(false, tc.code, 5*time.Second, tc.terminating, 0)
+			switch action {
+			case childPropagate:
+				boot.sweepLauncherImage(exePath)
+			case childPostUpdateFailure:
+				var restored bool
+				captureStderr(t, func() { restored = boot.recoverFailedBoot(exePath, tc.code) })
+				if restored {
+					t.Fatal("this exit must not be rolled back")
+				}
+			default:
+				t.Fatalf("action = %v, want the launcher to exit", action)
+			}
+			if *deletes != 0 {
+				t.Fatal("the launcher scheduled the deletion of the ~, the only copy of the previous binary")
+			}
+
+			// The next start, in launchAndSupervise's order.
+			cleanupOrphans(exePath, "2.0.1")
+			var next postUpdateBoot
+			armed := next.armInterruptedUpdate(exePath, "2.0.1")
+			if !bytesEqualFile(t, exePath+updater.OldSuffix, "N") {
+				t.Error("the previous binary must be back at .old")
+			}
+			if _, err := os.Stat(exePath + updater.LauncherImageSuffix); !os.IsNotExist(err) {
+				t.Errorf("the ~ must have been renamed, not copied or left (stat: %v)", err)
+			}
+			if !armed || !next.atFreshStart || next.artifact != exePath+updater.OldSuffix {
+				t.Errorf("next start: armed=%v atFreshStart=%v artifact=%q, want it armed at its own start with .old",
+					armed, next.atFreshStart, next.artifact)
+			}
+		})
+	}
+}
+
+// The other side of RV-10: once the release has started properly, the ~ is
+// an old launcher image again. The milestone resolves the breadcrumb, a stop
+// after it schedules the delete as before, and a start that still finds the ~
+// removes it and arms nothing. The same goes for a ~ beside a breadcrumb that
+// names another release (the binary a rollback restored).
+//
+// Mutants: keepsLauncherImage not reading the breadcrumb (no delete is
+// scheduled after the milestone); cleanupOrphans renaming without the version
+// test (the "another release" case leaves a .old).
+func TestALauncherImageIsSweptOnceItsUpdateHasStarted(t *testing.T) {
+	exePath, boot := firstUpdateRestarted(t)
+	deletes := recordLauncherImageDeletes(t)
+	resolveLandedUpdateBreadcrumb(exePath, "2.0.1", &nopLogger{})
+
+	if action, _ := boot.judge(false, 1, 10*time.Minute, true, 0); action != childPropagate {
+		t.Fatalf("a stop: action = %v, want it propagated", action)
+	}
+	boot.sweepLauncherImage(exePath)
+	if *deletes != 1 {
+		t.Errorf("deletes scheduled after the milestone = %d, want 1", *deletes)
+	}
+
+	for _, tc := range []struct{ name, breadcrumb string }{
+		{"no breadcrumb", ""},
+		{"a breadcrumb naming another release", "v2.0.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exePath := filepath.Join(t.TempDir(), "moombox.exe")
+			files := map[string]string{exePath: "N+1", exePath + updater.LauncherImageSuffix: "N"}
+			if tc.breadcrumb != "" {
+				files[exePath+updater.PendingVersionSuffix] = tc.breadcrumb
+			}
+			writeReleases(t, files)
+			cleanupOrphans(exePath, "2.0.1")
+			for _, suffix := range []string{updater.LauncherImageSuffix, updater.OldSuffix} {
+				if _, err := os.Stat(exePath + suffix); !os.IsNotExist(err) {
+					t.Errorf("%s is on disk after the start's sweep (stat: %v), want the ~ removed and no .old made", suffix, err)
+				}
+			}
+		})
+	}
+}
+
+// The second update of one launcher lifetime: the rename to ~ failed, so the
+// artifact is .old and the ~ beside it is the launcher's own image, one
+// version older. RV-10 must not keep or promote that file: a boot that ends
+// before its milestone schedules the ~ for deletion as before, and the next
+// start arms with the .old that is there, never with the ~ renamed over it.
+//
+// Mutants: keepsLauncherImage decided from the names on disk (a breadcrumb
+// and a ~: no delete is scheduled); cleanupOrphans renaming the ~ over an
+// existing .old (the start arms a rollback two versions back).
+func TestASecondUpdatesOlderLauncherImageIsNeverTheArtifact(t *testing.T) {
+	exePath := filepath.Join(t.TempDir(), "moombox.exe")
+	writeReleases(t, map[string]string{
+		exePath:                                "N+2",
+		exePath + updater.OldSuffix:            "N+1",
+		exePath + updater.LauncherImageSuffix:  "N",
+		exePath + updater.PendingVersionSuffix: "v2.0.2",
+	})
+	deletes := recordLauncherImageDeletes(t)
+	var boot postUpdateBoot
+	// handleUpdateRestart's answer when its rename fails.
+	boot.restarted(exePath+updater.OldSuffix, pendingUpdateTag(exePath), false, 0)
+
+	if action, _ := boot.judge(false, 1, 5*time.Second, true, 0); action != childPropagate {
+		t.Fatalf("a stop: action = %v, want it propagated", action)
+	}
+	boot.sweepLauncherImage(exePath)
+	if *deletes != 1 {
+		t.Errorf("deletes scheduled = %d, want 1: the ~ is two versions back and stands for nothing", *deletes)
+	}
+
+	cleanupOrphans(exePath, "2.0.2")
+	if !bytesEqualFile(t, exePath+updater.OldSuffix, "N+1") {
+		t.Error(".old must still hold the release this update replaced")
+	}
+	if _, err := os.Stat(exePath + updater.LauncherImageSuffix); !os.IsNotExist(err) {
+		t.Errorf("the older ~ survived the start's sweep (stat: %v)", err)
 	}
 }

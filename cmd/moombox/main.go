@@ -455,8 +455,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// a boot-crashing update could fail (updater review 2026-07, A1). In
 	// headless mode a bind failure exits above, preserving .old; TUI mode
 	// continues without the web server by design, which still counts as a
-	// healthy boot.
+	// healthy boot. The breadcrumb of an update that landed goes first, so
+	// that it never outlives the .old it vouches for
+	// (resolveLandedUpdateBreadcrumb, owner ruling RV-10).
 	if upd != nil {
+		if exePath, err := os.Executable(); err == nil {
+			resolveLandedUpdateBreadcrumb(exePath, version, log)
+		}
 		upd.CleanupOldBinary()
 	}
 

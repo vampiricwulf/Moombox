@@ -668,6 +668,48 @@ func resolveUpdateBreadcrumb(store *config.Store, exePath, currentVersion, rolle
 				slog.String("version", rolledBackFrom))
 		}
 	}
+	finishUpdateBreadcrumb(exePath, pendingPath, pendingTag, currentVersion, log)
+}
+
+// resolveLandedUpdateBreadcrumb is the first act of the first-successful-boot
+// milestone, ahead of its CleanupOldBinary sweep: a breadcrumb naming exactly
+// this version means the update landed, and it is resolved here (as
+// resolveUpdateBreadcrumb resolves it) before the previous binary at .old is
+// swept. The order is what lets the Windows launcher trust the breadcrumb at a
+// fresh start (cleanupOrphans, owner ruling RV-10): while it names the running
+// version, this release's milestone has swept nothing, so a `~` image with no
+// .old beside it is the binary this release replaced. Swept first, a process
+// killed between the sweep and the breadcrumb's removal left the breadcrumb
+// beside a `~` that, on the second update of one launcher lifetime, is two
+// versions back. A breadcrumb naming another version (a rollback, a manual
+// swap) is left for resolveUpdateBreadcrumb, which needs run()'s later
+// readings.
+func resolveLandedUpdateBreadcrumb(exePath, currentVersion string, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) {
+	pendingPath := exePath + updater.PendingVersionSuffix
+	raw, err := os.ReadFile(pendingPath)
+	if err != nil {
+		return
+	}
+	pendingTag := strings.TrimSpace(string(raw))
+	if pendingTag != "v"+currentVersion {
+		return
+	}
+	finishUpdateBreadcrumb(exePath, pendingPath, pendingTag, currentVersion, log)
+}
+
+// finishUpdateBreadcrumb removes the breadcrumb at pendingPath, and first the
+// failed-update marker a landed update superseded.
+func finishUpdateBreadcrumb(exePath, pendingPath, pendingTag, currentVersion string, log interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) {
 	// Before the breadcrumb goes: its age is what proves the update that
 	// landed came AFTER an earlier failure's marker.
 	if cleared, clrErr := clearSupersededFailureMarker(exePath, pendingPath, pendingTag, currentVersion); clrErr != nil {

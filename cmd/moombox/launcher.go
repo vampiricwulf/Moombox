@@ -43,9 +43,11 @@ func launchAndSupervise() {
 		os.Exit(1)
 	}
 
-	// Clean up old launcher binary from a previous session (now unlocked).
-	// Windows-only; no-op on Linux.
-	cleanupOrphans(exePath)
+	// Clean up old launcher binary from a previous session (now unlocked),
+	// or hand it back to .old for armInterruptedUpdate below when it is the
+	// rollback artifact of an update that has not started properly yet
+	// (owner ruling RV-10). Windows-only; no-op on Linux.
+	cleanupOrphans(exePath, version)
 
 	// Forward the stop signals (stopSignals: Ctrl+C, SIGTERM and, on Unix, a
 	// hangup) to the child instead of dying with the default disposition. A
@@ -205,7 +207,7 @@ func launchAndSupervise() {
 				fmt.Fprintf(os.Stderr, "The update to %s has not started yet. The previous version is kept at %s, and the next start tries the update again.\n",
 					boot.tag, boot.artifact)
 			}
-			deferDeleteOldLauncher(exePath)
+			boot.sweepLauncherImage(exePath)
 			os.Exit(1)
 		}
 		assignLauncherJob(childJob, cmd.Process)
@@ -227,7 +229,7 @@ func launchAndSupervise() {
 				code = exitErr.ExitCode()
 			} else {
 				fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", err)
-				deferDeleteOldLauncher(exePath)
+				boot.sweepLauncherImage(exePath)
 				os.Exit(1)
 			}
 		}
@@ -257,8 +259,11 @@ func launchAndSupervise() {
 			// fail-fast path — no rollback ping-pong is possible. When the
 			// restore fails, or the code is a startup error,
 			// recoverFailedBoot preserves what's left with manual
-			// instructions; this branch does not call deferDeleteOldLauncher,
-			// so a manual rollback stays one rename away. A boot whose
+			// instructions; this branch schedules no cleanup of the artifact,
+			// and the next start keeps it as well (a failure marker holds
+			// the ~, and after an exit 3 cleanupOrphans renames it back to
+			// .old and that start is armed, owner ruling RV-10), so a manual
+			// rollback stays one rename away. A boot whose
 			// artifact is already gone (it reached the milestone sweep before
 			// dying) never gets here: judgeChildExit sends it to crash
 			// supervision.
@@ -270,7 +275,7 @@ func launchAndSupervise() {
 			os.Exit(code)
 
 		case childPropagate:
-			deferDeleteOldLauncher(exePath)
+			boot.sweepLauncherImage(exePath)
 			os.Exit(propagatedExitCode(code))
 
 		default: // childCrash
@@ -279,7 +284,7 @@ func launchAndSupervise() {
 				fmt.Fprintf(os.Stderr,
 					"moombox crashed %d times in a row (last exit code %d) — giving up; check the logs\n",
 					consecutiveCrashes, code)
-				deferDeleteOldLauncher(exePath)
+				boot.sweepLauncherImage(exePath)
 				os.Exit(code)
 			}
 			backoff := crashBackoff(consecutiveCrashes)
@@ -341,7 +346,8 @@ func forwardStop(goos string, p stoppable, sig os.Signal) {
 // postUpdateBoot is the launcher's one-shot record of a freshly applied
 // update's first boot, kept from the restart that applied the update to the
 // exit that judges the boot. launchAndSupervise holds one and drives it only
-// through armInterruptedUpdate, judge, restartArtifact, restarted and recoverFailedBoot. The loop spawns processes and
+// through armInterruptedUpdate, judge, restartArtifact, restarted,
+// recoverFailedBoot and sweepLauncherImage. The loop spawns processes and
 // exits the launcher, so no test runs it; the bookkeeping that decides which
 // file a failed boot is judged and rolled back by lives here, where one does.
 type postUpdateBoot struct {
@@ -381,9 +387,8 @@ type postUpdateBoot struct {
 // its release, no new update was applied, so the restart is a config restart
 // of the same binary. It reports "" and leaves .old alone, and restarted
 // carries the boot forward with .old as its artifact. Renaming .old to ~ there
-// would hand the artifact to deferDeleteOldLauncher, which deletes the ~ on
-// the next propagated exit: a stop after a settings restart would lose the
-// rollback .old kept.
+// would move an artifact nothing holds for no reason, and record it under a
+// name the next start would have to rename back (cleanupOrphans).
 func (b *postUpdateBoot) restartArtifact(exePath string, wasFirst bool) string {
 	if b.atFreshStart && wasFirst && b.tag != "" &&
 		b.artifact == exePath+updater.OldSuffix && pendingUpdateTag(exePath) == b.tag {
@@ -454,10 +459,16 @@ func (b *postUpdateBoot) spawnFailureRollsBack() bool {
 // binary the launcher rolled back to (whose breadcrumb names the release it
 // replaced) never arms — and <exe>.old, which is then the artifact. It is
 // used where it is, not renamed as handleUpdateRestart renames it on Windows:
-// nothing holds it on a fresh start, and the ~ name is deleted by
-// deferDeleteOldLauncher on any later propagated exit and by cleanupOrphans
-// at the next start, so a stop or an exit 3 during this boot would destroy
-// the artifact that survives today as .old.
+// nothing holds it on a fresh start, so there is nothing to free the .old
+// name for.
+//
+// The same start also arms after an update's first boot that ran and never
+// reached its started milestone: it exited 3, or was stopped or quit before
+// it (owner ruling RV-10). Elsewhere that boot's artifact is .old already. On
+// Windows it is the ~ the restart renamed .old to: the launcher leaves it on
+// its way out (keepsLauncherImage), and cleanupOrphans, which runs just
+// before this, renames it back to .old. The rollback so stays armed until the
+// release has started properly once.
 //
 // The boot is then judged exactly as a restart-armed one: a stop the launcher
 // forwarded propagates and keeps .old (and the next start arms again), an
@@ -477,6 +488,38 @@ func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bo
 	}
 	b.armed, b.artifact, b.tag, b.atFreshStart = true, artifact, tag, true
 	return true
+}
+
+// keepsLauncherImage reports whether the Windows ~ image must outlive this
+// launcher: it is the rollback artifact of an update whose release has not
+// reached its started milestone (owner ruling RV-10). True while the recorded
+// artifact is <exe>~ (the restart that applied the update renamed .old there),
+// and the breadcrumb still names the release that restart recorded: the
+// release's milestone removes the breadcrumb, and a later update's restart
+// replaces the record. The next start then renames the ~ back to .old and arms
+// its first child with it (cleanupOrphans, armInterruptedUpdate). Decided from
+// the launcher's own record, never from the names on disk alone: on the
+// second update of one launcher lifetime the artifact is .old and the ~ beside
+// it is a version older, which goes as before. Always false off Windows, where
+// no artifact is ever a ~.
+func (b *postUpdateBoot) keepsLauncherImage(exePath string) bool {
+	return b.tag != "" && b.artifact == exePath+updater.LauncherImageSuffix &&
+		pendingUpdateTag(exePath) == b.tag
+}
+
+// scheduleOldLauncherDelete is deferDeleteOldLauncher, a seam for the tests
+// of sweepLauncherImage: on Windows the real one starts a detached process.
+var scheduleOldLauncherDelete = deferDeleteOldLauncher
+
+// sweepLauncherImage is what the launcher does about its old image on every
+// exit that cleans up: it schedules the ~ file's deletion
+// (deferDeleteOldLauncher), unless that file is still the rollback artifact
+// of a release that has not started properly (keepsLauncherImage).
+func (b *postUpdateBoot) sweepLauncherImage(exePath string) {
+	if b.keepsLauncherImage(exePath) {
+		return
+	}
+	scheduleOldLauncherDelete(exePath)
 }
 
 // recoverFailedBoot handles a first post-update boot that failed (code -1: the
@@ -905,17 +948,26 @@ func preserveUpdateRollback(exePath, backup string, exitCode int) {
 	// is what the NEXT boot announces as "Previous Update Failed" — with
 	// instructions whose first step is to replace the binary. An operator who
 	// follows them on a port conflict lands on the older release and gets the
-	// good one marked skipped. Same preservation (this path still skips the
-	// artifact cleanup, so a manual rollback stays one rename away), honest
-	// notice, no marker (CORE-23).
+	// good one marked skipped. Same preservation, honest notice, no marker
+	// (CORE-23). The artifact is not cleaned up on this path, and the next
+	// start keeps it too: .old stays where it is, and the Windows ~ is renamed
+	// back to .old (cleanupOrphans), so that start is armed to roll back
+	// (armInterruptedUpdate, owner ruling RV-10) and a manual rollback stays
+	// one rename away until the release has started properly once.
 	if classifyPostUpdateExit(exitCode) == postUpdatePreserve {
+		kept := ""
+		if oldPath := exePath + updater.OldSuffix; backup != oldPath {
+			kept = fmt.Sprintf(" (the next start moves it to %s)", oldPath)
+		}
 		fmt.Fprintf(os.Stderr,
 			"\nMoombox could not start after a self-update (exit code %d): a startup/environment\n"+
 				"failure — a config it cannot load, a port it cannot bind, a database it refuses —\n"+
 				"not a broken release. Fix the cause and start Moombox again.\n"+
 				"The previous version's binary is still at:\n  %s\n"+
-				"Rolling back is not the fix and would make automatic checks skip this release.\n",
-			exitCode, backup)
+				"It is kept until this release has started properly once%s, and Moombox\n"+
+				"goes back to it by itself if this release then fails right after starting.\n"+
+				"Rolling back by hand is not the fix and would make automatic checks skip this release.\n",
+			exitCode, backup, kept)
 		return
 	}
 	msg := fmt.Sprintf(

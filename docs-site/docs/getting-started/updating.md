@@ -100,7 +100,8 @@ minute) can be lost, Twitch especially. Updating between streams is safest.
    **Update applied. Restarting...** and reconnects.
 6. Once the new version has started successfully, it deletes the leftover
    files (`<binary>.old`, and any `.new` or `.failed`). On Windows,
-   `<binary>~` is removed once the launcher that runs from it has exited. On
+   `<binary>~` is removed once the new version has started successfully and
+   the launcher that runs from it has exited. On
    the first start of the new version an
    **Update Applied** notification reports the old and new version and
    whether the dashboard came back.
@@ -113,11 +114,14 @@ must be writable by the user running Moombox.
 
 ### If the new version fails to start
 
-The launcher watches the first start after an update. That includes an
-update whose restart was cut short, for example because Moombox was stopped
-or the machine shut down while it was restarting: the next time you start
-Moombox, it treats that start as the first one, with the previous binary at
-`<binary>.old` (on Windows too) as the one it rolls back to.
+The launcher watches the first start after an update, and it keeps watching
+until the new version has started successfully once. If Moombox was stopped
+or the machine shut down while it was restarting, or the new version was
+stopped, closed or reported a startup error in its first seconds, the
+previous binary is kept, and the next time you start Moombox that start is
+treated as the first one again. The previous binary is then at
+`<binary>.old`, on Windows too: a `<binary>~` left by the earlier attempt is
+renamed back to `<binary>.old` when Moombox starts.
 
 - **The new version crashes or exits with an error within two minutes:** the
   launcher rolls back automatically. The failed binary is kept as
@@ -131,10 +135,13 @@ Moombox, it treats that start as the first one, with the previous binary at
   load, a port it cannot bind, a database it refuses): that is your
   environment, not the release, so there is no rollback. Moombox stops and
   prints where the previous binary still is (`<binary>.old` on Linux,
-  `<binary>~` on Windows, `<binary>.old` on both after a restart that was cut
-  short). Fix the cause and start Moombox again.
-- **Moombox cannot start the new version's process at all, on the start
-  after a restart that was cut short:** nothing is rolled back and no version
+  `<binary>~` on Windows, `<binary>.old` on both when this was not the
+  first attempt). Fix the cause and start Moombox again. The previous binary
+  stays on disk (on Windows the next start renames `<binary>~` to
+  `<binary>.old`), and that start can still roll back by itself if the new
+  version then crashes.
+- **Moombox cannot start the new version's process at all, on a start that
+  follows an attempt that was cut short:** nothing is rolled back and no version
   is skipped. That is the system refusing to start a process, not the
   release. Moombox prints the error and where the previous binary is kept
   (`<binary>.old`), then exits. The next start tries the new version again.
