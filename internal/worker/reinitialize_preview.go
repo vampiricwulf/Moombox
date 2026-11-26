@@ -81,9 +81,9 @@ func PreviewReinitialize(db *database.Database, stagingBase string, job *databas
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		// The display-aspect record and the start thumbnail are metadata,
-		// never a recording (HasStagingFiles, isStagingMetadataFile): a job
-		// holding only them has nothing staged.
+		// The display-aspect record, the start thumbnail and a rendition
+		// marker are metadata, never a recording (HasStagingFiles,
+		// isStagingMetadataFile): a job holding only them has nothing staged.
 		if isStagingMetadataFile(d.Name()) {
 			return nil
 		}

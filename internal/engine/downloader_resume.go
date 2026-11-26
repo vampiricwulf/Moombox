@@ -290,12 +290,23 @@ func (d *SegmentDownloader) ClearResume() {
 // is recorded in. A SplitOnRenditionChange downloader writes it when it opens
 // the file, before any media, so a restart that finds no usable sidecar — one
 // before the first sidecar save, or with the sidecar lost — still knows what
-// the file holds (owner ruling R4-1). Nothing else reads it; the staging scans
-// recognise media by name, so it is never mistaken for a recording.
+// the file holds (owner ruling R4-1). Nothing else reads it. Package worker
+// treats it as metadata, never a recording (IsStagedRenditionMarker), and
+// removes it with an empty file it removes (StagedRenditionMarker).
 const renditionFileSuffix = ".rendition"
 
 func (d *SegmentDownloader) renditionFile() string {
-	return d.opts.OutputFile + renditionFileSuffix
+	return StagedRenditionMarker(d.opts.OutputFile)
+}
+
+// StagedRenditionMarker returns the rendition marker beside the staged media
+// file p. Exported so package worker can remove it with the file it names.
+func StagedRenditionMarker(p string) string { return p + renditionFileSuffix }
+
+// IsStagedRenditionMarker reports whether name, a file in a staging
+// directory, is a rendition marker: a record about a file, never media.
+func IsStagedRenditionMarker(name string) bool {
+	return strings.HasSuffix(name, renditionFileSuffix)
 }
 
 // renditionChanged reports whether the staged file holds another rendition

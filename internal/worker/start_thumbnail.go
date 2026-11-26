@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // startThumbnailFile names the copy of a YouTube live capture's thumbnail
@@ -59,11 +61,14 @@ func fetchYouTubeThumbnail(ctx context.Context, videoID, dst string, lg logger) 
 // isStagingMetadataFile reports whether name, a file in a job's staging
 // directory, is a record about a recording rather than anything a run could
 // resume or mux: the yt:stretch display-aspect record and the start thumbnail
-// (with the temporary name its download writes under). Both are written
-// before a capture's first media byte, so a job holding only them has
-// nothing staged (HasStagingFiles, PreviewReinitialize).
+// (with the temporary name its download writes under), both written before a
+// capture's first media byte, and a downloader's rendition marker
+// (engine.IsStagedRenditionMarker), which names a file's rendition and holds
+// none of it. A job holding only them has nothing staged (HasStagingFiles,
+// PreviewReinitialize).
 func isStagingMetadataFile(name string) bool {
-	return name == displayAspectFile || name == startThumbnailFile || name == startThumbnailFile+".tmp"
+	return name == displayAspectFile || name == startThumbnailFile || name == startThumbnailFile+".tmp" ||
+		engine.IsStagedRenditionMarker(name)
 }
 
 // stageStartThumbnail fetches a YouTube live capture's thumbnail into its
