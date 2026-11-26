@@ -1155,6 +1155,24 @@ func TestJobCreateRejectsPathTraversal(t *testing.T) {
 // A ".." inside a folder name is not traversal: both arms of the add route
 // use the segment rule (config.PathHasTraversal) like every config path
 // field. Mutant: restoring strings.Contains(dir, "..") on either arm.
+// A pasted Explorer "Copy as path" value is refused on both arms of the add
+// route, as every path setting is: nothing downstream takes the quotes off,
+// so the job would fail at mux after the whole download.
+// Mutant: dropping the shared output-directory check on either arm.
+func TestJobCreateRefusesAQuotedOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, body := range []map[string]any{
+		{"videoId": "abcd1234567", "outputDirectory": `"D:\Archives\VTuber"`},
+		{"platform": "twitch", "twitchType": TwitchListingType,
+			"url": "https://www.twitch.tv/somechannel/videos", "outputDirectory": `"/mnt/archive"`},
+	} {
+		rec := doRequest(t, f.router, "POST", "/api/jobs", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), config.PathRuleQuoted) {
+			t.Errorf("%v: want 400 naming the quotes, got %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestJobCreateAcceptsDotsInsideAFolderName(t *testing.T) {
 	f := newJobsFixture(t)
 	dir := filepath.Join(t.TempDir(), "Wait.. what")
@@ -1164,7 +1182,7 @@ func TestJobCreateAcceptsDotsInsideAFolderName(t *testing.T) {
 			"url": "https://www.twitch.tv/somechannel/videos", "outputDirectory": dir},
 	} {
 		rec := doRequest(t, f.router, "POST", "/api/jobs", body)
-		if strings.Contains(rec.Body.String(), "path traversal") {
+		if strings.Contains(rec.Body.String(), config.PathRuleTraversal) {
 			t.Errorf("%v: refused as traversal: %d %s", body, rec.Code, rec.Body.String())
 		}
 	}

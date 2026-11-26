@@ -273,6 +273,42 @@ func newQuotedPathErrors(updates map[string]any, stored *config.MoomboxConfig) m
 	return errs
 }
 
+// newChannelPathErrors refuses a channels[] entry's output_directory that
+// breaks a path rule (config.OutputDirOverrideRule), keyed
+// channels[i].output_directory with the path fields' wording. Each entry is
+// compared with the stored channel of the same ID (case-insensitive): the
+// dashboard's save sends every channel back, and an override stored before
+// the rule must not make every later save fail.
+func newChannelPathErrors(updates map[string]any, stored *config.MoomboxConfig) map[string]string {
+	chs, ok := updates["channels"].([]any)
+	if !ok {
+		return nil
+	}
+	errs := map[string]string{}
+	for i, raw := range chs {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		dir, ok := obj["output_directory"].(string)
+		if !ok {
+			continue
+		}
+		id, _ := obj["id"].(string)
+		var storedDir string
+		for _, ch := range stored.Channels {
+			if strings.EqualFold(ch.ID, strings.TrimSpace(id)) {
+				storedDir = ch.OutputDirectory
+				break
+			}
+		}
+		if rule := config.OutputDirOverrideRule(dir, storedDir); rule != "" {
+			errs[fmt.Sprintf("channels[%d].output_directory", i)] = "Path " + rule
+		}
+	}
+	return errs
+}
+
 // pathField names one path-shaped config field and whether config.Validate
 // refuses to persist it empty.
 type pathField struct {
@@ -1252,6 +1288,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		validationErrs := validateConfigUpdates(mergedValidationView(updates, live))
 		maps.Copy(validationErrs, channelErrs)
 		maps.Copy(validationErrs, newQuotedPathErrors(updates, live))
+		maps.Copy(validationErrs, newChannelPathErrors(updates, live))
 		if msg := newFFmpegPathError(updates, live.Paths.FfmpegPath); msg != "" {
 			validationErrs["paths.ffmpeg_path"] = msg
 		}
