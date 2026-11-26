@@ -319,39 +319,44 @@ func (db *Database) DeleteJobLeavingHistory(job *Job) error {
 	if job.Platform == "twitch" {
 		return db.DeleteJob(job.ID)
 	}
+	deleted, err := db.deleteJobLeavingHistoryTx(job.ID)
+	if err != nil || !deleted {
+		return err
+	}
+	db.notifyJobDeleted(job.ID)
+	return nil
+}
+
+// deleteJobLeavingHistoryTx runs DeleteJobLeavingHistory's transaction under
+// db.mu, rolled back before the lock is released. It reports whether a job
+// row was deleted; a row already gone writes nothing, as DeleteJob would.
+func (db *Database) deleteJobLeavingHistoryTx(id string) (bool, error) {
 	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	ctx := db.getCtx()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
-		db.mu.Unlock()
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
-		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, job.ID, now); err != nil {
-		db.mu.Unlock()
-		return err
+		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, id, now); err != nil {
+		return false, err
 	}
-	result, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", job.ID)
+	result, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
 	if err != nil {
-		db.mu.Unlock()
-		return err
+		return false, err
 	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		// The row was already gone: write nothing, as DeleteJob would.
-		db.mu.Unlock()
-		return nil
+	if n, _ := result.RowsAffected(); n == 0 {
+		return false, nil
 	}
 	if err := tx.Commit(); err != nil {
-		db.mu.Unlock()
-		return err
+		return false, err
 	}
-	db.mu.Unlock()
-	db.notifyJobDeleted(job.ID)
-	return nil
+	return true, nil
 }
 
 // HasActiveJob checks if there's an active (non-terminal) job for the given video ID.
