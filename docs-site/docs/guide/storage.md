@@ -203,7 +203,8 @@ with a message asking you to refresh.
 The staging folder of a job that is still on its way is never listed: a job
 that is `Queued`, `Upcoming`, `Live`, `Downloading`, `Muxing` or `COOKIES?`,
 and a Twitch `Error` job that is waiting for its automatic mux (its details
-say *Muxes automatically once Twitch confirms the broadcast over*). To free
+say *Muxes automatically once Twitch confirms the broadcast over, while the
+channel is monitored*). To free
 that space, act on the job and then click **Refresh**:
 
 - **Cancel** the job. It becomes `Cancelled`, and its folder is listed.
