@@ -215,7 +215,11 @@ Every batch action asks for confirmation first. Jobs that do not qualify are
 skipped silently (selecting ten jobs and pressing **Delete** deletes only the
 ones that can be deleted). If some jobs change state while the confirmation
 is open, they are skipped and a toast says how many. The result toast reads
-"Deleted: 5 jobs" or "4 of 5 succeeded. 1 failed."
+"Deleted: 5 jobs" or, when some were refused, "4 of 5 succeeded. 1 failed:"
+followed by the first reason the server gave (for example "This job's
+staging is busy … try again once it is done"), as the TUI's batch line does.
+A request that got no answer, or a refusal with no reason, leaves the count
+alone: "4 of 5 succeeded. 1 failed."
 
 Tasks and Archived keep separate selections.
 
@@ -370,10 +374,14 @@ Below that, sections appear when they have something to show:
 - **Job Logs** — the log lines Moombox collected for this job, oldest first.
   They are kept in memory only: a restart empties them, and a long-running
   job keeps only its most recent lines (the buffer holds up to 200 and is
-  cut back to the latest 100 when it overflows). Loaded when the dialog
-  opens and reloaded when the job's status changes; "No logs for this job
-  yet." when there are none. (The terminal UI shows the same lines with
-  `O L`.)
+  cut back to the latest 100 when it overflows). Of the jobs that have ended
+  (`Finished`, `Error` or `Cancelled`), only the 200 that ended most
+  recently since Moombox started keep their lines (a job with no lines does
+  not count); for an older one, read `moombox.log` (see
+  [Storage and files](storage.md#logs)). The section is refreshed every
+  second while the dialog is open and the browser tab is visible; "No logs
+  for this job yet." when there are none. (The terminal UI shows the same
+  lines with `O L`.)
 
 ### Footer buttons
 
@@ -517,9 +525,10 @@ ask first.
     warns that this is captured footage that is deleted too. A `Finished`
     job's staging that still holds a set-aside recording is never listed
     here, however old it is. Such a folder shows up only when its job is
-    not `Finished` (for example `Error`, `Cancelled`, `COOKIES?` or
-    `Queued`) or the job no longer exists. Consider **Recover** in the job's
-    details first.
+    `Error` or `Cancelled`, or the job no longer exists; the folders that
+    are never listed are in
+    [Orphaned files](storage.md#orphaned-files). Consider **Recover** in the
+    job's details first.
 
 If something stopped being an orphan since the list was drawn (a job now
 uses it), the delete is refused with "No longer an orphan. Refresh the list."
@@ -529,8 +538,10 @@ uses it), the delete is refused with "No longer an orphan. Refresh the list."
 Video IDs the monitor recorded as already processed but which no longer have
 a job — usually a job you deleted. While an entry remains, the monitor will
 not discover that video again. **Remove** (per row, or **Delete All**) lets
-the monitor pick it up again on its next pass. Each ID links to the YouTube
-watch page.
+the monitor pick it up again on its next pass. A YouTube video ID links to
+its watch page and a Twitch VOD ID (`tw_v…`) to its twitch.tv page; other
+Twitch IDs (a live stream's `tw_…`, a clip's `tw_clip_…`) name no page and
+are shown as plain text.
 
 ## The Logs tab
 
