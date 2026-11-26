@@ -147,6 +147,22 @@ test("the Player picker follows recordings finishing and being deleted", { skip 
   assert.equal(rebuilds, 2, "a deleted recording stayed in the picker");
 });
 
+// A reconnect or resync snapshot stands in for frames this tab missed, among
+// them the job_update to Finished and the job_deleted that rebuild the picker,
+// so an open Player tab rebuilds it as an open Archived tab refetches.
+//
+// Mutant: drop the _refreshPlayerPicker call in the initial_state case.
+test("a reconnect snapshot rebuilds an open Player picker", { skip }, async () => {
+  const h = await harness.makeApp();
+  let rebuilds = 0;
+  h.app.player.loadPlayerJobList = async () => { rebuilds++; };
+  h.app.player.playerInitialized = true;
+  h.app._activePanel = "player";
+  h.app.handleMessage({ type: "initial_state", payload: { jobs: [job("A", "Alpha")] } });
+  await h.flush();
+  assert.equal(rebuilds, 1, "the snapshot left the picker as it was before the gap");
+});
+
 // batchAction emptied the selection set but left the boxes ticked and the
 // .selected highlight on rows no job_update would redraw: a target the
 // server refused (a 400 from /cancel) provokes none, and a selected row that
