@@ -504,8 +504,8 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			return nil, fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
 		}
 		// A 429's wait may take the cumulative sleep up to
-		// discordRetryAfterWaitCap, so one long Retry-After is waited out
-		// wherever it lands in the ladder (after a 5xx backoff too); a second
+		// discordRetryAfterWaitCap, so a long Retry-After is waited out after a
+		// 5xx backoff too (up to what is left of the cap); a second
 		// long one is past it and gives up, and a 5xx backoff after a long
 		// wait is past discordMaxSleepTotal and gives up. Either way the
 		// cumulative sleep never exceeds discordRetryAfterWaitCap.
