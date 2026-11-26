@@ -270,3 +270,33 @@ func TestImportNamesASecondSidecarOfAKind(t *testing.T) {
 		t.Errorf("note %q names a second sidecar as a kind the import does not keep", r.Import.Note)
 	}
 }
+
+// A second chat for a video that already has one (a chat-shaped "<stem>.json"
+// beside "<stem>.chat.json", or one chat name written twice) is named as a
+// second chat, never as a kind the import does not keep, while a ".json" that
+// is no chat still is.
+//
+// Mutant: no reason for a second chat (the note then says the import keeps
+// chats "only" while naming a chat it left out).
+func TestImportNamesASecondChatOfAVideo(t *testing.T) {
+	f := newImportFixture(t)
+	rec, _ := importZip(t, f, orderedImportZip(t,
+		importEntry{name: "Stream [dQw4w9WgXcQ].mp4", data: []byte("VIDEO")},
+		importEntry{name: "Stream [dQw4w9WgXcQ].chat.json", data: []byte(reimportChat)},
+		importEntry{name: "Stream [dQw4w9WgXcQ].CHAT.JSON", data: []byte(reimportChat)},
+		importEntry{name: "Stream [dQw4w9WgXcQ].json", data: []byte(reimportChat)},
+		importEntry{name: "Stream [dQw4w9WgXcQ].info.json", data: []byte(`{"id":"x"}`)},
+	))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("import: %d (body %s)", rec.Code, rec.Body.String())
+	}
+	r := decodeImportResult(t, rec.Body.Bytes())
+	for _, want := range []string{
+		"left out Stream [dQw4w9WgXcQ].CHAT.JSON, Stream [dQw4w9WgXcQ].json: " + importSkipSecondChat,
+		"left out Stream [dQw4w9WgXcQ].info.json: " + importSkipOther,
+	} {
+		if !strings.Contains(r.Import.Note, want) {
+			t.Errorf("note %q lacks %q", r.Import.Note, want)
+		}
+	}
+}

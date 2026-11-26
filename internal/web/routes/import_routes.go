@@ -749,6 +749,7 @@ const (
 	importSkipUnrelated    = "not named after the recording"
 	importSkipRawNoChat    = "a raw chat is imported only beside its chat"
 	importSkipThumbnail    = "an archive keeps one thumbnail (.jpg, else .webp, else .png)"
+	importSkipSecondChat   = "a video keeps one chat"
 	importSkipChapters     = "not a chapter list Moombox can read"
 	importSkipNameTaken    = "imports/ already held a different file under the name it needs"
 	importSkipNameUnusable = "the name it needs in imports/ cannot be used"
@@ -819,15 +820,17 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		case importVideoExts[strings.ToLower(ext)]:
 			videos = append(videos, importPart{video: f, stem: strings.TrimSuffix(name, ext), ext: ext})
 		case strings.HasSuffix(lower, importChatSuffix):
-			if stem := name[:len(name)-len(importChatSuffix)]; chats[stem] == nil {
+			stem := name[:len(name)-len(importChatSuffix)]
+			if chats[stem] == nil {
 				chats[stem] = f
-				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 			}
+			chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 		case strings.ToLower(ext) == ".json":
-			if stem := name[:len(name)-len(".json")]; jsons[stem] == nil {
+			stem := name[:len(name)-len(".json")]
+			if jsons[stem] == nil {
 				jsons[stem] = f
-				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem, json: true})
 			}
+			chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem, json: true})
 		}
 	}
 	if len(videos) == 0 {
@@ -894,6 +897,14 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		}
 	}
 	reasons := map[*zip.File]string{}
+	// A chat of a video that kept another (a chat-shaped ".json" beside the
+	// ".chat.json" pair preferred, or one chat name written twice) is a
+	// second chat, not a kind the import does not keep.
+	for _, c := range chatEntries {
+		if named[c.stem] && !kept[c.entry] && pair(c.stem) != nil && (!c.json || importJSONIsChat(c.entry)) {
+			reasons[c.entry] = importSkipSecondChat
+		}
+	}
 	thumbRank := len(worker.ThumbnailExts)
 	var thumb *zip.File
 	paired := map[string]bool{} // each kind once (a raw chat once per chat)
