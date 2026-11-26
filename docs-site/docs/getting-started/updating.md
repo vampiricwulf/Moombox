@@ -123,6 +123,13 @@ treated as the first one again. The previous binary is then at
 `<binary>.old`, on Windows too: a `<binary>~` left by the earlier attempt is
 renamed back to `<binary>.old` when Moombox starts.
 
+On Windows, keeping the previous binary after a stop needs the Moombox you
+updated from to have this behaviour already, because that version's launcher
+is the one watching the first start. When you update from 2.9.10 or earlier,
+stopping or closing the new version in its first seconds still removes
+`<binary>~`, and the next start is not treated as the first one again. A
+startup error is covered on that update too.
+
 - **The new version crashes or exits with an error within two minutes:** the
   launcher rolls back automatically. The failed binary is kept as
   `<binary>.failed`, the previous binary is restored to the normal name and
