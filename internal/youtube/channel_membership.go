@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -87,7 +88,16 @@ type MembershipVideo struct {
 // years ago" / "3 weeks ago". Localized to en (we send Accept-Language: en).
 // Its PRESENCE marks a past stream/upload; its ABSENCE means the item is live,
 // upcoming, or unrecognized — all treated as "now" (see itemAge).
-var relativeAgeRe = regexp.MustCompile(`(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago`)
+//
+// It is anchored at both ends and applied to ONE string value at a time
+// (findAgeText), never to the serialized item: a title, an accessibility
+// label or a description snippet that merely contains "3 years ago" is a
+// longer string and cannot match. Unanchored, such a title dated an upcoming
+// members stream years in the past, outside every archive window, and nothing
+// ever probed it. The only prefixes are the two YouTube puts in front of the
+// age in a listing. A text this no longer recognises reads as "now": the item
+// is in scope and probed, which is the safe direction (owner ruling R3-2).
+var relativeAgeRe = regexp.MustCompile(`^(?:(?:Streamed|Premiered)\s+)?(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$`)
 
 // membershipPageBase is the origin the /membership probe fetches from. A
 // package var rather than a const solely so tests can point it at an httptest
@@ -300,8 +310,10 @@ func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out
 // "N <unit> ago" — "Started streaming 2 hours ago" — so that text counts as
 // live in its own right, beside the badges: without it a live item whose badge
 // markup had changed would rank by its elapsed time and could sink below dated
-// VODs and be dropped from the cap. Scanning the serialized item is
-// layout-agnostic (lockup and classic renderers both work).
+// VODs and be dropped from the cap. The age text is looked for in every string
+// value of the item, so it is layout-agnostic (lockup and classic renderers
+// both work), but only a value that is the age text and nothing else counts
+// (relativeAgeRe).
 func itemAge(item map[string]any) time.Duration {
 	b, err := json.Marshal(item)
 	if err != nil {
@@ -318,30 +330,80 @@ func itemAge(item map[string]any) time.Duration {
 		return 0
 	}
 	// A "Streamed N <unit> ago" text marks a PAST stream → rank by that age.
-	if m := relativeAgeRe.FindStringSubmatch(s); m != nil {
-		n, _ := strconv.Atoi(m[1])
-		var unit time.Duration
-		switch m[2] {
-		case "second":
-			unit = time.Second
-		case "minute":
-			unit = time.Minute
-		case "hour":
-			unit = time.Hour
-		case "day":
-			unit = 24 * time.Hour
-		case "week":
-			unit = 7 * 24 * time.Hour
-		case "month":
-			unit = 30 * 24 * time.Hour
-		case "year":
-			unit = 365 * 24 * time.Hour
-		}
-		return time.Duration(n) * unit
+	if age, ok := findAgeText(item); ok {
+		return age
 	}
 	// No live badge and no past-time text → upcoming or unrecognized → "now",
 	// so live/upcoming catching never depends on a single fragile badge marker.
 	return 0
+}
+
+// findAgeText looks through an item for a string VALUE that is, as a whole,
+// YouTube's relative age text, and returns the age it states. Keys are walked
+// in sorted order so the answer does not depend on map iteration.
+//
+// One field is read by name as well: a playlist row's videoInfo, which yt-dlp
+// documents as a single string like "50K views • 10 years ago"
+// (extractor/youtube/_tab.py). When it arrives as one simpleText the age is
+// its last "•" segment. A title cannot reach that field.
+func findAgeText(node any) (time.Duration, bool) {
+	switch n := node.(type) {
+	case string:
+		return parseAgeText(n)
+	case map[string]any:
+		if joined := getDeepStr(n, "videoInfo", "simpleText"); joined != "" {
+			if i := strings.LastIndex(joined, "•"); i >= 0 {
+				joined = joined[i+len("•"):]
+			}
+			if age, ok := parseAgeText(joined); ok {
+				return age, true
+			}
+		}
+		keys := make([]string, 0, len(n))
+		for k := range n {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if age, ok := findAgeText(n[k]); ok {
+				return age, true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if age, ok := findAgeText(v); ok {
+				return age, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// parseAgeText reads one whole relative age text ("Streamed 2 years ago").
+func parseAgeText(text string) (time.Duration, bool) {
+	m := relativeAgeRe.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	var unit time.Duration
+	switch m[2] {
+	case "second":
+		unit = time.Second
+	case "minute":
+		unit = time.Minute
+	case "hour":
+		unit = time.Hour
+	case "day":
+		unit = 24 * time.Hour
+	case "week":
+		unit = 7 * 24 * time.Hour
+	case "month":
+		unit = 30 * 24 * time.Hour
+	case "year":
+		unit = 365 * 24 * time.Hour
+	}
+	return time.Duration(n) * unit, true
 }
 
 // lockupTitle reads the title from a lockupViewModel:

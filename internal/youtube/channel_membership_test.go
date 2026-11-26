@@ -715,3 +715,67 @@ func TestExtractYtInitialDataDecodeIsTheAcceptance(t *testing.T) {
 		t.Errorf("decoded the wrong candidate: %+v", env)
 	}
 }
+
+// A title, an accessibility label or a description that merely CONTAINS an
+// age phrase is not the item's age. Matched over the whole serialized item it
+// dated an upcoming members stream years back, outside the archive window,
+// and the stream was never probed (owner ruling R3-2). Both renderer families
+// go through the tab parser, so the walk and the item it is handed are pinned
+// too.
+func TestItemAgeIgnoresAgeTextInsideOtherText(t *testing.T) {
+	page := `{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[
+		{"tabRenderer":{"selected":true,"tabIdentifier":"TAB_ID_SPONSORSHIPS","content":{"richGridRenderer":{"contents":[
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"upLockup001",
+				"rendererContext":{"accessibilityContext":{"label":"Watching my debut from 3 years ago by Some Channel"}},
+				"metadata":{"lockupMetadataViewModel":{"title":{"content":"Watching my debut from 3 years ago"}}}}}}},
+			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"upClassic02",
+				"title":{"runs":[{"text":"Watching my debut from 3 years ago"}],
+					"accessibility":{"accessibilityData":{"label":"Watching my debut from 3 years ago by Some Channel"}}},
+				"descriptionSnippet":{"runs":[{"text":"clips from 5 days ago"}]}}}}},
+			{"richItemRenderer":{"content":{"videoRenderer":{"videoId":"pastTitle03",
+				"title":{"runs":[{"text":"Watching my debut from 3 years ago"}]},
+				"publishedTimeText":{"simpleText":"Streamed 2 weeks ago"}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"pastLockup4",
+				"metadata":{"lockupMetadataViewModel":{"title":{"content":"reacting to clips from 5 days ago"},
+					"metadata":{"contentMetadataViewModel":{"metadataRows":[{"metadataParts":[
+						{"text":{"content":"1.2K views"}},{"text":{"content":"Premiered 4 months ago"}}]}]}}}}}}}}
+		]}}}}
+	]}}}`
+	videos, ok := parseMembershipTab([]byte(wrapPage(page)))
+	if !ok {
+		t.Fatal("expected access")
+	}
+	want := map[string]time.Duration{
+		"upLockup001": 0,
+		"upClassic02": 0,
+		// The item's own time text still dates it, whatever its title says.
+		"pastTitle03": 2 * 7 * 24 * time.Hour,
+		"pastLockup4": 4 * 30 * 24 * time.Hour,
+	}
+	if len(videos) != len(want) {
+		t.Fatalf("videos = %d, want %d", len(videos), len(want))
+	}
+	for _, v := range videos {
+		if v.Age != want[v.VideoID] {
+			t.Errorf("%s: Age = %v, want %v", v.VideoID, v.Age, want[v.VideoID])
+		}
+	}
+}
+
+// A playlist row's videoInfo can arrive as separate runs or as one joined
+// string ("50K views • 10 years ago", yt-dlp _tab.py). Both must date the row:
+// an undated uploads-playlist page is what the backfill reads as a parser
+// failure.
+func TestItemAgeReadsPlaylistVideoInfo(t *testing.T) {
+	runs := map[string]any{"title": map[string]any{"runs": []any{map[string]any{"text": "from 3 years ago"}}},
+		"videoInfo": map[string]any{"runs": []any{
+			map[string]any{"text": "50K views"}, map[string]any{"text": " • "}, map[string]any{"text": "10 years ago"}}}}
+	if got, want := itemAge(runs), 10*365*24*time.Hour; got != want {
+		t.Errorf("videoInfo runs: Age = %v, want %v", got, want)
+	}
+	joined := map[string]any{"title": map[string]any{"simpleText": "from 3 years ago"},
+		"videoInfo": map[string]any{"simpleText": "50K views • 10 years ago"}}
+	if got, want := itemAge(joined), 10*365*24*time.Hour; got != want {
+		t.Errorf("videoInfo simpleText: Age = %v, want %v", got, want)
+	}
+}
