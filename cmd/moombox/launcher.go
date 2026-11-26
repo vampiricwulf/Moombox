@@ -414,7 +414,7 @@ func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor t
 // automatically.
 func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bool {
 	tag := pendingUpdateTag(exePath)
-	if tag == "" || tag != "v"+runningVersion {
+	if tag != "v"+runningVersion {
 		return false
 	}
 	artifact := exePath + updater.OldSuffix
@@ -497,7 +497,8 @@ func restoreUpdateBreadcrumb(exePath, tag string) {
 // A first boot of a fresh update whose rollback artifact is gone has nothing
 // to roll back to (postUpdatePastRollback): its exit is an ordinary crash, and
 // a supervised one however soon it comes. artifact is the file
-// handleUpdateRestart named when it armed the boot.
+// handleUpdateRestart named when it armed the boot (or <exe>.old, for a boot
+// armInterruptedUpdate armed).
 func judgeChildExit(artifact string, firstAfterUpdate, wasRespawn bool, code int, ranFor time.Duration, terminating bool, consecutiveCrashes int) (action childExitAction, wasFirstAfterUpdate bool) {
 	pastRollback := firstAfterUpdate && postUpdatePastRollback(artifact)
 	wasFirstAfterUpdate = firstAfterUpdate && !pastRollback
@@ -627,7 +628,8 @@ const postUpdateFailureWindow = 2 * time.Minute
 
 // postUpdatePastRollback reports whether the first boot of a fresh update has
 // no rollback artifact left to restore — artifact, the file
-// handleUpdateRestart named at the restart that armed the boot. A .old
+// handleUpdateRestart named at the restart that armed the boot, or the .old
+// armInterruptedUpdate armed it with at a fresh start. A .old
 // artifact is gone once the boot reached the first-successful-boot milestone,
 // whose CleanupOldBinary swept it: an exit inside postUpdateFailureWindow then
 // used to end the launcher on preserve-with-instructions — with nothing to
@@ -690,12 +692,19 @@ func classifyPostUpdateExit(code int) postUpdateVerdict {
 // (keepAsideByLink), so the restore replaces the plain name in one rename
 // and a failed restore leaves the broken binary where it was.
 //
-// backup is the update's rollback artifact as handleUpdateRestart named it.
+// backup is the update's rollback artifact as handleUpdateRestart named it,
+// or the .old armInterruptedUpdate armed the boot with.
 //
 // Windows note: when the artifact is the ~ file it is this launcher's own
 // mapped image — renaming a mapped image is legal (it is how the update swap
 // renamed it to ~ in the first place), and afterwards the launcher runs
-// from the file at the plain name, exactly like a fresh start.
+// from the file at the plain name, exactly like a fresh start. When the boot
+// was armed at a fresh start (armInterruptedUpdate), the broken binary at the
+// plain name is this launcher's own image instead: the move aside renames it
+// to .failed, which is legal for the same reason, and the launcher runs from
+// .failed until it exits. The remove fallback cannot delete a mapped image,
+// so if the move aside never succeeds the rollback ends in the manual
+// instructions.
 func attemptAutoRollback(exePath, backup string, exitCode int) bool {
 	if _, err := os.Stat(backup); err != nil {
 		return false
@@ -832,7 +841,8 @@ func sweptFailedReleaseNote(marker, failedPath string) string {
 //
 // The one exception is exitCodeStartupError, which gets the honest notice and
 // NO marker — see the branch below. backup is the update's rollback artifact
-// as handleUpdateRestart named it, which both texts point the operator at.
+// as handleUpdateRestart named it (or the .old armInterruptedUpdate armed the
+// boot with), which both texts point the operator at.
 func preserveUpdateRollback(exePath, backup string, exitCode int) {
 	// A deterministic startup failure is not a failed update, and the marker
 	// is what the NEXT boot announces as "Previous Update Failed" — with

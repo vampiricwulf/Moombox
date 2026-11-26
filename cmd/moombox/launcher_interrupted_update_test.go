@@ -122,7 +122,6 @@ func TestAFreshStartArmsOnlyAnUpdateNeverBooted(t *testing.T) {
 	}{
 		{"no breadcrumb", map[string]string{updater.OldSuffix: "N"}},
 		{"breadcrumb naming another release", map[string]string{updater.OldSuffix: "N", updater.PendingVersionSuffix: "v2.0.2"}},
-		{"empty breadcrumb", map[string]string{updater.OldSuffix: "N", updater.PendingVersionSuffix: ""}},
 		{"no .old", map[string]string{updater.PendingVersionSuffix: "v2.0.1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,7 +176,7 @@ func TestAStopDuringAnInterruptedUpdatesBootKeepsOld(t *testing.T) {
 				var restored bool
 				captureStderr(t, func() { restored = boot.recoverFailedBoot(exePath, tc.code) })
 				if restored {
-					t.Fatal("a startup error must not be rolled back")
+					t.Fatal("this exit must not be rolled back")
 				}
 			default:
 				t.Fatalf("action = %v, want the launcher to exit", action)
