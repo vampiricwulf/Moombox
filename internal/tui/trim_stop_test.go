@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // trimRunningApp is an App whose trim dialog is on its progress step for a
@@ -158,23 +160,43 @@ func TestTrimStoppedWithAReasonSaysIt(t *testing.T) {
 // background, and A T was then refused ("A trim is already in progress"), so
 // nothing reached S and the TUI had no stop for its own trim. A T now shows
 // the progress step again, whatever job the cursor is on, and S stops that
-// trim.
+// trim. The chord goes through the key path, whose job gate refused it on a
+// row that is no finished job with a file (or on an empty list), and the
+// status bar's A hints offer it there too.
 //
-// Mutant: A T refused while a trim runs (OnStopTrim is never asked).
+// Mutants: A T refused while a trim runs (OnStopTrim is never asked); drop
+// buildMenuItems' trimInBackground arm (the key path refuses A T on the
+// Downloading row and with no jobs, and the hint leaves it out).
 func TestATBringsBackTheBackgroundTrim(t *testing.T) {
-	a, asked := trimRunningApp(t, "trim_A_1", nil)
-	pressTrim(a, keyEsc)
-	if a.trimDlg.IsVisible() {
-		t.Fatal("Esc did not send the trim to the background")
-	}
+	for _, tc := range []struct {
+		name string
+		jobs []*database.Job
+	}{
+		{"downloading row", []*database.Job{{ID: "D", Title: "D", Status: database.StatusDownloading}}},
+		{"no jobs", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, asked := trimRunningApp(t, "trim_A_1", nil)
+			a.taskList.SetJobs(tc.jobs)
+			pressTrim(a, keyEsc)
+			if a.trimDlg.IsVisible() {
+				t.Fatal("Esc did not send the trim to the background")
+			}
 
-	a.dispatchAction("A T", nil)
-	if !a.trimDlg.IsVisible() || a.trimDlg.JobID() != "A" {
-		t.Fatalf("A T did not bring back the running trim's dialog (visible %v, job %q)", a.trimDlg.IsVisible(), a.trimDlg.JobID())
-	}
-	pressTrim(a, "S")
-	if len(*asked) != 1 || (*asked)[0] != "A/trim_A_1" {
-		t.Errorf("S after A T asked to stop %v, want A/trim_A_1", *asked)
+			a.handleChord("a")
+			if hint := stripANSI(a.feedback.msg); !strings.Contains(hint, "T Trim") {
+				t.Errorf("the A hint leaves out T Trim: %q", hint)
+			}
+			a.handleChord("t")
+			if !a.trimDlg.IsVisible() || a.trimDlg.JobID() != "A" {
+				t.Fatalf("A T did not bring back the running trim's dialog (visible %v, job %q, feedback %q)",
+					a.trimDlg.IsVisible(), a.trimDlg.JobID(), a.feedback.msg)
+			}
+			pressTrim(a, "S")
+			if len(*asked) != 1 || (*asked)[0] != "A/trim_A_1" {
+				t.Errorf("S after A T asked to stop %v, want A/trim_A_1", *asked)
+			}
+		})
 	}
 }
 

@@ -395,7 +395,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if !a.trimDlg.IsVisible() {
 				// The dialog's own trim runs in the background (Esc): A T
 				// brings its progress step back, whichever job the cursor is
-				// on, so S can stop it again.
+				// on or with none (buildMenuItems drops A T's job gate while
+				// trimInBackground), so S can stop it again.
 				a.trimDlg.SetSize(a.width, a.height)
 				a.trimDlg.Reshow()
 				return a, tea.Batch(spinnerTickCmd(a.trimDlg.spinner), a.ensureProgressTicking())
@@ -997,6 +998,12 @@ func jobCount(n int) string {
 
 // buildMenuItems builds context-sensitive action menu items.
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
+// trimInBackground: the trim dialog's own trim is running with the dialog
+// hidden (Esc), so A T reshows it rather than opening a new trim.
+func (a *App) trimInBackground() bool {
+	return a.trimInProgress && !a.trimDlg.IsVisible()
+}
+
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action", Opens: "add video"},
@@ -1076,6 +1083,17 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				return jobverbs.TrimmableStatus(j.Status) && j.OutputFile != ""
 			}},
 		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action", Opens: "files"},
+	}
+	if a.trimInBackground() {
+		// A T now brings the dialog's background trim back (dispatchAction),
+		// which needs no job: the key path, the hint and the menu let it
+		// through whatever row the cursor is on, or none.
+		for i := range items {
+			if items[i].Chord == "A T" {
+				items[i].NeedsJob = false
+				items[i].JobFilter = nil
+			}
+		}
 	}
 
 	if a.OnListClientTokens != nil {
