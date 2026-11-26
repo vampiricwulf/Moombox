@@ -1761,13 +1761,14 @@ Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a p
 ├── src/
 │   ├── server.js                    (~900 lines, JSON-RPC server)
 │   ├── cipher.js                    (ejs signature/n solving)
-│   └── homepage.js                  (homepage challenge extraction)
+│   ├── homepage.js                  (homepage challenge extraction)
+│   └── player-store.js              (the players' disk store; MOOMBOX_SIDECAR_PLAYER_DIR)
 ├── vendor/                          (the vendored ejs solver)
 ├── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~19 MB)
 └── players/                         (the players the sidecar has prepared, player-store.js; MOOMBOX_SIDECAR_PLAYER_DIR)
 ```
 
-All told the first extraction is roughly 115 MB on Windows and 145-150 MB on Linux; the operator docs say "roughly 115-150 MB" so the figure survives a Node pin bump.
+All told the first extraction is roughly 115 MB on Windows, ~146 MB on linux-amd64 and ~142 MB on linux-arm64; the operator docs say "roughly 115-150 MB" so the figure survives a Node pin bump.
 
 ### Lifecycle
 
