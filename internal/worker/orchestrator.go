@@ -108,6 +108,12 @@ type DownloadOrchestrator struct {
 	// orchestrator a test builds by struct literal) never waits.
 	waitArchiveRewrite func(ctx context.Context, jobID, what string) bool
 
+	// shuttingDown is the worker's one answer to "has the stop begun"
+	// (DownloadWorker.shuttingDown, set by the worker; owner ruling R3-8),
+	// read through stopping. nil (an orchestrator a test builds by struct
+	// literal) is never stopping.
+	shuttingDown func() bool
+
 	// globalOutputDir is paths.output_directory as it stands now, absolute
 	// (resolveOutputDir; set by the worker): what the rows' relative columns
 	// are read against when a finalize asks whether another row names a file

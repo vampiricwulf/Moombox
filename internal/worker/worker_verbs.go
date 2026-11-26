@@ -770,6 +770,17 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 				w.logger.Info("MuxJob: cancelled by shutdown; the row stays Muxing for the next start", "jobID", jobID)
 				return
 			}
+			if w.shuttingDown() {
+				// The stop has begun and the mux root is not cancelled yet
+				// (Stop waits inFlightWait first): an FFmpeg that was
+				// signalled directly — systemd's default KillMode — failed
+				// this mux, not the recording. As the cancel above: the row
+				// stays Muxing with its staging, and the next start re-muxes
+				// it (owner ruling R3-8).
+				w.logger.Info("MuxJob: the mux stopped while Moombox is shutting down; the row stays Muxing for the next start",
+					"jobID", jobID, "err", err)
+				return
+			}
 			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
 			// Only over this mux's own Muxing: an outcome that landed
 			// meanwhile stands.
@@ -1016,7 +1027,7 @@ func (w *DownloadWorker) RecoverAsides(jobID string) error {
 		defer releaseSlot()
 
 		if err := w.orchestrator.recoverAsides(ctx, jobCtx); err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || w.shuttingDown() {
 				w.logger.Info("RecoverAsides: cancelled by shutdown; the recordings stay in staging", "jobID", jobID)
 				return
 			}

@@ -340,6 +340,9 @@ func TestTruncatedMuxErrorsInsteadOfFinishing(t *testing.T) {
 	if err := w.restartMux("j-trunc"); err != nil {
 		t.Fatalf("MuxJob: %v", err)
 	}
+	// Waited for, not stopped: a mux that fails once the stop has begun
+	// leaves the row Muxing for the next start (owner ruling R3-8).
+	w.wg.Wait()
 	w.Stop()
 
 	fresh, _ := db.GetJob("j-trunc")

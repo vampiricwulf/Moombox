@@ -362,6 +362,9 @@ type DownloadWorker struct {
 	// stops waiting on (awaitJobExit). Nil until Start, and in tests that
 	// never call it, where such a wait ends only with the run.
 	runCtx atomic.Pointer[context.Context]
+	// stopBegun is set on Stop's first line: the other half of shuttingDown,
+	// for a stop that did not come through Start's context.
+	stopBegun atomic.Bool
 
 	// autoMuxPending holds the jobs AutoMuxEndedBroadcast is confirming, so a
 	// monitor poll that lands while one is in flight does not start another;
@@ -582,6 +585,7 @@ func NewDownloadWorker(
 	// archive the import's re-mux is about to rename its copy over.
 	if orchestrator != nil {
 		orchestrator.waitArchiveRewrite = w.waitChapterImport
+		orchestrator.shuttingDown = w.shuttingDown
 		orchestrator.beginFinishing = w.beginFinishing
 		orchestrator.globalOutputDir = func() (dir string) {
 			w.readConfig(func(c *config.MoomboxConfig) { dir = resolveOutputDir(c) })
@@ -2374,6 +2378,33 @@ const muxCancelGrace = 2 * time.Second
 // but a mux ended that way is killed mid-write instead of cancelled.
 const StopBudget = inFlightWait + muxCancelGrace
 
+// shuttingDown reports whether Moombox's stop has begun: Start's context has
+// ended, which is the first thing a stop signal, a Quit and a restart do
+// (cmd/moombox, stopOnSignal), or Stop has been entered. It is the one
+// predicate every mux failure path asks before it reads an FFmpeg's error as
+// a failed mux (owner ruling R3-8).
+//
+// A mux's own context cannot answer that. The muxes that outlive their job
+// hang off the mux root, which Stop cancels only after inFlightWait, so that
+// a mux about to finish can; for those ten seconds a mux that dies reads as a
+// failure. FFmpeg does die in them when something signals the whole process
+// tree at once: systemd's default KillMode sends SIGTERM to every process in
+// the unit's control group, FFmpeg included, whatever process group it is in
+// (internal/childproc). The Mux action's Error write then landed on a row the
+// next start does not re-mux, since only a Muxing row is routed there.
+//
+// A mux that genuinely failed in those seconds is left Muxing as well; the
+// boot re-mux runs it once more and writes its Error then.
+func (w *DownloadWorker) shuttingDown() bool {
+	if w.stopBegun.Load() {
+		return true
+	}
+	if ctx := w.runCtx.Load(); ctx != nil {
+		return (*ctx).Err() != nil
+	}
+	return false
+}
+
 // Stop signals the worker to stop processing new jobs and waits for in-flight
 // jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
 // Muxes still running after that wait are cancelled rather than orphaned
@@ -2392,6 +2423,7 @@ func (w *DownloadWorker) Stop() {
 // closes: that is Stop. Once hurry has closed it takes muxCancelGrace at
 // most.
 func (w *DownloadWorker) StopHurried(hurry <-chan struct{}) {
+	w.stopBegun.Store(true)
 	w.logger.Info("download worker stopping")
 	if w.streamProc != nil {
 		w.streamProc.Stop()

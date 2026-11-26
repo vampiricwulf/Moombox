@@ -215,6 +215,9 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
 # Moombox needs up to about 15 seconds to save in-progress downloads.
 TimeoutStopSec=60
+# Stop only Moombox itself, which stops its FFmpeg and helper processes in
+# order; anything still running after TimeoutStopSec is killed.
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
@@ -241,6 +244,10 @@ Things to know:
   off.
 - `systemctl stop` sends SIGTERM, which starts a graceful shutdown. See
   [Signals and shutdown](../reference/cli.md#signals-and-shutdown).
+  `KillMode=mixed` sends it to Moombox alone; without it systemd signals every
+  process of the service at once, FFmpeg included. A mux cut off that way
+  is still left Muxing and done again at the next start, but add the line to
+  a unit you installed before it was here.
 
 The first-run wizard on a server: see
 [First run → Setting up a headless server](first-run.md#setting-up-a-headless-server).
