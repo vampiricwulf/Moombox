@@ -131,8 +131,9 @@ can pick a specific browser or point at any executable with
     at once with "this host has no display for a browser window". That
     includes a desktop where Moombox runs as a service without those
     variables.
-    The Docker image ships **no browser at all**, so the browser login is not
-    available there — use [Import a cookies.txt](#import-a-cookiestxt) or
+    The Docker image ships **no browser at all** and no display, so the
+    browser login is not available there (it answers with the no-display
+    sentence above) — use [Import a cookies.txt](#import-a-cookiestxt) or
     [Read a Firefox profile](#read-a-firefox-profile-docker-and-headless-hosts).
 
 Other things to know:
@@ -484,7 +485,7 @@ staged data), Reinitialize, Cancel or Delete; see [Jobs](jobs.md).
 
 | Symptom | What to do |
 |---|---|
-| "a supported browser (...) is required" | Install one of the supported browsers on the host, or set a [custom browser path](../configuration/cookies.md#cookiesbrowser_path). In Docker, import a file instead. |
+| "a supported browser (...) is required" | Install one of the supported browsers on the host, or set a [custom browser path](../configuration/cookies.md#cookiesbrowser_path). In Docker you see the no-display message in the next row instead; import a file. |
 | "this host has no display for a browser window; use Import cookies.txt or Read a Firefox profile instead" | Linux only: Moombox's environment names no display (neither `DISPLAY` nor `WAYLAND_DISPLAY` is set), so a browser window has nowhere to open. This is the case on a headless server, in Docker, and on a desktop where Moombox runs as a service. Use [Import a cookies.txt](#import-a-cookiestxt) or [Read a Firefox profile](#read-a-firefox-profile-docker-and-headless-hosts), or run Moombox inside the desktop session. |
 | "the browser exited before it opened" | A Chrome-family browser closed before its window opened (it crashed, or could not reach a display). Check that the browser starts on the host, or use [Import a cookies.txt](#import-a-cookiestxt). |
 | "browser profile not found — run setup first" | The Moombox profile folder does not exist yet. Run the browser login once, or mount a Firefox profile there. |
