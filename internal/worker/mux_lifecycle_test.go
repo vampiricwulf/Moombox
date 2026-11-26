@@ -934,6 +934,10 @@ func TestFinalizeMuxesEachAsideToItsOwnFile(t *testing.T) {
 		if err := w2.restartMux("j-aside-bad"); err != nil {
 			t.Fatalf("MuxJob: %v", err)
 		}
+		// Waited for on a running worker, not with Stop: a set-aside copy
+		// that fails once the stop has begun leaves the row Muxing for the
+		// next start (owner ruling RV-7).
+		w2.wg.Wait()
 		w2.Stop()
 
 		after, _ := db2.GetJob("j-aside-bad")
