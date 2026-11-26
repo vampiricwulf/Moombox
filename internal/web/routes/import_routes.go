@@ -1459,7 +1459,9 @@ const importMaxDisambiguation = 999
 // long CJK title's archive, or a backslash-named one a Linux host imported,
 // whose row has since been deleted, was otherwise never found under its old
 // name, and its re-import wrote a second full copy beside it. A legacy name
-// is only ever adopted, never written.
+// is only ever adopted here, never chosen for a new video or chat. A sidecar
+// follows its owner's name (chooseImportSidecarNames), so one the earlier
+// import did not keep is written beside a re-adopted legacy-named file.
 func chooseImportNames(importsDir, outputDir, base string, legacy []string, files []*importFile) (string, error) {
 	var videos []*importFile
 	for _, f := range files {
@@ -1649,9 +1651,14 @@ func zipEntryWrittenName(f *zip.File) string {
 	return strings.ToValidUTF8(f.Name, "\uFFFD")
 }
 
-// importNameReserve is what an import's file name can carry past its
+// importNameReserve is what a video's or chat's file name can carry past its
 // "<title> [<id>]" stem: a " (999)" disambiguation, a " - part999" part
-// suffix and the longest sibling suffix, ".chat.json".
+// suffix and the longer of the two suffixes, ".chat.json". A sidecar's suffix
+// can be longer (".chat.raw.jsonl", ".chapters.json"); its name is checked
+// against importNameMaxBytes when it is placed, and a sidecar that does not
+// fit is left out (chooseImportSidecarNames). The value must not change: it
+// sets importStem's cut, so a different one would stop an archive already
+// imported under a long title from being found again.
 const importNameReserve = len(" (999)") + len(" - part999") + len(importChatSuffix)
 
 // importStem is the file stem an import writes: the sanitized title and
@@ -1685,7 +1692,9 @@ func importLegacyStem(title, id string) string {
 // rule it has since left, each once and none of them base: the title capped
 // by runes rather than cut by bytes (importLegacyStem), and the title a Linux
 // host read from a backslash-named entry (importBackslashTitle), both cut by
-// bytes and capped by runes. chooseImportNames only ever re-adopts them.
+// bytes and capped by runes. chooseImportNames only ever re-adopts them for a
+// video or chat; a sidecar of a file re-adopted under one is named after it
+// and may be written there (chooseImportSidecarNames).
 func importLegacyStems(base, title, backslashTitle, id string) []string {
 	var stems []string
 	for _, s := range []string{importLegacyStem(title, id), importStem(backslashTitle, id), importLegacyStem(backslashTitle, id)} {
