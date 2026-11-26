@@ -51,12 +51,13 @@ const clipDayFilterReach = 23 * time.Hour
 // that reaches back to its last whole listing. A channel never listed whole
 // in this process asks for the last week (LAST_WEEK, the filter yt-dlp's
 // clip page defaults to): it covers a restart, or the install being down,
-// for up to a week. One listed within the day — every sweep but the first,
+// for up to a week. So does one that left the opted-in set and came back,
+// which the poll forgot (forgetClipChannelsExcept): a fresh opt-in. One listed within the day — every sweep but the first,
 // while Twitch answers — asks for the last day (LAST_DAY), which overlaps the
 // last listing many times over; the dedupe by slug makes the overlap free.
 // One whose last whole listing is older — the listings failed for a day (an
 // outage, a re-hashed op until Moombox is updated), or the poll did not run
-// (offline, a machine asleep) — asks for the week, then the month, so the
+// (offline, a machine asleep), never the operator switching it off — asks for the week, then the month, so the
 // clips made in the gap are listed when the listing comes back rather than
 // lost to a LAST_DAY that no longer reaches them. Past a month it stays at
 // LAST_MONTH: a first sweep never reaches past a week, and a gap that long
@@ -100,6 +101,35 @@ func (tm *TwitchMonitor) startClipSweep(ctx context.Context, channels []config.C
 		}()
 		tm.sweepClips(ctx, channels, time.Now())
 	}()
+}
+
+// forgetClipChannelsExcept drops the sweep state (sweptAt, listedAt) of every
+// channel not in channels, the ones opted in now. A channel that left the set
+// — its twitch_archive_clips switched off, the channel disabled or removed —
+// and comes back is then a fresh opt-in, whose first sweep asks for the last
+// week as after a restart (owner ruling R4-6), not a month's catch-up for
+// the time the operator had chosen not to archive its clips. doCheck calls it
+// on every online poll, ahead of its own return for no enabled Twitch channel
+// and of startClipSweep's for no opted-in one, so the last opted-in channel
+// leaving is seen too. An outage does not prune: doCheck returns before it
+// while offline, so the catch-up for a real gap stays.
+func (tm *TwitchMonitor) forgetClipChannelsExcept(channels []config.ChannelConfig) {
+	keep := make(map[string]bool, len(channels))
+	for _, ch := range channels {
+		keep[ch.ID] = true
+	}
+	tm.clips.mu.Lock()
+	defer tm.clips.mu.Unlock()
+	for id := range tm.clips.sweptAt {
+		if !keep[id] {
+			delete(tm.clips.sweptAt, id)
+		}
+	}
+	for id := range tm.clips.listedAt {
+		if !keep[id] {
+			delete(tm.clips.listedAt, id)
+		}
+	}
 }
 
 // clipChannelsOf is the channels with twitch_archive_clips on.
@@ -147,8 +177,14 @@ func (tm *TwitchMonitor) sweepClips(ctx context.Context, channels []config.Chann
 		filter := clipFilterFor(listedAt, listed, now)
 		cards, err := tm.listClips(ctx, ch.ID, filter)
 		if err == nil {
+			// Only while the channel's pacing mark is still this sweep's: a
+			// poll that saw the channel leave the opted-in set during the
+			// listing forgot it (forgetClipChannelsExcept), and writing the
+			// listing back would undo that.
 			tm.clips.mu.Lock()
-			tm.clips.listedAt[ch.ID] = now
+			if at, ok := tm.clips.sweptAt[ch.ID]; ok && at.Equal(now) {
+				tm.clips.listedAt[ch.ID] = now
+			}
 			tm.clips.mu.Unlock()
 		} else {
 			var changed *twitch.ClipAPIChangedError

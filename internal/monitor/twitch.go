@@ -211,6 +211,10 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 		return
 	}
 	channels := tm.getTwitchChannels()
+	clipChannels := clipChannelsOf(channels)
+	// A channel no longer opted in is forgotten here, ahead of both early
+	// returns, so its return is a fresh opt-in (forgetClipChannelsExcept).
+	tm.forgetClipChannelsExcept(clipChannels)
 	if len(channels) == 0 {
 		return
 	}
@@ -218,7 +222,7 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 	tm.logger.Debug("twitch checking", "channels", len(channels))
 	// The opted-in channels' clips, on a goroutine of their own: hourly, and
 	// never in the live poll's way (startClipSweep).
-	tm.startClipSweep(ctx, clipChannelsOf(channels))
+	tm.startClipSweep(ctx, clipChannels)
 
 	// Batch: one GQL request per chunk instead of one per channel. An
 	// N-channel cycle collapses from N serialized round-trips (~0.8s each)

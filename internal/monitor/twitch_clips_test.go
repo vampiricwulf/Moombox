@@ -195,6 +195,103 @@ func TestClipSweepFilterReachesBackToTheLastWholeListing(t *testing.T) {
 	}
 }
 
+// TestClipSweepReEnableIsAFreshOptIn is owner ruling R4-6: a channel that
+// leaves the opted-in set (its twitch_archive_clips switched off, the channel
+// disabled or removed) and comes back is a fresh opt-in, whose first sweep
+// asks for the last week as a restart's does, not a month's catch-up for the
+// time it was out. The poll forgets it where it sees it gone, also when no
+// channel is left opted in, or no Twitch channel is enabled at all (both
+// return before the sweep starts).
+//
+// Mutants: the prune dropped from doCheck (the return asks LAST_MONTH); the
+// prune placed after doCheck's no-channels return, or inside startClipSweep
+// (the disabled channel, or the switched-off one, asks LAST_MONTH).
+func TestClipSweepReEnableIsAFreshOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		leave func(*config.ChannelConfig)
+	}{
+		{"clips switched off", func(ch *config.ChannelConfig) { ch.TwitchArchiveClips = false }},
+		{"channel disabled", func(ch *config.ChannelConfig) { off := false; ch.Enabled = &off }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
+				offline := func(_ context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+					return make([]*twitch.TwitchStreamInfo, len(logins)), make([]error, len(logins)), nil
+				}
+				tm := newTestTwitchMonitor(t, offline, on)
+				var mu sync.Mutex
+				var asked []string
+				tm.FetchClips = func(_ context.Context, _ string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error) {
+					mu.Lock()
+					asked = append(asked, string(filter))
+					mu.Unlock()
+					return nil, nil
+				}
+				tm.OnClipFound = func(twitch.TwitchClipCard, *config.ChannelConfig) {}
+				setChannel := func(ch config.ChannelConfig) {
+					_ = tm.configStore.Update(func(c *config.MoomboxConfig) { c.Channels = []config.ChannelConfig{ch} })
+				}
+
+				ctx := context.Background()
+				tm.doCheck(ctx) // the first listing: the week
+				synctest.Wait()
+				time.Sleep(2 * time.Hour)
+				tm.doCheck(ctx) // listed within the day: the day
+				synctest.Wait()
+
+				gone := on
+				tc.leave(&gone)
+				setChannel(gone)
+				tm.doCheck(ctx) // sees it gone
+				synctest.Wait()
+
+				time.Sleep(10 * 24 * time.Hour)
+				setChannel(on)
+				tm.doCheck(ctx)
+				synctest.Wait()
+
+				mu.Lock()
+				defer mu.Unlock()
+				if want := []string{"LAST_WEEK", "LAST_DAY", "LAST_WEEK"}; !equalStrings(asked, want) {
+					t.Errorf("filters asked = %v, want %v", asked, want)
+				}
+			})
+		})
+	}
+}
+
+// TestClipSweepInFlightListingDoesNotOutliveAPrune: a sweep already listing a
+// channel when the poll forgets it does not write the channel's last listing
+// back, so the channel's return is still a fresh opt-in.
+//
+// Mutant: the listedAt write made whatever the pacing mark says (the return
+// asks LAST_MONTH).
+func TestClipSweepInFlightListingDoesNotOutliveAPrune(t *testing.T) {
+	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
+	tm := newTestTwitchMonitor(t, nil, on)
+	var asked []string
+	tm.FetchClips = func(_ context.Context, _ string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error) {
+		asked = append(asked, string(filter))
+		if len(asked) == 2 {
+			tm.forgetClipChannelsExcept(nil) // switched off mid-listing
+		}
+		return nil, nil
+	}
+	tm.OnClipFound = func(twitch.TwitchClipCard, *config.ChannelConfig) {}
+
+	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	chans := clipChannelsOf(tm.getTwitchChannels())
+	ctx := context.Background()
+	tm.sweepClips(ctx, chans, start)
+	tm.sweepClips(ctx, chans, start.Add(2*time.Hour))
+	tm.sweepClips(ctx, chans, start.Add(12*24*time.Hour))
+	if want := []string{"LAST_WEEK", "LAST_DAY", "LAST_WEEK"}; !equalStrings(asked, want) {
+		t.Errorf("filters asked = %v, want %v", asked, want)
+	}
+}
+
 // netTimeoutErr is a transport failure: a net.Error timing out.
 type netTimeoutErr struct{}
 
