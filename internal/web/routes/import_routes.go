@@ -1657,8 +1657,10 @@ func zipEntryWrittenName(f *zip.File) string {
 // can be longer (".chat.raw.jsonl", ".chapters.json"); its name is checked
 // against importNameMaxBytes when it is placed, and a sidecar that does not
 // fit is left out (chooseImportSidecarNames). The value must not change: it
-// sets importStem's cut, so a different one would stop an archive already
-// imported under a long title from being found again.
+// is one of the two bounds on importStem's cut (the template's title budget
+// is the other, and the one that binds for an 11-byte id), so a different
+// one could move the cut and stop an archive already imported under a long
+// title from being found again.
 const importNameReserve = len(" (999)") + len(" - part999") + len(importChatSuffix)
 
 // importStem is the file stem an import writes: the sanitized title and
