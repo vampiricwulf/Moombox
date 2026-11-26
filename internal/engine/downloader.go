@@ -378,6 +378,19 @@ type DownloaderOptions struct {
 	// quality-split short-segment rule) never need this flag at all: the
 	// guard only looks at bytes that are still there.
 	DiscardStaged bool
+	// RestartOnRenditionChange is the answer to a staged file of another
+	// rendition for a caller that has no parts to split into (owner ruling
+	// R4-1): the DASH-manifest strategy sets it, since its OTF and VOD
+	// downloads record one file in the staging root from the first segment.
+	// Start checks the file as a SplitOnRenditionChange downloader does (the
+	// resume sidecar, or with none usable the rendition marker) and, when it
+	// holds another rendition, never appends to it on the forced or the DB
+	// seq: the file is set aside as a DiscardStaged one is
+	// (<OutputFile>.restart-<unix ts>, muxed beside the archive at finalize)
+	// and the download starts over from segment 0 in a fresh file. It also
+	// keeps the marker beside every file it records. SplitOnRenditionChange,
+	// set by the live loop, wins over it.
+	RestartOnRenditionChange bool
 	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
 	// waiting for the next segment before it force-finalizes the recording —
 	// even if YouTube still reports the stream live (its status can lag or
@@ -870,9 +883,12 @@ type SegmentDownloader struct {
 	// then refuses to append to a file that holds another rendition — its
 	// sidecar, or with none usable its rendition marker, names another stream
 	// — and returns ErrRenditionChanged instead, and it keeps that marker
-	// beside every file it records. Unset — Twitch, the post-live and VOD
-	// downloads — Start resumes exactly as before and writes no marker.
-	// Assign before Start, like the callbacks.
+	// beside every file it records. A caller with no parts to split into sets
+	// DownloaderOptions.RestartOnRenditionChange instead. With neither —
+	// Twitch, the manifest-free post-live download (which sets DiscardStaged)
+	// — Start resumes exactly as before, writes no marker and removes a stale
+	// one beside a file it opens fresh. Assign before Start, like the
+	// callbacks.
 	SplitOnRenditionChange bool
 	// OnFetch reports n bytes of media payload ARRIVING off the network —
 	// fired at every successful segment body read, and in pieces while a
@@ -1215,6 +1231,20 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// SplitOnRenditionChange downloader checks first: the sidecar that named
 	// another stream, or the rendition marker the file was recorded under.
 	// See renditionChanged.
+	//
+	// A RestartOnRenditionChange downloader has no part to close: it sets
+	// the file aside below (the no-truncate guard's DiscardStaged arm) and
+	// starts over from segment 0, never on the position the fallbacks name.
+	restartForRendition := false
+	if !resuming && !d.SplitOnRenditionChange && d.opts.RestartOnRenditionChange {
+		if other, staged := d.renditionChanged(sidecarNamesOther); other {
+			d.logger.Warn("[Downloader] Staged file holds another rendition — not appending; setting it aside and starting over from the first segment",
+				"file", d.opts.OutputFile, "stagedRendition", staged,
+				"currentRendition", streamIdentity(d.getBaseURL()))
+			d.currentSeq.Store(0)
+			restartForRendition = true
+		}
+	}
 	if !resuming && d.SplitOnRenditionChange {
 		if other, staged := d.renditionChanged(sidecarNamesOther); other {
 			// CurrentSeq() is the next segment the capture needs: the DB
@@ -1295,7 +1325,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// path).
 	if !resuming && !d.opts.IsDirectURL {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
-			if !d.opts.DiscardStaged {
+			if !d.opts.DiscardStaged && !restartForRendition {
 				if d.opts.StopOnGap {
 					d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
 						"file", d.opts.OutputFile, "size", info.Size())
@@ -1371,8 +1401,17 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// that names another rendition. A file appended to on a position alone
 	// (no sidecar, no marker: staged by an older build) is left unmarked —
 	// what it holds is not known.
-	if d.SplitOnRenditionChange && (!resuming || state != nil) {
-		d.writeRenditionMarker()
+	//
+	// A downloader that keeps no marker removes one beside a file it opened
+	// fresh: that marker named the file this one replaced (a post-live
+	// restart's DiscardStaged set the live capture aside), and a later
+	// restart that read it would compare against the wrong rendition.
+	if d.SplitOnRenditionChange || d.opts.RestartOnRenditionChange {
+		if !resuming || state != nil {
+			d.writeRenditionMarker()
+		}
+	} else if !resuming {
+		d.removeRenditionMarker()
 	}
 
 	// Download init segment first (only if not resuming and not HLS).

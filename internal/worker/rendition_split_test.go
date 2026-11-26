@@ -211,3 +211,76 @@ func TestRestartPairStopsAtTheRefusedRenditionWithBothNextSegments(t *testing.T)
 		}
 	}
 }
+
+// TestDashManifestRestartSetsAsideAnotherRendition is owner ruling R4-1 on
+// the DASH-manifest path (DashStrategy: an OTF or VOD download with a
+// manifest, recorded as one file in the staging root, with no part to split
+// into). A restart whose chosen itag (299) is not the one the staged file was
+// recorded in (the rendition marker names 303), with the DB's last seq to
+// fall back on, must not append 299's fragments under 303's init: the staged
+// file is set aside as <file>.restart-<ts> with its bytes, and the download
+// starts over in a fresh file marked with its own rendition.
+//
+// Mutant: drop RestartOnRenditionChange from DownloadDash's video downloader
+// (the staged file is appended to on the DB seq and nothing is set aside).
+func TestDashManifestRestartSetsAsideAnotherRendition(t *testing.T) {
+	prev := newSegmentDownloader
+	t.Cleanup(func() { newSegmentDownloader = prev })
+	// The manifest's googlevideo host is sent to a dead local port; the path,
+	// which carries the rendition, is kept.
+	newSegmentDownloader = func(opts engine.DownloaderOptions) *engine.SegmentDownloader {
+		opts.BaseURL = strings.Replace(opts.BaseURL, "https://r4---sn.googlevideo.com", "http://127.0.0.1:1", 1)
+		opts.MaxRetries = 1
+		d := engine.NewSegmentDownloader(opts)
+		d.SetFastDelaysForTests(engineFastScale)
+		return d
+	}
+
+	srv := newManifestServer(t, potTestMPD)
+	job, _ := vodPotJob(t)
+	job.Run = &runRecord{}
+	last := 42
+	job.Job.LastVideoSeq, job.Job.LastAudioSeq = &last, &last
+	video := filepath.Join(job.StagingDir, "video_stream")
+	headed := make([]byte, 4096)
+	copy(headed[4:], "ftyp")
+	if err := os.WriteFile(video, headed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(video+".rendition", []byte("abc/303\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info := &youtube.VideoInfo{
+		StreamStatus:       youtube.StreamVOD,
+		DashManifestURL:    srv.URL + "/api/manifest/dash/id/abc",
+		DashManifestSource: "tv_auth",
+		Formats: []youtube.Format{
+			{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`},
+			{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`},
+		},
+	}
+	res, err := DownloadDash(context.Background(), job, info, nil, nil, &bgutils.PotProvider{}, nil)
+	if err != nil {
+		t.Fatalf("DownloadDash: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res.VideoDownloader.OnActivity = func(engine.DownloadActivity) { cancel() }
+	if err := res.VideoDownloader.Start(ctx); errors.Is(err, engine.ErrStagedMediaPresent) || errors.Is(err, engine.ErrRenditionChanged) {
+		t.Fatalf("Start = %v, want the download started over", err)
+	}
+
+	asides, _ := filepath.Glob(video + engine.StagedRestartSuffix + "*")
+	if len(asides) != 1 {
+		t.Fatalf("set-aside recordings = %v, want the staged file", asides)
+	}
+	if got, _ := os.ReadFile(asides[0]); len(got) != len(headed) {
+		t.Errorf("the set-aside file holds %d bytes, want the %d the staged file held", len(got), len(headed))
+	}
+	if info, err := os.Stat(video); err == nil && info.Size() >= int64(len(headed)) {
+		t.Errorf("video_stream is %d bytes, want a fresh file, not the staged one appended to", info.Size())
+	}
+	if got, _ := os.ReadFile(video + ".rendition"); strings.TrimSpace(string(got)) != "abc/299" {
+		t.Errorf("rendition marker = %q, want the fresh file's abc/299", got)
+	}
+}

@@ -160,6 +160,10 @@ and recording continues in the new format in a new part. Two formats are
 never mixed in one file. The *Quality Split* notification is sent only when
 the resolution changed.
 
+A video download that restarts in a different format keeps what it had
+downloaded as a set-aside file (muxed to its own file beside the archive)
+and downloads the video again from the start in the new format.
+
 ### Interruptions and the end of a stream
 
 - **Stalls.** When no new segment arrives, Moombox shows *Waiting for next

@@ -367,6 +367,10 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Orchestrator-provided StartSeq takes priority (quality recovery/split).
 	// Falls back to DB-stored last sequence for crash recovery.
 	// The resume file (.resume.json) takes priority over both if it exists.
+	// Neither fallback appends to a staged file of another rendition (owner
+	// ruling R4-1): the downloaders set RestartOnRenditionChange, so such a
+	// file is set aside and the download starts over from the first segment.
+	// The live loop's SplitOnRenditionChange wins over it there.
 	videoStartSeq := 0
 	forceVideoSeq := false
 	if job.VideoStartSeq > 0 {
@@ -388,20 +392,21 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.HasVideo = true
 		result.VideoPath = filepath.Join(job.StagingDir, "video_stream")
 		result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:             videoStream.BaseURL,
-			OutputFile:          result.VideoPath,
-			StartSeq:            videoStartSeq,
-			ForceStartSeq:       forceVideoSeq,
-			InitURL:             videoStream.Initialization,
-			PoToken:             dashPoToken,
-			CookieHeader:        dashCookieHeader,
-			MediaCookieHeader:   dashMediaCookieHeader,
-			MediaCookies:        mediaCookies,
-			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
-			IsOnline:            isOnline,
-			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
+			BaseURL:                  videoStream.BaseURL,
+			OutputFile:               result.VideoPath,
+			StartSeq:                 videoStartSeq,
+			ForceStartSeq:            forceVideoSeq,
+			RestartOnRenditionChange: true,
+			InitURL:                  videoStream.Initialization,
+			PoToken:                  dashPoToken,
+			CookieHeader:             dashCookieHeader,
+			MediaCookieHeader:        dashMediaCookieHeader,
+			MediaCookies:             mediaCookies,
+			MaxTimeout:               time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:           job.Config.SegmentWorkers,
+			InterruptionTimeout:      engineInterruptionTimeout(job.Config.InterruptionTimeout),
+			IsOnline:                 isOnline,
+			Logger:                   newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				return observeYouTubeStatusProbe(job, info, err)
@@ -432,20 +437,21 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.AudioItag = audioStream.Itag
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
 		result.AudioDownloader = newSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:             audioStream.BaseURL,
-			OutputFile:          result.AudioPath,
-			StartSeq:            audioStartSeq,
-			ForceStartSeq:       forceAudioSeq,
-			InitURL:             audioStream.Initialization,
-			PoToken:             dashPoToken,
-			CookieHeader:        dashCookieHeader,
-			MediaCookieHeader:   dashMediaCookieHeader,
-			MediaCookies:        mediaCookies,
-			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
-			SegmentWorkers:      job.Config.SegmentWorkers,
-			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
-			IsOnline:            isOnline,
-			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
+			BaseURL:                  audioStream.BaseURL,
+			OutputFile:               result.AudioPath,
+			StartSeq:                 audioStartSeq,
+			ForceStartSeq:            forceAudioSeq,
+			RestartOnRenditionChange: true,
+			InitURL:                  audioStream.Initialization,
+			PoToken:                  dashPoToken,
+			CookieHeader:             dashCookieHeader,
+			MediaCookieHeader:        dashMediaCookieHeader,
+			MediaCookies:             mediaCookies,
+			MaxTimeout:               time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:           job.Config.SegmentWorkers,
+			InterruptionTimeout:      engineInterruptionTimeout(job.Config.InterruptionTimeout),
+			IsOnline:                 isOnline,
+			Logger:                   newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "audio"),
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				return observeYouTubeStatusProbe(job, info, err)

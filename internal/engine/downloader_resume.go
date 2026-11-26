@@ -338,13 +338,19 @@ func (d *SegmentDownloader) renditionChanged(sidecarNamesOther bool) (bool, stri
 func (d *SegmentDownloader) writeRenditionMarker() {
 	id := streamIdentity(d.getBaseURL())
 	if id == "" {
-		if err := os.Remove(d.renditionFile()); err != nil && !os.IsNotExist(err) {
-			d.logger.Warn("[Downloader] Could not remove a stale rendition marker", "file", d.renditionFile(), "err", err)
-		}
+		d.removeRenditionMarker()
 		return
 	}
 	if err := utils.WriteFileAtomic(d.renditionFile(), []byte(id+"\n"), 0o644); err != nil {
 		d.logger.Warn("[Downloader] Could not record the staged file's rendition; a restart cannot check it",
 			"file", d.renditionFile(), "err", err)
+	}
+}
+
+// removeRenditionMarker removes the marker beside the output file: it named
+// another file than the one now opened. A failed removal is logged.
+func (d *SegmentDownloader) removeRenditionMarker() {
+	if err := os.Remove(d.renditionFile()); err != nil && !os.IsNotExist(err) {
+		d.logger.Warn("[Downloader] Could not remove a stale rendition marker", "file", d.renditionFile(), "err", err)
 	}
 }
