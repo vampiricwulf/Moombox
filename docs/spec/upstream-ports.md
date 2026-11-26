@@ -7,8 +7,8 @@ Where the last upstream review left off, so the next one (a local session, a sch
 ## Last review
 
 - **Date:** 2026-11-19
-- **Last port:** `f59c110` — fix(constants): move the randomized Chrome major window to 151-157 ← yt-dlp `d432ab874` (#17930); and `96e79e4` — fix(youtube): web_embedded takes the web family's GVS token and follows tv ← yt-dlp `ee2559128` (#18051)
-- **Ported into:** `internal/constants/constants.go` (`chromeMajorMin`/`chromeMajorMax`); `internal/youtube/types.go` (`GvsTokenRequired`, `AuthLevelTVAuth`/`AuthLevelWebEmbedded`), `internal/youtube/player_api_strategy.go` (authed cascade order), with comments in the worker's GVS strategies
+- **Last port:** `02529ea5` — fix(youtube): read a continuation token wrapped in a commandExecutorCommand ← yt-dlp `6a6d97b2c` (#12777), a port from an improvement sweep, not a review (the Date and the SHAs below are the 2026-11-19 review's)
+- **Ported into:** `internal/youtube/browse.go` (`findContinuationToken`, `continuationEndpointToken`)
 
 ## Upstream repos — last reviewed commit
 

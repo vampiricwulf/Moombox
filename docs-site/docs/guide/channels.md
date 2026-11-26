@@ -406,8 +406,8 @@ The history backfill shows its own progress:
 A failed scan is retried on the next feed check. The one exception is a tab
 Moombox cannot read the dates of: after two such failures in a row it is
 retried about once an hour, and the badge stays up in between. **Re-scan Feed
-History** (or ++r++ ++b++ in the terminal UI) retries at once, and so does
-widening the archive window or turning membership discovery on.
+History** (or ++r++ ++b++ in the terminal UI) retries at once. Widening the archive window, or membership discovery
+becoming active for the channel, is not held back by the hour's wait.
 
 ## Troubleshooting
 
