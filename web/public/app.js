@@ -1652,6 +1652,11 @@ export class MoomboxApp {
         for (const t of p.runningTrims || []) {
           if (t?.id && t.jobId) this.runningTrims[t.id] = t;
         }
+        // A stop held busy for a trim that ended meanwhile has no outcome
+        // frame coming to release it.
+        for (const id of [...this.stoppingTrims]) {
+          if (!this.runningTrims[id]) this.stoppingTrims.delete(id);
+        }
         if (this.selectedJobId) {
           // An archived row's open details are not refreshed below.
           const shown = this.jobs.find((j) => j.id === this.selectedJobId)

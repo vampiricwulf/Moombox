@@ -325,7 +325,8 @@ test("a running trim's bar moves in place and gives way to the trim", { skip }, 
 
 // Mutants: initial_state does not seed runningTrims — the reloaded page
 // shows no bar; merge it instead of rebuilding (drop `this.runningTrims =
-// {}` there) — a trim that ended while the socket was down keeps its bar.
+// {}` there) — a trim that ended while the socket was down keeps its bar;
+// drop the stoppingTrims prune — its stop stays busy forever.
 test("a page reloaded mid-trim shows the trim still running", { skip }, async () => {
   const r = await trimRace();
   const snapshot = (jobs, runningTrims) => r.h.app.handleMessage({ type: "initial_state", payload: { jobs, runningTrims } });
@@ -335,9 +336,12 @@ test("a page reloaded mid-trim shows the trim still running", { skip }, async ()
   assert.ok(row, "the reloaded page does not show the running trim");
   assert.equal(barValue(row), 30);
 
-  // A reconnect whose snapshot no longer lists it: it ended meanwhile.
+  // A reconnect whose snapshot no longer lists it: it ended meanwhile, and
+  // a stop held busy for it has no outcome frame coming.
+  r.h.app.stoppingTrims.add("tA");
   snapshot([{ ...finishedJob("A"), trims: [trimRecord("tA", "A", 60, 300)] }, finishedJob("B")], []);
   assert.equal(runningRow(r.h, "tA"), undefined, "a trim that ended while the socket was down kept its bar");
+  assert.equal(r.h.app.stoppingTrims.size, 0, "a stop for a trim that ended while the socket was down stayed busy");
   assert.deepEqual(trimsShown(r.h), ["tA"]);
 });
 
