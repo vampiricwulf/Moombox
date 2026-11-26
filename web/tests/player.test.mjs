@@ -548,6 +548,40 @@ test("a superseded job-list rebuild does not restore its stale selection", { ski
   assert.equal(h.player._rebuildsActive, 0, "both rebuilds left the mutation window");
 });
 
+for (const [name, rebuiltJobs] of [
+  ["still listed", ["j1", "j2"]],
+  ["deleted by the rebuild", ["j2"]],
+]) {
+  test(`a pick made while a single rebuild is fetching is kept (old recording ${name})`, { skip }, async () => {
+    const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], archived: [], watchState: {} });
+    const select = h.select();
+    await h.player.loadPlayerJobList();
+    await h.selectJob("j1");
+    select.value = "j1";
+
+    // The rebuild a WebSocket job update fires: its archived list answers
+    // only when released, and its active list no longer has j1 in the
+    // deletion case.
+    h.http.on("GET /api/jobs", () => rebuiltJobs.map((id) => finished(id)));
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    h.http.on("GET /api/jobs/archived", () => gate);
+    const rebuild = h.player.loadPlayerJobList();
+    await h.flush();
+
+    // Meanwhile the operator picks j2, and it loads.
+    select.value = "j2";
+    await h.selectJob("j2");
+
+    release([]);
+    await rebuild;
+    await h.flush();
+    assert.equal(select.value, "j2", "the picker still names the recording that plays");
+    assert.equal(h.player.playerJob?.id, "j2", "the rebuild did not tear down the new pick");
+    assert.equal(h.player._rebuildsActive, 0);
+  });
+}
+
 test("a job selection that throws is logged and hands focus back to the player", { skip }, async () => {
   const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], watchState: {} });
   const select = h.select();

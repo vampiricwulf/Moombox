@@ -1314,10 +1314,14 @@ export class PlayerController {
    * the `sl-change` listener needs in order to tell a synthetic event from a
    * user pick, and a superseded rebuild must not clear that while a newer one
    * is still mutating.
+   *
+   * The selection to keep is read only once both answers are in, not before
+   * the fetch: the operator can pick another recording while it is in flight
+   * (the picker is live then), and restoring the value read before the fetch
+   * would point the picker back at the old recording while the new one plays.
    */
   async loadPlayerJobList() {
     const select = document.getElementById("player-job-select");
-    const currentValue = select.value;
     const token = ++this._rebuildToken;
 
     try {
@@ -1337,13 +1341,17 @@ export class PlayerController {
         if (token !== this._rebuildToken) return;
       }
 
+      // Read after the last await before the option rebuild: a pick made
+      // during the fetch is the selection to keep.
+      const currentValue = select.value;
       const all = [...jobs, ...archived].filter((j) => j.status === "Finished" && j.filename);
       if (currentValue && !all.some((j) => j.id === currentValue)) {
         if (complete) {
-          // The currently loaded job disappeared (deleted, or its id changed
-          // via re-import) — clear the player instead of leaving a dangling
-          // selection.
-          this.clearPlayer();
+          // The selected job disappeared (deleted, or its id changed via
+          // re-import) — clear the player instead of leaving a dangling
+          // selection. Only when what plays IS that job (or nothing plays):
+          // a rebuild never tears down a recording it did not judge gone.
+          if (!this.playerJob || this.playerJob.id === currentValue) this.clearPlayer();
         } else if (this.playerJob?.id === currentValue) {
           // Missing from a list that half failed proves nothing: keep the
           // playing recording, and keep it in the picker.
