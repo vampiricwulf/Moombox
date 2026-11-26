@@ -105,7 +105,8 @@ func TestTwitch_DeletedManualAddHoldsItsBroadcastBack(t *testing.T) {
 // processStreamInfo (the three held cases find 900); Cancelled added to the
 // statuses its query excludes (the Cancelled case finds 900); Error dropped
 // from them (the Errored case finds nothing); the stream ID dropped from its
-// WHERE (the "another broadcast" case finds nothing).
+// WHERE (the "another broadcast" case finds nothing); manually_added dropped
+// from it (the "not manually added" case finds nothing).
 func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -113,15 +114,19 @@ func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
 		status   database.JobStatus
 		streamID string
 		held     bool
+		monitors bool // the row is not a manually added one
 	}{
-		{"cancelled, not yet deleted", "tw_manual_ch_1", database.StatusCancelled, "900", true},
+		{"cancelled, not yet deleted", "tw_manual_ch_1", database.StatusCancelled, "900", true, false},
 		// Rows manualJobClaims never reads: a `moombox add` row (the bare
 		// login) and a broadcast add re-initialised onto a later broadcast.
-		{"a moombox add row recording it", "ch", database.StatusDownloading, "900", true},
-		{"a re-initialised broadcast add muxing it", "tw_800", database.StatusMuxing, "900", true},
-		{"errored", "tw_manual_ch_1", database.StatusError, "900", false},
-		{"finished", "tw_manual_ch_1", database.StatusFinished, "900", false},
-		{"cancelled, naming another broadcast", "tw_manual_ch_1", database.StatusCancelled, "899", false},
+		{"a moombox add row recording it", "ch", database.StatusDownloading, "900", true, false},
+		{"a re-initialised broadcast add muxing it", "tw_800", database.StatusMuxing, "900", true, false},
+		{"errored", "tw_manual_ch_1", database.StatusError, "900", false, false},
+		{"finished", "tw_manual_ch_1", database.StatusFinished, "900", false, false},
+		{"cancelled, naming another broadcast", "tw_manual_ch_1", database.StatusCancelled, "899", false, false},
+		// The rule is about the operator's own jobs: the worker writes the
+		// column for those only, and a monitor's row is held by its history.
+		{"cancelled, not manually added", "x1", database.StatusCancelled, "900", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
@@ -133,7 +138,7 @@ func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
 				return infos, make([]error, len(logins)), nil
 			}, config.ChannelConfig{ID: "ch", Name: "ch", Platform: "twitch"})
 			if _, err := tm.db.AddJob(&database.Job{ID: tc.jobID, VideoID: tc.jobID, URL: "https://twitch.tv/ch",
-				Platform: "twitch", Status: tc.status, ManuallyAdded: true}); err != nil {
+				Platform: "twitch", Status: tc.status, ManuallyAdded: !tc.monitors}); err != nil {
 				t.Fatal(err)
 			}
 			tm.db.UpdateJobFields(tc.jobID, map[string]any{"twitch_stream_id": tc.streamID})
