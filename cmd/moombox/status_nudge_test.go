@@ -49,6 +49,9 @@ func TestStatusChangesNudgeTheDashboard(t *testing.T) {
 	wantNudge("the sidecar went down")
 	sidecar.PublishHealth(sidecar.Health{Healthy: true, Restarts: 1})
 	wantNudge("the sidecar came back")
+
+	s.activePlatformsChanged()
+	wantNudge("a dashboard save changed the active platforms")
 }
 
 // The TUI's badge carries the re-login flag too, and the flag can change with
@@ -100,14 +103,14 @@ func TestReloginFlagChangeReachesTheTUI(t *testing.T) {
 	}
 }
 
-// The three sources are wired where no test can drive them (initServices and
+// The sources are wired where no test can drive them (initServices and
 // run build the whole process), so the seam is which function each site
 // names, the shape TestBothUIsShareOneHideFinishedAgeBroadcast pins.
 //
 // Mutants: the nudge dropped from the OnAuthChange dispatcher (a session the
 // 30-minute check rejects leaves the pill green); OnReloginChange unwired;
 // run never subscribing to the sidecar's health.
-func TestStatusNudgeIsWiredToItsThreeSources(t *testing.T) {
+func TestStatusNudgeIsWiredToItsSources(t *testing.T) {
 	fset := token.NewFileSet()
 	services, err := parser.ParseFile(fset, "services.go", nil, 0)
 	if err != nil {
@@ -140,5 +143,41 @@ func TestStatusNudgeIsWiredToItsThreeSources(t *testing.T) {
 	}
 	if !hasCallTo(mainFile, "s", "wireSidecarStatusNudge") {
 		t.Error("main.go never calls s.wireSidecarStatusNudge — a sidecar that recovers leaves 'sidecar down' on every open dashboard")
+	}
+
+	// The active cookie platforms: a dashboard save (OnActivePlatformsChange)
+	// and a TUI save (OnSaveConfig) each reach the open dashboards. Mutants:
+	// the hook wired back to resendTUICookieStatus alone; the TUI save
+	// without the nudge.
+	wiring, err := parser.ParseFile(fset, "routes_wiring.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse routes_wiring.go: %v", err)
+	}
+	var platformsHook bool
+	ast.Inspect(wiring, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok {
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "OnActivePlatformsChange" && selectorIs(kv.Value, "s", "activePlatformsChanged") {
+				platformsHook = true
+			}
+		}
+		return true
+	})
+	if !platformsHook {
+		t.Error("OnActivePlatformsChange is not s.activePlatformsChanged — a dashboard save of the active platforms reaches no other dashboard")
+	}
+	tuiWiring, err := parser.ParseFile(fset, "tui_wiring.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse tui_wiring.go: %v", err)
+	}
+	var tuiSave bool
+	ast.Inspect(tuiWiring, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 &&
+			selectorIs(as.Lhs[0], "app", "OnSaveConfig") && hasCallTo(as.Rhs[0], "s", "nudgeDashboardStatus") {
+			tuiSave = true
+		}
+		return true
+	})
+	if !tuiSave {
+		t.Error("the TUI's OnSaveConfig does not call s.nudgeDashboardStatus — a TUI change of the active platforms reaches no dashboard")
 	}
 }

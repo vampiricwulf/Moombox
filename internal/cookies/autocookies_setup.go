@@ -39,6 +39,14 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	if platform != "youtube" && platform != "twitch" {
 		return fmt.Errorf("%w (got %q)", ErrUnsupportedPlatform, platform)
 	}
+	// Linux with no display: refused before the slot is claimed or a browser
+	// is looked for (owner ruling R4-7). Launched anyway, Firefox exited at
+	// once while the UI said a window had opened, and Chromium waited out
+	// the CDP timeout. The environment is the only reliable signal: a
+	// Firefox launcher exits within ~170 ms with code 0 even when it works.
+	if hostLacksDisplay() {
+		return ErrNoDisplay
+	}
 
 	s.mu.Lock()
 	// Checked before the in-progress gate: a stopped service is not "busy",

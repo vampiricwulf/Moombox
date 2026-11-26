@@ -12,7 +12,7 @@ import (
 
 // touchOthers touches n other jobs' entries under key, as the dispatches of n
 // other jobs' lifecycle events do — a backfill re-scan's `found`s on an
-// edit-mode target, which never batches, are one each.
+// edit-mode target, which never batches a lifecycle event, are one each.
 func touchOthers(tr *lifecycleTracker, n int, key string) {
 	for i := range n {
 		tr.messageID(fmt.Sprintf("other%04d", i), key)

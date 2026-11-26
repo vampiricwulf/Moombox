@@ -627,6 +627,13 @@ func (s *runState) runTUI() {
 		// the change gate the Web route applies before calling, so a save
 		// that did not move the threshold still costs nothing.
 		s.broadcastHideFinishedAge()
+		// The active cookie platforms decide which badges and Re-login
+		// warnings an open dashboard draws, and it reads them only from
+		// /api/status: nudge every tab to read it again, as a dashboard save
+		// does through OnActivePlatformsChange. Unconditional, for the same
+		// reason as the calls above; it costs each open tab one status read
+		// on a rare, human save.
+		s.nudgeDashboardStatus()
 		// Everything below reads a Snapshot, NOT updatedCfg: that's the live
 		// *MoomboxConfig pointer, and reading it unlocked would race a
 		// concurrent web PUT /api/config whole-struct store.
@@ -1512,8 +1519,9 @@ func (l *checkedLatch) admit(auth cookies.AuthStatus) bool {
 }
 
 // resendTUICookieStatus re-sends the TUI's cookie status line, whose
-// platform indicators come from config.GetActivePlatforms — wired to
-// OnActivePlatformsChange so a dashboard save reaches the status bar instead
+// platform indicators come from config.GetActivePlatforms — called from
+// activePlatformsChanged (OnActivePlatformsChange) so a dashboard save
+// reaches the status bar instead
 // of waiting for the next auth transition. A no-op without a TUI (the slot
 // is stored only by runTUI).
 func (s *runState) resendTUICookieStatus() {

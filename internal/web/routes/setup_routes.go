@@ -134,6 +134,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 		store.Read(func(c *config.MoomboxConfig) {
 			storedFFmpeg = c.Paths.FfmpegPath
 			maps.Copy(validationErrs, newQuotedPathErrors(updates, c))
+			maps.Copy(validationErrs, newChannelPathErrors(updates, c))
 		})
 		if msg := newFFmpegPathError(updates, storedFFmpeg); msg != "" {
 			validationErrs["paths.ffmpeg_path"] = msg

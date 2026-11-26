@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -184,7 +185,7 @@ func TestValidateChannelValues(t *testing.T) {
 	base := func() map[string]string {
 		return map[string]string{"id": "UC1", "archive_window_days": "", "archive_slots": ""}
 	}
-	if msg := validateChannelValues(base()); msg != "" {
+	if msg := validateChannelValues(base(), ""); msg != "" {
 		t.Errorf("blanks rejected: %s", msg)
 	}
 	cases := map[string][2]string{
@@ -196,13 +197,13 @@ func TestValidateChannelValues(t *testing.T) {
 	for name, c := range cases {
 		vals := base()
 		vals[c[0]] = c[1]
-		if msg := validateChannelValues(vals); msg == "" {
+		if msg := validateChannelValues(vals, ""); msg == "" {
 			t.Errorf("%s: %s=%q accepted", name, c[0], c[1])
 		}
 	}
 	ok := base()
 	ok["archive_window_days"], ok["archive_slots"] = "3650", "100"
-	if msg := validateChannelValues(ok); msg != "" {
+	if msg := validateChannelValues(ok, ""); msg != "" {
 		t.Errorf("boundary values rejected: %s", msg)
 	}
 }
@@ -383,5 +384,61 @@ func TestChannelTwitchArchiveClipsRoundTrip(t *testing.T) {
 	}
 	if !shown("twitch") || shown("youtube") {
 		t.Errorf("twitch_archive_clips shown for twitch %v, youtube %v; want Twitch only", shown("twitch"), shown("youtube"))
+	}
+}
+
+// TestChannelEditorsRefuseANewQuotedOrTraversingOutputDirectory: the Settings
+// channel editor and the setup wizard's channel step refuse a NEW output
+// directory wrapped in quotes (Explorer's "Copy as path") or holding a ".."
+// segment, as every path setting is refused, and keep the channel unsaved;
+// an override saved before the rule passes when the edit leaves it alone.
+//
+// Mutants it kills: validateChannelValues without the path rule, either
+// editor passing "" instead of the edited channel's stored value (the
+// unchanged stored override is refused).
+func TestChannelEditorsRefuseANewQuotedOrTraversingOutputDirectory(t *testing.T) {
+	stored := config.ChannelConfig{ID: "UC1", Platform: "youtube", OutputDirectory: `"E:\Old"`}
+	for _, dir := range []string{`"D:\Archives\VTuber"`, `'/mnt/archive'`, `../elsewhere`} {
+		m := NewSettingsModel()
+		m.channelMode = "edit"
+		m.channelIndex = 0
+		m.channels = []config.ChannelConfig{{ID: "UC1", Platform: "youtube"}}
+		m.channelEditValues = channelToValues(m.channels[0])
+		m.channelEditValues["output_directory"] = dir
+		m.handleChannelEditKey(keyEnter)
+		if !strings.HasPrefix(m.errorMsg, "Output directory cannot") || m.channels[0].OutputDirectory != "" {
+			t.Errorf("Settings editor with %s: error %q, stored %q", dir, m.errorMsg, m.channels[0].OutputDirectory)
+		}
+
+		w := NewSetupWizardModel()
+		w.channelMode = "edit"
+		w.channelIndex = 0
+		w.channelEditValues = channelToValues(config.ChannelConfig{ID: "UC1", Platform: "youtube"})
+		w.channelEditValues["output_directory"] = dir
+		w.handleChannelEditKey(keyEnter)
+		if !strings.HasPrefix(w.errorMsg, "Output directory cannot") || len(w.channels) != 0 {
+			t.Errorf("wizard with %s: error %q, channels %+v", dir, w.errorMsg, w.channels)
+		}
+	}
+
+	m := NewSettingsModel()
+	m.channelMode = "edit"
+	m.channelIndex = 0
+	m.channels = []config.ChannelConfig{stored}
+	m.channelEditValues = channelToValues(stored)
+	m.channelEditValues["name"] = "Renamed"
+	m.handleChannelEditKey(keyEnter)
+	if m.errorMsg != "" || m.channels[0].Name != "Renamed" {
+		t.Errorf("Settings editor refused an edit leaving the stored override alone: %q", m.errorMsg)
+	}
+
+	w := NewSetupWizardModel()
+	w.channelMode = "edit"
+	w.channelIndex = 0
+	w.channels = []config.ChannelConfig{stored}
+	w.channelEditValues = channelToValues(stored)
+	w.handleChannelEditKey(keyEnter)
+	if w.errorMsg != "" {
+		t.Errorf("wizard refused an edit leaving the stored override alone: %q", w.errorMsg)
 	}
 }

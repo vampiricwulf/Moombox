@@ -343,6 +343,10 @@ Edge cases:
   started or finished. See
   [`paths.output_directory`](paths-and-logs.md#pathsoutput_directory).
 - A relative path is resolved against Moombox's working directory.
+- A path wrapped in quotes (as Explorer's *Copy as path* produces) or with a
+  `..` segment is refused in both UIs, as the [path settings](paths-and-logs.md)
+  are: remove the quotes. A value saved before this rule keeps working and
+  does not block other edits of the channel.
 - The disk-space alerts and the backlog's disk gate measure the **global**
   output directory's volume (and the staging directory's, when that is a
   different one), not a per-channel folder on another drive.

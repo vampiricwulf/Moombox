@@ -248,7 +248,8 @@ Then the dashboard opens. A fresh install shows **Setup complete!** with
 ## Setting up a headless server
 
 On a machine without a desktop, the browser sign-in step cannot work (there
-is no browser for you to sign in to), and the dashboard wizard refuses to
+is no browser for you to sign in to; on Linux it says "this host has no
+display for a browser window"), and the dashboard wizard refuses to
 finish from another computer ("first-time setup must be from localhost").
 Choose one of these:
 

@@ -100,7 +100,7 @@ func (s *runState) wireRoutes() func() {
 		OnHideFinishedAgeChanged: s.broadcastHideFinishedAge,
 		OnChannelChange:          s.kickMonitors,
 		OnMonitorIntervalChange:  s.kickMonitors,
-		OnActivePlatformsChange:  s.resendTUICookieStatus,
+		OnActivePlatformsChange:  s.activePlatformsChanged,
 		OnDiskSettingsChange:     s.requestDiskRecheck,
 		OnSegmentWorkersChange:   s.warnSegmentWorkers,
 		OnNotificationsChange: func() {

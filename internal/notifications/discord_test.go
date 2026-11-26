@@ -234,13 +234,13 @@ func TestDiscordWebhook4xxIsPermanent(t *testing.T) {
 }
 
 // TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter verifies that a
-// Retry-After beyond the 30s ceiling fast-fails after exactly one request.
+// Retry-After beyond the 60s ceiling (discordRetryAfterWaitCap) fast-fails after exactly one request.
 // The overflow cases matter: values past ~9.2e9s (or Inf/NaN) overflow
 // time.Duration to a NEGATIVE on amd64 — a Duration-space cap comparison
 // silently accepted them and hammered the rate-limited webhook with
 // zero-delay retries. The cap must be checked in float space.
 func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
-	for _, retryAfter := range []string{"9999", "9999999999999", "1e300", "Inf", "NaN", "-5", ""} {
+	for _, retryAfter := range []string{"61", "9999", "9999999999999", "1e300", "Inf", "NaN", "-5", ""} {
 		t.Run("retryAfter="+retryAfter, func(t *testing.T) {
 			var hits atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
