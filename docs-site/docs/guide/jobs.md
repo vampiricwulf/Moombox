@@ -94,7 +94,9 @@ instead of ending in `Error`:
   third retry in a row fails, the job ends in `Error` with *(gave up after 3
   retries)* added to the error. A video that is really gone (removed,
   private, members-only) is not retried. A disk-full retry keeps its
-  staging and resumes from the last checkpoint.
+  staging and resumes from the last checkpoint. A Twitch backlog VOD or a
+  swept clip takes the same retries when Twitch answers with a server error
+  or a rate limit.
 - **A YouTube rate limit**: the job goes back to `Queued` for an hour, and
   this does not count against its three retries. Only a rate limit that has
   lasted **24 hours with at least 3 refusals** ends the job in `Error`, with
