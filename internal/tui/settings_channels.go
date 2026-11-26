@@ -567,6 +567,16 @@ func (m *SettingsModel) HandleChannelResolved(input, id, name, platform string, 
 		m.updateTextInputForField()
 		return
 	}
+	// The Enter that started the lookup checked the values as they were
+	// then, and the other fields stay editable while it is out: an output
+	// directory typed or pasted since is held to the same rule before the
+	// save, which is the only check a TUI save has.
+	if msg := validateChannelValues(m.channelEditValues, storedChannelDir(m.channels, m.channelIndex)); msg != "" {
+		m.errorMsg = msg
+		m.status = saveError
+		m.updateTextInputForField()
+		return
+	}
 	m.saveCurrentChannel()
 }
 

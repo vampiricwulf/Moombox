@@ -330,3 +330,45 @@ func TestSettingsChannelPlatformAutoDetectReadsMixedCaseHost(t *testing.T) {
 		t.Errorf("platform after a YouTube.com link: %q, want youtube", got)
 	}
 }
+
+// TestChannelEditorsCheckValuesAgainWhenTheResolveAnswers: only Enter is
+// blocked while a channel ID is being resolved, so the other fields can
+// still be edited, and the answer saved whatever they then held. The save
+// that follows a resolve is the only check a TUI channel save has (no route
+// runs config.OutputDirOverrideRule for it), so an output directory pasted
+// in quotes during the lookup was stored, and the stored value then passed
+// every later edit. Both editors now hold the values to the Enter's rules
+// again when the answer arrives, and stay open on a refusal.
+//
+// Mutants killed: validateChannelValues dropped from the Settings
+// HandleChannelResolved, or from the wizard's (the channel is saved with the
+// quoted directory).
+func TestChannelEditorsCheckValuesAgainWhenTheResolveAnswers(t *testing.T) {
+	stubTUIHandleLookup(t)
+	const quoted = `"D:\Archives\VTuber"`
+
+	m := settingsAdding(nil, "@SomeHandle")
+	if act := m.handleChannelKey(keyEnter); act != "resolve_channel" {
+		t.Fatalf("Settings: Enter on a bare @handle: action %q, want resolve_channel", act)
+	}
+	m.channelEditValues["output_directory"] = quoted // typed while the lookup is out
+	r := resolveFor(t, m.GetChannelResolveInput())
+	m.HandleChannelResolved(r.Input, r.ID, r.Name, r.Platform, r.Err)
+	if len(m.channels) != 0 || !strings.HasPrefix(m.errorMsg, "Output directory ") || m.status != saveError {
+		t.Errorf("Settings: channels %+v, errorMsg %q, status %v; want nothing saved and the output directory refused",
+			m.channels, m.errorMsg, m.status)
+	}
+
+	a := NewApp()
+	w := wizardOnChannelEditor(a, nil, "@SomeHandle")
+	if act := w.handleChannelEditKey(keyEnter); act != "resolve_channel" {
+		t.Fatalf("wizard: Enter on a bare @handle: action %q, want resolve_channel", act)
+	}
+	w.channelEditValues["output_directory"] = quoted
+	r = resolveFor(t, w.GetChannelResolveInput())
+	w.HandleChannelResolved(r.Input, r.ID, r.Name, r.Platform, r.Err)
+	if len(w.channels) != 0 || !strings.HasPrefix(w.errorMsg, "Output directory ") || w.channelMode != "edit" {
+		t.Errorf("wizard: channels %+v, errorMsg %q, mode %q; want nothing saved, the output directory refused and the editor open",
+			w.channels, w.errorMsg, w.channelMode)
+	}
+}

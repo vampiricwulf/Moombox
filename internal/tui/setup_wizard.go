@@ -1106,6 +1106,14 @@ func (m *SetupWizardModel) HandleChannelResolved(input, id, name, platform strin
 		m.updateTextInputForField()
 		return
 	}
+	// As the Settings editor: the values may have changed since the Enter
+	// that checked them, and nothing after this save checks them again.
+	if msg := validateChannelValues(m.channelEditValues, storedChannelDir(m.channels, m.channelIndex)); msg != "" {
+		m.errorMsg = msg
+		m.clampChannelEditField()
+		m.updateTextInputForField()
+		return
+	}
 	m.commitChannelEdit()
 }
 
