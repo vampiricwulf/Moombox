@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,8 +27,9 @@ var errGQL503 = errors.New("gql exhausted 3 retries: gql http 503 (ShareClipRend
 //
 // Mutants: the transient-answer check dropped from processTwitchClip (the
 // swept clip ends in Error); dropped from processTwitchVod (the backlog VOD
-// ends in Error); isTwitchTransientAnswer matching any GQL answer (the 404
-// clip is requeued).
+// ends in Error); dropped from its HLS fetch (the backlog VOD whose access
+// token is refused ends in Error); isTwitchTransientAnswer matching any GQL
+// answer (the 404 clip is requeued).
 func TestTwitchBacklogGQLRefusalRequeues(t *testing.T) {
 	ch := "twitch_retry"
 	backlogClip := func(t *testing.T, db *database.Database) string {
@@ -78,6 +80,38 @@ func TestTwitchBacklogGQLRefusalRequeues(t *testing.T) {
 			rw.Header().Set("Retry-After", "120")
 			rw.WriteHeader(http.StatusTooManyRequests)
 			io.WriteString(rw, "slow down")
+		}))
+		t.Cleanup(srv.Close)
+		oldGQL := constants.TwitchURLs.GQL
+		constants.TwitchURLs.GQL = srv.URL + "/gql"
+		t.Cleanup(func() { constants.TwitchURLs.GQL = oldGQL })
+
+		w, db := testWorkerSetup(t)
+		w.streamProc.tw = twitch.NewService(nil, discardLogger{})
+		if _, err := db.AddJob(&database.Job{ID: "tw_v123", VideoID: "tw_v123", URL: "https://www.twitch.tv/videos/123",
+			Platform: "twitch", Status: database.StatusUpcoming, ChannelID: &ch, QueuePriority: 1}); err != nil {
+			t.Fatal(err)
+		}
+		w.processJob(context.Background(), "tw_v123")
+		row, _ := db.GetJob("tw_v123")
+		if row.Status != database.StatusQueued || !w.scheduler.held("tw_v123", time.Now()) {
+			t.Errorf("status = %s (%q), want Queued and held", row.Status, row.Error)
+		}
+	})
+
+	// The VOD's metadata answers, and the access-token request ahead of its
+	// playlist (GetVodHLSPlaylist, also a GQL call) is the one refused.
+	t.Run("backlog VOD, long 429 on the access token", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(b), "videoPlaybackAccessToken") {
+				rw.Header().Set("Retry-After", "120")
+				rw.WriteHeader(http.StatusTooManyRequests)
+				io.WriteString(rw, "slow down")
+				return
+			}
+			io.WriteString(rw, `{"data":{"video":{"id":"123","title":"t","lengthSeconds":600,"broadcastType":"ARCHIVE",`+
+				`"createdAt":"2026-10-01T00:00:00Z","owner":{"id":"1","login":"streamer","displayName":"Streamer"}}}}`)
 		}))
 		t.Cleanup(srv.Close)
 		oldGQL := constants.TwitchURLs.GQL

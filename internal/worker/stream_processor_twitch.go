@@ -581,6 +581,10 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		if err := twitchVodFetchError(ctx, "twitch VOD HLS error", err); err != nil {
 			return nil, err
 		}
+		// The access-token request ahead of the playlist is a GQL call too.
+		if err := twitchTransientAnswerError("twitch VOD HLS error", err); err != nil {
+			return nil, err
+		}
 		return &StreamProcessResult{
 			ShouldDownload: false,
 			IsVod:          true,
