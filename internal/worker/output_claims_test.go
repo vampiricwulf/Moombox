@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -13,23 +12,18 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/ffmpegtest"
 )
 
-// writeBlockingFFmpeg writes a stand-in FFmpeg that creates its output (the
-// last argument), touches started, and then holds the "mux" open until
-// release exists — the window a real multi-gigabyte copy-mux spends writing.
-func writeBlockingFFmpeg(t *testing.T, started, release string) string {
+// blockingFFmpeg installs the stand-in FFmpeg of ffmpegtest.Gated (the test
+// binary run again as FFmpeg, on every platform) and names its two gate
+// files. The stand-in writes a few bytes to its output (the last argument),
+// records the run in started, and then holds the "mux" open until release
+// exists — the window a real multi-gigabyte copy-mux spends writing.
+func blockingFFmpeg(t *testing.T) (ffmpeg, started, release string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "ffmpeg")
-	script := "#!/bin/sh\n" +
-		"for a; do out=\"$a\"; done\n" +
-		"printf partial > \"$out\"\n" +
-		": > '" + started + "'\n" +
-		"while [ ! -e '" + release + "' ]; do sleep 0.01; done\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	ffmpeg, dir := ffmpegtest.Gated(t)
+	return ffmpeg, filepath.Join(dir, "outputs"), filepath.Join(dir, "gate")
 }
 
 func waitForFile(t *testing.T, path string) {
@@ -46,15 +40,14 @@ func waitForFile(t *testing.T, path string) {
 	}
 }
 
-// runBlocked hands install a writeBlockingFFmpeg stand-in, runs start on its
+// runBlocked hands install a blockingFFmpeg stand-in, runs start on its
 // own goroutine, and returns once the stand-in is holding its "mux" open.
 // release lets it finish and returns start's error; a test that stops before
 // calling it releases on cleanup, so start never outlives the test.
 func runBlocked(t *testing.T, install func(ffmpegPath string), start func() error) (release func() error) {
 	t.Helper()
-	gates := t.TempDir()
-	started, gate := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-	install(writeBlockingFFmpeg(t, started, gate))
+	ffmpeg, started, gate := blockingFFmpeg(t)
+	install(ffmpeg)
 
 	done := make(chan error, 1)
 	go func() {
@@ -92,9 +85,6 @@ func runBlocked(t *testing.T, install func(ffmpegPath string), start func() erro
 // Mutant: dropping muxAndFinalize's claimOutputStem, or the sweep's or the
 // recheck's outputClaimOwner check.
 func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in FFmpeg is a shell script")
-	}
 	w, db := testWorkerSetup(t)
 	staging, outputDir := muxFixtureJob(t, w, db, "j-inflight")
 	if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("staged"), 0o644); err != nil {
@@ -147,9 +137,6 @@ func TestOrphanSweepLeavesAnInProgressMuxAlone(t *testing.T) {
 //
 // Mutant: dropping muxSegment's claimOutputStem.
 func TestOrphanSweepLeavesAnInProgressPartMuxAlone(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in FFmpeg is a shell script")
-	}
 	w, db := testWorkerSetup(t)
 	t.Cleanup(w.Stop)
 	staging, outputDir := muxFixtureJob(t, w, db, "j-inflight-part")

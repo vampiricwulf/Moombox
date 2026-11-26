@@ -288,7 +288,7 @@ internal/disk                -- Disk space queries: kernel32 on Windows, statfs 
 internal/constants           -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils               -- HTTP helpers, formatters, YouTube URL parsing
 internal/treeguard           -- test-only: every tested package's TestMain runs through it, failing a run that leaves files in the package directory
-internal/ffmpegtest          -- test-only: the trim tests' stand-in FFmpeg, the test binary run again as the encoder (worker, web/routes)
+internal/ffmpegtest          -- test-only: the stand-in FFmpeg of the trim tests and of the tests that hold a mux open, the test binary run again as the encoder (worker, web/routes)
 ```
 
 The tree carries no file or line counts: [appendix-metrics.md](appendix-metrics.md) § Package Scale is their one copy, with the script that regenerates it, and the Totals beside it give the module's figures.

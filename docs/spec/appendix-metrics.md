@@ -84,7 +84,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | httpx/ | ~190 | 1 | 3 | Shared keep-alive-tuned http.Client/Transport shapes |
 | notifications/notificationtest/ | ~180 | 1 | 2 | Shared fakes for the notification manager's tests |
 | httpx/httpxtest/ | ~130 | 1 | 2 | Test-only: an http.Client that serves a handler in the test's own process, so a request can run inside a `testing/synctest` bubble (the updater's stall tests, the engine's idle-deadline and ceiling tests) |
-| ffmpegtest/ | ~100 | 1 | 0 | Test-only: the stand-in FFmpeg of the trim tests in `worker` and `web/routes` — the test binary run again as the encoder (`RunIfStandIn` first in `TestMain`), so the tests that stop a running trim run on Windows too |
+| ffmpegtest/ | ~100 | 1 | 0 | Test-only: the stand-in FFmpeg of the trim tests in `worker` and `web/routes` and of the worker tests that hold a mux open — the test binary run again as the encoder (`RunIfStandIn` first in `TestMain`), so the tests that stop a running trim run on Windows too |
 | jobverbs/ | ~120 | 1 | 1 | One status predicate per job verb (Cancel, Resume, Reinitialize, Mux, Delete, Watched, Trim, chapter import) — called by the REST routes, the TUI and the worker; imports only `database` |
 | bgutils/embed/ | ~80 | 4 | 2 | go:embed boundary for the Node binaries + sidecar tarball |
 | stats/ | ~80 | 1 | 2 | Figures shared by the Web Stats tab and the TUI's E T overlay — job aggregates, disk reading |

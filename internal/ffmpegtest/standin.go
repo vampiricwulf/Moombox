@@ -1,7 +1,8 @@
-// Package ffmpegtest provides a stand-in FFmpeg for tests that need a trim
-// they can hold open, stop or fail: the test binary itself, run again as the
-// encoder. A shell script did this before and ran nowhere but Unix, so the
-// tests that stop a running trim never ran on Windows.
+// Package ffmpegtest provides a stand-in FFmpeg for tests that need a trim or
+// a mux they can hold open, stop or fail: the test binary itself, run again
+// as FFmpeg. Shell scripts did this before and ran nowhere but Unix, so the
+// tests that stop a running trim or sweep under a running mux never ran on
+// Windows.
 //
 // A package using it calls RunIfStandIn first thing in its TestMain. It is
 // an ordinary package rather than a _test.go helper because internal/worker
@@ -28,9 +29,9 @@ const giveUpAfter = 30 * time.Second
 // Gated returns the path of a stand-in FFmpeg and its directory. Run as
 // FFmpeg, the stand-in:
 //
-//   - appends the output it was given (its last argument) to dir/outputs;
-//   - writes a few bytes there, the way a real encode opens its output at
-//     once;
+//   - writes a few bytes to the output it was given (its last argument),
+//     the way a real encode opens its output at once;
+//   - then appends that output's path to dir/outputs;
 //   - reports 24 s encoded on stderr, the way FFmpeg's stats line does;
 //   - waits for dir/gate (create it to let the encode end), giving up with
 //     exit status 1 after 30 s;
@@ -67,16 +68,18 @@ func RunIfStandIn() {
 }
 
 func run(dir string, args []string) int {
+	// The output first, its record second: a test that has seen the record
+	// may look for the file at once.
 	out := args[len(args)-1]
+	if err := os.WriteFile(out, []byte("partial"), 0o644); err != nil {
+		return 2
+	}
 	f, err := os.OpenFile(filepath.Join(dir, "outputs"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return 2
 	}
 	_, werr := fmt.Fprintln(f, out)
 	if cerr := f.Close(); werr != nil || cerr != nil {
-		return 2
-	}
-	if err := os.WriteFile(out, []byte("partial"), 0o644); err != nil {
 		return 2
 	}
 	fmt.Fprint(os.Stderr, "frame=120 fps=60 q=28.0 size=256kB time=00:00:24.00 bitrate=87.4kbits/s speed=12x\r")

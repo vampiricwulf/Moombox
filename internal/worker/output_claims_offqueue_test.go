@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -42,9 +41,6 @@ func assertSweepSpares(t *testing.T, db *database.Database, cfg *config.MoomboxC
 // Mutant: dropping CreateTrim's claimOutputStem, or the output sweep's claim
 // check.
 func TestOrphanSweepLeavesAnInProgressTrimAlone(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in FFmpeg is a shell script")
-	}
 	_, db := testWorkerSetup(t)
 	outputDir := t.TempDir()
 	src := filepath.Join(outputDir, "src.mp4")
@@ -86,9 +82,6 @@ func TestOrphanSweepLeavesAnInProgressTrimAlone(t *testing.T) {
 // RecoverAsides' staging claim, or scanStagingOrphans' claim check (the
 // staging dir is offered).
 func TestOrphanSweepLeavesAnInProgressAsideRecoveryAlone(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in FFmpeg is a shell script")
-	}
 	w, db := testWorkerSetup(t)
 	staging, outputDir := muxFixtureJob(t, w, db, "j-recover-claim")
 	db.UpdateJobFields("j-recover-claim", map[string]any{"status": database.StatusCancelled})
