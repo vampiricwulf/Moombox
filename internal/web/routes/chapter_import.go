@@ -450,7 +450,19 @@ func (s *ChapterService) apply(ctx context.Context, jobID string, list []utils.C
 	}
 
 	var original []utils.SidecarChapter
-	if imp, imported, rerr := utils.ReadImportedChaptersSidecar(t.sidecar); rerr == nil && imported {
+	imp, imported, rerr := utils.ReadImportedChaptersSidecar(t.sidecar)
+	if rerr != nil {
+		// An earlier import's list exists but cannot be read (a hand edit
+		// that broke its JSON, a scanner holding the file). Its original is
+		// the only record of the chapters before the first import — the
+		// archive was re-muxed to the imported list — so refuse rather than
+		// record what the archive or its parts carry now as the original.
+		// Same answer as Restore's.
+		s.deps.Logger.Warn("Chapter import: the saved chapter list cannot be read, so its original could not be kept; nothing was changed",
+			"job", jobID, "file", filepath.Base(t.sidecar), "error", rerr)
+		return nil, refuseChapters(http.StatusInternalServerError, "The saved chapter list cannot be read")
+	}
+	if imported {
 		original = imp.Original
 	} else {
 		// The first import: what the archive carries now becomes the

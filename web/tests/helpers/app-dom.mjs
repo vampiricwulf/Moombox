@@ -428,7 +428,8 @@ export async function makeApp({ routes = {}, initialState = {}, storage = {}, li
   http
     .on("GET /api/setup/status", () => initialState.setup ?? { isFirstRun: false, ffmpegValid: true })
     .on("GET /api/config", () => initialState.config ?? {})
-    .on("GET /api/status", () => initialState.status ?? {})
+    // importMaxBytes: the server always sends its upload cap (constants.MaxImportUploadBytes).
+    .on("GET /api/status", () => initialState.status ?? { importMaxBytes: 500 * 1024 * 1024 })
     .on("GET /api/auth/status", () => initialState.auth ?? { authRequired: false, passwordlessExternal: false })
     .on("GET /api/cookies/auto-status", () => initialState.cookieAutoStatus ?? {});
   for (const [key, handler] of Object.entries(routes)) http.on(key, handler);

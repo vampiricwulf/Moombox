@@ -103,6 +103,9 @@ Other things that respect the critical threshold:
   threshold.
 - **Import Chapters** refuses to re-mux an archive when the temporary copy it
   writes would take the volume to the critical threshold.
+- An **archive import** ([Imports tab](../guide/web-dashboard.md#the-imports-tab), TUI `A Z`) is refused
+  when unpacking it would take the output volume to the critical threshold,
+  or when the volume lacks the archive's unpacked size plus 256 MB.
 
 The disk hold and an open `disk_critical` alert survive a restart: Moombox
 starts with backlog admission still held, and the first reading 2 points below
@@ -146,8 +149,12 @@ disk_warn_percent = 80
 
 The usage percentage at which Moombox sends a **Disk Space Critical**
 notification and stops admitting `Queued` rows. Admission resumes when usage is
-2 points or more below it (93% with the default). See the table above for
-everything this threshold controls.
+2 points or more below it (93% with the default). Two operator actions that
+write a large file onto the output drive also refuse to take it to this
+threshold: an [archive import](../guide/web-dashboard.md#the-imports-tab) is
+refused, and a [chapter import](../guide/chapters.md) saves its list beside
+the recording without rewriting it. See the table above for everything this
+threshold controls.
 
 Set it low enough that the downloads that keep running after it is reached
 (live captures are never paused) still fit in what is left. On a small drive,

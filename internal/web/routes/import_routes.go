@@ -30,10 +30,13 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // truncateUTF8 caps s at maxBytes without splitting a multi-byte rune —
@@ -83,7 +86,14 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 	// doesn't collapse every remote client into a single 5/min bucket.
 	importRL.ClientIP = func(r *http.Request) string { return web.EffectiveClientIP(store, r) }
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
-		// Max 500MB upload
+		// Max 500MB upload. A body that says up front it is larger — a
+		// browser and curl send Content-Length for a file — is refused
+		// before anything is spooled; a chunked one (the TUI's) is cut by
+		// the copy below.
+		if req.ContentLength > maxImportUpload {
+			jsonError(rw, importTooLargeMessage, http.StatusRequestEntityTooLarge)
+			return
+		}
 		req.Body = http.MaxBytesReader(rw, req.Body, maxImportUpload)
 
 		contentType := req.Header.Get("Content-Type")
@@ -160,7 +170,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		tmpFile.Close()
 		if err != nil {
 			if importUploadTooLarge(err) {
-				jsonError(rw, "upload too large (max 500 MB)", http.StatusRequestEntityTooLarge)
+				jsonError(rw, importTooLargeMessage, http.StatusRequestEntityTooLarge)
 				return
 			}
 			jsonError(rw, "failed to read upload", http.StatusBadRequest)
@@ -226,6 +236,19 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		rec, err := scanImportRecording(zipReader.File)
 		if err != nil {
 			jsonError(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Room for what is extracted, checked before any of it is written
+		// (owner ruling R4-11), by the rule the chapter re-mux's copy uses
+		// (disk.RoomFor): the kept entries' declared sizes plus headroom
+		// free on the output volume, and not taking it to disk_critical —
+		// an import is optional and can be retried, a live capture writing
+		// to the same volume cannot. The spool is already on disk, so the
+		// reading counts it. A volume that cannot be read passes.
+		if msg := importRoomRefusal(store, importsDir, rec.files()); msg != "" {
+			logger.Warn("import: refused, the output volume has no room for it", "dir", importsDir, "reason", msg)
+			jsonError(rw, msg, http.StatusInsufficientStorage)
 			return
 		}
 
@@ -362,6 +385,11 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 				return
 			}
 		}
+		// A chapter list that does not parse is left out: placed beside the
+		// archive it would refuse every later chapter save (the import
+		// route's "The saved chapter list cannot be read").
+		skipped := rec.skipped
+		files, skipped = dropUnreadableImportChapters(files, skipped)
 
 		// The names: "<title> [<id>]", or the first " (n)" of it that is
 		// free or already holds exactly these bytes — a file left by a
@@ -387,6 +415,12 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			jsonError(rw, "failed to check imports/ for the archive's name", http.StatusInternalServerError)
 			return
 		}
+		// A Moombox archive's sidecars go under the name of what they belong
+		// to (owner ruling R4-12): the thumbnail, description and chapter
+		// list beside the video, the raw chat beside its chat — where the
+		// finalize writes them and where the chapter routes and the orphan
+		// sweep look. One whose name holds something else is left out.
+		files, skipped = chooseImportSidecarNames(outputDir, files, skipped)
 		// The row a recording gets, so an import is not a second-class job:
 		// absolute output/chat paths, the pinned output directory the
 		// relative names resolve against, and the size (Stats' recorded
@@ -462,6 +496,19 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 			length := int(totalSeconds)
 			job.LengthSeconds = &length
 		}
+		// The restored thumbnail and description, as a finalize records
+		// them: the dashboard serves the local thumbnail ahead of the remote
+		// one (which a deleted video's, and every Twitch import's, lacks),
+		// and both UIs show the description column.
+		for _, f := range files {
+			switch f.kind {
+			case importKindThumbnail:
+				job.ThumbnailFile, _ = filepath.Abs(f.dest)
+			case importKindDescription:
+				job.DescriptionFile, _ = filepath.Abs(f.dest)
+				job.Description = importDescriptionText(f.tmp)
+			}
+		}
 
 		// The client may have gone while the archive was extracting — a tab
 		// closed, a reverse proxy's read timeout. It was told nothing was
@@ -525,7 +572,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		// set afterwards are silently dropped for non-gzip clients.
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
-		jsonResponse(rw, importResponse{Job: job, Import: newImportOutcome(baseStem, files, rec.unpairedChats)})
+		jsonResponse(rw, importResponse{Job: job, Import: newImportOutcome(baseStem, files, rec.unpairedChats, skipped)})
 	})
 
 	return func() { importRL.Close() }
@@ -552,9 +599,20 @@ type importOutcome struct {
 	// UnpairedChats names the zip's chat archives whose name matches none of
 	// its videos: a chat is paired by name only, so these were not imported.
 	UnpairedChats []string `json:"unpairedChats,omitempty"`
+	// Skipped names every other entry of the zip that was not imported: one
+	// that is not a file of the recording, a file kind an import does not
+	// keep, a second thumbnail, a raw chat with no chat, a chapter list that
+	// does not parse, a sidecar whose name in imports/ held a different file.
+	// Note gives the reasons, naming at most importNoteNames entries for each.
+	Skipped []string `json:"skipped,omitempty"`
 	// Note is the outcome in one line, the words both clients show.
 	Note string `json:"note,omitempty"`
 }
+
+// importNoteNames is the most entries the note names for one reason: a zip
+// of a whole folder can carry hundreds of unrelated files, and the TUI shows
+// the note on its feedback line. Skipped lists them all.
+const importNoteNames = 5
 
 // importRename is one file placed under a " (n)" name: From is the name a
 // different file already held, To the name the import took.
@@ -564,18 +622,39 @@ type importRename struct {
 }
 
 // newImportOutcome reports where each file landed against the name it was
-// meant to have, baseStem plus its suffix, and the chats left out.
-func newImportOutcome(baseStem string, files []*importFile, unpairedChats []string) importOutcome {
+// meant to have, baseStem plus its suffix, and the chats and other entries
+// left out. A sidecar takes the name of what it belongs to, so it is never
+// reported as renamed.
+func newImportOutcome(baseStem string, files []*importFile, unpairedChats []string, skipped []importSkip) importOutcome {
 	out := importOutcome{UnpairedChats: unpairedChats}
 	var notes []string
 	if len(unpairedChats) > 0 {
 		notes = append(notes, "left out "+strings.Join(unpairedChats, ", ")+": a chat is imported only beside the video its name matches")
+	}
+	// One clause per reason, in the order first met, naming its entries.
+	var reasons []string
+	byReason := map[string][]string{}
+	for _, sk := range skipped {
+		out.Skipped = append(out.Skipped, sk.name)
+		if byReason[sk.reason] == nil {
+			reasons = append(reasons, sk.reason)
+		}
+		byReason[sk.reason] = append(byReason[sk.reason], sk.name)
+	}
+	for _, r := range reasons {
+		names := byReason[r]
+		listed := strings.Join(names[:min(len(names), importNoteNames)], ", ")
+		if more := len(names) - importNoteNames; more > 0 {
+			listed += fmt.Sprintf(" and %d more", more)
+		}
+		notes = append(notes, "left out "+listed+": "+r)
 	}
 	for _, f := range files {
 		name := filepath.Base(f.dest)
 		switch {
 		case f.adopted:
 			out.Readopted = append(out.Readopted, name)
+		case f.follows != nil:
 		case name != baseStem+f.suffix:
 			out.Renamed = append(out.Renamed, importRename{From: baseStem + f.suffix, To: name})
 			notes = append(notes, fmt.Sprintf("imports/ already held a different %q; imported as %q", baseStem+f.suffix, name))
@@ -617,6 +696,74 @@ type importRecording struct {
 	// unpairedChats are the zip's chats named after no video: every
 	// ".chat.json" so named, and every such ".json" holding a chat.
 	unpairedChats []string
+	// sidecars are the Moombox sidecars paired with it by name (owner
+	// ruling R4-12): its thumbnail, description and chapter list, and each
+	// chat's raw sidecar.
+	sidecars []importSidecar
+	// skipped are the other entries the import leaves out, each with why.
+	skipped []importSkip
+}
+
+// importSidecar is one sidecar entry paired with the recording: its kind
+// (importKind*), the suffix it is written with, and for a raw chat the stem
+// of the chat it belongs to.
+type importSidecar struct {
+	entry    *zip.File
+	kind     string
+	suffix   string
+	chatStem string
+}
+
+// importSkip is an entry an import left out, by its base name, and the
+// reason the note gives for it.
+type importSkip struct {
+	name   string
+	reason string
+}
+
+// The kinds of sidecar an import restores (owner ruling R4-12): what a
+// finalize writes beside an archive under its name (copyAssets,
+// writeSplitArchiveChapters) or a chapter import saves there.
+const (
+	importKindThumbnail   = "thumbnail"
+	importKindDescription = "description"
+	importKindChapters    = "chapter list"
+	importKindRawChat     = "raw chat"
+)
+
+// importSidecarSuffixes are the endings of every sidecar an import writes,
+// each as it writes it (lower case).
+var importSidecarSuffixes = append([]string{worker.ChatRawSidecarSuffix, utils.ChaptersSidecarSuffix, worker.DescriptionSidecarSuffix}, worker.ThumbnailExts...)
+
+// importChaptersMaxBytes is the largest chapter list an import reads: a
+// list of a few hundred chapters is a few tens of KB.
+const importChaptersMaxBytes = 4 << 20
+
+// importDescriptionMaxBytes is the most of a description sidecar copied
+// into the row's description column; the file itself is kept whole.
+const importDescriptionMaxBytes = 64 << 10
+
+// The reasons an import's note gives for an entry it left out.
+const (
+	importSkipOther        = "an import keeps a recording's videos, chats, raw chats, chapter list, thumbnail and description only"
+	importSkipUnrelated    = "not named after the recording"
+	importSkipRawNoChat    = "a raw chat is imported only beside its chat"
+	importSkipThumbnail    = "an archive keeps one thumbnail (.jpg, else .webp, else .png)"
+	importSkipSecondChat   = "a video keeps one chat"
+	importSkipChapters     = "not a chapter list Moombox can read"
+	importSkipNameTaken    = "imports/ already held a different file under the name it needs"
+	importSkipNameUnusable = "the name it needs in imports/ cannot be used"
+)
+
+// importSidecarSuffixOf returns the entry of importSidecarSuffixes name ends
+// in, matched without regard to case on the name's own last bytes, or "".
+func importSidecarSuffixOf(name string) string {
+	for _, suffix := range importSidecarSuffixes {
+		if len(name) > len(suffix) && strings.EqualFold(name[len(name)-len(suffix):], suffix) {
+			return suffix
+		}
+	}
+	return ""
 }
 
 // importChatEntry is a chat-shaped entry of a zip — "<stem>.chat.json", or
@@ -639,12 +786,30 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	chats := map[string]*zip.File{}
 	jsons := map[string]*zip.File{}
 	var chatEntries []importChatEntry // both kinds, in zip order
+	// Every entry that is a file of the archive, and the sidecar-shaped
+	// ones among them (importSidecarSuffixes), each in zip order.
+	type namedEntry struct {
+		entry *zip.File
+		name  string
+	}
+	var all []namedEntry
+	type sidecarEntry struct {
+		namedEntry
+		stem, suffix string
+	}
+	var sidecarEntries []sidecarEntry
 	for _, f := range entries {
 		if f.FileInfo().IsDir() {
 			continue
 		}
 		name := zipEntryName(f)
 		if importMacMetadata(f, name) {
+			continue
+		}
+		all = append(all, namedEntry{f, name})
+		// Ahead of the chat arms: "<X>.chapters.json" is not a chat.
+		if suffix := importSidecarSuffixOf(name); suffix != "" {
+			sidecarEntries = append(sidecarEntries, sidecarEntry{namedEntry{f, name}, name[:len(name)-len(suffix)], suffix})
 			continue
 		}
 		lower := strings.ToLower(name)
@@ -655,15 +820,17 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		case importVideoExts[strings.ToLower(ext)]:
 			videos = append(videos, importPart{video: f, stem: strings.TrimSuffix(name, ext), ext: ext})
 		case strings.HasSuffix(lower, importChatSuffix):
-			if stem := name[:len(name)-len(importChatSuffix)]; chats[stem] == nil {
+			stem := name[:len(name)-len(importChatSuffix)]
+			if chats[stem] == nil {
 				chats[stem] = f
-				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 			}
+			chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem})
 		case strings.ToLower(ext) == ".json":
-			if stem := name[:len(name)-len(".json")]; jsons[stem] == nil {
+			stem := name[:len(name)-len(".json")]
+			if jsons[stem] == nil {
 				jsons[stem] = f
-				chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem, json: true})
 			}
+			chatEntries = append(chatEntries, importChatEntry{entry: f, name: name, stem: stem, json: true})
 		}
 	}
 	if len(videos) == 0 {
@@ -707,10 +874,103 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	// A chat named after none of the videos is left out, and named in the
 	// response — a ".json" as much as a ".chat.json", when it holds a chat:
 	// "chat.json" beside "Stream [id].mp4" was dropped with a plain 201.
+	unpaired := map[*zip.File]bool{}
 	for _, c := range chatEntries {
 		if !named[c.stem] && (!c.json || importJSONIsChat(c.entry)) {
 			rec.unpairedChats = append(rec.unpairedChats, path.Base(c.name))
+			unpaired[c.entry] = true
 		}
+	}
+
+	// The sidecars: the thumbnail, description and chapter list named after
+	// the recording (a split one's under the base its parts share, as the
+	// finalize writes them), and the raw sidecar of each chat it kept.
+	kept := map[*zip.File]bool{}
+	chatStems := map[string]bool{}
+	if rec.chat != nil {
+		kept[rec.chat], chatStems[rec.stem] = true, true
+	}
+	for _, p := range rec.parts {
+		kept[p.video] = true
+		if p.chat != nil {
+			kept[p.chat], chatStems[p.stem] = true, true
+		}
+	}
+	reasons := map[*zip.File]string{}
+	// A chat of a video that kept another (a chat-shaped ".json" beside the
+	// ".chat.json" pair preferred, or one chat name written twice) is a
+	// second chat, not a kind the import does not keep.
+	for _, c := range chatEntries {
+		if named[c.stem] && !kept[c.entry] && pair(c.stem) != nil && (!c.json || importJSONIsChat(c.entry)) {
+			reasons[c.entry] = importSkipSecondChat
+		}
+	}
+	thumbRank := len(worker.ThumbnailExts)
+	var thumb *zip.File
+	paired := map[string]bool{} // each kind once (a raw chat once per chat)
+	for _, sc := range sidecarEntries {
+		var kind, chatStem string
+		switch {
+		case sc.suffix == worker.ChatRawSidecarSuffix:
+			if !chatStems[sc.stem] {
+				reasons[sc.entry] = importSkipRawNoChat
+				continue
+			}
+			kind, chatStem = importKindRawChat, sc.stem
+		case sc.stem != rec.stem:
+			continue
+		case sc.suffix == utils.ChaptersSidecarSuffix:
+			if sc.entry.UncompressedSize64 > importChaptersMaxBytes {
+				reasons[sc.entry] = importSkipChapters
+				continue
+			}
+			kind = importKindChapters
+		case sc.suffix == worker.DescriptionSidecarSuffix:
+			kind = importKindDescription
+		default:
+			// A thumbnail: the first by the finalize's order of extensions.
+			if r := slices.Index(worker.ThumbnailExts, sc.suffix); r < thumbRank {
+				if thumb != nil {
+					reasons[thumb] = importSkipThumbnail
+				}
+				thumb, thumbRank = sc.entry, r
+			} else {
+				reasons[sc.entry] = importSkipThumbnail
+			}
+			continue
+		}
+		if paired[kind+"|"+chatStem] {
+			reasons[sc.entry] = importSkipSecond(kind)
+			continue
+		}
+		paired[kind+"|"+chatStem] = true
+		kept[sc.entry] = true
+		rec.sidecars = append(rec.sidecars, importSidecar{entry: sc.entry, kind: kind, suffix: sc.suffix, chatStem: chatStem})
+	}
+	if thumb != nil {
+		kept[thumb] = true
+		rec.sidecars = append(rec.sidecars, importSidecar{entry: thumb, kind: importKindThumbnail, suffix: worker.ThumbnailExts[thumbRank]})
+	}
+
+	// Everything else is named in the note: an entry named after the
+	// recording or a part of it for what it is, any other for not being
+	// one of its files. A chat named after no video is reported apart
+	// (unpairedChats).
+	for _, e := range all {
+		if kept[e.entry] || unpaired[e.entry] {
+			continue
+		}
+		reason := reasons[e.entry]
+		if reason == "" {
+			reason = importSkipUnrelated
+			for stem := range named {
+				if strings.HasPrefix(e.name, stem+".") {
+					reason = importSkipOther
+					break
+				}
+			}
+		}
+		rec.skipped = append(rec.skipped, importSkip{name: path.Base(e.name), reason: reason})
 	}
 	return rec, nil
 }
@@ -825,19 +1085,121 @@ func (r *importRecording) metaChat() *zip.File {
 
 // files lists what the import writes, videos first in part order: each part
 // keeps its " - partN" in its suffix, and each chat follows its video's name.
+//
+// The sidecars come last, each following the file whose name it takes
+// (chooseImportSidecarNames): a raw chat its chat's, every other one the
+// recording's first video's, less that video's " - partN" and extension.
 func (r *importRecording) files() []*importFile {
 	var files, chats []*importFile
+	chatByStem := map[string]*importFile{}
 	for _, p := range r.parts {
 		partSuffix := p.stem[len(r.stem):] // " - partN", or "" for a recording in one file
 		files = append(files, &importFile{entry: p.video, kind: "video", suffix: partSuffix + p.ext, part: p.num})
 		if p.chat != nil {
-			chats = append(chats, &importFile{entry: p.chat, kind: "chat", suffix: partSuffix + importChatSuffix, part: p.num})
+			c := &importFile{entry: p.chat, kind: "chat", suffix: partSuffix + importChatSuffix, part: p.num}
+			chats = append(chats, c)
+			chatByStem[p.stem] = c
 		}
 	}
 	if r.chat != nil {
-		chats = append([]*importFile{{entry: r.chat, kind: "chat", suffix: importChatSuffix}}, chats...)
+		c := &importFile{entry: r.chat, kind: "chat", suffix: importChatSuffix}
+		chats = append([]*importFile{c}, chats...)
+		chatByStem[r.stem] = c
 	}
-	return append(files, chats...)
+	var sidecars []*importFile
+	for _, sc := range r.sidecars {
+		f := &importFile{entry: sc.entry, kind: sc.kind, suffix: sc.suffix, follows: files[0]}
+		if sc.kind == importKindRawChat {
+			chat := chatByStem[sc.chatStem]
+			f.follows, f.part = chat, chat.part
+			f.suffix = strings.TrimSuffix(chat.suffix, importChatSuffix) + worker.ChatRawSidecarSuffix
+		}
+		sidecars = append(sidecars, f)
+	}
+	return append(append(files, chats...), sidecars...)
+}
+
+// importSkipSecond is the reason a second sidecar of a kind already kept is
+// left out (a zip can hold one name twice): a recording keeps one of each,
+// and each chat one raw chat.
+func importSkipSecond(kind string) string {
+	if kind == importKindRawChat {
+		return "a chat keeps one raw chat"
+	}
+	return "an archive keeps one " + kind
+}
+
+// dropUnreadableImportChapters leaves out an extracted chapter list that
+// does not parse as one (utils.ReadChaptersSidecar), removing its temporary
+// file and naming it in skipped: beside the archive it would make every
+// later chapter save refuse.
+func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]*importFile, []importSkip) {
+	// The closure appends to skipped: read it only after DeleteFunc returns.
+	kept := slices.DeleteFunc(files, func(f *importFile) bool {
+		if f.kind != importKindChapters {
+			return false
+		}
+		if _, err := utils.ReadChaptersSidecar(f.tmp); err == nil {
+			return false
+		}
+		os.Remove(f.tmp)
+		f.tmp = ""
+		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: importSkipChapters})
+		return true
+	})
+	return kept, skipped
+}
+
+// chooseImportSidecarNames gives each sidecar the name of the file it
+// follows with its own suffix in place of that file's: a raw chat beside its
+// chat, "<stem>.chat.raw.jsonl"; the rest beside the recording,
+// "<stem>.jpg", "<stem>.description", "<stem>.chapters.json" — the names
+// the finalize writes and the chapter routes and the orphan sweep derive.
+// Never a " (n)" of its own, which nothing would find: a name holding
+// exactly these bytes is re-adopted, and one holding anything else, or one
+// that cannot be used (past a file name's 255 bytes), leaves the sidecar out,
+// named in skipped. The others keep their temporary files for place.
+func chooseImportSidecarNames(outputDir string, files []*importFile, skipped []importSkip) ([]*importFile, []importSkip) {
+	// The closure appends to skipped: read it only after DeleteFunc returns.
+	kept := slices.DeleteFunc(files, func(f *importFile) bool {
+		if f.follows == nil {
+			return false
+		}
+		owner := f.follows
+		dest := filepath.Join(filepath.Dir(owner.dest), strings.TrimSuffix(filepath.Base(owner.dest), owner.suffix)+f.suffix)
+		reason := importSkipNameUnusable
+		if _, ok := validatePathTraversal(dest, outputDir); ok && len(filepath.Base(dest)) <= importNameMaxBytes {
+			adopt, err := f.claim(dest)
+			if err == nil {
+				f.dest, f.adopted = dest, adopt
+				return false
+			}
+			if errors.Is(err, errImportNameTaken) {
+				reason = importSkipNameTaken
+			}
+		}
+		os.Remove(f.tmp)
+		f.tmp = ""
+		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: reason})
+		return true
+	})
+	return kept, skipped
+}
+
+// importDescriptionText is a description sidecar's text for the row's
+// description column, which both UIs show: "" for one past
+// importDescriptionMaxBytes or one that cannot be read.
+func importDescriptionText(file string) string {
+	f, err := os.Open(file)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, importDescriptionMaxBytes+1))
+	if err != nil || len(b) > importDescriptionMaxBytes {
+		return ""
+	}
+	return strings.ToValidUTF8(string(b), "�")
 }
 
 // importVideoFiles is the videos of files, in part order.
@@ -922,9 +1284,12 @@ func ffprobeDurationSeconds(ctx context.Context, ffprobePath, file string) float
 // its suffix — or adopted, when that name already holds the same bytes.
 type importFile struct {
 	entry  *zip.File
-	kind   string // "video" or "chat": what a failure names
+	kind   string // "video", "chat" or an importKind* sidecar: what a failure names
 	suffix string // what follows the stem: ".mp4", ".chat.json", " - part2.mp4"
 	part   int    // the split recording's part it belongs to; 0 for the whole
+	// follows is, for a sidecar, the file whose name it takes
+	// (chooseImportSidecarNames); nil for a video or a chat.
+	follows *importFile
 
 	tmp  string // this request's extraction; "" once placed or removed
 	size int64
@@ -1084,8 +1449,8 @@ func chooseImportNames(importsDir, outputDir, base string, legacy []string, file
 		}
 	}
 	for _, f := range files {
-		if f.kind == "video" {
-			continue
+		if f.kind == "video" || f.follows != nil {
+			continue // a sidecar takes the name of what it follows (chooseImportSidecarNames)
 		}
 		if _, adopted := adoptImportLegacyStem(importsDir, outputDir, legacy, []*importFile{f}); adopted {
 			continue
@@ -1168,8 +1533,43 @@ func chooseImportStem(importsDir, outputDir, base string, files []*importFile) (
 	return "", fmt.Errorf("every name up to %q: %w", fmt.Sprintf("%s (%d)", base, importMaxDisambiguation), errImportNameTaken)
 }
 
-// maxImportUpload caps an import upload (the whole request body).
-const maxImportUpload = 500 * 1024 * 1024
+// maxImportUpload caps an import upload (the whole request body): the one
+// value both clients check a file against before uploading it.
+const maxImportUpload = constants.MaxImportUploadBytes
+
+// importTooLargeMessage is the 413 an upload over maxImportUpload gets.
+var importTooLargeMessage = fmt.Sprintf("upload too large (max %d MB)", maxImportUpload>>20)
+
+// importDiskSpace reads the output volume an import writes to; a variable so
+// a test can stand one in.
+var importDiskSpace = disk.GetDiskSpace
+
+// importRoomRefusal is the import's disk check (owner ruling R4-11): the
+// operator's words for why the output volume cannot take files — their
+// declared uncompressed sizes plus disk.WriteHeadroom — or "" when it can, or
+// when the volume cannot be read. Both sizes are named.
+func importRoomRefusal(store *config.Store, dir string, files []*importFile) string {
+	var size uint64
+	for _, f := range files {
+		size += f.entry.UncompressedSize64
+	}
+	space, err := importDiskSpace(dir)
+	if err != nil {
+		return ""
+	}
+	var thresholds config.DiskConfig
+	store.Read(func(c *config.MoomboxConfig) { thresholds = c.Disk })
+	short := disk.RoomFor(space, size+disk.WriteHeadroom, thresholds)
+	if short == nil {
+		return ""
+	}
+	need, free := utils.FormatFileSize(int64(short.Need)), utils.FormatFileSize(int64(short.Free))
+	if short.Crosses {
+		return fmt.Sprintf("not enough free space to import: the archive needs %s of the output volume's %s free, which would take it to %.1f%% used, past the disk_critical threshold (%d%%)",
+			need, free, short.AfterPct, short.CriticalPercent)
+	}
+	return fmt.Sprintf("not enough free space to import: the archive needs %s free on the output volume, which has %s", need, free)
+}
 
 // errImportTooLarge is copyWithLimit's answer to a body longer than its limit.
 var errImportTooLarge = errors.New("upload exceeds the import size limit")

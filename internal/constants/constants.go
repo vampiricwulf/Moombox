@@ -460,3 +460,9 @@ const (
 	// values.
 	DownloadChunkSize = 5 * 1024 * 1024
 )
+
+// MaxImportUploadBytes caps an archive import's upload, the whole request
+// body of POST /api/import: the server refuses a larger one (413), and both
+// clients refuse a file over it before sending a byte — the TUI's A Z by
+// this constant, the dashboard by the importMaxBytes /api/status carries.
+const MaxImportUploadBytes = 500 << 20

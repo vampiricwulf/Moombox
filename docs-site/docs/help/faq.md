@@ -165,7 +165,7 @@
     No. Deleting a job removes it from the list; the archive and the files
     beside it stay on disk and show up in the **Orphaned** tab, where you can
     delete them. To add a recording back to the list, pack it (with its chat
-    file) into a `.zip` and upload it on the **Imports** tab. See [Storage and files](../guide/storage.md) and
+    file, thumbnail, description and chapter list) into a `.zip` and upload it on the **Imports** tab. See [Storage and files](../guide/storage.md) and
     [Web dashboard](../guide/web-dashboard.md).
 
 ## Access and security

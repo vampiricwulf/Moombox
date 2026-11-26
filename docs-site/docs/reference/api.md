@@ -184,7 +184,7 @@ direct loopback connection (see
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/status` | Version, uptime, memory, disk, cookie status per platform, next monitor checks, per-channel health, BotGuard sidecar health, pending update, admission holds. |
+| `GET` | `/api/status` | Version, uptime, memory, disk, cookie status per platform, next monitor checks, per-channel health, BotGuard sidecar health, pending update, admission holds, the archive import's upload limit in bytes (`importMaxBytes`). |
 | `GET` | `/api/stats` | The figures on the Stats tab (`disk`, `storage`, `activity`), plus `twitchHints`, which only the API shows: `hits` and `misses` counters, since Moombox started, of Twitch jobs that reused the stream details the Twitch monitor had just fetched (a hit) or had to ask Twitch again (a miss). Hits that stay at zero while the monitor keeps finding Twitch broadcasts mean every Twitch job is making that extra request. |
 | `GET` | `/api/logs` | Recent log lines. |
 | `POST` | `/api/monitors/check-now` | Poll all monitors now (once per 30 s). |

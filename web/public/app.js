@@ -827,6 +827,13 @@ export class MoomboxApp {
           this.serverUtcOffsetMinutes = status.utcOffsetMinutes;
           this.settings?._wireTemplatePreview?.();
         }
+        // The archive import's upload cap (constants.MaxImportUploadBytes),
+        // which the Imports panel checks a chosen file against before
+        // uploading it.
+        if (Number.isFinite(status.importMaxBytes) && status.importMaxBytes !== this.importMaxBytes) {
+          this.importMaxBytes = status.importMaxBytes;
+          this.imports?.showImportLimit?.();
+        }
         if (status.version) {
           if (this._version && status.version !== this._version) {
             // The server restarted on a DIFFERENT version — an update
@@ -1677,6 +1684,11 @@ export class MoomboxApp {
         // shown; an open one refetches now, or its ghosts stay until the
         // operator leaves the tab and comes back.
         if (this._activePanel === "archived") this.fetchArchivedJobs();
+        // The Player picker has the same gap: the job_update to Finished and
+        // the job_deleted frames that would have rebuilt it may be among the
+        // missed ones. A first snapshot with the Player tab open rebuilds it
+        // once more, which the rebuild token makes harmless.
+        this._refreshPlayerPicker();
         this._syncParkedBadge();
         this.logPanel.renderLogs();
         this.updateCheckCountdown();

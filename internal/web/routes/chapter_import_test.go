@@ -479,6 +479,79 @@ func TestChapterImportFirstSaveKeepsTheArchivesChapters(t *testing.T) {
 	})
 }
 
+// TestChapterImportSaveRefusesOverAnUnreadableImport: once an import's
+// sidecar exists, its original is the only record of the chapters before the
+// first import (a single-file archive was re-muxed to the imported list; a
+// split archive's finalize list was overwritten). A save while that sidecar
+// cannot be read is refused as Restore refuses, the sidecar left byte for
+// byte and nothing re-muxed, so Restore can still bring the real chapters
+// back once the file is readable again.
+//
+// Mutant: apply taking a read error for "no import yet" and recording what
+// the archive or its parts carry now as the original.
+func TestChapterImportSaveRefusesOverAnUnreadableImport(t *testing.T) {
+	const broken = `{"imported": true, "chapters": [`
+	check := func(t *testing.T, f *chapterFixture, imp *fakeChapterImporter, jobID, sidecar string) {
+		t.Helper()
+		f.cache.probe = func(context.Context, string, string) ([]Chapter, error) {
+			t.Error("the save read the archive's chapters to use as the original")
+			return nil, nil
+		}
+		code, _, body := f.postImport(t, "/api/jobs/"+jobID+"/chapters", map[string]any{"text": "0:01 one"})
+		if code != http.StatusInternalServerError || !strings.Contains(body, "The saved chapter list cannot be read") {
+			t.Errorf("save over an unreadable import: %d %s", code, body)
+		}
+		if got := string(readFile(t, sidecar)); got != broken {
+			t.Errorf("the refused save rewrote the sidecar: %q", got)
+		}
+		if imp.remuxCount() != 0 {
+			t.Errorf("the refused save re-muxed (%d)", imp.remuxCount())
+		}
+	}
+	t.Run("single file", func(t *testing.T) {
+		imp := &fakeChapterImporter{}
+		f := newChapterImportFixture(t, imp)
+		archive := filepath.Join(f.outputDir, "vod.mp4")
+		if err := os.WriteFile(archive, []byte("recorded"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sidecar := filepath.Join(f.outputDir, "vod"+utils.ChaptersSidecarSuffix)
+		if err := os.WriteFile(sidecar, []byte(broken), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		length := 600
+		f.addJob(t, "yt_vod", func(j *database.Job) { j.Filename = "vod.mp4"; j.LengthSeconds = &length })
+		check(t, f, imp, "yt_vod", sidecar)
+		if string(readFile(t, archive)) != "recorded" {
+			t.Error("the refused save changed the archive")
+		}
+	})
+	t.Run("split", func(t *testing.T) {
+		imp := &fakeChapterImporter{}
+		f := newChapterImportFixture(t, imp)
+		p1 := filepath.Join(f.outputDir, "Show - part1.mp4")
+		p2 := filepath.Join(f.outputDir, "Show - part2.mp4")
+		for _, p := range []string{p1, p2} {
+			if err := os.WriteFile(p, []byte("recorded"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sidecar := filepath.Join(f.outputDir, "Show"+utils.ChaptersSidecarSuffix)
+		if err := os.WriteFile(sidecar, []byte(broken), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.addJob(t, "tw_split", func(j *database.Job) {
+			j.Platform = "twitch"
+			j.OutputFile = p1
+			j.Segments = []database.Segment{
+				{SegmentIndex: 0, Filename: filepath.Base(p1), FilePath: p1, DurationSeconds: 100},
+				{SegmentIndex: 1, Filename: filepath.Base(p2), FilePath: p2, DurationSeconds: 60},
+			}
+		})
+		check(t, f, imp, "tw_split", sidecar)
+	})
+}
+
 // TestChapterImportPrefillsTheJoinPoint is owner decision CJ-3 through the
 // preview route: a live YouTube capture that joined 1:23:45 into the
 // broadcast (join_offset_seconds on its row) opens the import with the

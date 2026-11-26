@@ -128,8 +128,9 @@ Niconico style:
 - When chat is busier than the screen can hold, a comment that cannot get a
   row within about 2 seconds is skipped, and a small **+N not shown** pill
   appears for a few seconds. Use the sidebar to read everything.
-- The overlay pauses with the video, follows the playback speed, clears when
-  you seek, and restarts from the new position.
+- The overlay pauses with the video, also while the video stops to buffer,
+  follows the playback speed, clears when you seek, and restarts from the new
+  position.
 - Deleted messages never fly; an edited one flies with its new text.
 - The comments are drawn over the video, not into it: they are not saved in
   the file and are not visible in other players.
