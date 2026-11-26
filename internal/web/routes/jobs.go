@@ -815,9 +815,13 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				avatarURL       string
 				streamStartTime string
 				twitchCategory  string
+				// What the processing history is told this add was
+				// (worker.RecordManualTwitchAdd).
+				addKind = worker.ManualTwitchAddWaiting
 			)
 
 			if isClip {
+				addKind = worker.ManualTwitchAddClip
 				jobID = twitch.ClipJobID(videoID)
 				url = "https://clips.twitch.tv/" + videoID
 				title = "Clip " + videoID + " — Manual Add"
@@ -847,6 +851,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 					}
 				}
 			} else if isVod {
+				addKind = worker.ManualTwitchAddVOD
 				jobID = twitch.VodJobID(login)
 				url = "https://www.twitch.tv/videos/" + login
 				meta, err := twitchFetcher.FetchVodMetadata(req.Context(), login)
@@ -870,6 +875,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 					return
 				}
 				if err == nil && meta != nil && meta.IsLive {
+					addKind = worker.ManualTwitchAddBroadcast
 					jobID = "tw_" + meta.StreamID
 					title = meta.ChannelName + " — " + meta.Title
 					if meta.Title == "" {
@@ -927,11 +933,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 				jsonError(rw, "job already exists", http.StatusConflict)
 				return
 			}
-			// A pasted clip is in the history as a found one is, so an
-			// twitch_archive_clips sweep never queues it again once its row is
-			// deleted (worker.RecordPastedClip).
-			if err := worker.RecordPastedClip(db, job); err != nil {
-				slog.Warn("add: could not record the pasted clip in the processing history", "jobID", job.ID, "err", err)
+			// A pasted clip, VOD or live broadcast is in the history as a
+			// found one is, so the clip sweep, the VOD backlog and the live
+			// monitor do not archive it again once its row is deleted
+			// (worker.RecordManualTwitchAdd, owner ruling RV-3).
+			if err := worker.RecordManualTwitchAdd(db, job, addKind); err != nil {
+				slog.Warn("add: could not record the Twitch job in the processing history", "jobID", job.ID, "err", err)
 			}
 			// Announced before the enqueue (see the YouTube add below).
 			if notifier != nil {

@@ -155,6 +155,92 @@ func TestRestartOfAnotherRenditionSplitsIntoANewPart(t *testing.T) {
 	})
 }
 
+// A staged part of another rendition that the switch back closes, not the
+// split: the restart set up on the no-JS fallback formats (another itag than
+// the staged part's), its first run is refused with
+// engine.ErrRenditionChanged, and by the refresh the challenges solve again,
+// so switchBack closes the staged part and opens the new one. The closed
+// part's row carries the quality its file holds, as the split's does (owner
+// ruling R4-1), not the one the restart chose.
+//
+// Mutant: currentQuality read from the file only in the split branch (the
+// row reads 1080p, the fallback's).
+func TestARenditionRefusedPartClosedByTheSwitchBackKeepsItsOwnQuality(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	synctest.Test(t, func(t *testing.T) {
+		w, db := testWorkerSetup(t)
+		pin := 299
+		job := &database.Job{ID: "rend-back", VideoID: "rend-back", URL: "u", Platform: "youtube", Status: database.StatusDownloading,
+			SelectedVideoItag: &pin}
+		if _, err := db.AddJob(job); err != nil {
+			t.Fatal(err)
+		}
+		o := w.orchestrator
+		gate := &gateSolver{}
+		gate.open.Store(true)
+		o.routedCipher, o.cipherSolver, o.potProvider = gate, nil, &bgutils.PotProvider{}
+		o.SetFfmpegPath(ffmpegPath)
+		root := t.TempDir()
+		jobCtx := &JobContext{Job: job, DB: db, Config: &JobConfig{}, YT: youtube.NewService(nil, &discardLogger{}),
+			StagingDir: root, OutputDir: t.TempDir(), Filename: "rend-back", Logger: &captureLogger{},
+			Interruption: &interruptionSignal{}, Run: &runRecord{}}
+		jobCtx.Run.markNoJS()
+
+		// The part staged before the restart: 64x64, whatever was chosen now.
+		writeMuxFixture(t, ffmpegPath, filepath.Join(root, "video_stream"), 1)
+		refused := engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: filepath.Join(root, "video_stream"),
+			BaseURL: "https://r2.googlevideo.com/videoplayback?itag=299", StartSeq: 43, ForceStartSeq: true})
+		result := &DownloadResult{VideoDownloader: refused, VideoPath: filepath.Join(root, "video_stream"),
+			HasVideo: true, VideoItag: 299, VideoWidth: 1920, VideoHeight: 1080, VideoFps: 30}
+
+		var mu sync.Mutex
+		runs := 0
+		live := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, PlayerURL: nPlayer, Formats: liveSwitchFormats("tv_public")}
+		origInfo, origRun := liveVideoInfo, runLiveDownloaders
+		t.Cleanup(func() { liveVideoInfo, runLiveDownloaders = origInfo, origRun })
+		liveVideoInfo = func(*youtube.Service, context.Context, string) (*youtube.VideoInfo, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if runs > 1 {
+				return &youtube.VideoInfo{StreamStatus: youtube.StreamPostLive}, nil
+			}
+			cp := *live
+			return &cp, nil
+		}
+		runLiveDownloaders = func(_ *DownloadOrchestrator, _ context.Context, res *DownloadResult) error {
+			mu.Lock()
+			defer mu.Unlock()
+			runs++
+			if runs == 1 {
+				return fmt.Errorf("%w: %s", engine.ErrRenditionChanged, res.VideoPath)
+			}
+			return nil
+		}
+		recordDownloaders(t)
+		fakeCookieless(t, liveSwitchFormats("visionos"), nil)
+
+		tracker := NewProgressTracker(db, job.ID, discardLogger{}, 0)
+		var lastSeg atomicTimeValue
+		_, _, err := o.runLiveStreamDownload(context.Background(), jobCtx, jobCtx, 0, true, live, result, tracker,
+			func() bool { return false }, &lastSeg)
+		tracker.Close()
+		time.Sleep(2 * activityUpdateInterval)
+		if err != nil {
+			t.Fatalf("runLiveStreamDownload = %v", err)
+		}
+		if jobCtx.Run.noJS() {
+			t.Fatal("the run did not switch back: this test's part was closed by another exit")
+		}
+		segs, err := db.GetSegments(job.ID)
+		if err != nil || len(segs) == 0 {
+			t.Fatalf("segment rows = %v (err %v), want the closed staged part's", segs, err)
+		}
+		if segs[0].SegmentIndex != 0 || segs[0].Quality != "64p" {
+			t.Errorf("the closed part's row is part %d at %q, want part 0 at the staged file's 64p", segs[0].SegmentIndex, segs[0].Quality)
+		}
+	})
+}
+
 // TestRestartPairStopsAtTheRefusedRenditionWithBothNextSegments runs the
 // restart's real downloader pair through runDownloaders, the way the live
 // loop's first run does, for the common trigger: a lowered resolution cap

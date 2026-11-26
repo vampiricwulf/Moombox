@@ -25,7 +25,8 @@ func (db *Database) HasProcessed(videoID string) (bool, error) {
 // AddToHistory records that a job was created under videoID (the job ID).
 // Every caller writes it right after AddJob added the row (and
 // DeleteJobLeavingHistory writes the same marked row for a YouTube job the
-// operator deletes, so a job added by URL has one too), so the row is
+// operator deletes, so a job added by URL has one too, and for the broadcast
+// a manually added Twitch job recorded, owner ruling RV-6), so the row is
 // marked job_created: once the job is deleted, it is the record that keeps
 // the video from being archived again and, for a YouTube broadcast, from
 // being found again while it is upcoming or live (HasJobBlockingRedetection,

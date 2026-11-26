@@ -19,7 +19,7 @@ import (
 // Mutants: the clip URL branch in the body.URL parse dropped (400 "video ID
 // or URL required"); the clip slug held to the login regexp ("-" refused,
 // 400); isClip not setting is_vod; the ErrClipUnavailable arm dropped (201);
-// the RecordPastedClip call dropped (the clip is not in the history).
+// the RecordManualTwitchAdd call dropped (the clip is not in the history).
 func TestTwitchAddAcceptsAPastedClip(t *testing.T) {
 	f := newJobsFixture(t)
 	f.tw.clipMeta = &TwitchJobMetadata{Title: "A day in the life of xQc", ChannelName: "xQc", ChannelLogin: "xqc",

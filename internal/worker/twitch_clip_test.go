@@ -376,26 +376,47 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 	}
 }
 
-// TestRecordPastedClipEntersOnlyClips: a pasted clip is entered in the
-// processing history (the twitch_archive_clips sweep's dedupe), and every other
-// manual add is left out of it, as it always was.
+// TestRecordManualTwitchAddEntersTheKeysAMonitorReads: a Twitch job added by
+// URL is entered in the processing history when its ID is one a monitor path
+// looks up there (owner ruling RV-3) — a clip (the clip sweep), a VOD (the
+// backlog), a live broadcast Twitch named (the live monitor) — so its Delete
+// leaves an Orphaned entry that holds it back. An add that waits for a
+// channel has an ID no monitor reads, and is left out whatever that ID looks
+// like: `moombox add <channel>` keys its row by the bare login, and a login
+// may itself have a key's shape. So is any YouTube row (its Delete writes
+// its own).
 //
-// Mutants: the jobfilter.IsClipJob check dropped (the live channel's row is
-// entered); the AddToHistory call dropped (the clip is not).
-func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
+// Mutants: the kind ignored and the ID's shape alone trusted (the key-shaped
+// logins are entered); the VOD or broadcast arm dropped (that row is not);
+// the VOD arm taking any ID; the AddToHistory call dropped.
+func TestRecordManualTwitchAddEntersTheKeysAMonitorReads(t *testing.T) {
 	_, db := testWorkerSetup(t)
-	clip := &database.Job{ID: "tw_clip_X", VideoID: "tw_clip_X", Platform: "twitch"}
-	live := &database.Job{ID: "tw_manual_ea_1", VideoID: "tw_manual_ea_1", Platform: "twitch"}
-	for _, j := range []*database.Job{clip, live} {
-		if err := RecordPastedClip(db, j); err != nil {
+	for _, tc := range []struct {
+		id, platform string
+		kind         ManualTwitchAddKind
+		want         bool
+	}{
+		{"tw_clip_X", "twitch", ManualTwitchAddClip, true},
+		{twitch.BuildJobID("2412345678", true), "twitch", ManualTwitchAddVOD, true},
+		{twitch.BuildJobID("51234567890", false), "twitch", ManualTwitchAddBroadcast, true},
+		{"tw_manual_ea_1", "twitch", ManualTwitchAddWaiting, false},
+		{"ea", "twitch", ManualTwitchAddWaiting, false}, // the CLI's channel add
+		// Channel logins shaped like a key, as the CLI keys them.
+		{"tw_vtuber", "twitch", ManualTwitchAddWaiting, false},
+		{"tw_v777", "twitch", ManualTwitchAddWaiting, false},
+		{"tw_clip_fan", "twitch", ManualTwitchAddWaiting, false},
+		{"tw_123", "twitch", ManualTwitchAddWaiting, false},
+		{"tw_v", "twitch", ManualTwitchAddVOD, false},
+		{"tw_vabc", "twitch", ManualTwitchAddVOD, false}, // no VOD has such an ID
+		{"dQw4w9WgXcQ", "youtube", ManualTwitchAddVOD, false},
+	} {
+		job := &database.Job{ID: tc.id, VideoID: tc.id, Platform: tc.platform}
+		if err := RecordManualTwitchAdd(db, job, tc.kind); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if seen, _ := db.HasProcessed(clip.ID); !seen {
-		t.Error("the pasted clip is not in the processing history")
-	}
-	if seen, _ := db.HasProcessed(live.ID); seen {
-		t.Error("a live channel's manual add was entered in the processing history")
+		if seen, _ := db.HasProcessed(tc.id); seen != tc.want {
+			t.Errorf("%s (%s, a %s add) in the processing history = %v, want %v", tc.id, tc.platform, tc.kind, seen, tc.want)
+		}
 	}
 }
 

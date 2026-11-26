@@ -391,6 +391,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 		if job != nil {
 			a.openTrimForJob(job)
+		} else {
+			// Only the action menu gets here: it listed A T with no job
+			// while a trim ran in the background, and that trim has ended
+			// since. (The chord path rebuilds the items on every key.)
+			a.setFeedback("The trim has ended: choose Trim Video again")
+			return a, nil
 		}
 	case "A O":
 		a.filesDlg.SetSize(a.width, a.height)
@@ -981,14 +987,15 @@ func jobCount(n int) string {
 	return fmt.Sprintf("%d jobs", n)
 }
 
-// buildMenuItems builds context-sensitive action menu items.
-// This is the single source of truth for all chords, menu entries, feedback hints, and help text.
-// trimInBackground: the trim dialog's own trim is running with the dialog
-// hidden (Esc), so A T reshows it rather than opening a new trim.
+// trimInBackground reports whether the trim dialog's own trim is running
+// with the dialog hidden (Esc), so A T reshows it rather than opening a new
+// trim.
 func (a *App) trimInBackground() bool {
 	return a.trimInProgress && !a.trimDlg.IsVisible()
 }
 
+// buildMenuItems builds context-sensitive action menu items.
+// This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action", Opens: "add video"},

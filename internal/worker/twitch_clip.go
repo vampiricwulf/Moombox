@@ -33,20 +33,90 @@ import (
 // the ordinary finalize (muxAndFinalize: stream copy, thumbnail, metadata,
 // Finished). No chat is captured: a clip has none.
 
-// RecordPastedClip enters a clip row an add path just created (POST
-// /api/jobs, `moombox add`) in the processing history, as the monitor's
-// OnClipFound does for the clips its sweep finds. The sweep of a channel
-// whose twitch_archive_clips is on skips a clip whose job ID is in the history or
-// is a job now (TwitchMonitor.sweepClips); a pasted clip was only the
-// second, so once its Finished row was deleted the next sweep whose window
-// still held it archived it again — the dedupe by slug that archives a clip
-// once held for the monitor's clips only. A row of any other kind is left
-// out of the history, as every other manual add is.
-func RecordPastedClip(db *database.Database, job *database.Job) error {
-	if !jobfilter.IsClipJob(job) {
+// ManualTwitchAddKind is what an add path asked for when it created a Twitch
+// row (RecordManualTwitchAdd). The job ID alone cannot say: `moombox add
+// <channel>` keys its row by the bare login, and "tw_vtuber", "tw_clip_x" and
+// "tw_123" are all logins Twitch allows.
+type ManualTwitchAddKind string
+
+const (
+	// ManualTwitchAddClip is a clip, by its URL or slug.
+	ManualTwitchAddClip ManualTwitchAddKind = "clip"
+	// ManualTwitchAddVOD is a past broadcast, by its URL or ID.
+	ManualTwitchAddVOD ManualTwitchAddKind = "vod"
+	// ManualTwitchAddBroadcast is a channel Twitch reported live at the
+	// add, whose row is keyed by that broadcast's stream ID.
+	ManualTwitchAddBroadcast ManualTwitchAddKind = "broadcast"
+	// ManualTwitchAddWaiting is a channel whose broadcast the add did not
+	// learn: offline, unreachable, or added by `moombox add`.
+	ManualTwitchAddWaiting ManualTwitchAddKind = "waiting"
+)
+
+// RecordManualTwitchAdd enters a Twitch row an add path just created (POST
+// /api/jobs, `moombox add`) in the processing history, as the monitors do
+// for the rows they create, when the add is of a kind whose job ID is a key a
+// Twitch monitor path reads there (owner ruling RV-3):
+//
+//   - a clip, "tw_clip_<slug>": the clip sweep of a channel whose
+//     twitch_archive_clips is on skips a clip whose job ID is in the history
+//     or is a job now (TwitchMonitor.sweepClips);
+//   - a VOD, "tw_v<id>": the VOD backlog skips one in the history
+//     (QueueTwitchVideos with SkipHistory);
+//   - a live capture of a broadcast Twitch already named, "tw_<stream id>":
+//     the live monitor skips a broadcast in the history
+//     (TwitchMonitor.processStreamInfo).
+//
+// Each was only "a job now" before, so once the operator deleted the row the
+// next sweep, listing or live check archived it again, and the Delete left
+// nothing under Orphaned History Entries to say so or to remove. The row
+// written here is that entry.
+//
+// A live add of a channel whose broadcast the add did not learn is left out:
+// "tw_manual_<login>_<n>" (the route) and the bare login (the CLI) are keys
+// no monitor reads, so a row under one would hold nothing back, and a login
+// shaped like a key would hold back somebody else's video. Its broadcast is
+// entered by the operator's Delete instead, from the stream ID the capture's
+// start wrote on the row (DeleteJobLeavingHistory, owner ruling RV-6).
+func RecordManualTwitchAdd(db *database.Database, job *database.Job, kind ManualTwitchAddKind) error {
+	if !manualTwitchAddIsAMonitorKey(job, kind) {
 		return nil
 	}
 	return db.AddToHistory(job.ID)
+}
+
+// manualTwitchAddIsAMonitorKey reports whether an add of this kind made a
+// row whose ID is one a Twitch monitor path looks up in the processing
+// history (RecordManualTwitchAdd): the kind's own key shape, and no other.
+func manualTwitchAddIsAMonitorKey(job *database.Job, kind ManualTwitchAddKind) bool {
+	if job == nil || job.Platform != "twitch" {
+		return false
+	}
+	switch kind {
+	case ManualTwitchAddClip:
+		return jobfilter.IsClipJob(job)
+	case ManualTwitchAddVOD:
+		id, ok := twitch.VodIDFromJobID(job.ID)
+		return ok && allDigits(id)
+	case ManualTwitchAddBroadcast:
+		// twitch.BuildJobID's live shape: "tw_" and the stream's numeric ID.
+		stream, ok := strings.CutPrefix(job.ID, "tw_")
+		return ok && allDigits(stream)
+	}
+	return false
+}
+
+// allDigits reports whether s is one or more ASCII digits, the shape of a
+// Twitch VOD or stream ID.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // TwitchClipDownload is what stream processing hands the clip download: the

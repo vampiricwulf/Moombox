@@ -217,3 +217,31 @@ test("a file chosen before the cap is known is checked before it is sent", { ski
   assert.ok(PendingXHR.last, "a file within the cap was not sent");
   assert.equal(h.app.imports.importUploading, true);
 });
+
+// The same read when another status read starts before it answers (the
+// socket's onopen, Settings): its answer is the older one and is dropped, and
+// the cap went with it, so the oversize file was sent after all. The cap is a
+// constant of the build and is now taken from a superseded answer too.
+//
+// Mutant: apply importMaxBytes after loadStatus's generation check.
+test("a cap read that a newer status read supersedes still refuses the oversize file", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: {} } });
+  globalThis.XMLHttpRequest = PendingXHR;
+  PendingXHR.last = null;
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+
+  const answers = [];
+  h.http.on("GET /api/status", () => new Promise((r) => { answers.push(r); }));
+  const upload = h.app.imports.uploadImport();
+  await h.flush();
+  const newer = h.app.loadStatus();
+  await h.flush();
+  assert.equal(answers.length, 2, "precondition: two status reads out");
+  answers[0]({ importMaxBytes: 10 });
+  await upload;
+  assert.equal(PendingXHR.last, null, "the oversize file was sent");
+  assert.ok(h.toasts().some((t) => /an archive import takes at most 10B/.test(t.textContent)));
+  answers[1]({ importMaxBytes: 10 });
+  await newer;
+});

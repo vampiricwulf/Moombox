@@ -396,8 +396,11 @@ func sameTwitchStart(known, current string) bool {
 // dedup, recovery, term matching, and OnStreamFound dispatch. (The fetch
 // itself moved to the batch call in doCheck.)
 func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.ChannelConfig, info *twitch.TwitchStreamInfo) error {
-	// Dedup by stream ID. HasProcessed is keyed by job ID (see main.go's
-	// AddToHistory(jobID) call), while HasActiveJob queries the video_id
+	// Dedup by stream ID. HasProcessed is keyed by job ID (the monitor's own
+	// AddToHistory(jobID) call, worker.RecordManualTwitchAdd for a
+	// broadcast added by URL, owner ruling RV-3, and the row the Delete of a
+	// manually added job leaves for the broadcast it recorded, owner ruling
+	// RV-6), while HasActiveJob queries the video_id
 	// column which for monitor-created Twitch jobs stores the unprefixed
 	// stream ID (manual Twitch adds in the web routes store jobID in both
 	// columns, which is why their HasActiveJob(jobID) call works). Prior
@@ -418,7 +421,10 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 			existing, getErr := tm.db.GetJob(jobID)
 			if getErr != nil {
 				tm.logger.Debug("recover check: GetJob failed", "jobID", jobID, "err", getErr)
-			} else if jobstate.TwitchAutoRetryPending(existing) {
+			} else if jobstate.PendingAutoAction(existing) == jobstate.AutoActionRetry {
+				// PendingAutoAction, not TwitchAutoRetryPending alone: a
+				// row the operator added by URL is in the history too, and
+				// is never re-initialised here (both UIs say so).
 				tm.logger.Debug("twitch recoverable error — offering recovery", // the callback logs acceptance once
 					"jobID", jobID,
 					"channel", info.ChannelDisplayName,

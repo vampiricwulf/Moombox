@@ -805,10 +805,20 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		liveStagingBase = c.Paths.StagingDirectory
 	})
 
-	variant, outcome := sp.startTwitchVariant(variants, job, map[string]any{
+	start := map[string]any{
 		"status": database.StatusLive,
 		"is_vod": false,
-	})
+	}
+	// A manually added job also names the broadcast it is about to record
+	// (Job.TwitchStreamID, owner ruling RV-6), in the write that claims
+	// Live, so the operator's Delete can leave the history row that holds
+	// that broadcast back from the live monitor. It overwrites: a
+	// re-initialised row that takes a later broadcast names the later one. A
+	// monitor-created job's ID is already the monitor's key.
+	if job.ManuallyAdded && streamInfo.StreamID != "" {
+		start["twitch_stream_id"] = streamInfo.StreamID
+	}
+	variant, outcome := sp.startTwitchVariant(variants, job, start)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}
@@ -816,6 +826,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		// The row already holds an outcome — a Cancel that landed since
 		// processJob read it — and Live was not written over it.
 		return cancelledResult(), nil
+	}
+	if id, ok := start["twitch_stream_id"].(string); ok {
+		job.TwitchStreamID = id
 	}
 
 	sp.logger.Info("twitch live stream ready",

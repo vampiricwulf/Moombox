@@ -378,14 +378,44 @@ same job at the same time (see [When two actions collide](#when-two-actions-coll
 
 Removes the job from the list. It does **not** delete any files: the archive, its chat and thumbnail, and any
 staging stay on disk and appear in the dashboard's **Orphaned** tab (TUI:
-++a++ ++o++), where you can delete them. The video also stays in Moombox's
-processed history (a job you added by URL or imported as well as one a
-monitor found),
-so the monitors do not pick it up again, even a stream that is still
-upcoming or live — remove its entry under **Orphaned History Entries** on
-the same tab if you want it archived again. A job deleted before you
-upgraded to this release holds back only finished videos (see
-[Storage](storage.md)).
+++a++ ++o++), where you can delete them.
+
+The video also stays in Moombox's processed history, so the monitors do not
+pick it up again. Remove its entry under **Orphaned History Entries** on the
+same tab if you want it archived again. What stays depends on the job:
+
+- **A YouTube video** always leaves an entry, whether a monitor found it or
+  you added it by URL or imported it (an import counts when its file name
+  carries the video's `[id]`). The entry holds the video back even while the
+  stream is still upcoming or live.
+- **A Twitch VOD or clip** leaves an entry when a monitor found it, when it
+  came from a pasted list of videos, or when you added it by its URL. The
+  entry holds a VOD back from **Queue past VODs** and a clip back from the
+  clip sweep.
+- **A Twitch live broadcast** leaves an entry when the monitor found it, or
+  when you added its channel in the dashboard or the TUI while Twitch
+  reported it live. The entry holds the broadcast back from the live check.
+  If you reinitialized a job you added and it went on to record a later
+  broadcast, deleting it leaves an entry for that later broadcast as well.
+- **A Twitch channel job that had to wait for the broadcast** (one added
+  while the channel was offline or while Twitch could not be reached, and
+  any channel added with `moombox add`) leaves an entry for the broadcast
+  it recorded, named `tw_` and Twitch's stream ID. The entry appears when
+  you delete the job, not before, and holds that broadcast back from the
+  live check. A job that has never started recording a broadcast
+  leaves no entry; a reinitialized job still leaves the entry of the
+  broadcast it recorded before.
+- **An import of a Twitch recording, or one with no video ID in its file
+  name,** leaves no entry.
+
+A YouTube job deleted before you upgraded to the release that tells deleted
+jobs apart holds back only finished videos (see [Storage](storage.md)). A
+Twitch VOD or live broadcast you added by URL before the release that
+records it has no entry, so deleting it does not hold it back. The same
+goes for a Twitch channel job whose recording had already ended before
+the release that keeps the broadcast's stream ID on the job. A job still
+recording when you upgraded picks the stream ID up at the restart, so its
+delete does leave the entry.
 
 ### Watched
 

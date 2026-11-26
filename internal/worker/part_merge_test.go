@@ -250,12 +250,18 @@ func TestPartMergerMerge_Identity(t *testing.T) {
 		name     string
 		probe    func(ctx context.Context, ffprobePath, filePath string) (*streamParams, error)
 		segments []database.Segment
+		// cutShort: the merge reports a child process that failed to the
+		// finalize (owner ruling RV-1). ffprobe is one, and a shutdown that
+		// signals the process tree kills it as it kills the concat. Parts
+		// that simply differ report nothing.
+		cutShort bool
 	}{
 		// ProbeFailure pins the interface contract: a probe error on ANY part
 		// aborts the WHOLE merge, returning the input slice completely
 		// untouched (no rows touched, concat/replace never invoked).
 		{
-			name: "ProbeFailure",
+			name:     "ProbeFailure",
+			cutShort: true,
 			probe: func(_ context.Context, _, filePath string) (*streamParams, error) {
 				if filePath == "b.mp4" {
 					return nil, errors.New("ffprobe: boom")
@@ -301,6 +307,9 @@ func TestPartMergerMerge_Identity(t *testing.T) {
 
 			if !reflect.DeepEqual(got, tc.segments) {
 				t.Errorf("merge = %+v, want input unchanged %+v", got, tc.segments)
+			}
+			if pm.cutShort != tc.cutShort {
+				t.Errorf("cutShort = %v, want %v", pm.cutShort, tc.cutShort)
 			}
 			if concatCalled {
 				t.Error("concat must not be called")
@@ -349,6 +358,11 @@ func TestPartMergerMerge_FailureAborts(t *testing.T) {
 			}
 			if tc.concatErr != nil && replaceCalled {
 				t.Error("db replace must not be called after a concat failure")
+			}
+			// Only a child process is reported to the finalize (owner ruling
+			// RV-1): a shutdown kills that, never the DB write.
+			if pm.cutShort != (tc.concatErr != nil) {
+				t.Errorf("cutShort = %v after %s", pm.cutShort, tc.name)
 			}
 			if b, err := os.ReadFile(part1); err != nil || string(b) != "orig1" {
 				t.Errorf("part1 mutated by aborted merge: content=%q err=%v", b, err)

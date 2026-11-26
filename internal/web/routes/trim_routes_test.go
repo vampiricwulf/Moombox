@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/ffmpegtest"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
@@ -267,9 +267,6 @@ func TestTrimServiceAnswersCarryTheirReason(t *testing.T) {
 // …)`) — the answer waits for the gated encode, the page gives up, and the
 // trim dies with its request.
 func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stand-in for FFmpeg")
-	}
 	dir := t.TempDir()
 	db, err := database.Open(filepath.Join(dir, "t.db"))
 	if err != nil {
@@ -290,14 +287,8 @@ func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
 	}
 	// A stand-in FFmpeg that opens its output, then waits for the gate (30 s
 	// at most, so nothing it is left running outlives the test).
-	gate := filepath.Join(dir, "gate")
-	ff := filepath.Join(dir, "ffmpeg")
-	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\nprintf partial > \"$out\"\n" +
-		"i=0; while [ ! -e '" + gate + "' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n" +
-		"printf whole > \"$out\"\n"
-	if err := os.WriteFile(ff, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	ff, standIn := ffmpegtest.Gated(t)
+	gate := filepath.Join(standIn, "gate")
 	svc := worker.NewTrimService(db, ff, silentLogger{})
 	t.Cleanup(svc.Stop)
 	r := chi.NewRouter()
@@ -358,9 +349,6 @@ func TestTrimCreateOutlivesThePageThatAskedForIt(t *testing.T) {
 //
 // Mutant: drop the handler's StopTrim — the running trim answers 404.
 func TestTrimDeleteStopsARunningTrim(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stand-in for FFmpeg")
-	}
 	dir := t.TempDir()
 	db, err := database.Open(filepath.Join(dir, "t.db"))
 	if err != nil {
@@ -381,12 +369,7 @@ func TestTrimDeleteStopsARunningTrim(t *testing.T) {
 	}
 	// A stand-in FFmpeg that opens its output and waits for a gate that never
 	// opens (30 s at most, so nothing it is left running outlives the test).
-	ff := filepath.Join(dir, "ffmpeg")
-	script := "#!/bin/sh\nfor a; do out=\"$a\"; done\nprintf partial > \"$out\"\n" +
-		"i=0; while [ ! -e '" + filepath.Join(dir, "gate") + "' ]; do sleep 0.02; i=$((i+1)); [ $i -gt 1500 ] && exit 1; done\n"
-	if err := os.WriteFile(ff, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	ff, _ := ffmpegtest.Gated(t)
 	svc := worker.NewTrimService(db, ff, silentLogger{})
 	t.Cleanup(svc.Stop)
 	r := chi.NewRouter()

@@ -83,10 +83,15 @@ func (o *DownloadOrchestrator) stopping() bool {
 // the stop has begun (owner ruling R3-8): an FFmpeg that systemd, or anything
 // else ending the process tree, signalled directly exits non-zero before the
 // mux root is cancelled, and that is the shutdown, not a failed mux. Either
-// way no status is written here: the part stays in staging, and the job's
-// finalize muxes it (muxUnrecordedSegments).
+// way no status is written here and the part stays in staging. A part mux
+// that failed while the job was still recording is muxed by the job's
+// finalize (muxUnrecordedSegments). That recovery is the finalize's last
+// attempt: a part it fails to mux has no later pass, so it marks the
+// finalize (JobContext.FinalizeMuxFailed), and during a shutdown the split
+// finalize leaves the row Muxing for the next start instead of finishing
+// without the part (errFinalizeCutShortByShutdown, owner ruling RV-1).
 func (o *DownloadOrchestrator) partMuxFailed(msg string, args ...any) {
-	o.muxFailed(msg, "the part stays in staging for the job's finalize", args...)
+	o.muxFailed(msg, "the part stays in staging for the job's finalize or the next start's re-mux", args...)
 }
 
 // muxFailed logs a mux that returned an error and writes no status: an

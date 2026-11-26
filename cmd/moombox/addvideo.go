@@ -217,16 +217,18 @@ func addVideo(input, configPath string) {
 			os.Exit(1)
 		}
 		if added {
-			kind := "channel"
+			// A channel's row is keyed by its login, which no monitor reads
+			// in the history, whatever the login looks like.
+			kind, addKind := "channel", worker.ManualTwitchAddWaiting
 			switch tw.Type {
 			case utils.TwitchVOD:
-				kind = "VOD"
+				kind, addKind = "VOD", worker.ManualTwitchAddVOD
 			case utils.TwitchClip:
-				kind = "clip"
+				kind, addKind = "clip", worker.ManualTwitchAddClip
 			}
 			fmt.Printf("Added Twitch %s %s to queue.\n", kind, jobID)
-			if err := worker.RecordPastedClip(db, job); err != nil {
-				fmt.Fprintf(os.Stderr, "Could not record the clip in the processing history: %v\n", err)
+			if err := worker.RecordManualTwitchAdd(db, job, addKind); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not record the job in the processing history: %v\n", err)
 			}
 			login := ""
 			if tw.Type == utils.TwitchChannel {

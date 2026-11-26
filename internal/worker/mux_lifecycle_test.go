@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -700,9 +699,6 @@ func TestOffQueueMuxHonoursTheOperatorsCancel(t *testing.T) {
 // the resumed row does; drop the write — the stranded row is left Muxing
 // with nothing running it.
 func TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in FFmpeg is a shell script")
-	}
 	for _, tc := range []struct {
 		name   string
 		landed database.JobStatus // what reaches the row after the route's Cancelled
@@ -720,9 +716,8 @@ func TestOffQueueMuxCancelRestoresOnlyAStrandedMuxing(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(staging, "video.mp4"), []byte("staged"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			gates := t.TempDir()
-			started, release := filepath.Join(gates, "started"), filepath.Join(gates, "release")
-			w.orchestrator.SetFfmpegPath(writeBlockingFFmpeg(t, started, release))
+			ffmpeg, started, release := blockingFFmpeg(t)
+			w.orchestrator.SetFfmpegPath(ffmpeg)
 			defer os.WriteFile(release, nil, 0o644) // a mux the cancel missed ends anyway
 
 			// Registered ahead of the mux's own listener, so it runs first:

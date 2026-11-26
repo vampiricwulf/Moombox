@@ -597,6 +597,100 @@ test("a pick kept by a superseded rebuild is applied when the newer rebuild fail
   assert.equal(h.player._pickDuringRebuild, null);
 });
 
+// The other order: the newest rebuild fails while the superseded one is still
+// parked in its window. The failure could not apply the pick then, and the
+// superseded rebuild left without applying it, so it sat until some later
+// rebuild loaded it over whatever played by then. Mutants: drop the failed
+// rebuild's mark; drop the apply as the superseded rebuild leaves its window.
+test("a kept pick is applied when the newer rebuild fails before the superseded one leaves its window", { skip }, async () => {
+  const jobs = ["j1", "j2"].map((id) => finished(id));
+  const h = harness.makePlayer({ jobs, archived: [], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  select.value = "j1";
+
+  let sawRead, releaseN, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gateN = new Promise((r) => { releaseN = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gateN; },
+  });
+  const rebuildN = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  let failN1;
+  const gateN1 = new Promise((_, reject) => { failN1 = reject; });
+  h.http.on("GET /api/jobs/archived", () => gateN1);
+  const rebuildN1 = h.player.loadPlayerJobList();
+  await h.flush();
+
+  select.value = "j2";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  failN1(new TypeError("Failed to fetch"));
+  await rebuildN1;
+  await h.flush();
+  assert.equal(h.player.playerJob?.id, "j1", "the superseded rebuild still holds the options: nothing applied yet");
+
+  gated = false;
+  releaseN();
+  await rebuildN;
+  await h.flush();
+  assert.equal(select.value, "j2");
+  assert.equal(h.player.playerJob?.id, "j2", "the kept pick loaded once the option list was let go");
+  assert.equal(h.player._pickDuringRebuild, null);
+});
+
+// A pick kept by a superseded rebuild, then the picker cleared (it is
+// clearable) before the newer rebuild finished: that rebuild used to load the
+// kept pick into the player just cleared. Mutant: drop the listener's reset
+// of the kept pick on a clear.
+test("a pick kept by a superseded rebuild does not load after the picker is cleared", { skip }, async () => {
+  const jobs = ["j1", "j2"].map((id) => finished(id));
+  const h = harness.makePlayer({ jobs, archived: [], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  select.value = "j1";
+
+  let sawRead, releaseN, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gateN = new Promise((r) => { releaseN = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gateN; },
+  });
+  const rebuildN = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  let releaseN1;
+  const gateN1 = new Promise((r) => { releaseN1 = r; });
+  h.http.on("GET /api/jobs/archived", () => gateN1);
+  const rebuildN1 = h.player.loadPlayerJobList();
+  await h.flush();
+
+  select.value = "j2";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  gated = false;
+  releaseN();
+  await rebuildN;
+  await h.flush();
+
+  select.value = "";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  await h.flush();
+  assert.equal(h.player.playerJob, null, "precondition: the clear emptied the player");
+
+  releaseN1([]);
+  await rebuildN1;
+  await h.flush();
+  assert.equal(h.player.playerJob, null, "the kept pick loaded after the clear");
+  assert.equal(select.value, "");
+});
+
 // ── 10. Seek event order (Phases 3+4 fix wave, F1) ──────────────────────────
 
 test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, async () => {

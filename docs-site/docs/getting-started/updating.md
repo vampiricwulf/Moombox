@@ -133,6 +133,11 @@ Moombox, it treats that start as the first one, with the previous binary at
   prints where the previous binary still is (`<binary>.old` on Linux,
   `<binary>~` on Windows, `<binary>.old` on both after a restart that was cut
   short). Fix the cause and start Moombox again.
+- **Moombox cannot start the new version's process at all, on the start
+  after a restart that was cut short:** nothing is rolled back and no version
+  is skipped. That is the system refusing to start a process, not the
+  release. Moombox prints the error and where the previous binary is kept
+  (`<binary>.old`), then exits. The next start tries the new version again.
 - **The rollback itself fails:** the launcher leaves the previous binary where
   it is, writes the recovery steps into `<binary>.update-failed` and prints
   them. Recovery is one rename: put the previous binary (the path the

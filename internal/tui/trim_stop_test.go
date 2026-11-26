@@ -224,3 +224,67 @@ func TestALateStopRefusalLeavesTheTrimsResult(t *testing.T) {
 		t.Error("the failed trim's dialog still holds a stop")
 	}
 }
+
+// TestAStopRefusedWhileTheDialogIsHiddenFreesS: S, then Esc before the stop
+// has answered, then the refusal. The hidden dialog's stop is taken back as
+// a visible one's is, so A T brings back a progress step whose S asks again
+// and which shows the reason, instead of "Stopping..." with S dead for the
+// rest of the trim. The refusal is also said on the feedback line, the only
+// place the operator can see it while the dialog is hidden.
+//
+// Mutant: put IsVisible back into stopTrimResultMsg's StopRefused condition
+// (the reshown dialog still holds the stop and the second S asks nothing).
+func TestAStopRefusedWhileTheDialogIsHiddenFreesS(t *testing.T) {
+	a, asked := trimRunningApp(t, "trim_A_1", errors.New("the trim has finished encoding and is being saved"))
+	_, stop := a.keyTrim(tea.KeyPressMsg{}, "S")
+	pressTrim(a, keyEsc)
+	if a.trimDlg.IsVisible() {
+		t.Fatal("Esc did not send the trim to the background")
+	}
+	a.Update(stop())
+	if !strings.Contains(a.feedback.msg, "being saved") {
+		t.Errorf("feedback = %q, want the refusal while the dialog is hidden", a.feedback.msg)
+	}
+
+	a.handleChord("a")
+	a.handleChord("t")
+	if !a.trimDlg.IsVisible() || a.trimDlg.Stopping() {
+		t.Fatalf("after A T: visible=%v stopping=%v, want the progress step with S live", a.trimDlg.IsVisible(), a.trimDlg.Stopping())
+	}
+	if view := stripANSI(a.trimDlg.View()); !strings.Contains(view, "being saved") {
+		t.Errorf("the reshown dialog does not say why the stop was refused:\n%s", view)
+	}
+	pressTrim(a, "S")
+	if len(*asked) != 2 {
+		t.Errorf("S after the reshow asked %d times in all, want 2", len(*asked))
+	}
+}
+
+// TestMenuTrimChosenAfterTheBackgroundTrimEndedSaysSo: the action menu is
+// built when it opens. Opened during a background trim it lists Trim Video
+// with no job needed; if that trim ends while the menu is open, choosing it
+// had no trim to bring back and no job to open one for, and did nothing
+// without a word.
+//
+// Mutant: drop dispatchAction's A T else arm (the trim's own result stays on
+// the feedback line and the choice goes unanswered).
+func TestMenuTrimChosenAfterTheBackgroundTrimEndedSaysSo(t *testing.T) {
+	a, _ := trimRunningApp(t, "trim_A_1", nil)
+	pressTrim(a, keyEsc)
+	a.actionMenu.SetSize(a.width, a.height)
+	a.actionMenu.Open(a.buildMenuItems())
+	for i, it := range a.actionMenu.mainList.Items() {
+		if mi, ok := it.(menuActionItem); ok && mi.action != nil && mi.action.Chord == "A T" {
+			a.actionMenu.mainList.Select(i)
+		}
+	}
+	a.Update(createTrimResultMsg{Filename: "clip.mp4"})
+
+	a.keyActionMenu(tea.KeyPressMsg{}, keyEnter)
+	if a.actionMenu.IsVisible() || a.trimDlg.IsVisible() {
+		t.Fatalf("menu visible=%v, trim dialog visible=%v, want both closed", a.actionMenu.IsVisible(), a.trimDlg.IsVisible())
+	}
+	if !strings.Contains(a.feedback.msg, "The trim has ended") {
+		t.Errorf("feedback = %q, want a line saying the trim has ended", a.feedback.msg)
+	}
+}

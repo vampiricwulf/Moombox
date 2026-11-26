@@ -701,7 +701,11 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) (manifest bool, er
 // .old (previous binary), .new (interrupted download), .new.sig (interrupted
 // verification), and .failed (the binary an automatic rollback moved aside —
 // see attemptAutoRollback in cmd/moombox/launcher.go; it is kept only until
-// a boot proves healthy, which is exactly this call).
+// a boot proves healthy, which is exactly this call). On Windows one .failed
+// outlives that: the one a launcher that armed the update at its own start
+// renamed its own image to. It cannot be deleted while that launcher runs,
+// and goes at the first milestone after the launcher has been stopped and
+// started.
 //
 // <exe>.sig is deliberately NOT swept. Moombox never writes it
 // (VerifyCurrentSignature downloads to an os.CreateTemp file, ApplyUpdate
@@ -726,7 +730,8 @@ func (u *Updater) CleanupOldBinary() {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
-				if suffix == LauncherImageSuffix {
+				switch {
+				case suffix == LauncherImageSuffix:
 					// Expected right after a Windows self-update: the `~`
 					// file is the still-running LAUNCHER's mapped image
 					// (handleUpdateRestart renamed .old → ~ while executing
@@ -735,7 +740,19 @@ func (u *Updater) CleanupOldBinary() {
 					// cleanup / next-start sweep removes it — not an orphan.
 					u.logger.Debug("[Updater] Stale `~` file still in use (likely the running launcher); deferring to launcher cleanup",
 						"path", path, "error", err.Error())
-				} else {
+				case suffix == FailedBinarySuffix && runtime.GOOS == "windows":
+					// After a rollback by a launcher that armed the update
+					// at its own start, .failed is that launcher's mapped
+					// image (attemptAutoRollback renamed the plain name
+					// while executing from it), and Windows deletes no
+					// running image. Every boot under that launcher met the
+					// refusal, as a Warn each time. The milestone of a boot
+					// under a later launcher start removes it. A .failed
+					// something else holds is quieted too, and tried again
+					// at every later milestone.
+					u.logger.Debug("[Updater] Stale .failed file still in use (the running launcher's image after a rollback, or a scanner); a later start removes it",
+						"path", path, "error", err.Error())
+				default:
 					u.logger.Warn("[Updater] Failed to remove stale file",
 						"path", path,
 						"error", err.Error(),

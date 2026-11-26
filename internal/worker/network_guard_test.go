@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/ffmpegtest"
 	"github.com/vampiricwulf/Moombox/internal/treeguard"
 )
 
@@ -36,9 +37,15 @@ var (
 // saved a thumbnail. The 404 keeps that outcome without the round trips; a
 // test that wants a thumbnail serves its own (TestCopyAssetsTakesTheFirstUsableThumbnailSize).
 //
+// The trim tests' stand-in FFmpeg is this binary run again
+// (ffmpegtest.RunIfStandIn).
+//
 // The tests run through treeguard.Run, which fails a run that left a file in
 // the package directory.
 func TestMain(m *testing.M) {
+	// First: a process started as the stand-in FFmpeg acts it out and exits.
+	ffmpegtest.RunIfStandIn()
+
 	var mu sync.Mutex
 	reached := map[string]int{}
 	trip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -614,6 +614,37 @@ type importOutcome struct {
 // the note on its feedback line. Skipped lists them all.
 const importNoteNames = 5
 
+// importReportNameBytes is the most bytes of one entry's name the response
+// repeats, in unpairedChats, skipped and the note. A zip entry's name can be
+// 64 KB and a zip can hold a thousand of them, and both clients show the
+// note whole. A name from a real filesystem is at most 255 bytes a
+// component, so few are ever cut.
+const importReportNameBytes = 200
+
+// importReportName is the name an entry left out of the import is reported
+// under: its base name, cut to importReportNameBytes with a closing "…" when
+// it is longer. Every place that records such a name goes through it, so the
+// count caps (maxFiles entries, importNoteNames a reason in the note) bound
+// the response in bytes as well.
+func importReportName(name string) string {
+	const ellipsis = "…"
+	base := path.Base(name)
+	if len(base) <= importReportNameBytes {
+		return base
+	}
+	return truncateUTF8(base, importReportNameBytes-len(ellipsis)) + ellipsis
+}
+
+// importNoteList joins the first importNoteNames of names for the note, and
+// counts the rest.
+func importNoteList(names []string) string {
+	listed := strings.Join(names[:min(len(names), importNoteNames)], ", ")
+	if more := len(names) - importNoteNames; more > 0 {
+		listed += fmt.Sprintf(" and %d more", more)
+	}
+	return listed
+}
+
 // importRename is one file placed under a " (n)" name: From is the name a
 // different file already held, To the name the import took.
 type importRename struct {
@@ -629,7 +660,7 @@ func newImportOutcome(baseStem string, files []*importFile, unpairedChats []stri
 	out := importOutcome{UnpairedChats: unpairedChats}
 	var notes []string
 	if len(unpairedChats) > 0 {
-		notes = append(notes, "left out "+strings.Join(unpairedChats, ", ")+": a chat is imported only beside the video its name matches")
+		notes = append(notes, "left out "+importNoteList(unpairedChats)+": a chat is imported only beside the video its name matches")
 	}
 	// One clause per reason, in the order first met, naming its entries.
 	var reasons []string
@@ -642,12 +673,7 @@ func newImportOutcome(baseStem string, files []*importFile, unpairedChats []stri
 		byReason[sk.reason] = append(byReason[sk.reason], sk.name)
 	}
 	for _, r := range reasons {
-		names := byReason[r]
-		listed := strings.Join(names[:min(len(names), importNoteNames)], ", ")
-		if more := len(names) - importNoteNames; more > 0 {
-			listed += fmt.Sprintf(" and %d more", more)
-		}
-		notes = append(notes, "left out "+listed+": "+r)
+		notes = append(notes, "left out "+importNoteList(byReason[r])+": "+r)
 	}
 	for _, f := range files {
 		name := filepath.Base(f.dest)
@@ -877,7 +903,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	unpaired := map[*zip.File]bool{}
 	for _, c := range chatEntries {
 		if !named[c.stem] && (!c.json || importJSONIsChat(c.entry)) {
-			rec.unpairedChats = append(rec.unpairedChats, path.Base(c.name))
+			rec.unpairedChats = append(rec.unpairedChats, importReportName(c.name))
 			unpaired[c.entry] = true
 		}
 	}
@@ -970,7 +996,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 				}
 			}
 		}
-		rec.skipped = append(rec.skipped, importSkip{name: path.Base(e.name), reason: reason})
+		rec.skipped = append(rec.skipped, importSkip{name: importReportName(e.name), reason: reason})
 	}
 	return rec, nil
 }
@@ -1144,7 +1170,7 @@ func dropUnreadableImportChapters(files []*importFile, skipped []importSkip) ([]
 		}
 		os.Remove(f.tmp)
 		f.tmp = ""
-		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: importSkipChapters})
+		skipped = append(skipped, importSkip{name: importReportName(zipEntryName(f.entry)), reason: importSkipChapters})
 		return true
 	})
 	return kept, skipped
@@ -1180,7 +1206,7 @@ func chooseImportSidecarNames(outputDir string, files []*importFile, skipped []i
 		}
 		os.Remove(f.tmp)
 		f.tmp = ""
-		skipped = append(skipped, importSkip{name: path.Base(zipEntryName(f.entry)), reason: reason})
+		skipped = append(skipped, importSkip{name: importReportName(zipEntryName(f.entry)), reason: reason})
 		return true
 	})
 	return kept, skipped
@@ -1433,7 +1459,9 @@ const importMaxDisambiguation = 999
 // long CJK title's archive, or a backslash-named one a Linux host imported,
 // whose row has since been deleted, was otherwise never found under its old
 // name, and its re-import wrote a second full copy beside it. A legacy name
-// is only ever adopted, never written.
+// is only ever adopted here, never chosen for a new video or chat. A sidecar
+// follows its owner's name (chooseImportSidecarNames), so one the earlier
+// import did not keep is written beside a re-adopted legacy-named file.
 func chooseImportNames(importsDir, outputDir, base string, legacy []string, files []*importFile) (string, error) {
 	var videos []*importFile
 	for _, f := range files {
@@ -1623,9 +1651,16 @@ func zipEntryWrittenName(f *zip.File) string {
 	return strings.ToValidUTF8(f.Name, "\uFFFD")
 }
 
-// importNameReserve is what an import's file name can carry past its
+// importNameReserve is what a video's or chat's file name can carry past its
 // "<title> [<id>]" stem: a " (999)" disambiguation, a " - part999" part
-// suffix and the longest sibling suffix, ".chat.json".
+// suffix and the longer of the two suffixes, ".chat.json". A sidecar's suffix
+// can be longer (".chat.raw.jsonl", ".chapters.json"); its name is checked
+// against importNameMaxBytes when it is placed, and a sidecar that does not
+// fit is left out (chooseImportSidecarNames). The value must not change: it
+// is one of the two bounds on importStem's cut (the template's title budget
+// is the other, and the one that binds for an 11-byte id), so a different
+// one could move the cut and stop an archive already imported under a long
+// title from being found again.
 const importNameReserve = len(" (999)") + len(" - part999") + len(importChatSuffix)
 
 // importStem is the file stem an import writes: the sanitized title and
@@ -1659,7 +1694,9 @@ func importLegacyStem(title, id string) string {
 // rule it has since left, each once and none of them base: the title capped
 // by runes rather than cut by bytes (importLegacyStem), and the title a Linux
 // host read from a backslash-named entry (importBackslashTitle), both cut by
-// bytes and capped by runes. chooseImportNames only ever re-adopts them.
+// bytes and capped by runes. chooseImportNames only ever re-adopts them for a
+// video or chat; a sidecar of a file re-adopted under one is named after it
+// and may be written there (chooseImportSidecarNames).
 func importLegacyStems(base, title, backslashTitle, id string) []string {
 	var stems []string
 	for _, s := range []string{importLegacyStem(title, id), importStem(backslashTitle, id), importLegacyStem(backslashTitle, id)} {

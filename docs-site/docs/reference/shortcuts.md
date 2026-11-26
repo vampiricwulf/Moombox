@@ -40,7 +40,7 @@ shortcuts.
 | `A X X` | Cancel Job | `Downloading`, `Live`, `Upcoming`, `Queued`, `Muxing`, `COOKIES?` | yes |
 | `A D D` | Delete Job | `Finished`, `Error`, `Cancelled`, `COOKIES?` | yes |
 | `A W` | Toggle Watched | `Finished` | yes |
-| `A T` | Trim Video | `Finished` with an output file | |
+| `A T` | Trim Video | `Finished` with an output file; any row (or none) while a trim runs in the background | |
 | `A O` | Browse Orphaned Items | — | |
 | `A K` | Manage Client Tokens | — | |
 | `A C` | Import Chapters | Complete `Finished` jobs with an archive | |
@@ -217,7 +217,7 @@ Settings also accepts mouse clicks, and the wheel scrolls the section.
 |---|---|
 | Create: times | ++tab++ switches start / end; ++enter++ continues; `M` delete mode; ++esc++ cancel. |
 | Create: confirm | ++enter++ creates the trim; `M` delete mode; ++esc++ back. |
-| Create: encoding | ++esc++ closes and keeps encoding in the background. |
+| Create: encoding | `S` stops the trim; ++esc++ closes and keeps encoding in the background (`A T` from any row brings it back). |
 | Delete | ++up++ / ++down++ select (wraps); ++enter++ twice deletes; `M` or ++esc++ back to create mode. |
 
 ### Orphaned items (`A O`) and client tokens (`A K`)

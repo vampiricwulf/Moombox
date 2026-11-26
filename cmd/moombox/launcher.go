@@ -187,7 +187,7 @@ func launchAndSupervise() {
 		if startErr := cmd.Start(); startErr != nil {
 			starting.Store(false)
 			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", startErr)
-			if boot.armed {
+			if boot.spawnFailureRollsBack() {
 				// The freshly-updated binary would not even start — restore
 				// the previous version and respawn it; fall back to keeping
 				// it on disk with manual instructions if that isn't possible.
@@ -195,6 +195,15 @@ func launchAndSupervise() {
 					continue
 				}
 				os.Exit(1)
+			}
+			if boot.armed {
+				// A boot armed at this launcher's own start (owner ruling
+				// RV-2): the file that would not spawn is the one this
+				// launcher is running from, so nothing is rolled back and
+				// nothing is written. .old and the breadcrumb stay, and the
+				// next start arms again.
+				fmt.Fprintf(os.Stderr, "The update to %s has not started yet. The previous version is kept at %s, and the next start tries the update again.\n",
+					boot.tag, boot.artifact)
 			}
 			deferDeleteOldLauncher(exePath)
 			os.Exit(1)
@@ -412,6 +421,23 @@ func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor t
 	b.armed = wasFirst && ranFor < postUpdateFailureWindow
 }
 
+// spawnFailureRollsBack reports whether a child that could not be spawned at
+// all (cmd.Start failed) counts as the armed update's failed first boot. It
+// does for a boot a restart armed: that launcher is the previous release, and
+// the binary it cannot start is the new one. It does not for a boot armed at
+// this launcher's own start (armInterruptedUpdate): the launcher is then
+// running from the very file it failed to spawn, so the failure is the
+// environment's (a process or handle limit, memory, a policy that blocks
+// process creation), no child ran, and there is no boot to judge. Rolling
+// back there moved a release that never ran to .failed and had the restored
+// one mark it skipped. The launcher reports the error and exits instead,
+// with .old and the breadcrumb left for the next start to arm again, as
+// after a forwarded stop (owner ruling RV-2). A child that did run and died
+// quickly is judged and rolled back as before (R3-10).
+func (b *postUpdateBoot) spawnFailureRollsBack() bool {
+	return b.armed && !b.atFreshStart
+}
+
 // armInterruptedUpdate arms the first child of a fresh launcher start as the
 // first boot of an update that was applied but never booted, and reports
 // whether it did. ApplyUpdate swaps the binary and writes the .update-pending
@@ -438,7 +464,8 @@ func (b *postUpdateBoot) restarted(artifact, tag string, wasFirst bool, ranFor t
 // exit 3 (a port in use, a config it cannot load) keeps .old with the honest
 // notice and is not rolled back, a boot that reached its milestone swept .old
 // and is past rollback, and any other quick failure is rolled back
-// automatically.
+// automatically. The one difference is a child that cannot be spawned at all,
+// which is not a boot and is not rolled back here (spawnFailureRollsBack).
 func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bool {
 	tag := pendingUpdateTag(exePath)
 	if tag != "v"+runningVersion {
@@ -729,7 +756,10 @@ func classifyPostUpdateExit(code int) postUpdateVerdict {
 // was armed at a fresh start (armInterruptedUpdate), the broken binary at the
 // plain name is this launcher's own image instead: the move aside renames it
 // to .failed, which is legal for the same reason, and the launcher runs from
-// .failed until it exits. The remove fallback cannot delete a mapped image,
+// .failed until it exits. That .failed therefore outlives the restored
+// release's healthy boot: CleanupOldBinary cannot delete a running image (it
+// says so at Debug) and removes the file at the first milestone after this
+// launcher has exited and Moombox has been started again. The remove fallback cannot delete a mapped image,
 // so if the move aside never succeeds the rollback ends in the manual
 // instructions.
 func attemptAutoRollback(exePath, backup string, exitCode int) bool {

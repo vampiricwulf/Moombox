@@ -87,7 +87,6 @@ func TestSweep_RepeatedParserArmFailuresBackOff(t *testing.T) {
 	bw.OnProgress = func(_, _ string, _ int, state BackfillState) { states <- state }
 	startWorker(t, bw)
 	refs := []ChannelRef{refFor(backfillTestCh(), 3, false)}
-
 	// sweep runs one Sweep and reports whether it scanned, waiting out the
 	// scan's cleanup so the next sweep judges a settled channel.
 	sweep := func(force bool) bool {
@@ -106,6 +105,15 @@ func TestSweep_RepeatedParserArmFailuresBackOff(t *testing.T) {
 		default:
 			return false
 		}
+	}
+
+	// asking sweeps once for the channel with another window or membership
+	// eligibility, then puts the fixed request back.
+	asking := func(windowDays int, withMembership bool) bool {
+		t.Helper()
+		refs[0] = refFor(backfillTestCh(), windowDays, withMembership)
+		defer func() { refs[0] = refFor(backfillTestCh(), 3, false) }()
+		return sweep(false)
 	}
 
 	if !sweep(false) {
@@ -132,6 +140,32 @@ func TestSweep_RepeatedParserArmFailuresBackOff(t *testing.T) {
 	}
 	if sweep(false) {
 		t.Fatal("a third failure running must wait again")
+	}
+
+	// A config change that asks more of the channel ends the wait: a wider
+	// window, or a membership tab newly eligible, is another scan. The count
+	// starts over, so the wait is back after two more failures. A narrower
+	// window is the scan that failed, and waits.
+	if asking(2, false) {
+		t.Fatal("a narrowed window must keep the wait")
+	}
+	if !asking(7, false) {
+		t.Fatal("a widened window must scan at once")
+	}
+	if !asking(7, false) {
+		t.Fatal("the widened scan's first failure must retry on the next sweep")
+	}
+	if asking(7, false) {
+		t.Fatal("the widened scan failed twice running and must wait")
+	}
+	if !asking(7, true) {
+		t.Fatal("a membership tab newly eligible must scan at once")
+	}
+	if !asking(7, true) || asking(7, true) {
+		t.Fatal("the membership scan must retry once and then wait")
+	}
+	if asking(3, false) {
+		t.Fatal("asking for less than the scan that failed must keep the wait")
 	}
 	if !sweep(true) {
 		t.Fatal("a manual rescan must run at once")
