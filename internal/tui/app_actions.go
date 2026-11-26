@@ -987,14 +987,15 @@ func jobCount(n int) string {
 	return fmt.Sprintf("%d jobs", n)
 }
 
-// buildMenuItems builds context-sensitive action menu items.
-// This is the single source of truth for all chords, menu entries, feedback hints, and help text.
-// trimInBackground: the trim dialog's own trim is running with the dialog
-// hidden (Esc), so A T reshows it rather than opening a new trim.
+// trimInBackground reports whether the trim dialog's own trim is running
+// with the dialog hidden (Esc), so A T reshows it rather than opening a new
+// trim.
 func (a *App) trimInBackground() bool {
 	return a.trimInProgress && !a.trimDlg.IsVisible()
 }
 
+// buildMenuItems builds context-sensitive action menu items.
+// This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action", Opens: "add video"},
