@@ -63,3 +63,23 @@ func TestTUITrimFailureTextFitsOneLine(t *testing.T) {
 		t.Error(`OnCreateTrim does not return trimFailureText(err) — the TUI would show the trim's raw error, FFmpeg's stderr tail included`)
 	}
 }
+
+// TestTUITrimStopErrorSaysWhy: the trim dialog shows a refused stop on its
+// error line. A refusal is shown as the dashboard's 409 shows it, and a trim
+// no longer running — it ended as S was pressed — says so in place of
+// "trim not found".
+//
+// Mutants: drop trimStopError's refusal branch (the wrapped error's text is
+// shown); drop its ErrTrimNotFound branch.
+func TestTUITrimStopErrorSaysWhy(t *testing.T) {
+	if err := trimStopError(nil); err != nil {
+		t.Errorf("trimStopError(nil) = %v", err)
+	}
+	refused := &worker.TrimRefusedError{Reason: "the trim has finished encoding and is being saved", Conflict: true}
+	if got := trimStopError(fmt.Errorf("stop: %w", refused)); got == nil || got.Error() != refused.Reason {
+		t.Errorf("trimStopError(refusal) = %v, want %q", got, refused.Reason)
+	}
+	if got := trimStopError(worker.ErrTrimNotFound); got == nil || got.Error() != "the trim has already ended" {
+		t.Errorf("trimStopError(not found) = %v, want \"the trim has already ended\"", got)
+	}
+}

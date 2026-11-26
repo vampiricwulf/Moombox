@@ -45,6 +45,22 @@ func trimFailureText(err error) string {
 	return "Could not create the trim; the log has the reason"
 }
 
+// trimStopError is TrimService.StopTrim's error as the TUI shows it: a
+// refusal as written (the dashboard's 409 shows the same), a trim no longer
+// running as "it has already ended".
+func trimStopError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if refused, ok := errors.AsType[*worker.TrimRefusedError](err); ok {
+		return errors.New(refused.Reason)
+	}
+	if errors.Is(err, worker.ErrTrimNotFound) {
+		return errors.New("the trim has already ended")
+	}
+	return err
+}
+
 // cookieBadgeFor projects one platform's AuthStatus triple onto the status-bar
 // tier. Shared by both platforms rather than written twice: the two arms had
 // already diverged — YouTube could reach CookiesOnly and Twitch could not,
@@ -451,23 +467,32 @@ func (s *runState) runTUI() {
 			s.log.Debug("Failed to open folder in file manager", slog.String("error", err.Error()))
 		}
 	}
-	app.OnCreateTrim = func(jobID string, startSec, endSec float64, onProgress func(float64)) (string, string) {
+	app.OnCreateTrim = func(jobID string, startSec, endSec float64, onStarted func(string), onProgress func(float64)) (string, string, bool) {
 		job, err := s.db.GetJob(jobID)
 		if err != nil || job == nil {
 			s.log.Error("Failed to get job for trim", slog.String("jobID", jobID))
-			return "", "Failed to get job"
+			return "", "Failed to get job", false
 		}
 		// context.Background(): the dialog's "Continue in background" must
 		// not stop the trim, and the trim service bounds every trim by its
 		// own lifetime anyway (TrimService.Stop, at shutdown). A trim that
 		// broke has already sent trim_error from the service; the dialog's own
 		// line below is the TUI's feedback beside it.
-		record, err := s.trimSvc.CreateTrim(context.Background(), job, startSec, endSec, onProgress)
+		// The trim dialog's S stops the trim by the id handed to onStarted
+		// (OnStopTrim below).
+		record, err := s.trimSvc.CreateTrimStarted(context.Background(), job, startSec, endSec,
+			func(task worker.TrimTask) { onStarted(task.ID) }, onProgress)
+		if errors.Is(err, worker.ErrTrimStopped) {
+			return "", "", true
+		}
 		if err != nil {
 			s.log.Error("Failed to create trim", slog.String("jobID", jobID), slog.String("error", err.Error()))
-			return "", trimFailureText(err)
+			return "", trimFailureText(err), false
 		}
-		return record.Filename, ""
+		return record.Filename, "", false
+	}
+	app.OnStopTrim = func(jobID, trimID string) error {
+		return trimStopError(s.trimSvc.StopTrim(jobID, trimID))
 	}
 	app.OnDeleteTrim = func(jobID, trimID string) error {
 		if err := s.trimSvc.DeleteTrim(jobID, trimID); err != nil {

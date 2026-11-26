@@ -786,8 +786,29 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chapterSaveResultMsg:
 		return a.handleChapterSaveResult(msg)
 
+	case stopTrimResultMsg:
+		// Taken: the trim's own result follows, Stopped. Refused (it is
+		// being saved, or has already ended): S works again, and why is
+		// shown where the operator is looking.
+		if msg.Err == "" {
+			return a, nil
+		}
+		if a.trimDlg.IsVisible() && a.trimDlg.JobID() == msg.JobID && a.trimDlg.Stopping() {
+			a.trimDlg.StopRefused(msg.Err)
+		} else {
+			a.setFeedbackWithSeverity("Trim stop failed: "+msg.Err, severityError)
+		}
+		return a, nil
+
 	case createTrimResultMsg:
 		a.trimInProgress = false
+		if msg.Stopped {
+			if a.trimDlg.IsVisible() {
+				a.trimDlg.Close()
+			}
+			a.setFeedback("Trim stopped")
+			return a, a.ensureMarqueeTicking()
+		}
 		if a.trimDlg.IsVisible() {
 			// Dialog still open — show result or error inline
 			if msg.Err != "" {

@@ -372,21 +372,54 @@ func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 	createFn := a.OnCreateTrim
 	progressMu := &a.trimProgressMu
 	progressPct := &a.trimProgressPct
+	runningID := &a.trimRunningID
 	return safeCmdOr(func() tea.Msg {
 		if createFn == nil {
 			return createTrimResultMsg{Err: "Create trim not available"}
+		}
+		onStarted := func(trimID string) {
+			progressMu.Lock()
+			*runningID = trimID
+			progressMu.Unlock()
 		}
 		onProgress := func(pct float64) {
 			progressMu.Lock()
 			*progressPct = pct
 			progressMu.Unlock()
 		}
-		filename, errMsg := createFn(jobID, startSec, endSec, onProgress)
+		filename, errMsg, stopped := createFn(jobID, startSec, endSec, onStarted, onProgress)
+		if stopped {
+			return createTrimResultMsg{Stopped: true}
+		}
 		if errMsg != "" {
 			return createTrimResultMsg{Err: errMsg}
 		}
 		return createTrimResultMsg{Filename: filename}
 	}, func(text string) tea.Msg { return createTrimResultMsg{Err: text} })
+}
+
+// stopTrimCmd stops the trim the dialog started (S on its progress step),
+// by the id OnCreateTrim's onStarted handed over. With no id yet the trim
+// is still being checked, and there is nothing to stop.
+func (a *App) stopTrimCmd(jobID string) tea.Cmd {
+	stopFn := a.OnStopTrim
+	a.trimProgressMu.Lock()
+	trimID := a.trimRunningID
+	a.trimProgressMu.Unlock()
+	if stopFn == nil {
+		return func() tea.Msg { return stopTrimResultMsg{JobID: jobID, Err: "Stop trim not available"} }
+	}
+	if trimID == "" {
+		return func() tea.Msg {
+			return stopTrimResultMsg{JobID: jobID, Err: "The trim is still starting; press S again"}
+		}
+	}
+	return safeCmdOr(func() tea.Msg {
+		if err := stopFn(jobID, trimID); err != nil {
+			return stopTrimResultMsg{JobID: jobID, Err: err.Error()}
+		}
+		return stopTrimResultMsg{JobID: jobID}
+	}, func(text string) tea.Msg { return stopTrimResultMsg{JobID: jobID, Err: text} })
 }
 
 func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {

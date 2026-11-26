@@ -62,6 +62,10 @@ type TrimDialogModel struct {
 	progressBar     progress.Model
 	progressPercent float64
 	progressElapsed time.Duration
+	// stopping: S asked for the trim to stop and its answer is not back
+	// yet. The progress step's one busy field; set by HandleKey, cleared by
+	// StartProgress and StopRefused.
+	stopping bool
 
 	// Job metadata for display
 	lengthSeconds float64
@@ -160,8 +164,19 @@ func (m *TrimDialogModel) StartProgress() {
 	m.spinner = newSpinner()
 	m.progressPercent = 0
 	m.progressElapsed = 0
+	m.stopping = false
 	m.errorMsg = ""
 }
+
+// StopRefused is a stop (S) that was not taken: the trim runs on, S works
+// again, and why is shown.
+func (m *TrimDialogModel) StopRefused(msg string) {
+	m.stopping = false
+	m.errorMsg = msg
+}
+
+// Stopping reports whether a stop asked for with S is still out.
+func (m *TrimDialogModel) Stopping() bool { return m.stopping }
 
 // SetProgress updates the progress display.
 func (m *TrimDialogModel) SetProgress(percent float64, elapsed time.Duration) {
@@ -215,7 +230,8 @@ func (m *TrimDialogModel) SelectedTrimID() string {
 }
 
 // HandleKey processes key input. Returns action:
-// "submit" for create, "delete" for delete confirm, "background" to dismiss progress overlay, "" for no action.
+// "submit" for create, "delete" for delete confirm, "background" to dismiss progress overlay,
+// "stop" to stop the running trim, "" for no action.
 func (m *TrimDialogModel) HandleKey(key string) string {
 	if key == keyEsc {
 		return m.handleEscape()
@@ -312,7 +328,12 @@ func (m *TrimDialogModel) handleCreateKey(key string) string {
 			return "submit"
 		}
 
-	case trimStepProgress: // Progress — only Esc works (handled in HandleKey before this)
+	case trimStepProgress: // Progress — S stops the trim; Esc is handled in HandleKey
+		if (key == "s" || key == "S") && !m.stopping {
+			m.stopping = true
+			m.errorMsg = ""
+			return "stop"
+		}
 		return ""
 	}
 	return ""
@@ -541,6 +562,9 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 		// Elapsed time
 		elapsed := m.progressElapsed.Truncate(time.Second)
 		lines = append(lines, DimStyle.Render(fmt.Sprintf("  Elapsed: %s", elapsed)))
+		if m.stopping {
+			lines = append(lines, YellowStyle.Render("  Stopping..."))
+		}
 	}
 
 	if m.errorMsg != "" {
@@ -555,7 +579,7 @@ func (m *TrimDialogModel) renderCreateMode(w, _ int) string {
 	case trimStepConfirm:
 		lines = append(lines, DimStyle.Render("Enter: Create Trim | M: Delete mode | Esc: Back"))
 	case trimStepProgress:
-		lines = append(lines, DimStyle.Render("Esc: Continue In Background"))
+		lines = append(lines, DimStyle.Render("S: Stop Trim | Esc: Continue In Background"))
 	}
 
 	return strings.Join(lines, "\n")

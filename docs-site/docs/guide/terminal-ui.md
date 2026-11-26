@@ -456,7 +456,11 @@ import.
 Enter a start and end time (++tab++ switches field, ++enter++ continues), check
 the confirmation, and press ++enter++ to create the trim. The end must be after
 the start, within the video's length, and at least 1 second later. While it
-encodes, ++esc++ closes the dialog and the encode carries on in the background.
+encodes, `S` stops the trim (the unfinished file is removed, the dialog closes
+with "Trim stopped", and no Trim Failed notification is sent), and ++esc++
+closes the dialog while the encode carries on in the background. A trim that
+has finished encoding and is being saved can no longer be stopped; the dialog
+says so and the trim completes.
 `M` switches to delete mode, which lists the job's existing trims; ++enter++
 twice deletes the selected one.
 

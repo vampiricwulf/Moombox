@@ -364,6 +364,7 @@ func (a *App) keyTrim(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
 			a.trimStartedAt = time.Now()
 			a.trimProgressMu.Lock()
 			a.trimProgressPct = 0
+			a.trimRunningID = ""
 			a.trimProgressMu.Unlock()
 			jobID := a.trimDlg.JobID()
 			startSec := a.trimDlg.ParsedStartSeconds()
@@ -374,6 +375,8 @@ func (a *App) keyTrim(msg tea.KeyPressMsg, key string) (tea.Model, tea.Cmd) {
 		}
 	case "background":
 		a.setFeedback("Trim encoding in background...")
+	case "stop":
+		return a, a.stopTrimCmd(a.trimDlg.JobID())
 	case "delete":
 		if a.OnDeleteTrim != nil {
 			trimID := a.trimDlg.SelectedTrimID()

@@ -217,9 +217,16 @@ type (
 		View    ChapterImportView
 		Err     error
 	}
+	// stopTrimResultMsg is OnStopTrim's answer. A stop that was taken says
+	// nothing here: the trim's own createTrimResultMsg follows, Stopped.
+	stopTrimResultMsg struct {
+		JobID string
+		Err   string
+	}
 	createTrimResultMsg struct {
 		Filename string
 		Err      string
+		Stopped  bool // the trim was stopped (S), not failed
 	}
 	deleteTrimResultMsg struct {
 		JobID    string // the job whose trim dialog asked
@@ -608,6 +615,10 @@ type App struct {
 	trimStartedAt   time.Time
 	trimProgressMu  sync.Mutex
 	trimProgressPct float64
+	// trimRunningID is the running trim's id, under trimProgressMu: handed
+	// over by OnCreateTrim's onStarted once its request has passed every
+	// check, cleared on submit. The trim dialog's S stops that trim.
+	trimRunningID string
 
 	// Progress
 	progressStore *ProgressStore
@@ -868,9 +879,15 @@ type App struct {
 	// (setAsideSelectDelay), once per status change and once more shortly
 	// after a status change (setAsideReaskDelay).
 	JobSetAsideArchives func(jobID string) []SetAsideArchiveEntry
-	OnCreateTrim        func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim        func(jobID, trimID string) error
-	OnOpenFolder        func(jobID string)
+	// OnCreateTrim runs a trim and returns once it is done. onStarted is
+	// handed the trim's id before the encode starts (what OnStopTrim takes);
+	// stopped reports a trim OnStopTrim stopped, which is no failure.
+	OnCreateTrim func(jobID string, startSec, endSec float64, onStarted func(trimID string), onProgress func(float64)) (filename string, errMsg string, stopped bool)
+	// OnStopTrim stops a running trim (worker.TrimService.StopTrim, the
+	// call the dashboard's Stop makes); its error is written for the user.
+	OnStopTrim   func(jobID, trimID string) error
+	OnDeleteTrim func(jobID, trimID string) error
+	OnOpenFolder func(jobID string)
 	// OnSaveConfig persists the settings model's config. It returns the save
 	// error so the overlay can report a failure instead of showing "Saved"
 	// over a write that never landed (CORE-4).
