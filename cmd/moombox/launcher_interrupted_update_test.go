@@ -75,6 +75,43 @@ func TestAnInterruptedUpdatesQuickDeathIsRolledBack(t *testing.T) {
 	}
 }
 
+// A child that cannot be spawned at all is the armed update's failed boot
+// only when a restart armed it: that launcher is the previous release. A
+// launcher that armed at its own start is running from the file it could not
+// spawn, so it rolls nothing back and leaves .old and the breadcrumb for the
+// next start (owner ruling RV-2), through a settings restart of the same
+// binary as well. An update applied inside that boot is a restart-armed boot
+// again.
+//
+// Mutants: `return b.armed` (the startup-armed spawn failure is rolled back
+// and the release skipped); restarted not clearing atFreshStart for a new
+// update (the update's spawn failure is not rolled back).
+func TestASpawnFailureRollsBackOnlyARestartArmedBoot(t *testing.T) {
+	exePath := interruptedUpdate(t)
+	var boot postUpdateBoot
+	if boot.spawnFailureRollsBack() {
+		t.Error("an unarmed boot has nothing to roll back")
+	}
+	boot.armInterruptedUpdate(exePath, "2.0.1")
+	if boot.spawnFailureRollsBack() {
+		t.Error("a boot armed at the launcher's own start must not roll back a failed spawn")
+	}
+	// A settings restart of the same binary carries the boot forward.
+	_, first := boot.judge(false, exitCodeRestart, 5*time.Second, false, 0)
+	boot.restarted(boot.restartArtifact(exePath, first), pendingUpdateTag(exePath), first, 5*time.Second)
+	if !boot.armed || boot.spawnFailureRollsBack() {
+		t.Errorf("after a settings restart: armed = %v, rolls back a failed spawn = %v; want armed and no rollback",
+			boot.armed, boot.spawnFailureRollsBack())
+	}
+	// A new update applied inside that boot: the launcher is now the older
+	// binary, as in any restart-armed boot.
+	_, first = boot.judge(false, exitCodeRestart, 5*time.Second, false, 0)
+	boot.restarted(exePath+updater.OldSuffix, "v2.0.2", first, 5*time.Second)
+	if !boot.spawnFailureRollsBack() {
+		t.Error("a boot a restart armed with a new update must roll back a failed spawn")
+	}
+}
+
 // A startup-armed boot that proves itself is no longer protected: its
 // milestone sweeps .old and resolves the breadcrumb, so a later crash, even a
 // quick one, is a supervised crash that restores nothing, and the next fresh
