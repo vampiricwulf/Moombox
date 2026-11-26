@@ -9,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -54,11 +55,14 @@ const browseStripTTL = 30 * time.Minute
 // TabItem is one video listed on a channel tab page. Age comes from itemAge
 // (spec §11 classification): 0 means live/upcoming/undatable — "now" — via the
 // live-badge short-circuit; only a "Streamed N <unit> ago" text yields a
-// non-zero coarse age (the lower bound of the true age, spec §12).
+// non-zero coarse age (the lower bound of the true age, spec §12). Marked is
+// itemMarked: an explicit live or upcoming marker, which tells the backfill
+// scanner an Age-0 item is one YouTube labelled, not one the parser missed.
 type TabItem struct {
 	VideoID string
 	Title   string
 	Age     time.Duration
+	Marked  bool
 }
 
 // TabPage is one /browse page of a channel tab. Continuation "" means the tab
@@ -234,16 +238,25 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 	var (
 		items    []MembershipVideo
 		token    string
+		unread   string
 		newVD    string
 		fetchErr error
 	)
 	if continuation == "" {
-		items, token, newVD, fetchErr = s.fetchBrowseFirstPage(ctx, channelID, tab, visitorData)
+		items, token, unread, newVD, fetchErr = s.fetchBrowseFirstPage(ctx, channelID, tab, visitorData)
 	} else {
-		items, token, newVD, fetchErr = s.fetchBrowseContinuation(ctx, continuation, visitorData)
+		items, token, unread, newVD, fetchErr = s.fetchBrowseContinuation(ctx, continuation, visitorData)
 	}
 	if fetchErr != nil {
 		return nil, fmt.Errorf("browse %s tab %s: %w", channelID, tab, fetchErr)
+	}
+	if token == "" && unread != "" {
+		// The page ends on a continuation item whose token Moombox cannot
+		// read: the tab is finished here as before, but a shape YouTube
+		// changed is named in the log rather than read as a clean end
+		// (owner ruling R3-4).
+		s.logger.Warn("[YouTube] browse page has a continuation item with no readable token; treating the tab as finished",
+			"channel", channelID, "tab", tab, "item", unread)
 	}
 
 	if err := s.browse.finishPage(sessKey, token, newVD); err != nil {
@@ -284,12 +297,12 @@ func (s *Service) FetchChannelTabPage(ctx context.Context, channelID, tab, conti
 // must NOT take it: its identity matches (step 1's short-circuit or step 2),
 // the tab is simply exhausted — and on a streams-only channel the UU playlist
 // would contaminate the videos scan with stream VODs.
-func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visitorData string) (items []MembershipVideo, token, newVD string, err error) {
+func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visitorData string) (items []MembershipVideo, token, unread, newVD string, err error) {
 	strip, haveStrip := s.browse.cachedStrip(channelID)
 	if !haveStrip {
 		body, harvestErr := s.browsePost(ctx, s.browseRequestBody(channelID, "", "", visitorData), visitorData)
 		if harvestErr != nil {
-			return nil, "", "", fmt.Errorf("tab-strip harvest: %w", harvestErr)
+			return nil, "", "", "", fmt.Errorf("tab-strip harvest: %w", harvestErr)
 		}
 		env := decodeBrowseEnvelope(body)
 		harvested, ok := harvestTabStrip(env)
@@ -302,15 +315,15 @@ func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visi
 			// the channel completing its backfill) off a response that had
 			// no tab content at all. Nothing was cached, so the sweep-retry
 			// re-harvests.
-			return nil, "", "", fmt.Errorf("tab-strip harvest: envelope carries no tab strip")
+			return nil, "", "", "", fmt.Errorf("tab-strip harvest: envelope carries no tab strip")
 		}
 		// An empty-but-present strip (topic channel: Home only) is cached
 		// too — "the channel lacks the tab" is itself the answer.
 		s.browse.storeStrip(channelID, harvested)
 		strip = harvested
 		var matched bool
-		if items, token, newVD, matched = parseBrowseTabPage(env, tab); matched {
-			return items, token, newVD, nil
+		if items, token, newVD, matched, unread = parseBrowseTabPage(env, tab); matched {
+			return items, token, unread, newVD, nil
 		}
 		// Mismatch guarantees items == nil, token == "" (parseBrowseTabPage
 		// never leaks the wrong tab's content); newVD is kept for finishPage.
@@ -319,48 +332,48 @@ func (s *Service) fetchBrowseFirstPage(ctx context.Context, channelID, tab, visi
 	if params := strip[tab]; params != "" {
 		body, postErr := s.browsePost(ctx, s.browseRequestBody(channelID, params, "", visitorData), visitorData)
 		if postErr != nil {
-			return nil, "", "", postErr
+			return nil, "", "", "", postErr
 		}
 		var vd string
 		var matched bool
-		items, token, vd, matched = parseBrowseTabPage(decodeBrowseEnvelope(body), tab)
+		items, token, vd, matched, unread = parseBrowseTabPage(decodeBrowseEnvelope(body), tab)
 		if vd != "" {
 			newVD = vd
 		}
 		if matched {
-			return items, token, newVD, nil
+			return items, token, unread, newVD, nil
 		}
 	}
 
 	if tab == "videos" && strings.HasPrefix(channelID, "UC") {
 		plBody, plErr := s.browsePost(ctx, s.browseRequestBody("VLUU"+channelID[2:], "", "", visitorData), visitorData)
 		if plErr != nil {
-			return nil, "", "", fmt.Errorf("uploads-playlist fallback: %w", plErr)
+			return nil, "", "", "", fmt.Errorf("uploads-playlist fallback: %w", plErr)
 		}
 		// tab "" accepts the playlist page's selected tab as-is — a playlist
 		// response's tab carries no /videos identity to match.
-		if plItems, plToken, plVD, plOK := parseBrowseTabPage(decodeBrowseEnvelope(plBody), ""); plOK {
-			items, token = plItems, plToken
+		if plItems, plToken, plVD, plOK, plUnread := parseBrowseTabPage(decodeBrowseEnvelope(plBody), ""); plOK {
+			items, token, unread = plItems, plToken, plUnread
 			if plVD != "" {
 				newVD = plVD
 			}
 		}
 	}
-	return items, token, newVD, nil
+	return items, token, unread, newVD, nil
 }
 
 // fetchBrowseContinuation POSTs a continuation token and parses the page-2+
 // envelope: onResponseReceivedActions (or the onResponseReceivedEndpoints
 // variant yt-dlp also accepts) → appendContinuationItemsAction →
 // continuationItems.
-func (s *Service) fetchBrowseContinuation(ctx context.Context, continuation, visitorData string) (items []MembershipVideo, token, newVD string, err error) {
+func (s *Service) fetchBrowseContinuation(ctx context.Context, continuation, visitorData string) (items []MembershipVideo, token, unread, newVD string, err error) {
 	body, err := s.browsePost(ctx, s.browseRequestBody("", "", continuation, visitorData), visitorData)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
-		return nil, "", "", fmt.Errorf("parse browse continuation response: %w", err)
+		return nil, "", "", "", fmt.Errorf("parse browse continuation response: %w", err)
 	}
 	seen := make(map[string]struct{})
 	for _, key := range []string{"onResponseReceivedActions", "onResponseReceivedEndpoints"} {
@@ -383,11 +396,18 @@ func (s *Service) fetchBrowseContinuation(ctx context.Context, continuation, vis
 			}
 			walkVideoRenderers(cont, seen, &items)
 			if token == "" {
-				token = findContinuationToken(cont)
+				var u string
+				token, u = findContinuationToken(cont)
+				if unread == "" {
+					unread = u
+				}
 			}
 		}
 	}
-	return items, token, getDeepStr(root, "responseContext", "visitorData"), nil
+	if token != "" {
+		unread = ""
+	}
+	return items, token, unread, getDeepStr(root, "responseContext", "visitorData"), nil
 }
 
 // browseRequestBody builds the /browse POST body: WEB client context (plus
@@ -589,9 +609,9 @@ func harvestTabStrip(env *browseFirstPageEnvelope) (map[string]string, bool) {
 // the scan); the videos caller redirects to the UU playlist, everyone else
 // treats it as clean exhaustion. A MATCHED tab with no items is a
 // real-but-empty tab: tabMatched true, empty page.
-func parseBrowseTabPage(env *browseFirstPageEnvelope, tab string) (items []MembershipVideo, token, visitorData string, tabMatched bool) {
+func parseBrowseTabPage(env *browseFirstPageEnvelope, tab string) (items []MembershipVideo, token, visitorData string, tabMatched bool, unread string) {
 	if env == nil {
-		return nil, "", "", false
+		return nil, "", "", false, ""
 	}
 	visitorData = env.ResponseContext.VisitorData
 
@@ -607,52 +627,100 @@ func parseBrowseTabPage(env *browseFirstPageEnvelope, tab string) (items []Membe
 		}
 	}
 	if selected == nil {
-		return nil, "", visitorData, false
+		return nil, "", visitorData, false, ""
 	}
 	if tab != "" && browseTabID(selected) != tab {
-		return nil, "", visitorData, false
+		return nil, "", visitorData, false, ""
 	}
 
 	// Deep-parse ONLY the selected tab body (the lazy-decode rationale at
 	// ytInitialTabs). Missing/unparseable content on a matched tab is an
 	// empty page, not a mismatch — the channel HAS the tab.
 	if len(selected.Content) == 0 {
-		return nil, "", visitorData, true
+		return nil, "", visitorData, true, ""
 	}
 	var tree map[string]any
 	if err := json.Unmarshal(selected.Content, &tree); err != nil {
-		return nil, "", visitorData, true
+		return nil, "", visitorData, true, ""
 	}
 	seen := make(map[string]struct{})
 	walkVideoRenderers(tree, seen, &items)
-	return items, findContinuationToken(tree), visitorData, true
+	token, unread = findContinuationToken(tree)
+	return items, token, visitorData, true, unread
 }
 
-// findContinuationToken walks a decoded tab/continuation tree for the
-// canonical token path: continuationItemRenderer.continuationEndpoint.
-// continuationCommand.token (yt-dlp _base.py handles further variants —
-// button wrappers, continuationItemViewModel — none of which YouTube serves
-// on channel tab grids today). A tab page carries at most one trailing
+// findContinuationToken walks a decoded tab/continuation tree for the next
+// page's token on a continuationItemRenderer's continuationEndpoint: the
+// direct continuationCommand.token, or, when that is empty, the first
+// continuationCommand.token among commandExecutorCommand.commands — the
+// wrapper yt-dlp has read on playlist pages since 6a6d97b2c (#12777,
+// _extract_continuation_ep_data in extractor/youtube/_base.py), which the
+// videos tab's uploads-playlist fallback pages through. yt-dlp's button and
+// continuationItemViewModel variants are not read: no capture shows them on
+// a surface Moombox pages. A tab page carries at most one trailing
 // continuationItemRenderer, so map iteration order is immaterial.
-func findContinuationToken(node any) string {
+//
+// unread names a continuationItemRenderer whose token none of those paths
+// reached, and is set only when the whole tree yielded no token. The caller
+// logs it and treats the page as the tab's last, as before (owner ruling
+// R3-4): a new shape is visible in the log without stalling the scan.
+func findContinuationToken(node any) (token, unread string) {
 	switch n := node.(type) {
 	case map[string]any:
 		if cir, ok := n["continuationItemRenderer"].(map[string]any); ok {
-			if tok := getDeepStr(cir, "continuationEndpoint", "continuationCommand", "token"); tok != "" {
-				return tok
+			if tok := continuationEndpointToken(cir); tok != "" {
+				return tok, ""
 			}
+			unread = describeContinuationItem(cir)
 		}
 		for _, v := range n {
-			if tok := findContinuationToken(v); tok != "" {
-				return tok
+			tok, u := findContinuationToken(v)
+			if tok != "" {
+				return tok, ""
+			}
+			if unread == "" {
+				unread = u
 			}
 		}
 	case []any:
 		for _, v := range n {
-			if tok := findContinuationToken(v); tok != "" {
+			tok, u := findContinuationToken(v)
+			if tok != "" {
+				return tok, ""
+			}
+			if unread == "" {
+				unread = u
+			}
+		}
+	}
+	return "", unread
+}
+
+// continuationEndpointToken reads a continuationItemRenderer's token: the
+// direct path first, then the commandExecutorCommand wrapper.
+func continuationEndpointToken(cir map[string]any) string {
+	if tok := getDeepStr(cir, "continuationEndpoint", "continuationCommand", "token"); tok != "" {
+		return tok
+	}
+	ep, _ := cir["continuationEndpoint"].(map[string]any)
+	exec, _ := ep["commandExecutorCommand"].(map[string]any)
+	cmds, _ := exec["commands"].([]any)
+	for _, c := range cmds {
+		if cm, ok := c.(map[string]any); ok {
+			if tok := getDeepStr(cm, "continuationCommand", "token"); tok != "" {
 				return tok
 			}
 		}
 	}
 	return ""
+}
+
+// describeContinuationItem names an unreadable continuation item by its keys
+// (and its endpoint's), never its values, for the log line.
+func describeContinuationItem(cir map[string]any) string {
+	desc := "continuationItemRenderer{" + strings.Join(slices.Sorted(maps.Keys(cir)), ",") + "}"
+	if ep, ok := cir["continuationEndpoint"].(map[string]any); ok {
+		desc += " continuationEndpoint{" + strings.Join(slices.Sorted(maps.Keys(ep)), ",") + "}"
+	}
+	return desc
 }

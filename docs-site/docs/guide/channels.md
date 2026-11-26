@@ -427,6 +427,11 @@ The history backfill shows its own progress:
   **BF:<tab> p<N>** when narrow) during a scan and a dim **BF: retry** when
   a failed scan is waiting to be retried.
 
+A failed scan is retried on the next feed check. The one exception is a tab
+Moombox cannot read the dates of: after two such failures in a row it is
+retried about once an hour, and the badge stays up in between. **Re-scan Feed
+History** (or ++r++ ++b++ in the terminal UI) retries at once.
+
 ## Troubleshooting
 
 A channel never gets jobs
