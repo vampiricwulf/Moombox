@@ -133,7 +133,12 @@ func (fm *FeedMonitor) walk(ctx context.Context, ch *config.ChannelConfig, chID,
 		// A job row in any status but Finished means the video is handled:
 		// active, or settled by a Cancel or an Error that no re-detection
 		// acts on (owner ruling R4-4), so it is not probed. Finished stays
-		// eligible for the incomplete-tail resume on re-detection.
+		// eligible for the incomplete-tail resume on re-detection. A held
+		// row is never probed, so a stored upcoming or live status stays
+		// and Q2 brings the row back every cycle for this one indexed read.
+		// That cost is accepted: the job or the history row decides the
+		// video, and once the operator removes it the next probe moves the
+		// row on.
 		if held, err := fm.db.HasJobBlockingRedetection(row.VideoID); err != nil || held {
 			skipped++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
