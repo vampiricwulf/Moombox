@@ -132,7 +132,7 @@ connection down it could not be delivered.
 |---|---|---|
 | `trim_created` (Trim Created) | *Trim Created* | A trimmed copy of a finished recording was made. |
 | `trim_deleted` (Trim Deleted) | *Trim Deleted* | A trim was deleted. |
-| `trim_error` (Trim Error) | *Trim Failed* | A trim failed — FFmpeg, the disk or the database failed, or an automatic post-download trim could not produce its file. |
+| `trim_error` (Trim Error) | *Trim Failed* | A trim failed — FFmpeg, the disk or the database failed, or an automatic post-download trim could not produce its file (including one cut short by Moombox shutting down). A trim you stopped yourself, or one whose job you deleted, sends nothing. |
 
 ### System
 
