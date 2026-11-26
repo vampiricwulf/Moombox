@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -603,9 +604,9 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		inTrimDir := owners.isTrimDir(filepath.Dir(absPath))
 		ext := strings.ToLower(filepath.Ext(path))
 		isMedia := ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".ts"
-		isThumbnail := ext == ".jpg" || ext == ".webp" || ext == ".png"
+		isThumbnail := slices.Contains(ThumbnailExts, ext)
 		isChat := strings.HasSuffix(strings.ToLower(path), ".chat.json")
-		isDescription := ext == ".description"
+		isDescription := ext == DescriptionSidecarSuffix
 		// The chat's raw sidecar and a split archive's chapter list, which
 		// are named after the archive and on no column (owner decision
 		// FE-16): owned while the archive they derive from is
@@ -1064,7 +1065,18 @@ func (o *outputOwners) asideOwnerUnder(dir string) string {
 // archive under its base name and records on no column — the chat's raw
 // sidecar and a split archive's chapter list (utils.ChaptersSidecarSuffix),
 // or a chapter import's beside a single-file archive (owner decision CI-1).
-const chatRawSidecarSuffix = ".chat.raw.jsonl"
+// The archive import restores it under this name (internal/web/routes).
+const ChatRawSidecarSuffix = ".chat.raw.jsonl"
+
+// DescriptionSidecarSuffix ends the description the finalize writes beside
+// an archive (copyAssets), which the archive import restores under the same
+// name.
+const DescriptionSidecarSuffix = ".description"
+
+// ThumbnailExts are the thumbnail extensions the finalize writes beside an
+// archive, in the order it tries them (copyAssets); the archive import keeps
+// the first of them a zip holds. Read only.
+var ThumbnailExts = []string{".jpg", ".webp", ".png"}
 
 // archiveDerivedStem returns the stems a derived sidecar may be owned
 // through, and whether path is one: "<X>.chat.raw.jsonl" belongs to the
@@ -1080,8 +1092,8 @@ const chatRawSidecarSuffix = ".chat.raw.jsonl"
 func archiveDerivedStem(path string) ([]string, bool) {
 	lower := strings.ToLower(path)
 	switch {
-	case strings.HasSuffix(lower, chatRawSidecarSuffix):
-		x := path[:len(path)-len(chatRawSidecarSuffix)]
+	case strings.HasSuffix(lower, ChatRawSidecarSuffix):
+		x := path[:len(path)-len(ChatRawSidecarSuffix)]
 		return []string{normalizePath(x), normalizePath(x + ".chat")}, true
 	case strings.HasSuffix(lower, utils.ChaptersSidecarSuffix):
 		return []string{normalizePath(path[:len(path)-len(utils.ChaptersSidecarSuffix)])}, true
@@ -1104,7 +1116,7 @@ func asideSiblingStem(absPath string) (string, bool) {
 	switch lower := strings.ToLower(base); {
 	case strings.HasSuffix(lower, ".chat.json"):
 		base = base[:len(base)-len(".json")]
-	case strings.HasSuffix(lower, chatRawSidecarSuffix):
+	case strings.HasSuffix(lower, ChatRawSidecarSuffix):
 		// The raw sidecar of the recovered recording's chat (FE-16).
 		base = base[:len(base)-len(".raw.jsonl")]
 	}

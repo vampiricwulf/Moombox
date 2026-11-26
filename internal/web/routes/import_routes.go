@@ -36,6 +36,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // truncateUTF8 caps s at maxBytes without splitting a multi-byte rune —
@@ -730,21 +731,9 @@ const (
 	importKindRawChat     = "raw chat"
 )
 
-// importDescriptionSuffix ends a description sidecar's name, as the
-// finalize writes it.
-const importDescriptionSuffix = ".description"
-
-// importChatRawSuffix ends a chat's raw sidecar's name: the worker's
-// chatRawSidecarSuffix, "<X>.chat.raw.jsonl" beside "<X>.chat.json".
-const importChatRawSuffix = ".chat.raw.jsonl"
-
-// importThumbnailExts are the thumbnail extensions a finalize writes, in the
-// order it tries them; an archive keeps the first the zip holds.
-var importThumbnailExts = []string{".jpg", ".webp", ".png"}
-
 // importSidecarSuffixes are the endings of every sidecar an import writes,
 // each as it writes it (lower case).
-var importSidecarSuffixes = append([]string{importChatRawSuffix, utils.ChaptersSidecarSuffix, importDescriptionSuffix}, importThumbnailExts...)
+var importSidecarSuffixes = append([]string{worker.ChatRawSidecarSuffix, utils.ChaptersSidecarSuffix, worker.DescriptionSidecarSuffix}, worker.ThumbnailExts...)
 
 // importChaptersMaxBytes is the largest chapter list an import reads: a
 // list of a few hundred chapters is a few tens of KB.
@@ -905,13 +894,13 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 		}
 	}
 	reasons := map[*zip.File]string{}
-	thumbRank := len(importThumbnailExts)
+	thumbRank := len(worker.ThumbnailExts)
 	var thumb *zip.File
 	paired := map[string]bool{} // each kind once (a raw chat once per chat)
 	for _, sc := range sidecarEntries {
 		var kind, chatStem string
 		switch {
-		case sc.suffix == importChatRawSuffix:
+		case sc.suffix == worker.ChatRawSidecarSuffix:
 			if !chatStems[sc.stem] {
 				reasons[sc.entry] = importSkipRawNoChat
 				continue
@@ -925,11 +914,11 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 				continue
 			}
 			kind = importKindChapters
-		case sc.suffix == importDescriptionSuffix:
+		case sc.suffix == worker.DescriptionSidecarSuffix:
 			kind = importKindDescription
 		default:
 			// A thumbnail: the first by the finalize's order of extensions.
-			if r := slices.Index(importThumbnailExts, sc.suffix); r < thumbRank {
+			if r := slices.Index(worker.ThumbnailExts, sc.suffix); r < thumbRank {
 				if thumb != nil {
 					reasons[thumb] = importSkipThumbnail
 				}
@@ -949,7 +938,7 @@ func scanImportRecording(entries []*zip.File) (*importRecording, error) {
 	}
 	if thumb != nil {
 		kept[thumb] = true
-		rec.sidecars = append(rec.sidecars, importSidecar{entry: thumb, kind: importKindThumbnail, suffix: importThumbnailExts[thumbRank]})
+		rec.sidecars = append(rec.sidecars, importSidecar{entry: thumb, kind: importKindThumbnail, suffix: worker.ThumbnailExts[thumbRank]})
 	}
 
 	// Everything else is named in the note: an entry named after the
@@ -1112,7 +1101,7 @@ func (r *importRecording) files() []*importFile {
 		if sc.kind == importKindRawChat {
 			chat := chatByStem[sc.chatStem]
 			f.follows, f.part = chat, chat.part
-			f.suffix = strings.TrimSuffix(chat.suffix, importChatSuffix) + importChatRawSuffix
+			f.suffix = strings.TrimSuffix(chat.suffix, importChatSuffix) + worker.ChatRawSidecarSuffix
 		}
 		sidecars = append(sidecars, f)
 	}
