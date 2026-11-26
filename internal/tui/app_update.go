@@ -747,9 +747,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Warn {
 				sev = severityWarning
 			}
-			a.setWrappedFeedback("Imported: "+msg.Title+" — "+msg.Note, sev)
+			a.setWrappedFeedback("Imported: "+displayText(msg.Title)+" — "+msg.Note, sev)
 		} else {
-			a.setFeedback("Imported: " + msg.Title)
+			a.setFeedback("Imported: " + displayText(msg.Title))
 		}
 		// Async close uncovers the task list — resume a paused marquee now.
 		return a, a.ensureMarqueeTicking()

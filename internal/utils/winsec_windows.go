@@ -85,7 +85,8 @@ const fileAllAccess windows.ACCESS_MASK = 0x1F01FF
 // inherited from the folder) that grants full control to exactly three
 // principals: the account this process runs as, NT AUTHORITY\SYSTEM and
 // BUILTIN\Administrators. It is the per-FILE hardening for the secrets Moombox
-// writes (cookies.txt and its sidecar, config.toml), and unlike
+// writes (cookies.txt and its sidecar, config.toml, the TLS private key it
+// generates), and unlike
 // ApplyUserOnlyDACL it changes nothing but the one file: the folder, and
 // everything else in it, keeps the permissions it has.
 //

@@ -67,6 +67,17 @@ var mediaKeepKeys = map[string]bool{
 //
 // Every query value of one is cut too, and its fragment.
 //
+// A signed download — any other URL whose query has both a sig key and a
+// token key, which is how Twitch signs a clip's file (the rendition URL plus
+// the clip's playback token, on whichever CDN host serves clips this year) —
+// keeps its host and its whole path, which name the clip and the rendition,
+// and has every query value and its fragment cut:
+//
+//	https://production.assets.clips.twitchcdn.net/v2/media/<slug>/video-1080.mp4?sig=<redacted>&token=<redacted>
+//
+// The rule reads the keys, not the host. A URL with only one of the two keys
+// is left as it is.
+//
 // Every URL, a media URL or not, has its GVS PO token cut (PoTokenURL). The
 // string is spliced rather than re-serialised through url.URL, so a URL
 // net/url cannot parse, or one a log line truncated, is still handled, and a
@@ -108,7 +119,30 @@ func MediaURL(rawURL string) string {
 		twitchPath(segs)
 		return prefix + strings.Join(segs, "/") + cutQueryValues(tail, nil)
 	}
+	if hasSigAndToken(tail) {
+		return prefix + path + cutQueryValues(tail, nil)
+	}
 	return s
+}
+
+// hasSigAndToken reports whether tail — a URL's "?query#fragment" — has both a
+// sig key and a token key in its query. Read by splitting, like the rest of
+// this file, so an unparseable or truncated URL is still answered.
+func hasSigAndToken(tail string) bool {
+	query, _, _ := strings.Cut(tail, "#")
+	if !strings.HasPrefix(query, "?") {
+		return false
+	}
+	sig, token := false, false
+	for _, p := range strings.Split(query[1:], "&") {
+		switch key, _, _ := strings.Cut(p, "="); key {
+		case "sig":
+			sig = true
+		case "token":
+			token = true
+		}
+	}
+	return sig && token
 }
 
 // cutQueryValues returns tail — a URL's "?query#fragment", either part

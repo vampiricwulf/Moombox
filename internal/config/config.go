@@ -1480,6 +1480,9 @@ func Save(cfg *MoomboxConfig, path string) error {
 	}
 
 	if err := utils.ReplaceFile(tmpPath, path); err != nil {
+		// ReplaceFile leaves its source where it is; without this every failed
+		// save would leave one more full copy of the settings beside the file.
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

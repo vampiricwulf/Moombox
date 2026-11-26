@@ -431,9 +431,10 @@ If it never starts:
 
 - On Linux it needs **glibc**; on Alpine and other musl systems it cannot run.
   Use a glibc distribution or the Docker image.
-- It unpacks about 36 MB into your cache folder on first start
-  (`%LOCALAPPDATA%\Moombox\sidecar` or `~/.cache/Moombox/sidecar`). A full or
-  read-only cache folder stops it.
+- It unpacks roughly 115 to 150 MB, depending on platform, into your cache
+  folder on first start (`%LOCALAPPDATA%\Moombox\sidecar` or
+  `~/.cache/Moombox/sidecar`), and later keeps the YouTube players it prepares
+  there too. A full or read-only cache folder stops it.
 - If it is killed for memory, raise
   [`memory.sidecar_hard_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_hard_limit_mb)
   (restart required).
@@ -464,8 +465,12 @@ If Twitch has rotated out the built-in Client-ID, set a current one in
 The cookie guide has its own table of messages:
 [Cookies and sign-in](../guide/cookies.md). The ones met most often:
 
-- **"failed to update cookie file — rotated session cookies were discarded
-  and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+- **"failed to update cookie file — renewed session cookies are in memory
+  only and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+  It tries again every minute but logs this warning at most once an hour (the
+  line starts with `youtube session renewal:`), so search a long enough
+  stretch of the log. Until a write succeeds, the renewed session lives in
+  memory only: it keeps working until Moombox restarts, then is lost.
   In Docker this is almost always a `cookies.txt` bind-mounted on its own or
   read-only; keep it inside the `/data` volume instead. Elsewhere, check the
   file's permissions.
@@ -505,6 +510,13 @@ drive's permissions as well, until Moombox writes it again. After the
 command, change and save any setting once (that rewrites `config.toml`), and
 refresh or re-import your cookies (that rewrites `cookies.txt`). Each file is
 restricted again the moment it is written.
+
+If HTTPS is on with the self-signed certificate Moombox generated, its
+private key (`moombox.key`) is restricted again at the next start, with
+nothing for you to do. That happens only when `tls_cert_path` and
+`tls_key_path` are both empty and the certificate is Moombox's own. A
+certificate and key you supplied yourself are never changed: set their
+permissions as you see fit.
 
 Current versions never change the permissions of a folder that already
 exists. They restrict `cookies.txt` and `config.toml` themselves instead

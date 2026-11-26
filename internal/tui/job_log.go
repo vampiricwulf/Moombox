@@ -61,7 +61,7 @@ func (m *JobLogModel) Open(job *database.Job) {
 	m.visible = true
 	m.loaded = false
 	m.jobID = job.ID
-	title := job.Title
+	title := displayText(job.Title)
 	if title == "" {
 		title = job.ID
 	}

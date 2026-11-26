@@ -94,9 +94,9 @@ func TestFinishedJobShowsAnIncompleteChatVerdict(t *testing.T) {
 	// The ACTIVE job's Chat row comes from the Progress section, which is a
 	// DIFFERENT call site from the terminal row above — and it is reachable:
 	// recordChatOutcome (internal/worker) writes the verdict off the chat
-	// goroutine's own exit, independent of the video capture, so a Twitch IRC
-	// session that exhausts its reconnect budget mid-stream shows "incomplete"
-	// here while the download runs on.
+	// goroutine's own exit, independent of the video capture, so a chat
+	// capture that ends in an error mid-stream shows "incomplete" here while
+	// the download runs on.
 	//
 	// Mutant this kills: a refactor that special-cases the terminal path and
 	// leaves the Progress site on some other colour rule — e.g. the shared

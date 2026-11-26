@@ -7,7 +7,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// jobVerbFlow is the one Resume (A R) or Reinitialize (A I) run in flight.
+// jobVerbFlow is the one Resume (A R), Reinitialize (A I) or batch Cancel
+// (A X over a selection) run in flight.
 //
 // The worker's verbs do their work on the caller's goroutine when the job is
 // idle: a reinitialize writes the row, deletes the staging directory and the
@@ -16,6 +17,12 @@ import (
 // keys for seconds, a batch for much longer, and job events backed up behind
 // it. The run is a command instead, as A D's delete already is.
 //
+// A batch Cancel is one committed row write per job, and a selection can be
+// the whole list (Ctrl+A over a backlog of Queued rows), so it runs here too
+// and shares the one busy state: while it runs, Resume, Reinitialize and
+// Cancel are refused (owner ruling R3-15). A single job's Cancel is one write
+// and stays on the update loop.
+//
 // One busy field, written only by begin and end, both called on the update
 // goroutine (CLAUDE.md, State machines, rule 6). gen names the run: an answer
 // carrying any other gen belongs to no run this App is waiting for and is
@@ -23,7 +30,7 @@ import (
 type jobVerbFlow struct {
 	busy  bool
 	gen   uint64
-	label string // "Resume" or "Reinitialize", for the busy refusal
+	label string // "Resume", "Reinitialize" or "Cancel", for the busy refusal
 	line  string // what the feedback line says while the run is in flight
 }
 
@@ -50,14 +57,18 @@ func (f *jobVerbFlow) end(gen uint64) bool {
 type jobVerbWords struct{ noun, doing, done string }
 
 func jobVerbWordsFor(chord string) jobVerbWords {
-	if chord == "A I" {
+	switch chord {
+	case "A I":
 		return jobVerbWords{"Reinitialize", "Reinitializing", "Reinitialized"}
+	case "A X":
+		return jobVerbWords{"Cancel", "Cancelling", "Cancelled"}
 	}
 	return jobVerbWords{"Resume", "Resuming", "Resumed"}
 }
 
-// jobVerbBusy refuses a new Resume or Reinitialize while one is still
-// running, saying so on the feedback line. The selection is left as it is.
+// jobVerbBusy refuses a new Resume, Reinitialize or batch Cancel while a run
+// is still in flight, saying so on the feedback line. The selection is left
+// as it is.
 func (a *App) jobVerbBusy() bool {
 	if !a.jobVerb.busy {
 		return false
@@ -66,11 +77,30 @@ func (a *App) jobVerbBusy() bool {
 	return true
 }
 
-// runJobVerb starts verb (OnResumeJob or OnReinitializeJob) on ids as a
-// command and shows that it has started. title is the job's, for a single
-// job; "" makes it a batch, reported by count. The caller has checked
-// jobVerbBusy and chosen the eligible ids.
-func (a *App) runJobVerb(chord string, verb func(jobID string) error, ids []string, title string) tea.Cmd {
+// cancelBusy refuses a Cancel that may not run beside the run in flight. A
+// batch Cancel shares the one busy state, so any run refuses it. A single
+// job's Cancel runs on the update loop and is refused only while a batch
+// Cancel runs.
+func (a *App) cancelBusy(batch bool) bool {
+	if !a.jobVerb.busy || (!batch && a.jobVerb.label != jobVerbWordsFor("A X").noun) {
+		return false
+	}
+	return a.jobVerbBusy()
+}
+
+// applied adapts a verb that answers with an error alone (OnResumeJob,
+// OnReinitializeJob) to runJobVerb: no error means it applied.
+func applied(verb func(jobID string) error) func(string) (bool, error) {
+	return func(id string) (bool, error) { return true, verb(id) }
+}
+
+// runJobVerb starts verb (OnResumeJob or OnReinitializeJob through applied,
+// or OnCancelJob) on ids as a command and shows that it has started. verb
+// says whether it applied: false with no error is a job that had already
+// ended (a Cancel that found it Finished, Error or Cancelled). title is the
+// job's, for a single job; "" makes it a batch, reported by count. The
+// caller has checked jobVerbBusy and chosen the eligible ids.
+func (a *App) runJobVerb(chord string, verb func(jobID string) (bool, error), ids []string, title string) tea.Cmd {
 	w := jobVerbWordsFor(chord)
 	line := w.doing + " " + jobCount(len(ids)) + "..."
 	if title != "" {
@@ -81,16 +111,19 @@ func (a *App) runJobVerb(chord string, verb func(jobID string) error, ids []stri
 	return safeCmdOr(func() tea.Msg {
 		res := jobVerbResultMsg{Gen: gen, Chord: chord, Title: title}
 		for _, id := range ids {
-			if err := verb(id); err != nil {
+			switch ok, err := verb(id); {
+			case err != nil:
 				res.Refused.add(err)
-				continue
+			case ok:
+				res.Count++
+			default:
+				res.Ended++
 			}
-			res.Count++
 		}
 		return res
 	}, func(text string) tea.Msg {
 		// A panic must still end the run, or the busy state would refuse
-		// every later Resume and Reinitialize for the session.
+		// every later Resume, Reinitialize and Cancel for the session.
 		res := jobVerbResultMsg{Gen: gen, Chord: chord, Title: title}
 		res.Refused.add(errors.New(text))
 		return res
@@ -134,7 +167,8 @@ func (a *App) jobVerbRunningNote() string {
 // A refusal is always shown: it is the one thing the operator has to act on.
 // A single job's success says nothing new, so it only gives the run's own
 // line, if that is still up, the ordinary hold. A batch's count is shown
-// unless a chord is in progress.
+// unless a chord is in progress; for a batch Cancel that count line includes
+// the jobs that had already ended, held back with it.
 func (a *App) finishJobVerb(msg jobVerbResultMsg) {
 	running := a.jobVerb.line
 	if !a.jobVerb.end(msg.Gen) {
@@ -158,5 +192,31 @@ func (a *App) finishJobVerb(msg jobVerbResultMsg) {
 		}
 		return
 	}
+	if msg.Chord == "A X" {
+		a.setCancelBatchFeedback(msg.Count, msg.Ended, msg.Refused)
+		return
+	}
 	a.setBatchFeedback(w.done+" "+jobCount(msg.Count), msg.Refused)
+}
+
+// setCancelBatchFeedback reports a batch Cancel: how many jobs it cancelled,
+// how many had already ended by the time it reached them (OnCancelJob leaves
+// those as they ended), and the first refusal.
+func (a *App) setCancelBatchFeedback(count, ended int, refused verbRefusals) {
+	switch {
+	case refused.n > 0:
+		// A refusal (a job already finishing) is the line's news, in red,
+		// after what became of the rest — the ended jobs too.
+		done := "Cancelled " + jobCount(count)
+		if ended > 0 {
+			done += "; " + jobCount(ended) + " had already ended"
+		}
+		a.setBatchFeedback(done, refused)
+	case ended > 0 && count > 0:
+		a.setFeedbackWithSeverity(fmt.Sprintf("Cancelled %s; %s had already ended", jobCount(count), jobCount(ended)), severityWarning)
+	case ended > 0:
+		a.setFeedbackWithSeverity("Not cancelled: "+jobCount(ended)+" had already ended", severityWarning)
+	default:
+		a.setFeedback("Cancelled " + jobCount(count))
+	}
 }

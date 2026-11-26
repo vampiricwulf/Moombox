@@ -71,3 +71,32 @@ func TestSaveSurvivesAFailedFileRestriction(t *testing.T) {
 		t.Errorf("the saved config does not load: %v", err)
 	}
 }
+
+// TestSaveRemovesItsTempFileWhenTheReplaceFails: the temp file is a full copy
+// of config.toml (the password hash, the webhook URLs). A save whose final
+// replace fails must not leave one behind each time, under a name nothing
+// reads or removes.
+//
+// Mutant: drop the os.Remove from the ReplaceFile failure branch -> one
+// config.toml.<random>.tmp stays beside the target.
+func TestSaveRemovesItsTempFileWhenTheReplaceFails(t *testing.T) {
+	dir := configDirFixture(t, "output/")
+	target := filepath.Join(dir, "config.toml")
+	// A non-empty folder where config.toml should be: no platform renames a
+	// file over it.
+	if err := os.MkdirAll(filepath.Join(target, "held"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Save(Defaults(), target); err == nil {
+		t.Fatal("Save succeeded over a folder; the test no longer makes the replace fail")
+	}
+
+	left, err := filepath.Glob(filepath.Join(dir, "config.toml.*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("a failed save left %v behind", left)
+	}
+}

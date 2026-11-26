@@ -172,11 +172,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	}
 	if job != nil {
 		if prevID != newID || prevTitle != job.Title {
-			title := job.Title
-			if title == "" {
-				title = job.VideoID
-			}
-			m.marquee.Reset(title, m.titleValueWidth())
+			m.marquee.Reset(displayTitle(job), m.titleValueWidth())
 		}
 	} else {
 		m.marquee.Reset("", 0)
@@ -275,11 +271,7 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	m.updateViewportContent()
 	// Recalculate marquee width when the panel width changes.
 	if widthChanged {
-		title := m.job.Title
-		if title == "" {
-			title = m.job.VideoID
-		}
-		m.marquee.Reset(title, m.titleValueWidth())
+		m.marquee.Reset(displayTitle(m.job), m.titleValueWidth())
 	}
 }
 
@@ -534,12 +526,8 @@ func (m *JobDetailsModel) buildRows() {
 	status := string(j.Status)
 
 	// === Basic Info (no header, matching TS) ===
-	title := j.Title
-	if title == "" {
-		title = j.VideoID
-	}
-	m.addField("Title", title)
-	ch := j.ChannelName
+	m.addField("Title", displayTitle(j))
+	ch := displayText(j.ChannelName)
 	if ch == "" {
 		ch = "Unknown"
 	}
