@@ -154,28 +154,24 @@ func TestGetSolversACallerQueuedBehindATimedOutCompileIsRefused(t *testing.T) {
 // caller gets the solvers without compiling again. Callers with short
 // deadlines (a 30 s probe) would otherwise each start from zero.
 //
+// The cancel comes from compileStarting, so it always lands after
+// compileSolver's last context check and before the run. The script runs for
+// 200 ms so that a run given the cancelled context is always interrupted,
+// never finished first.
+//
 // Mutant: the caller's context passed to the run (the first call returns
 // context.Canceled and the second compiles again, gets going to 2).
 func TestGetSolversACallerCancelDoesNotAbortARunningCompile(t *testing.T) {
 	const playerURL = "https://www.youtube.com/s/player/cccc3333/player_ias.vflset/en_US/base.js"
-	const slowPlayer = `var end = Date.now() + 400; while (Date.now() < end) {}
+	const slowPlayer = `var end = Date.now() + 200; while (Date.now() < end) {}
 _result.n = function(x) { return x + "_ok"; };`
 	s, gets, _ := compileFixture(t, playerURL, slowPlayer, 60*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("cancel goroutine panicked: %v", r)
-			}
-		}()
-		for gets.Load() == 0 {
-			time.Sleep(time.Millisecond)
-		}
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	origStarting := compileStarting
+	compileStarting = cancel
+	t.Cleanup(func() { compileStarting = origStarting })
 	if _, err := getSolvers(t, s, ctx, playerURL); err != nil {
 		t.Fatalf("compile whose caller cancelled = %v, want the solvers", err)
 	}

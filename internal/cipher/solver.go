@@ -335,6 +335,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	// the compile: a compile cut short by a short-deadline caller would fill
 	// no cache, and the next caller would start again from zero.
 	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
+	compileStarting()
 	solvers, err := getFromPrepared(preprocessed)
 	if err != nil {
 		return nil, fmt.Errorf("compile cipher solver for %s: %w", playerID, err)
@@ -414,6 +415,11 @@ func (s *GojaResolver) touchLRU(key string) {
 func containsKey(order []string, key string) bool {
 	return slices.Contains(order, key)
 }
+
+// compileStarting runs after compileSolver's last look at the caller's
+// context and just before the compile. Production leaves it empty; a test
+// swaps it to act at exactly that point (cancel the caller).
+var compileStarting = func() {}
 
 // getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
 // The code is expected to set _result.sig and _result.n when invoked with a _result object.
