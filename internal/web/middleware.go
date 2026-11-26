@@ -164,6 +164,11 @@ type refusalLogBudget struct {
 	logged     int
 	suppressed int
 	timerArmed bool
+	// armedFor is the windowEnd the summary timer was armed against. A
+	// refusal that rolls the window before that timer fires leaves it armed;
+	// when it fires it finds armedFor behind windowEnd and re-arms for the
+	// new window instead of reporting part of it.
+	armedFor time.Time
 }
 
 // admit counts one refusal. It reports whether this refusal gets its own
@@ -186,21 +191,37 @@ func (b *refusalLogBudget) admit() (logThis bool, endedSuppressed int, arm func(
 	b.suppressed++
 	if !b.timerArmed {
 		b.timerArmed = true
+		b.armedFor = b.windowEnd
 		d := b.windowEnd.Sub(now)
 		arm = func() { b.after(d, b.flushFn) }
 	}
 	return false, endedSuppressed, arm
 }
 
-// take returns and clears the suppressed count and disarms the timer, so the
-// timer and the next refusal never both report the same window.
-func (b *refusalLogBudget) take() int {
+// take runs when the summary timer fires. It returns and clears the
+// suppressed count and disarms the timer, so the timer and the next refusal
+// never both report the same window. A timer armed for a window that a later
+// refusal has already rolled (and reported) reports nothing while the new
+// window is open: it is re-armed for the new window's end when that window
+// has suppressed refusals (rearm, which the caller runs after the lock is
+// released), and disarmed otherwise. Each window's count is one line.
+func (b *refusalLogBudget) take() (n int, rearm func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	now := b.now()
+	if !b.armedFor.Equal(b.windowEnd) && now.Before(b.windowEnd) {
+		if b.suppressed == 0 {
+			b.timerArmed = false
+			return 0, nil
+		}
+		b.armedFor = b.windowEnd
+		d := b.windowEnd.Sub(now)
+		return 0, func() { b.after(d, b.flushFn) }
+	}
 	b.timerArmed = false
-	n := b.suppressed
+	n = b.suppressed
 	b.suppressed = 0
-	return n
+	return n, nil
 }
 
 func csrfMiddleware(store *config.Store, internalToken string, logger interface {
@@ -217,7 +238,11 @@ func csrfMiddleware(store *config.Store, internalToken string, logger interface 
 				logger.Warn("CSRF: refusal summary panicked", "panic", r)
 			}
 		}()
-		reportSuppressed(budget.take())
+		n, rearm := budget.take()
+		reportSuppressed(n)
+		if rearm != nil {
+			rearm()
+		}
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

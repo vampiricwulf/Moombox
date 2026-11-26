@@ -1880,3 +1880,78 @@ func TestCSRFRefusalLogBudget(t *testing.T) {
 		t.Fatalf("second window: %d refusal lines, %d summaries, last %q (%v)", lines, sums, last, log.warns)
 	}
 }
+
+// A refusal that rolls the window before the old window's summary timer has
+// fired leaves that timer armed. When it fires mid-way through the new window
+// it must not report the new window's partial count; the new window's count
+// is reported once, at its own end.
+func TestCSRFRefusalLogBudgetStaleTimer(t *testing.T) {
+	store := config.NewStore(&config.MoomboxConfig{
+		Network: config.NetworkConfig{NetworkAccess: "public"},
+	}, "")
+	pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	clock := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	var pending []func()
+	var delays []time.Duration
+	budget := &refusalLogBudget{
+		now:   func() time.Time { return clock },
+		after: func(d time.Duration, f func()) { delays = append(delays, d); pending = append(pending, f) },
+	}
+	log := &recordingLogger{}
+	h := csrfMiddleware(store, "tok", log, budget)(pass)
+	refuse := func() {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(""))
+		r.RemoteAddr = "203.0.113.9:1234"
+		r.Host = "dash.example:774"
+		r.Header.Set("Origin", "http://attacker.example")
+		h.ServeHTTP(httptest.NewRecorder(), r)
+	}
+	summaries := func() []string {
+		var out []string
+		for _, l := range log.warns {
+			if strings.Contains(l, "suppressed") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+
+	// Window 1: 3 suppressed, timer armed for its end.
+	for i := 0; i < csrfRefusalLogBudget+3; i++ {
+		refuse()
+	}
+	// The first refusal after window 1 ends runs before its timer fires: it
+	// reports window 1 and opens window 2, then window 2 suppresses 4.
+	clock = clock.Add(csrfRefusalLogWindow + time.Second)
+	for i := 0; i < csrfRefusalLogBudget+4; i++ {
+		refuse()
+	}
+	if s := summaries(); len(s) != 1 || !strings.Contains(s[0], "suppressed 3 more") {
+		t.Fatalf("after window 1 rolled: summaries %v; want one naming 3", s)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("window 2 armed a second timer while window 1's was pending (%d timers)", len(pending))
+	}
+
+	// Window 1's timer fires late, 10 s into window 2: nothing is reported,
+	// and the timer is re-armed for window 2's end.
+	clock = clock.Add(10 * time.Second)
+	pending[0]()
+	if s := summaries(); len(s) != 1 {
+		t.Fatalf("stale timer reported part of window 2: %v", s)
+	}
+	if len(pending) != 2 || delays[1] != csrfRefusalLogWindow-10*time.Second {
+		t.Fatalf("stale timer re-armed %d timers with delays %v; want one more for window 2's end", len(pending), delays)
+	}
+	refuse()
+
+	// Window 2 ends: one line with its whole count.
+	clock = clock.Add(csrfRefusalLogWindow - 10*time.Second)
+	pending[1]()
+	if s := summaries(); len(s) != 2 || !strings.Contains(s[1], "suppressed 5 more") {
+		t.Fatalf("at window 2's end: summaries %v; want a second naming 5", s)
+	}
+}
