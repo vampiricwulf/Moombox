@@ -14,7 +14,9 @@ import (
 // entry that holds the video back until the operator removes it. Before, the
 // add wrote no row and a Twitch delete writes none, so the next backlog
 // listing or live check archived it again. An add that waits for an offline
-// channel has an ID no monitor reads and leaves no entry.
+// channel has an ID no monitor reads and, deleted before it has recorded a
+// broadcast, leaves no entry (one that has recorded leaves the broadcast's,
+// owner ruling RV-6).
 //
 // Mutants: the RecordManualTwitchAdd call dropped from the add route (no
 // entry after the delete); the waiting add recorded (an entry for it).
