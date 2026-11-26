@@ -118,6 +118,12 @@ func (m *TrimDialogModel) Open(jobID, jobTitle string) {
 	m.parsedEnd = 0
 }
 
+// Reshow shows the dialog again as it was hidden, its step and the trim it
+// follows kept: the progress step of a trim sent to the background with Esc.
+func (m *TrimDialogModel) Reshow() {
+	m.visible = true
+}
+
 // Close hides the dialog.
 func (m *TrimDialogModel) Close() {
 	m.visible = false
@@ -194,6 +200,7 @@ func (m *TrimDialogModel) SetError(msg string) {
 // operator can retry with Enter or go back with Esc.
 func (m *TrimDialogModel) FailCreate(err string) {
 	m.SetLoading(false)
+	m.stopping = false
 	m.createStep = trimStepConfirm
 	m.SetError(err)
 }

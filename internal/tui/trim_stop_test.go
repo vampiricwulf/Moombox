@@ -153,3 +153,52 @@ func TestTrimStoppedWithAReasonSaysIt(t *testing.T) {
 		t.Errorf("feedback = %q, want \"Trim stopped: the job was deleted\"", a.feedback.msg)
 	}
 }
+
+// TestATBringsBackTheBackgroundTrim: Esc sends the dialog's trim to the
+// background, and A T was then refused ("A trim is already in progress"), so
+// nothing reached S and the TUI had no stop for its own trim. A T now shows
+// the progress step again, whatever job the cursor is on, and S stops that
+// trim.
+//
+// Mutant: A T refused while a trim runs (OnStopTrim is never asked).
+func TestATBringsBackTheBackgroundTrim(t *testing.T) {
+	a, asked := trimRunningApp(t, "trim_A_1", nil)
+	pressTrim(a, keyEsc)
+	if a.trimDlg.IsVisible() {
+		t.Fatal("Esc did not send the trim to the background")
+	}
+
+	a.dispatchAction("A T", nil)
+	if !a.trimDlg.IsVisible() || a.trimDlg.JobID() != "A" {
+		t.Fatalf("A T did not bring back the running trim's dialog (visible %v, job %q)", a.trimDlg.IsVisible(), a.trimDlg.JobID())
+	}
+	pressTrim(a, "S")
+	if len(*asked) != 1 || (*asked)[0] != "A/trim_A_1" {
+		t.Errorf("S after A T asked to stop %v, want A/trim_A_1", *asked)
+	}
+}
+
+// TestALateStopRefusalLeavesTheTrimsResult: S pressed as the trim finished.
+// Its result arrives first and says "Trim created"; the stop then answers
+// that the trim has already ended. With no trim running that refusal is
+// dropped, rather than shown in red over the trim that succeeded.
+//
+// Mutants: drop the !a.trimInProgress check (the refusal covers the result);
+// drop FailCreate's stopping reset (a failed trim's dialog says
+// "Stopping..." on).
+func TestALateStopRefusalLeavesTheTrimsResult(t *testing.T) {
+	a, _ := trimRunningApp(t, "trim_A_1", errors.New("the trim has already ended"))
+	_, stop := a.keyTrim(tea.KeyPressMsg{}, "S")
+	a.Update(createTrimResultMsg{Filename: "clip.mp4"})
+	a.Update(stop())
+	if a.feedback.msg != "Trim created: clip.mp4" {
+		t.Errorf("feedback = %q, want the trim's own result", a.feedback.msg)
+	}
+
+	b, _ := trimRunningApp(t, "trim_A_1", nil)
+	pressTrim(b, "S")
+	b.Update(createTrimResultMsg{Err: "boom"})
+	if b.trimDlg.Stopping() {
+		t.Error("the failed trim's dialog still holds a stop")
+	}
+}

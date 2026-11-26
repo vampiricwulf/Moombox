@@ -392,6 +392,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "A T":
 		if a.trimInProgress {
+			if !a.trimDlg.IsVisible() {
+				// The dialog's own trim runs in the background (Esc): A T
+				// brings its progress step back, whichever job the cursor is
+				// on, so S can stop it again.
+				a.trimDlg.SetSize(a.width, a.height)
+				a.trimDlg.Reshow()
+				return a, tea.Batch(spinnerTickCmd(a.trimDlg.spinner), a.ensureProgressTicking())
+			}
 			a.setFeedback("A trim is already in progress")
 			return a, nil
 		}

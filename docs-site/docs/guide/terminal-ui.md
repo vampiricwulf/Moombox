@@ -458,7 +458,8 @@ the confirmation, and press ++enter++ to create the trim. The end must be after
 the start, within the video's length, and at least 1 second later. While it
 encodes, `S` stops the trim (the unfinished file is removed, the dialog closes
 with "Trim stopped", and no Trim Failed notification is sent), and ++esc++
-closes the dialog while the encode carries on in the background. A trim that
+closes the dialog while the encode carries on in the background; `A T` brings
+its progress back, so `S` can still stop it. A trim that
 has finished encoding and is being saved can no longer be stopped; the dialog
 says so and the trim completes. Deleting the job stops its trim too ("Trim
 stopped: the job was deleted").

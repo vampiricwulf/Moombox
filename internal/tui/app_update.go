@@ -790,7 +790,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Taken: the trim's own result follows, Stopped. Refused (it is
 		// being saved, or has already ended): S works again, and why is
 		// shown where the operator is looking.
-		if msg.Err == "" {
+		// No trim running any more: it ended as the stop was sent, and its
+		// own result has already been reported ("Trim created" or its
+		// failure), which a refusal must not cover.
+		if msg.Err == "" || !a.trimInProgress {
 			return a, nil
 		}
 		if a.trimDlg.IsVisible() && a.trimDlg.JobID() == msg.JobID && a.trimDlg.Stopping() {
