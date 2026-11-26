@@ -346,10 +346,13 @@ func itemAge(item map[string]any) time.Duration {
 }
 
 // itemMarkers are the key/value pairs that mark a listing item live or
-// upcoming, each one a structural field of the item and each taken from what
-// yt-dlp reads (extractor/youtube/_tab.py): the classic renderers' time-status
-// overlay style and live badge, and the lockup's thumbnail badge style. The
-// live badge's icon name is the one Moombox's own live check already keyed on.
+// upcoming, each one a structural field of the item. yt-dlp reads three of
+// them (extractor/youtube/_tab.py): the classic renderers' "LIVE" time-status
+// overlay style and BADGE_STYLE_TYPE_LIVE_NOW badge, and the lockup's
+// THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE thumbnail badge style. The "UPCOMING"
+// overlay style is not read upstream (yt-dlp dates a classic upcoming item by
+// upcomingEventData), and the live icon name is the one Moombox's own live
+// check already keyed on; neither has been seen in a capture here.
 var itemMarkers = map[string][]string{
 	"style":      {"LIVE", "UPCOMING", "BADGE_STYLE_TYPE_LIVE_NOW"},
 	"badgeStyle": {"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"},

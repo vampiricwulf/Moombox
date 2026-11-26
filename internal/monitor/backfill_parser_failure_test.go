@@ -153,3 +153,51 @@ func TestSweep_RepeatedParserArmFailuresBackOff(t *testing.T) {
 		t.Fatal("an arm failure that follows a fetch failure is a first one and retries on the next sweep")
 	}
 }
+
+// The back-off holds back a retry of the same scan, not new work: a sweep
+// that asks for a wider window, or for membership the stopped scan did not
+// have, scans at once.
+func TestSweep_ParserArmBackOffYieldsToAWiderScan(t *testing.T) {
+	db := newTestDB(t)
+	armErr := error(&undatableTabError{chID: backfillTestChannel, tab: "streams"})
+	scans := make(chan struct{}, 8)
+	bw := newTestBackfillWorker(t, db, withScan(func(context.Context, *config.ChannelConfig, string, int, bool) error {
+		scans <- struct{}{}
+		return armErr
+	}))
+	bw.now = func() time.Time { return time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC) }
+	startWorker(t, bw)
+
+	sweep := func(ref ChannelRef) bool {
+		t.Helper()
+		bw.Sweep([]ChannelRef{ref}, false)
+		inflight, _ := inflightState(bw)
+		if fl := inflight[backfillTestChannel]; fl != nil {
+			recvWithin(t, fl.done, "the scan's cleanup")
+		}
+		select {
+		case <-scans:
+			return true
+		default:
+			return false
+		}
+	}
+	narrow := refFor(backfillTestCh(), 3, false)
+	if !sweep(narrow) || !sweep(narrow) {
+		t.Fatal("the first two arm failures must each scan")
+	}
+	if sweep(narrow) {
+		t.Fatal("the same scan was retried inside the back-off")
+	}
+	if !sweep(refFor(backfillTestCh(), 30, false)) {
+		t.Fatal("a widened window waited out the back-off")
+	}
+	// That wider scan failed twice running too (the arm's count carries on),
+	// so it is held; membership newly eligible is new work again.
+	if sweep(refFor(backfillTestCh(), 30, false)) {
+		t.Fatal("the wider scan was retried inside its back-off")
+	}
+	if !sweep(refFor(backfillTestCh(), 30, true)) {
+		t.Fatal("membership newly eligible waited out the back-off")
+	}
+}
