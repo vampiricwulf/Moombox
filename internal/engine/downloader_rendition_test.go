@@ -82,6 +82,15 @@ func TestStartRefusesToAppendAnotherRendition(t *testing.T) {
 				if got := d.CurrentSeq(); got != tc.nextSeq {
 					t.Errorf("CurrentSeq() = %d after the refusal, want the next segment %d", got, tc.nextSeq)
 				}
+				// The live loop may run the refused downloader again (a
+				// look-refresh that waits): the refusal names the same segment.
+				d.Cancel()
+				if err := startAgainstDeadAddress(t, d); !errors.Is(err, ErrRenditionChanged) {
+					t.Errorf("second Start = %v, want the same refusal", err)
+				}
+				if got := d.CurrentSeq(); got != tc.nextSeq {
+					t.Errorf("CurrentSeq() = %d after a second refusal, want the same next segment %d", got, tc.nextSeq)
+				}
 				if tc.sidecar != "" {
 					if _, err := os.Stat(path + resumeFileSuffix); err != nil {
 						t.Errorf("the refusal removed the sidecar: %v", err)

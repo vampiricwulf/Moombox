@@ -1218,9 +1218,12 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	if !resuming && d.SplitOnRenditionChange {
 		if other, staged := d.renditionChanged(sidecarNamesOther); other {
 			// CurrentSeq() is the next segment the capture needs: the DB
-			// fallback's StartSeq is the last one written.
-			if !d.opts.ForceStartSeq && d.currentSeq.Load() > 0 {
-				d.currentSeq.Add(1)
+			// fallback's StartSeq is the last one written. Derived from the
+			// options, not added to the position: the live loop can run the
+			// same refused downloader again (a look-refresh that waits), and
+			// each run must name the same segment.
+			if !d.opts.ForceStartSeq && d.opts.StartSeq > 0 {
+				d.currentSeq.Store(int64(d.opts.StartSeq + 1))
 			}
 			d.logger.Warn("[Downloader] Staged file holds another rendition — not appending; the caller closes it as a part and records on in a new one",
 				"file", d.opts.OutputFile, "stagedRendition", staged,
