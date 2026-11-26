@@ -69,13 +69,14 @@ const (
 // Each was only "a job now" before, so once the operator deleted the row the
 // next sweep, listing or live check archived it again, and the Delete left
 // nothing under Orphaned History Entries to say so or to remove. The row
-// written here is that entry (a Twitch delete writes none of its own,
-// DeleteJobLeavingHistory).
+// written here is that entry.
 //
 // A live add of a channel whose broadcast the add did not learn is left out:
 // "tw_manual_<login>_<n>" (the route) and the bare login (the CLI) are keys
 // no monitor reads, so a row under one would hold nothing back, and a login
-// shaped like a key would hold back somebody else's video.
+// shaped like a key would hold back somebody else's video. Its broadcast is
+// entered by the operator's Delete instead, from the stream ID the capture's
+// start wrote on the row (DeleteJobLeavingHistory, owner ruling RV-6).
 func RecordManualTwitchAdd(db *database.Database, job *database.Job, kind ManualTwitchAddKind) error {
 	if !manualTwitchAddIsAMonitorKey(job, kind) {
 		return nil

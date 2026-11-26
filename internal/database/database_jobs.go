@@ -176,7 +176,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs, announce_found, join_offset_seconds, live_edge_reason
+		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id
 		FROM jobs ORDER BY updated_at DESC`
 
 	rows, err := db.db.QueryContext(db.getCtx(), query)
@@ -312,18 +312,30 @@ func (db *Database) DeleteJob(id string) error {
 // R4-3), a job added by URL or by import as well as one a monitor created
 // (whose row AddToHistory already wrote). Removing the row from the Orphaned
 // list reopens the video. A YouTube job's ID is its video ID, the key history
-// uses. A Twitch job is deleted as DeleteJob does: its history row, when it
-// has one, was written when the job was created, by the monitor or by the
-// add (worker.RecordManualTwitchAdd, owner ruling RV-3), and a delete leaves
-// it in place. So is a job whose ID is not a YouTube video ID (an
-// import's "imp_" placeholder): no monitor can find it again, so its row
-// would only clutter the Orphaned list. DeleteJob stays for the deletes that
-// are not the operator's (an import rolling back its own row).
+// uses.
+//
+// A Twitch job's own history row, when it has one, was written when the job
+// was created, by the monitor or by the add (worker.RecordManualTwitchAdd,
+// owner ruling RV-3), and a delete leaves it in place. A manually added
+// Twitch job that recorded a broadcast (Job.TwitchStreamID) also leaves, in
+// the same transaction, the row "tw_<stream id>" for that broadcast, the key
+// the live monitor looks it up by (owner ruling RV-6): a channel added while
+// offline, by `moombox add`, or a re-initialised row that recorded a later
+// broadcast has a job ID that is not that key, so without the row the
+// monitor archived the broadcast again while it was still live. The row is
+// written here and not when the broadcast is learned, so no entry is listed
+// as orphaned while its job exists. A Twitch job with no recorded broadcast
+// is deleted as DeleteJob does.
+//
+// So is a job whose ID is not a YouTube video ID (an import's "imp_"
+// placeholder): no monitor can find it again, so its row would only clutter
+// the Orphaned list. DeleteJob stays for the deletes that are not the
+// operator's (an import rolling back its own row).
 func (db *Database) DeleteJobLeavingHistory(job *Job) error {
-	if job.Platform == "twitch" || !isYouTubeVideoID(job.ID) {
+	if job.Platform != "twitch" && !isYouTubeVideoID(job.ID) {
 		return db.DeleteJob(job.ID)
 	}
-	deleted, err := db.deleteJobLeavingHistoryTx(job.ID)
+	deleted, err := db.deleteJobLeavingHistoryTx(job.ID, job.Platform == "twitch")
 	if err != nil || !deleted {
 		return err
 	}
@@ -352,7 +364,13 @@ func isYouTubeVideoID(id string) bool {
 // deleteJobLeavingHistoryTx runs DeleteJobLeavingHistory's transaction under
 // db.mu, rolled back before the lock is released. It reports whether a job
 // row was deleted; a row already gone writes nothing, as DeleteJob would.
-func (db *Database) deleteJobLeavingHistoryTx(id string) (bool, error) {
+//
+// The history key is the job ID, or for a Twitch job "tw_" and the stream ID
+// the row holds NOW (twitch.BuildJobID's form, spelled out because this
+// package imports nothing internal). It is read inside the transaction: the
+// caller's Job is a snapshot, and the worker may have written the column
+// since. A Twitch row with no stream ID writes no history.
+func (db *Database) deleteJobLeavingHistoryTx(id string, twitch bool) (bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -362,11 +380,25 @@ func (db *Database) deleteJobLeavingHistoryTx(id string) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
-		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, id, now); err != nil {
-		return false, err
+	key := id
+	if twitch {
+		var streamID sql.NullString
+		err := tx.QueryRowContext(ctx, "SELECT twitch_stream_id FROM jobs WHERE id = ?", id).Scan(&streamID)
+		if err != nil && err != sql.ErrNoRows {
+			return false, err
+		}
+		key = ""
+		if streamID.String != "" {
+			key = "tw_" + streamID.String
+		}
+	}
+	if key != "" {
+		now := time.Now().UTC().Format(time.RFC3339)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
+			 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, key, now); err != nil {
+			return false, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
 	if err != nil {

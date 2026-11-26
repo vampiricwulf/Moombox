@@ -351,6 +351,22 @@ type Job struct {
 	// live edge: <reason>, joined H:MM:SS in" — YouTube has no gap-fill, so
 	// the operator is the only one who can fetch the missing start.
 	LiveEdgeReason string `json:"liveEdgeReason,omitempty"`
+	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED
+	// Twitch job last started to record (owner ruling RV-6). Such a job's ID
+	// is often not the key the live monitor looks a broadcast up by
+	// ("tw_<stream id>"): a channel added while offline or unreachable is
+	// "tw_manual_<login>_<n>", one added by `moombox add` is the bare login,
+	// and a row added while live that was re-initialised records a later
+	// broadcast under the first one's ID. The worker writes it as the capture
+	// starts (StreamProcessor.processTwitchLive) and overwrites it when
+	// the row records a later broadcast; a Reinitialize leaves it. Its one
+	// reader is the operator's Delete (DeleteJobLeavingHistory), which leaves
+	// the history row "tw_<this>" so the deleted broadcast is not archived
+	// again. "" (NULL) for every other job, for a manual job that has not
+	// recorded a broadcast, and for every row from before v29.
+	//
+	// json:"-": no UI shows it.
+	TwitchStreamID string `json:"-"`
 	// NotificationMsgs maps a notification target's stable key — the first 16
 	// hex digits of SHA-256 over the RESOLVED webhook URL, the same key
 	// notifications.buildTargets dedupes on — to the id of the one Discord

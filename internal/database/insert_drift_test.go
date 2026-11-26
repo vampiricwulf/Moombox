@@ -25,6 +25,9 @@ var runtimeOnlyJobFields = []string{
 	// LiveEdgeReason is the worker's, written when a capture falls to the
 	// live edge (owner decision PR-R2): never a creation field.
 	"LiveEdgeReason",
+	// TwitchStreamID is the worker's too, written when a manually added
+	// Twitch job starts recording a broadcast (owner ruling RV-6).
+	"TwitchStreamID",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

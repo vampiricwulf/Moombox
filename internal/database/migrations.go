@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -150,7 +150,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     notification_msgs TEXT,
     announce_found INTEGER NOT NULL DEFAULT 0,
     join_offset_seconds REAL,
-    live_edge_reason TEXT
+    live_edge_reason TEXT,
+    twitch_stream_id TEXT  -- v29: the broadcast a manually added Twitch job recorded (owner ruling RV-6)
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -811,6 +812,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 29 {
+		if err := db.migrateV29(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(29); err != nil {
+			return err
+		}
+	}
+
 	// Data only, no version: see the function for why it runs on every Open.
 	db.backfillTwitchOfflineParkReasons()
 
@@ -1112,6 +1122,17 @@ func (db *Database) migrateV28() error {
 	if _, err := db.db.ExecContext(db.getCtx(),
 		`UPDATE history SET job_created = 1 WHERE job_created = 0 AND video_id IN (SELECT id FROM jobs)`); err != nil {
 		return fmt.Errorf("v28 backfill: %w", err)
+	}
+	return nil
+}
+
+// migrateV29 adds twitch_stream_id to jobs (owner ruling RV-6; see the
+// Job.TwitchStreamID doc comment in types.go). Nullable, no default and no
+// backfill: a row from before the column has none, and its Delete leaves what
+// it left before. Idempotent.
+func (db *Database) migrateV29() error {
+	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN twitch_stream_id TEXT`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v29 alter: %w", err)
 	}
 	return nil
 }

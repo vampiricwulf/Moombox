@@ -395,21 +395,24 @@ same tab if you want it archived again. What stays depends on the job:
 - **A Twitch live broadcast** leaves an entry when the monitor found it, or
   when you added its channel in the dashboard or the TUI while Twitch
   reported it live. The entry holds the broadcast back from the live check.
-  An entry from your own add names the broadcast that was live at the add:
-  if you reinitialized that job and it went on to record a later broadcast,
-  the later one is not held back.
-- **A Twitch channel job that had to wait for the broadcast** leaves no
-  entry: one added while the channel was offline or while Twitch could not
-  be reached, and any channel added with `moombox add`. If the channel is
-  monitored and the same broadcast is still live, the live check can pick
-  it up again.
+  If you reinitialized a job you added and it went on to record a later
+  broadcast, deleting it leaves an entry for that later broadcast as well.
+- **A Twitch channel job that had to wait for the broadcast** (one added
+  while the channel was offline or while Twitch could not be reached, and
+  any channel added with `moombox add`) leaves an entry for the broadcast
+  it recorded, named `tw_` and Twitch's stream ID. The entry appears when
+  you delete the job, not before, and holds that broadcast back from the
+  live check. A job you delete before it has started recording a broadcast
+  leaves no entry.
 - **An import of a Twitch recording, or one with no video ID in its file
   name,** leaves no entry.
 
 A YouTube job deleted before you upgraded to the release that tells deleted
 jobs apart holds back only finished videos (see [Storage](storage.md)). A
 Twitch VOD or live broadcast you added by URL before the release that
-records it has no entry, so deleting it does not hold it back.
+records it has no entry, so deleting it does not hold it back. The same
+goes for a Twitch channel job that started recording its broadcast before
+the release that keeps the broadcast's stream ID on the job.
 
 ### Watched
 

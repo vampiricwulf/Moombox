@@ -397,8 +397,10 @@ func sameTwitchStart(known, current string) bool {
 // itself moved to the batch call in doCheck.)
 func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.ChannelConfig, info *twitch.TwitchStreamInfo) error {
 	// Dedup by stream ID. HasProcessed is keyed by job ID (the monitor's own
-	// AddToHistory(jobID) call, and worker.RecordManualTwitchAdd for a
-	// broadcast added by URL, owner ruling RV-3), while HasActiveJob queries the video_id
+	// AddToHistory(jobID) call, worker.RecordManualTwitchAdd for a
+	// broadcast added by URL, owner ruling RV-3, and the row the Delete of a
+	// manually added job leaves for the broadcast it recorded, owner ruling
+	// RV-6), while HasActiveJob queries the video_id
 	// column which for monitor-created Twitch jobs stores the unprefixed
 	// stream ID (manual Twitch adds in the web routes store jobID in both
 	// columns, which is why their HasActiveJob(jobID) call works). Prior
