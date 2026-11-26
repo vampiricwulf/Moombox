@@ -266,3 +266,22 @@ func TestCreateYouTubeJobLogsVideoFoundOnlyWhenAdded(t *testing.T) {
 		t.Error("createYouTubeJob no longer logs Info \"Video found\" for a created job")
 	}
 }
+
+// The TUI's Delete (A D, and a multi-select delete) is the operator's Delete,
+// as the Web route is: it goes through DeleteJobLeavingHistory, so a YouTube
+// job added by URL or by import leaves its history row and its stream is not
+// found again while upcoming or live (owner ruling R4-3). runTUI needs a
+// terminal, so the wiring is asserted on its source.
+//
+// Mutant: OnDeleteJob back on plain s.db.DeleteJob (no history row).
+func TestTUIDeleteLeavesTheJobsHistoryRow(t *testing.T) {
+	lit, fset := closureAssigned(t, "tui_wiring.go", "runTUI", "app.OnDeleteJob")
+	calls := callsIn(lit.Body)
+	if len(calls["DeleteJobLeavingHistory"]) == 0 {
+		t.Error("runTUI's OnDeleteJob does not call DeleteJobLeavingHistory — a TUI delete leaves no history row")
+	}
+	for _, call := range calls["DeleteJob"] {
+		t.Errorf("runTUI's OnDeleteJob calls DeleteJob at %s — the operator's delete must leave the history row",
+			fset.Position(call.Pos()))
+	}
+}
