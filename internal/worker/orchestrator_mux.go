@@ -1363,6 +1363,15 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 		select {
 		case <-ctx.Done():
 			wait.Stop()
+			// A delete cancels the job's context too (its OnJobDeleted
+			// listener), and only after the delete has committed: a row
+			// that is gone now is that delete, answered as the read at the
+			// top of a pass answers it, so the caller reclaims staging
+			// instead of keeping it under no row. A shutdown leaves the row
+			// in place and still ends below.
+			if cur, err := o.db.GetJob(jobID); err == nil && cur == nil {
+				return nil, &finishedRowGoneError{written: written}
+			}
 			return nil, o.finishedNotWritten(jobID, fmt.Errorf("the recording was written to %s, but the job was stopped before it could be marked Finished; staging is kept, use Mux to record it", written))
 		case <-wait.C:
 		}
