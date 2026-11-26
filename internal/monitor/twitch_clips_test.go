@@ -195,6 +195,116 @@ func TestClipSweepFilterReachesBackToTheLastWholeListing(t *testing.T) {
 	}
 }
 
+// TestClipSweepReEnableIsAFreshOptIn is owner ruling R4-6: a channel that
+// leaves the opted-in set (its twitch_archive_clips switched off, the channel
+// disabled or removed) and comes back is a fresh opt-in, whose first sweep
+// asks for the last week as a restart's does, not a month's catch-up for the
+// time it was out. The poll forgets it where it sees it gone, also when no
+// channel is left opted in, no Twitch channel is enabled at all (both return
+// before the sweep starts), or the device is offline; and a channel save
+// (PruneHealth, kickMonitors) forgets it at once, so off and on again
+// between two polls is seen too.
+//
+// Mutants: the prune dropped from doCheck (the return asks LAST_MONTH); the
+// prune placed after doCheck's offline or no-channels return, or inside
+// startClipSweep (the offline, disabled or switched-off case asks
+// LAST_MONTH); the prune dropped from PruneHealth (the between-polls case
+// asks LAST_MONTH).
+func TestClipSweepReEnableIsAFreshOptIn(t *testing.T) {
+	clipsOff := func(ch *config.ChannelConfig) { ch.TwitchArchiveClips = false }
+	pollOnline := func(ctx context.Context, tm *TwitchMonitor) { tm.doCheck(ctx) }
+	for _, tc := range []struct {
+		name  string
+		leave func(*config.ChannelConfig)
+		see   func(ctx context.Context, tm *TwitchMonitor) // what notices the channel gone
+	}{
+		{"clips switched off", clipsOff, pollOnline},
+		{"channel disabled", func(ch *config.ChannelConfig) { off := false; ch.Enabled = &off }, pollOnline},
+		{"clips switched off while offline", clipsOff, func(ctx context.Context, tm *TwitchMonitor) {
+			tm.IsOnline = func() bool { return false }
+			tm.doCheck(ctx)
+			tm.IsOnline = nil
+		}},
+		{"clips switched off and on between polls", clipsOff, func(_ context.Context, tm *TwitchMonitor) { tm.PruneHealth() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
+				offline := func(_ context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+					return make([]*twitch.TwitchStreamInfo, len(logins)), make([]error, len(logins)), nil
+				}
+				tm := newTestTwitchMonitor(t, offline, on)
+				var mu sync.Mutex
+				var asked []string
+				tm.FetchClips = func(_ context.Context, _ string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error) {
+					mu.Lock()
+					asked = append(asked, string(filter))
+					mu.Unlock()
+					return nil, nil
+				}
+				tm.OnClipFound = func(twitch.TwitchClipCard, *config.ChannelConfig) {}
+				setChannel := func(ch config.ChannelConfig) {
+					_ = tm.configStore.Update(func(c *config.MoomboxConfig) { c.Channels = []config.ChannelConfig{ch} })
+				}
+
+				ctx := context.Background()
+				tm.doCheck(ctx) // the first listing: the week
+				synctest.Wait()
+				time.Sleep(2 * time.Hour)
+				tm.doCheck(ctx) // listed within the day: the day
+				synctest.Wait()
+
+				gone := on
+				tc.leave(&gone)
+				setChannel(gone)
+				tc.see(ctx, tm)
+				synctest.Wait()
+
+				time.Sleep(10 * 24 * time.Hour)
+				setChannel(on)
+				tm.doCheck(ctx)
+				synctest.Wait()
+
+				mu.Lock()
+				defer mu.Unlock()
+				if want := []string{"LAST_WEEK", "LAST_DAY", "LAST_WEEK"}; !equalStrings(asked, want) {
+					t.Errorf("filters asked = %v, want %v", asked, want)
+				}
+			})
+		})
+	}
+}
+
+// TestClipSweepInFlightListingDoesNotOutliveAPrune: a sweep already listing a
+// channel when the poll forgets it does not write the channel's last listing
+// back, so the channel's return is still a fresh opt-in.
+//
+// Mutant: the listedAt write made whatever the pacing mark says (the return
+// asks LAST_MONTH).
+func TestClipSweepInFlightListingDoesNotOutliveAPrune(t *testing.T) {
+	on := config.ChannelConfig{ID: "vanillatv", Name: "VanillaTV", Platform: "twitch", TwitchArchiveClips: true}
+	tm := newTestTwitchMonitor(t, nil, on)
+	var asked []string
+	tm.FetchClips = func(_ context.Context, _ string, filter twitch.ClipFilter) ([]twitch.TwitchClipCard, error) {
+		asked = append(asked, string(filter))
+		if len(asked) == 2 {
+			tm.forgetClipChannelsExcept(nil) // switched off mid-listing
+		}
+		return nil, nil
+	}
+	tm.OnClipFound = func(twitch.TwitchClipCard, *config.ChannelConfig) {}
+
+	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	chans := clipChannelsOf(tm.getTwitchChannels())
+	ctx := context.Background()
+	tm.sweepClips(ctx, chans, start)
+	tm.sweepClips(ctx, chans, start.Add(2*time.Hour))
+	tm.sweepClips(ctx, chans, start.Add(12*24*time.Hour))
+	if want := []string{"LAST_WEEK", "LAST_DAY", "LAST_WEEK"}; !equalStrings(asked, want) {
+		t.Errorf("filters asked = %v, want %v", asked, want)
+	}
+}
+
 // netTimeoutErr is a transport failure: a net.Error timing out.
 type netTimeoutErr struct{}
 

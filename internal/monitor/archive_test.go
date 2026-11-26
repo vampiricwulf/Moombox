@@ -226,9 +226,11 @@ func TestArchive_UnknownNeverJobs_HasProcessedOnlyGatesVod(t *testing.T) {
 		db := newTestDB(t)
 		now := fixedNow()
 		seedRow(t, db, "UC1", "u2", now.Add(-1*time.Hour), "exact", "rss", "unknown")
-		if err := db.AddToHistory("u2"); err != nil { // history row, NO job row
-			t.Fatalf("AddToHistory: %v", err)
-		}
+		// A skip row: history, NO job ever created (one DECAPI wrote before
+		// it stopped recording skips and give-ups, or an orphan already there
+		// at the v28 upgrade). Only the row a deleted job left holds a stream
+		// back (owner ruling R4-3, TestFeed_ADeletedJobsStreamIsNotFoundAgain).
+		addSkipHistoryRow(t, db, "u2")
 		// rss404: the live arm is gated by neither HasProcessed NOR the
 		// established gate — only past content is.
 		fm := newTestFeedMonitor(t, db, withRSS(rss404()), withMembership(membWith()),

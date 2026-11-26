@@ -205,6 +205,13 @@ If Moombox cannot read the archive's current chapters on the first import, it
 refuses rather than risk losing them: "The archive's current chapters could not
 be read, so they could not be kept to restore; nothing was changed".
 
+After an import, the same holds for the saved list: if the `.chapters.json`
+file beside the archive cannot be read (it was edited by hand and no longer
+parses, or another program has it open), a new import is refused with "The
+saved chapter list cannot be read" and nothing is changed, so **Restore
+original** still brings back the real original once the file is readable
+again.
+
 The import cannot run while another operation is using the job's files — a
 trim being made, a set-aside recovery, or a mux — and a trim cannot start
 while an import is rewriting the archive. Whichever comes second is refused;

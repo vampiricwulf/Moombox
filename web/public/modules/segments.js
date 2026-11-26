@@ -13,6 +13,9 @@ export class SegmentPlayer {
     this.segIdx = 0;
     this.segTimeOffset = 0;
     this.totalDuration = 0;
+    // A seek waiting for its part to load: { target, wasPlaying } (see
+    // seekToGlobalTime).
+    this._pendingSeek = null;
   }
 
   /** @returns {boolean} Whether multi-segment mode is active. */
@@ -46,6 +49,7 @@ export class SegmentPlayer {
   /** Reset all state. */
   reset() {
     if (this._seekAbort) { this._seekAbort.abort(); this._seekAbort = null; }
+    this._pendingSeek = null;
     this.segments = null;
     this.segOffsets = null;
     this.segIdx = 0;
@@ -73,6 +77,9 @@ export class SegmentPlayer {
   getGlobalTime(video) {
     if (!video) return 0;
     if (this.active) {
+      // While a part loads the element reads about 0, not where the seek
+      // meant to land; a relative seek (the arrow keys) counts from the target.
+      if (this._pendingSeek) return this._pendingSeek.target;
       return this.segTimeOffset + video.currentTime;
     }
     return video.currentTime;
@@ -95,6 +102,15 @@ export class SegmentPlayer {
 
   /**
    * Seek to a global time (seconds), switching segments if needed.
+   *
+   * A seek into another part loads it and lands once it has loaded, resuming
+   * playback if it was running. Loading pauses the element, so a second seek
+   * made before that part has loaded (a held arrow key, two quick chapter
+   * clicks) cannot read the play state or the position from the element:
+   * both come from the pending record, and the second seek replaces the
+   * first one's target on the same load instead of setting currentTime on an
+   * element that has not loaded yet. A load that fails (the element's error
+   * event) drops the pending record.
    * @param {number} globalSeconds
    * @param {HTMLVideoElement} video
    */
@@ -120,14 +136,24 @@ export class SegmentPlayer {
       const seg = this.segOffsets[i];
       const segEnd = seg.startOffset + (seg.durationSeconds || 0);
       if (globalSeconds < segEnd || i === this.segOffsets.length - 1) {
-        if (i !== this.segIdx) {
-          const wasPlaying = !video.paused;
-          this.loadSegment(i, video);
+        if (i !== this.segIdx || this._pendingSeek) {
+          const wasPlaying = !video.paused || !!this._pendingSeek?.wasPlaying;
+          if (i !== this.segIdx) this.loadSegment(i, video);
+          this._pendingSeek = { target: globalSeconds, wasPlaying };
           this._seekAbort = new AbortController();
           video.addEventListener("loadeddata", () => {
             this._seekAbort = null;
+            this._pendingSeek = null;
             video.currentTime = globalSeconds - seg.startOffset;
             if (wasPlaying) safePlay(video);
+          }, { once: true, signal: this._seekAbort.signal });
+          // A part that fails to load never fires loadeddata: the seek is
+          // dropped, so a later seek in that part sets currentTime itself and
+          // getGlobalTime reads the element again.
+          video.addEventListener("error", () => {
+            this._seekAbort?.abort();
+            this._seekAbort = null;
+            this._pendingSeek = null;
           }, { once: true, signal: this._seekAbort.signal });
         } else {
           video.currentTime = globalSeconds - seg.startOffset;

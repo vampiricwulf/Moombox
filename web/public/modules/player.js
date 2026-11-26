@@ -367,6 +367,9 @@ export class PlayerController {
     this.nico = new NicoScheduler({ lanes: this._lanes, indexAfter, seedCursorIndex });
     /** @type {Set<Animation>} every in-flight overlay animation */
     this._nicoAnims = new Set();
+    // The video is playing but waiting for data (`waiting` until `playing`):
+    // the overlay holds its flight as it does on a pause.
+    this._nicoStalled = false;
     this._nicoDroppedShown = 0;
     this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
@@ -394,6 +397,15 @@ export class PlayerController {
      */
     this._rebuildToken = 0;
     this._rebuildsActive = 0;
+    /**
+     * A pick the operator made inside a rebuild's option-mutation window,
+     * where the listener cannot act on it (the rebuild is about to write back
+     * the value it read): the rebuild that completes applies it.
+     * `_restoringValue` is the value that rebuild writes back, so an sl-change
+     * carrying it is the rebuild's own, not a pick.
+     */
+    this._pickDuringRebuild = null;
+    this._restoringValue = null;
 
     // Watch state tracking
     this._watchSaveInterval = null;
@@ -420,20 +432,15 @@ export class PlayerController {
 
     // Job selection
     jobSelect.addEventListener("sl-change", async () => {
-      if (this._rebuildsActive > 0) return;
       const val = jobSelect.value;
+      if (this._rebuildsActive > 0) {
+        // Kept for the rebuild to apply once it has written the option list
+        // (loadPlayerJobList); the value it writes back is its own event.
+        if (val && val !== this._restoringValue) this._pickDuringRebuild = val;
+        return;
+      }
       if (val) {
-        // Await the load, then hand the keyboard over (see
-        // focusPlayerSurface). In a `finally`: a load that throws must not
-        // leave focus parked on the select, where every shortcut is swallowed
-        // and the user cannot tell why.
-        try {
-          await this.onPlayerJobSelect(val);
-        } catch (e) {
-          console.error("player: job select failed", e?.message ?? e);
-        } finally {
-          focusPlayerSurface();
-        }
+        await this._loadPick(val);
       } else {
         this.clearPlayer();
       }
@@ -541,6 +548,9 @@ export class PlayerController {
     // pill. Un-anchored the intervening tick does nothing; `seeked` below
     // re-anchors at the target.
     video.addEventListener("seeking", () => {
+      // A seek clears the overlay; a wait for the new position fires its own
+      // `waiting`, so an older stall must not outlive it.
+      this._nicoStalled = false;
       this.clearNicoOverlay();
       this.nico.unanchor();
     });
@@ -560,12 +570,30 @@ export class PlayerController {
     // animations simply follow the video — the cursor is NEVER advanced here
     // (doing so skipped every message that was due while paused).
     video.addEventListener("pause", () => {
+      this._nicoStalled = false;
       if (video.ended) return; // end-of-media pause: let in-flight text finish
       for (const a of this._nicoAnims) a.pause();
     });
 
     video.addEventListener("play", () => {
+      this._nicoStalled = false;
       for (const a of this._nicoAnims) a.play();
+    });
+
+    // A buffering stall fires no `pause`: the picture freezes while the
+    // animations, on the document clock, would fly on. `waiting` holds them
+    // (and makes anything placed meanwhile start held, see ctx.paused in
+    // spawnNicoMessages) until `playing` says the picture moves again.
+    video.addEventListener("waiting", () => {
+      if (video.paused || video.ended) return;
+      this._nicoStalled = true;
+      for (const a of this._nicoAnims) a.pause();
+    });
+
+    video.addEventListener("playing", () => {
+      const wasStalled = this._nicoStalled;
+      this._nicoStalled = false;
+      if (wasStalled && !video.paused) for (const a of this._nicoAnims) a.play();
     });
 
     video.addEventListener("ratechange", () => {
@@ -588,6 +616,7 @@ export class PlayerController {
 
     // Never freeze the overlay at end of media — let in-flight text fly out.
     video.addEventListener("ended", () => {
+      this._nicoStalled = false;
       for (const a of this._nicoAnims) a.play();
     });
 
@@ -1314,10 +1343,14 @@ export class PlayerController {
    * the `sl-change` listener needs in order to tell a synthetic event from a
    * user pick, and a superseded rebuild must not clear that while a newer one
    * is still mutating.
+   *
+   * The selection to keep is read only once both answers are in, not before
+   * the fetch: the operator can pick another recording while it is in flight
+   * (the picker is live then), and restoring the value read before the fetch
+   * would point the picker back at the old recording while the new one plays.
    */
   async loadPlayerJobList() {
     const select = document.getElementById("player-job-select");
-    const currentValue = select.value;
     const token = ++this._rebuildToken;
 
     try {
@@ -1337,13 +1370,17 @@ export class PlayerController {
         if (token !== this._rebuildToken) return;
       }
 
+      // Read after the last await before the option rebuild: a pick made
+      // during the fetch is the selection to keep.
+      const currentValue = select.value;
       const all = [...jobs, ...archived].filter((j) => j.status === "Finished" && j.filename);
       if (currentValue && !all.some((j) => j.id === currentValue)) {
         if (complete) {
-          // The currently loaded job disappeared (deleted, or its id changed
-          // via re-import) — clear the player instead of leaving a dangling
-          // selection.
-          this.clearPlayer();
+          // The selected job disappeared (deleted, or its id changed via
+          // re-import) — clear the player instead of leaving a dangling
+          // selection. Only when what plays IS that job (or nothing plays):
+          // a rebuild never tears down a recording it did not judge gone.
+          if (!this.playerJob || this.playerJob.id === currentValue) this.clearPlayer();
         } else if (this.playerJob?.id === currentValue) {
           // Missing from a list that half failed proves nothing: keep the
           // playing recording, and keep it in the picker.
@@ -1357,6 +1394,7 @@ export class PlayerController {
       // only user-driven paths emit it), so this never interrupts playback.
       // Guard against any synthetic sl-change firing mid-rebuild anyway.
       this._rebuildsActive++;
+      this._restoringValue = currentValue;
       try {
         select.querySelectorAll("sl-option").forEach((o) => o.remove());
 
@@ -1379,6 +1417,16 @@ export class PlayerController {
         this._rebuildsActive--;
       }
 
+      // A pick made inside the mutation window (this rebuild's, or a
+      // superseded one's) was overwritten by the write-back above and never
+      // loaded: apply it now, when it is still in the list.
+      const pick = this._pickDuringRebuild;
+      this._pickDuringRebuild = null;
+      if (pick && all.some((j) => j.id === pick)) {
+        select.value = pick;
+        await this._loadPick(pick);
+      }
+
       // Show/hide empty state. Both lines are set in both arms: the subtext
       // ("Choose from the dropdown above…") used to stay put when the list
       // was empty, pointing at a dropdown with nothing in it.
@@ -1396,9 +1444,36 @@ export class PlayerController {
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);
+      // The newest rebuild failed before it could apply a pick a superseded
+      // one kept: apply it now from the options already shown, rather than
+      // leave it for a later rebuild to load minutes from now.
+      if (token === this._rebuildToken && this._rebuildsActive === 0) {
+        const pick = this._pickDuringRebuild;
+        this._pickDuringRebuild = null;
+        if (pick && [...select.querySelectorAll("sl-option")].some((o) => o.value === pick)) {
+          select.value = pick;
+          await this._loadPick(pick);
+        }
+      }
       // The half-failed list toasts above; a total failure (server
       // unreachable) must too, or the picker just sits stale.
       this.app.showToast(`Failed to load the video list: ${e.message}`, "warning");
+    }
+  }
+
+  /**
+   * Load the recording the operator picked, then hand the keyboard over (see
+   * focusPlayerSurface). In a `finally`: a load that throws must not leave
+   * focus parked on the select, where every shortcut is swallowed and the
+   * user cannot tell why.
+   */
+  async _loadPick(jobId) {
+    try {
+      await this.onPlayerJobSelect(jobId);
+    } catch (e) {
+      console.error("player: job select failed", e?.message ?? e);
+    } finally {
+      focusPlayerSurface();
     }
   }
 
@@ -1409,6 +1484,9 @@ export class PlayerController {
 
     // Track selection to detect stale responses from rapid switching
     const selectionId = ++this._selectionSeq;
+    // A pick acted on here is the newest one: a pick an earlier rebuild kept
+    // for later (loadPlayerJobList) is older and must never load over it.
+    this._pickDuringRebuild = null;
 
     // Fetch job details
     // A pick that cannot be opened says why and puts the picker back on what
@@ -2524,7 +2602,7 @@ export class PlayerController {
       stageW,
       laneHeight,
       rate: video.playbackRate || 1,
-      paused: video.paused && !video.ended,
+      paused: (video.paused && !video.ended) || this._nicoStalled,
       overlay,
     };
 

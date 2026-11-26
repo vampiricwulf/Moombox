@@ -1830,6 +1830,12 @@ sl-progress-bar {
 .nico-message .chat-emoji {
     height: 1em;                 /* never taller than the line box → one lane per message */
     width: auto;
+    /* The overlay measures a message the moment it is built, often before its
+       emotes have loaded, and that width sets how far it flies and when its
+       lane is free. An image not loaded yet has no ratio to size from, so it
+       is given a 1em square (the shape of Twitch, BTTV, FFZ and YouTube
+       emotes); once loaded it takes its own ratio. */
+    aspect-ratio: auto 1 / 1;
     vertical-align: -0.15em;
     display: inline-block;
 }

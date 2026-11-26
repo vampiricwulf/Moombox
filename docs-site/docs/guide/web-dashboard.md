@@ -465,7 +465,8 @@ A trim is refused when:
 your library as a `Finished` job.
 
 1. Drag a `.zip` onto the drop area, or click it to browse. Only `.zip` files
-   are accepted.
+   are accepted, up to the upload limit the drop area names (500 MB): a
+   larger file is refused at once with a warning, before anything is sent.
 2. Optionally fill in **Title** (otherwise taken from the chat file or the
    file name) and **Channel** (otherwise from the chat file, or "Import").
 3. Click **Import**. A progress bar shows the upload; **Cancel** stops it
@@ -484,7 +485,21 @@ The `.zip` must hold **one** recording:
 
 - a video file (`.mp4`, `.mkv`, `.webm` or `.ts`), **or** a split
   recording's `"<name> - part1"`, `"<name> - part2"`… files, and
-- optionally its chat, named after it: `"<name>.chat.json"`.
+- optionally its chat, named after it: `"<name>.chat.json"`, and
+- optionally the other files Moombox writes beside an archive, named after
+  it: its thumbnail (`"<name>.jpg"`, `.webp` or `.png`; one is kept, in
+  that order), `"<name>.description"`, its chapter list
+  `"<name>.chapters.json"` and a chat's raw copy
+  `"<name>.chat.raw.jsonl"`. A split recording's are named after the name
+  its parts share (`"<name>.jpg"` beside `"<name> - part1.mp4"`). They are
+  put back beside the imported recording, so the job shows its own thumbnail
+  and description and the player its chapters — useful for a video that has
+  since been deleted, and for every Twitch recording.
+
+Anything else in the `.zip` is left out, and the result line names it with
+the reason (for example "left out notes.txt: not named after the recording").
+A chapter list Moombox cannot read is left out too, and so is one of these
+files when `imports` already holds a different file under the name it needs.
 
 The video ID is read from the last `[id]` in the file name (the form both
 Moombox and yt-dlp use, `Title [dQw4w9WgXcQ]`), or from the chat file. A
@@ -501,6 +516,13 @@ directory](../configuration/paths-and-logs.md).
 | Files in the archive | 1,000 |
 | Compression ratio | at most 100 : 1 (a higher ratio is refused as a possible zip bomb) |
 | Imports | 5 per minute |
+
+An import is refused before anything is unpacked when the output drive has no
+room for it: it needs the archive's unpacked size plus 256 MB free, and it may
+not take the drive to the [critical disk
+threshold](../configuration/disk-memory-connectivity.md#diskdisk_critical_percent). The message names both sizes ("not
+enough free space to import: the archive needs … free on the output volume,
+which has …"). Free some space, or raise the threshold, and import again.
 
 An import is refused when a job with the same video ID already exists ("job
 already exists for video ID: …"). If a file of the same name is already in
@@ -544,8 +566,10 @@ uses it), the delete is refused with "No longer an orphan. Refresh the list."
 
 Video IDs the monitor recorded as already processed but which no longer have
 a job — usually a job you deleted. While an entry remains, the monitor will
-not discover that video again. **Remove** (per row, or **Delete All**) lets
-the monitor pick it up again on its next pass. A YouTube video ID links to
+not discover that video again, even a stream that is still upcoming or live
+(an entry already here when you upgraded holds back only finished videos;
+see [Storage](storage.md)). **Remove** (per row, or **Delete All**) lets the
+monitor pick it up again on its next pass. A YouTube video ID links to
 its watch page and a Twitch VOD ID (`tw_v…`) to its twitch.tv page; other
 Twitch IDs (a live stream's `tw_…`, a clip's `tw_clip_…`) name no page and
 are shown as plain text.

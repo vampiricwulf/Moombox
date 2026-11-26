@@ -940,6 +940,13 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				jsonErrorSized(rw, err.Error(), http.StatusConflict)
 			case errors.Is(err, cookies.ErrNoBrowserFound):
 				jsonErrorSized(rw, "no supported browser installed", http.StatusFailedDependency)
+			// The host cannot show the browser window (Linux with no
+			// display), or the browser was gone before it opened: 424 like a
+			// missing browser, and verbatim, since each sentence says what
+			// happened and the first names the browser-free routes.
+			case errors.Is(err, cookies.ErrNoDisplay),
+				errors.Is(err, cookies.ErrBrowserExitedEarly):
+				jsonErrorSized(rw, err.Error(), http.StatusFailedDependency)
 			// A wrong INPUT, not a server fault and not a condition that
 			// clears: 400 with the sentinel's own sentence, which names the
 			// two accepted values and the one it was given. StartSetup owns

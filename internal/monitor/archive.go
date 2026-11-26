@@ -85,7 +85,8 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		// The §10 decision table, in its order. The first two gates repeat
 		// the walk's (the store and jobs table may have changed between the
 		// passes, and archive must stand alone when the walk was truncated).
-		if active, err := fm.db.HasActiveJob(row.VideoID); err != nil || active {
+		// The job gate holds back every row but Finished (owner ruling R4-4).
+		if held, err := fm.db.HasJobBlockingRedetection(row.VideoID); err != nil || held {
 			gated++
 			continue // DB read error ⇒ skip the item, continue the cycle (§7)
 		}
@@ -97,10 +98,14 @@ func (fm *FeedMonitor) archive(ctx context.Context, ch *config.ChannelConfig, ch
 		switch row.Status {
 		case database.FeedStatusUpcoming, database.FeedStatusLive:
 			// Job iff FRESH this cycle — never windowed, never M-gated, and
-			// NEVER HasProcessed-gated: history rows exist with no job row
-			// (a deleted job, rows DECAPI wrote before it stopped recording
-			// skips and give-ups), and gating here would skip the
-			// stream the moment its probe returned live (§10). A stale
+			// never HasProcessed-gated: a history row DECAPI wrote for a skip
+			// or give-up (before it stopped recording those) has no job behind
+			// it, and gating on it would skip the stream the moment its probe
+			// returned live (§10). The row a DELETED job left does hold the
+			// stream back, but through the job gate above
+			// (HasJobBlockingRedetection's history clause, owner ruling R4-3),
+			// so this arm never sees it; removing that row from the Orphaned
+			// list reopens the stream. A stale
 			// upcoming/live row the walk could not probe this cycle
 			// (cooldown, error, cookie gate) waits for the next one.
 			if res, isFresh := fresh[row.VideoID]; isFresh {

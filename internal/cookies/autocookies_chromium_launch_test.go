@@ -273,7 +273,7 @@ func TestWaitForCDPReturnsPromptlyOn200(t *testing.T) {
 	port := newLoopback127Server(t, mux)
 
 	start := time.Now()
-	err := waitForCDP(context.Background(), port, 2*time.Second)
+	err := waitForCDP(context.Background(), port, 2*time.Second, nil)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -301,7 +301,7 @@ func TestWaitForCDPTimesOutOnPersistent500(t *testing.T) {
 
 	const timeout = 600 * time.Millisecond
 	start := time.Now()
-	err := waitForCDP(context.Background(), port, timeout)
+	err := waitForCDP(context.Background(), port, timeout, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -327,7 +327,7 @@ func TestWaitForCDPTimesOutWithNoServer(t *testing.T) {
 
 	const timeout = 300 * time.Millisecond
 	start := time.Now()
-	err = waitForCDP(context.Background(), port, timeout)
+	err = waitForCDP(context.Background(), port, timeout, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -355,7 +355,7 @@ func TestWaitForCDPReturnsCtxErrBeforeDeadline(t *testing.T) {
 	resultCh := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		resultCh <- waitForCDP(ctx, 1, 5*time.Second)
+		resultCh <- waitForCDP(ctx, 1, 5*time.Second, nil)
 	}()
 
 	select {

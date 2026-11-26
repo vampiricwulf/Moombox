@@ -355,8 +355,9 @@ func TestDecapi_TerminalMemoDoesNotLatchOnUpcoming(t *testing.T) {
 // Clearing an orphaned history row is the documented way to put a video back
 // in play (internal/database/database_extras.go:48-56), so the memo must be
 // gated on a LIVE HasProcessed read, never on a remembered one. The row is
-// seeded the way history arises: a job was created for the video and has
-// since been deleted.
+// a skip row (no job ever created): the row a deleted job leaves stops DECAPI
+// before the memo (HasJobBlockingRedetection, also a live read; owner ruling
+// R4-3, TestDecapi_ADeletedJobsStreamIsNotFoundAgain).
 //
 // Mutant: caching the processed flag alongside the memo makes the operator's
 // remedy silently do nothing.
@@ -369,9 +370,7 @@ func TestDecapi_TerminalMemoReleasesWhenHistoryIsCleared(t *testing.T) {
 		return &VideoProbeResult{StreamStatus: "vod", Title: "finished vod", PublishedAt: pub, PublishedPrecision: "day"}, nil
 	})
 	found := recordDecapiVideoFound(dm)
-	if err := db.AddToHistory("vidDecClr11"); err != nil {
-		t.Fatal(err)
-	}
+	addSkipHistoryRow(t, db, "vidDecClr11")
 
 	ch := &config.ChannelConfig{ID: "UC1", Name: "UC1", IncludeNonLiveContent: true}
 	body := decapiBody("vidDecClr11", "finished vod")

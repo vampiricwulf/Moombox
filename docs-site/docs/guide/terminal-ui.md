@@ -341,7 +341,7 @@ The dashboard shows the same summary before its Reinitialize.
 | Chord | Action | Available for |
 |---|---|---|
 | `A A` | **Add Video**: opens the add dialog. | Always. |
-| `A Z` | **Import Archive**: import a `.zip` holding one recording and its `<name>.chat.json`. | Always. |
+| `A Z` | **Import Archive**: import a `.zip` holding one recording, its `<name>.chat.json` and the thumbnail, description and chapter list Moombox wrote beside it. | Always. |
 | `A R` | **Resume Job**: continue a download from what is already staged. Batch-capable. | YouTube jobs in `Error`, `Cancelled` or `COOKIES?`, or `Finished` with an incomplete tail, whose staging still has files. |
 | `A I I` | **Reinitialize Job**: reset the job to start again from scratch. Batch-capable. | `Error`, `Cancelled`, `COOKIES?`. |
 | `A M M` | **Mux Job**: build the output file from what is staged. | `Error` or `Cancelled` with staged segments; `Finished` with an unmuxed part left in staging. |
@@ -472,7 +472,12 @@ Opens a file browser in the `import` folder under Moombox's working directory
 (created if missing). Pick a `.zip` (++up++ / ++down++, ++right++ or ++enter++
 to open or select, ++left++ or ++backspace++ to go up), then optionally
 override the title and channel (++tab++ switches field) and press ++enter++ to
-import.
+import. A file over the 500 MB upload limit is refused before anything is
+sent ("Import refused: *name* is 3.0GB; an archive import takes at most
+500.0MB"). What goes in the `.zip`, and what the result line says about a
+file it left out, is described under [The Imports
+tab](web-dashboard.md#the-imports-tab). After a refused import the dialog stays on the title and channel
+step, with the marked field ready to type in.
 
 ### Trim Video (`A T`)
 
@@ -492,8 +497,10 @@ twice deletes the selected one.
 ### Orphaned items (`A O`)
 
 Lists files and folders in the staging and output folders that no job owns,
-and processing-history entries with no job. A history entry stops the monitor from
-re-discovering that video; removing it lets the video be picked up again.
+and processing-history entries with no job. A history entry stops the monitors from
+re-discovering that video, even a stream still upcoming or live; removing it
+lets the video be picked up again (see [Storage](storage.md) for entries from
+before the upgrade).
 `D` twice (within 3 seconds) deletes the selected item, `A` twice deletes every
 item in the current group, `R` refreshes. See [Storage](storage.md).
 

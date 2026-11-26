@@ -279,13 +279,16 @@ the network is slow:
 - **Batching.** `found`, `added` and per-job *Authentication Required*
   notifications are held for 5 seconds and sent together, up to 10 embeds
   per Discord message. A single one still waits the 5 seconds. Everything
-  else goes out at once; an error never waits behind a batch.
+  else goes out at once; an error never waits behind a batch. On a target
+  set to one message per job, only *Authentication Required* is batched.
 - **Order.** Each target delivers in order, one message at a time, so a
   job's notifications never arrive out of order.
 - **Retries.** Each message gets up to 3 attempts, with a 15-second timeout
-  per attempt. Discord's rate limits are respected (Moombox waits when
-  Discord says to). A permanent refusal, such as a deleted webhook, is not
-  retried.
+  per attempt. Discord's rate limits are respected: Moombox waits when
+  Discord says to, for at most 60 seconds in all for one message. A
+  message Discord asks to hold back longer than that, or without saying
+  for how long, is dropped. A permanent refusal, such as a deleted
+  webhook, is not retried.
 - **Backlog limit.** Each target holds at most 256 waiting messages. If it
   fills (for example Discord is slow during a big channel re-scan), the
   oldest discovery message (`found`, `added`, `scheduled`, `rescheduled`)
@@ -326,6 +329,12 @@ The ping shows as text but nobody is notified
 :   In one-message-per-job mode, only new posts notify — not edits. Also
     check that the event is in the target's mention list and the role can be
     mentioned.
+
+A notification failed to send
+:   The log has an error ("notification send failed") naming the event, the
+    title and the target as `target=#2`: its place in the list of
+    notification targets, counting from 1, muted ones included. Press that
+    target's test button to see why it fails.
 
 Discovery notifications are missing after a re-scan
 :   They may have been dropped because the target's backlog filled up; the

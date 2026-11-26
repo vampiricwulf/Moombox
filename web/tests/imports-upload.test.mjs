@@ -124,13 +124,21 @@ test("an import's outcome note is shown and kept", { skip }, async () => {
 // W25-04: a chat the zip carried but named after no video was left out; the
 // note says so, as a warning. A re-adoption alone is a success.
 //
+// imports-4: any other entry left out (skipped) warns the same way.
+//
 // Mutants: warning only for a rename (the left-out chat toasts as a
-// success); warning for every note (the re-adoption toasts as a warning).
-test("a left-out chat warns; a re-adoption does not", { skip }, async () => {
+// success); skipped not read (the left-out entry toasts as a success);
+// warning for every note (the re-adoption toasts as a warning).
+test("a left-out chat or entry warns; a re-adoption does not", { skip }, async () => {
   const h = await harness.makeApp();
   const left = 'left out Recording B.chat.json: a chat is imported only beside the video its name matches';
   await importAnswered(h, 201, { id: "imp_0a1b2c3d", import: { unpairedChats: ["Recording B.chat.json"], note: left } });
   assert.ok(h.toasts().some((t) => t.textContent.includes(left) && t.variant === "warning"), "the left-out chat did not warn");
+
+  const hs = await harness.makeApp();
+  const skippedNote = "left out notes.txt: not named after the recording";
+  await importAnswered(hs, 201, { id: "imp_0a1b2c3d", import: { skipped: ["notes.txt"], note: skippedNote } });
+  assert.ok(hs.toasts().some((t) => t.textContent.includes(skippedNote) && t.variant === "warning"), "the left-out entry did not warn");
 
   const h2 = await harness.makeApp();
   const kept = "kept the identical copy already in imports/: Stream [dQw4w9WgXcQ].mp4";
@@ -157,4 +165,55 @@ test("a refused import shows the server's reason", { skip }, async () => {
 
   assert.equal(h.el("import-status-text").textContent, reason);
   assert.ok(h.toasts().some((t) => t.textContent.includes(reason) && t.variant === "danger"));
+});
+
+// imports-3: the server's upload cap comes from /api/status (importMaxBytes,
+// constants.MaxImportUploadBytes); the dropzone names it, and a file past it
+// is refused when chosen — nothing is uploaded, Import stays hidden — where
+// it used to be sent and refused only once the server had spooled 500 MB.
+//
+// Mutants: setImportFile without the size check (the big file is taken);
+// the cap not read from the status (the small file is refused or the hint
+// stays empty); the check refusing a file AT the cap.
+test("a file over the server's upload cap is refused before uploading", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: { importMaxBytes: 10 } } });
+  assert.equal(h.app.importMaxBytes, 10, "the cap was not read from /api/status");
+  h.app.imports.initImports();
+  assert.equal(h.el("import-max-size").textContent, " (max 10B)");
+
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+  assert.equal(h.app.imports.importFile, null, "the oversize file was taken");
+  assert.equal(h.el("import-submit-btn").style.display, "none", "Import was offered for it");
+  assert.ok(h.toasts().some((t) => /big\.zip is 11B; an archive import takes at most 10B/.test(t.textContent) && t.variant === "warning"));
+
+  const atCap = new h.window.File(["x".repeat(10)], "ok.zip");
+  h.app.imports.setImportFile(atCap);
+  assert.equal(h.app.imports.importFile, atCap, "a file at the cap was refused");
+});
+
+// imports-3 (fix round): a file chosen before the first status read brought
+// the cap was taken unchecked and sent, and the server's 413 can reach the
+// browser as a network error. Import now reads the status once first.
+//
+// Mutants: uploadImport without the status read (the big file is sent);
+// the read but no size check after it; a refusal that leaves the file chosen.
+test("a file chosen before the cap is known is checked before it is sent", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: {} } });
+  assert.equal(h.app.importMaxBytes, undefined, "precondition: no cap yet");
+  globalThis.XMLHttpRequest = PendingXHR;
+  PendingXHR.last = null;
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+  assert.ok(h.app.imports.importFile, "precondition: taken unchecked");
+
+  h.http.on("GET /api/status", () => ({ importMaxBytes: 10 }));
+  await h.app.imports.uploadImport();
+  assert.equal(PendingXHR.last, null, "the oversize file was sent");
+  assert.equal(h.app.imports.importFile, null, "the refused file stays chosen");
+  assert.ok(h.toasts().some((t) => /big\.zip is 11B; an archive import takes at most 10B/.test(t.textContent)));
+
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(10)], "ok.zip"));
+  await h.app.imports.uploadImport();
+  assert.ok(PendingXHR.last, "a file within the cap was not sent");
+  assert.equal(h.app.imports.importUploading, true);
 });

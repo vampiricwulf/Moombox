@@ -23,6 +23,7 @@ export class ImportController {
 
   initImports() {
     this.importInitialized = true;
+    this.showImportLimit();
 
     const dropzone = document.getElementById("import-dropzone");
     const fileInput = document.getElementById("import-file-input");
@@ -114,6 +115,34 @@ export class ImportController {
     if (cancelBtn) cancelBtn.style.display = "none";
   }
 
+  /**
+   * The server's upload cap (importMaxBytes from /api/status,
+   * constants.MaxImportUploadBytes), or null until a status read brought it.
+   */
+  _maxBytes() {
+    const max = this.app.importMaxBytes;
+    return Number.isFinite(max) && max > 0 ? max : null;
+  }
+
+  /** Names the cap in the dropzone once it is known. */
+  showImportLimit() {
+    const el = document.getElementById("import-max-size");
+    const max = this._maxBytes();
+    if (el) el.textContent = max ? ` (max ${formatBytes(max)})` : "";
+  }
+
+  /**
+   * Refuses a file over the server's cap with a toast; true when it did.
+   * The server would refuse it too, but only once the upload began, and a
+   * browser may report that answer as a network error.
+   */
+  _refuseOversize(file) {
+    const max = this._maxBytes();
+    if (!max || file.size <= max) return false;
+    this.app.showToast(`${file.name} is ${formatBytes(file.size)}; an archive import takes at most ${formatBytes(max)}`, "warning");
+    return true;
+  }
+
   setImportFile(file) {
     // Swapping the file mid-upload hid the progress bar and its Cancel button
     // while the old file kept uploading.
@@ -121,6 +150,13 @@ export class ImportController {
       this.app.showToast(this._importing()
         ? "The archive is being imported — wait for it to finish before choosing another file"
         : "An import is uploading — cancel it before choosing another file", "warning");
+      const fileInput = document.getElementById("import-file-input");
+      if (fileInput) fileInput.value = "";
+      return;
+    }
+    // A file over the server's cap is refused here, before a byte is sent.
+    // Before the first status read has brought the cap, uploadImport checks.
+    if (this._refuseOversize(file)) {
       const fileInput = document.getElementById("import-file-input");
       if (fileInput) fileInput.value = "";
       return;
@@ -187,8 +223,27 @@ export class ImportController {
     document.getElementById("import-channel").value = "";
   }
 
-  uploadImport() {
-    if (!this.importFile || this.importUploading) return;
+  async uploadImport() {
+    if (!this.importFile || this.importUploading || this._capChecking) return;
+    // The cap comes with the status read; a file chosen before the first one
+    // answered was taken unchecked. Read it once before sending anything.
+    // With the cap known this path never awaits, so the upload starts in
+    // the click's own turn.
+    if (this._maxBytes() === null) {
+      this._capChecking = true;
+      try {
+        await this.app.loadStatus?.();
+      } catch {
+        // No cap to check against: the server's own check still stands.
+      } finally {
+        this._capChecking = false;
+      }
+      if (!this.importFile || this.importUploading) return;
+      if (this._refuseOversize(this.importFile)) {
+        this.clearImportFile();
+        return;
+      }
+    }
 
     this.importUploading = true;
     this._bodySent = false;
@@ -268,7 +323,8 @@ export class ImportController {
         // `import` says what became of a name already taken in imports/
         // (import_routes.go importOutcome): a byte-identical file re-adopted,
         // or a different one left alone while this archive took " (2)" — and
-        // any chat left out for matching no video's name.
+        // any chat left out for matching no video's name, and any other entry
+        // the import did not keep (skipped).
         let outcome = null;
         try { outcome = JSON.parse(xhr.responseText).import || null; } catch {}
         const note = outcome && outcome.note ? outcome.note : "";
@@ -278,10 +334,10 @@ export class ImportController {
           // next file or Clear, rather than going with the 1.5 s reset.
           statusText.textContent = `Import complete — ${note}`;
           submitBtn.style.display = "none";
-          // A rename, or a chat left out for matching no video's name, is a
-          // warning; files re-adopted as they were are a success.
+          // A rename, or a chat or other entry left out, is a warning; files
+          // re-adopted as they were are a success.
           const listed = (k) => Array.isArray(outcome[k]) && outcome[k].length > 0;
-          const warn = listed("renamed") || listed("unpairedChats");
+          const warn = listed("renamed") || listed("unpairedChats") || listed("skipped");
           this.app.showToast(`Archive imported — ${note}`, warn ? "warning" : "success");
         } else {
           statusText.textContent = "Import complete!";

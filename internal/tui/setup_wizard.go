@@ -1010,7 +1010,7 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 			m.errorMsg = fmt.Sprintf("Channel %q already added", id)
 			return ""
 		}
-		if msg := validateChannelValues(m.channelEditValues); msg != "" {
+		if msg := validateChannelValues(m.channelEditValues, storedChannelDir(m.channels, m.channelIndex)); msg != "" {
 			m.errorMsg = msg
 			return ""
 		}

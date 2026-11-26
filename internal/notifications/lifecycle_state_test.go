@@ -374,14 +374,10 @@ func TestTerminalEditsThenPostsSeparately(t *testing.T) {
 }
 
 // TestNonLifecycleEventsNeverTouchTheMessage: auth, trim_* and System keep
-// posting as they always did, even on an edit-mode target.
-//
-// It waits with waitCalls rather than m.Wait(), because the per-job `auth` is
-// the one batchable key here (isBatchable: found/added, plus auth with a
-// JobID) and a terminal Wait would flush the window for the batcher. With the
-// non-flushing waiter, the edit-mode bypass at the head of batcher.Add has to
-// be the thing that delivers the auth embed inside the deadline — the window
-// is 5 s and nothing else opens it.
+// posting as they always did, even on an edit-mode target. The per-job
+// `auth` waits in the 5 s window there too (owner ruling R4-10, batchableIn),
+// so the terminal Wait is what flushes it; it still goes out as a POST of its
+// own and never edits the job's message.
 func TestNonLifecycleEventsNeverTouchTheMessage(t *testing.T) {
 	f := newFakeDiscord(t, okCreated("M5"))
 	m := editManager(t, f, newMemStore(), nil)
@@ -389,9 +385,7 @@ func TestNonLifecycleEventsNeverTouchTheMessage(t *testing.T) {
 	run(t, m, "yt_1", "downloading")
 	m.Send("Authentication Required", "d", TypeWarning, nil, SendOptions{Event: "auth", JobID: "yt_1"})
 	m.Send("Disk Space Warning", "d", TypeWarning, nil, SendOptions{Event: "disk_warning"})
-	if !waitCalls(t, f, 3, 2*time.Second) {
-		t.Fatalf("only %v arrived — an edit-mode target must not coalesce its `auth`", methods(f.calls()))
-	}
+	m.Wait()
 
 	got := methods(f.calls())
 	if len(got) != 3 || got[0] != http.MethodPost || got[1] != http.MethodPost || got[2] != http.MethodPost {

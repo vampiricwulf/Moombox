@@ -1583,7 +1583,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".mp4", archiveSidecarExts)
 		}
 		if err == nil && fileExists(segments[0].ChatFile) {
-			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".chat.json", []string{chatRawSidecarSuffix})
+			err = o.setForeignFileAside(jobCtx.Job.ID, plain+".chat.json", []string{ChatRawSidecarSuffix})
 		}
 		if err != nil {
 			o.logger.Warn("the job's only part keeps its part name", "err", err, "jobID", jobCtx.Job.ID)
@@ -1790,7 +1790,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// archive's set-aside name, with its raw sidecar; when it cannot be
 		// renamed the copy is refused like a failed one, so the capture is
 		// kept in staging.
-		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{chatRawSidecarSuffix})
+		foreign := o.setForeignFileAside(jobCtx.Job.ID, chatDst, []string{ChatRawSidecarSuffix})
 		// A chat still at the name is the job's own, and the raw sidecar
 		// beside it is that chat's: both are replaced.
 		ownChat := foreign == nil && fileExists(chatDst)
@@ -1828,7 +1828,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		// could not follow): it is set aside first, and when it cannot be the
 		// copy is refused like a failed one.
 		if _, err := os.Stat(rawSrc); err == nil && foreign == nil {
-			rawDst := filepath.Join(outputDir, filenameBase+chatRawSidecarSuffix)
+			rawDst := filepath.Join(outputDir, filenameBase+ChatRawSidecarSuffix)
 			var err error
 			if !ownChat {
 				err = o.setForeignFileAside(jobCtx.Job.ID, rawDst, nil)
@@ -1848,7 +1848,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	// Atomic write via tmp+rename: a crash mid-write would otherwise leave a
 	// truncated .description file with the DB row pointing at it.
 	if jobCtx.Job.Description != "" {
-		descPath := filepath.Join(outputDir, filenameBase+".description")
+		descPath := filepath.Join(outputDir, filenameBase+DescriptionSidecarSuffix)
 		if err := writeDescriptionAtomic(descPath, jobCtx.Job.Description); err != nil {
 			o.logger.Warn("failed to save description", "err", err)
 		} else {
@@ -1860,7 +1860,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 	// live, as "thumbnail.*"; a YouTube capture's early copy has its own name,
 	// startThumbnailFile, and is only the fallback further down).
 	thumbnailSaved := false
-	for _, ext := range []string{".jpg", ".webp", ".png"} {
+	for _, ext := range ThumbnailExts {
 		stagingThumb := filepath.Join(jobCtx.StagingDir, "thumbnail"+ext)
 		if _, err := os.Stat(stagingThumb); err == nil {
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)

@@ -9,7 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // importAnsweredWith runs A Z's upload against a stand-in server that answers
@@ -44,7 +48,7 @@ func importAnsweredWith(t *testing.T, a *App, status int, body string) importRes
 // "Imported: <title>".
 //
 // Mutants: importFileCmd not decoding import.note (the plain line); Warn not
-// set from import.renamed or from import.unpairedChats, or the update
+// set from import.renamed, import.unpairedChats or import.skipped, or the update
 // ignoring it (green for a warning); setFeedback in place of
 // setWrappedFeedback (the note is cut to one row).
 func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
@@ -59,6 +63,8 @@ func TestImportOutcomeReachesTheFeedbackLine(t *testing.T) {
 			severitySuccess, "kept the identical copy"},
 		{"a chat left out", `{"title":"Stream","import":{"unpairedChats":["B.chat.json"],"note":"left out B.chat.json: a chat is imported only beside the video its name matches"}}`,
 			severityWarning, "left out B.chat.json"},
+		{"an entry left out", `{"title":"Stream","import":{"skipped":["notes.txt"],"note":"left out notes.txt: not named after the recording"}}`,
+			severityWarning, "left out notes.txt"},
 		{"plain", `{"title":"Stream","import":{}}`, severityUnstated, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,5 +102,83 @@ func TestImportRefusalReasonReachesTheDialog(t *testing.T) {
 	a.Update(importAnsweredWith(t, a, http.StatusBadRequest, `{"error":"`+reason+`"}`))
 	if a.importDlg.errorMsg != reason {
 		t.Errorf("dialog error %q, want %q", a.importDlg.errorMsg, reason)
+	}
+}
+
+// imports-5: after a refused import the metadata step's marked field takes
+// typing again — Enter blurred the input to start the import, and the
+// refusal must give the focus back, not leave a field marked "> " that
+// ignores every key until Tab.
+//
+// Mutant: SetError setting the step without refocusing the active field.
+func TestImportRefusalKeepsTheFieldTypeable(t *testing.T) {
+	for _, focus := range []int{0, 1} {
+		a := NewApp()
+		a.width, a.height = 100, 40
+		a.importDlg.SetSize(100, 40)
+		a.importDlg.visible, a.importDlg.step = true, importStepMeta
+		a.importDlg.filePath = "a.zip"
+		a.importDlg.title, a.importDlg.channel = "Old", "Chan"
+		a.importDlg.metaFocus = focus
+		a.importDlg.syncToTextInput()
+
+		a.Update(keyMsg("enter"))
+		if a.importDlg.step != importStepImporting {
+			t.Fatalf("focus %d: Enter left the step at %v", focus, a.importDlg.step)
+		}
+		a.Update(importAnsweredWith(t, a, http.StatusBadRequest, `{"error":"refused"}`))
+		a.Update(keyMsg("x"))
+		got := a.importDlg.title
+		want := "Oldx"
+		if focus == 1 {
+			got, want = a.importDlg.channel, "Chanx"
+		}
+		if got != want {
+			t.Errorf("focus %d: typed after a refusal, field = %q, want %q", focus, got, want)
+		}
+	}
+}
+
+// imports-3: an archive past the import's upload cap is refused before a
+// byte is sent — the TUI's request is chunked, so the server learns its size
+// only by spooling 500 MB of it — naming both sizes; a small one is sent.
+//
+// Mutant: importFileCmd opening and posting the file without the size check.
+func TestImportRefusesAnArchiveOverTheCapBeforeSending(t *testing.T) {
+	for _, tc := range []struct {
+		size int64
+		sent bool
+	}{
+		{constants.MaxImportUploadBytes + 1, false},
+		{1 << 10, true},
+	} {
+		var hits atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"x"}`)
+		}))
+		a := NewApp()
+		_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		a.SetWebPort(func() int { return port })
+		zipPath := filepath.Join(t.TempDir(), "big.zip")
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(tc.size); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		msg, _ := a.importFileCmd(zipPath)().(importResultMsg)
+		srv.Close()
+		if got := hits.Load() > 0; got != tc.sent {
+			t.Errorf("size %d: sent = %v, want %v (%+v)", tc.size, got, tc.sent, msg)
+		}
+		if !tc.sent && (!strings.Contains(msg.Err, "big.zip") || !strings.Contains(msg.Err, utils.FormatFileSize(constants.MaxImportUploadBytes))) {
+			t.Errorf("size %d: refusal %q does not name the file and the cap", tc.size, msg.Err)
+		}
 	}
 }

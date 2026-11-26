@@ -1071,6 +1071,50 @@ func TestJobDelete404(t *testing.T) {
 	}
 }
 
+// The operator's Delete leaves every YouTube job's history row, so a job
+// added by URL (which no monitor ever recorded in history) is held back from
+// re-detection once deleted, exactly as a monitor-created one is, and its row
+// shows under Orphaned (owner ruling R4-3). A Twitch job's delete writes no
+// row: only the Twitch monitor records those. Nor does an import placeholder's
+// (imp_ and eight hex digits): no monitor can find that ID again.
+//
+// Mutants: the route back on plain DeleteJob (no row, the stream is found
+// again); the Twitch early return dropped (a stray row keyed by the tw_ ID);
+// the video-ID shape check dropped (a stray row keyed by the imp_ ID).
+func TestJobDeleteLeavesAURLAddedYouTubeJobsHistoryRow(t *testing.T) {
+	f := newJobsFixture(t)
+	f.addJob(t, "urlAdded001", func(j *database.Job) {
+		j.Status = database.StatusUpcoming
+		j.ManuallyAdded = true
+	})
+	f.addJob(t, "tw_123456", func(j *database.Job) {
+		j.Platform = "twitch"
+		j.VideoID = "123456"
+		j.Status = database.StatusCancelled
+	})
+	f.addJob(t, "imp_0a1b2c3d", func(j *database.Job) {
+		j.Status = database.StatusFinished
+	})
+	for _, id := range []string{"urlAdded001", "tw_123456", "imp_0a1b2c3d"} {
+		if rec := doRequest(t, f.router, "DELETE", "/api/jobs/"+id, nil); rec.Code != http.StatusOK {
+			t.Fatalf("delete %s: want 200, got %d", id, rec.Code)
+		}
+		if got, _ := f.db.GetJob(id); got != nil {
+			t.Fatalf("delete %s: row still present", id)
+		}
+	}
+	if held, err := f.db.HasJobBlockingRedetection("urlAdded001"); err != nil || !held {
+		t.Errorf("HasJobBlockingRedetection(urlAdded001) = %v, %v; want true after the delete", held, err)
+	}
+	orphans, err := f.db.ListOrphanedHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 1 || orphans[0].VideoID != "urlAdded001" {
+		t.Errorf("orphaned history = %v, want only urlAdded001", orphans)
+	}
+}
+
 // --- POST /api/jobs (creation) — validation paths ---
 
 func TestJobCreateRejectsEmptyVideoIDAndURL(t *testing.T) {
@@ -1152,6 +1196,24 @@ func TestJobCreateRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+// A pasted Explorer "Copy as path" value is refused on both arms of the add
+// route, as every path setting is: nothing downstream takes the quotes off,
+// so the job would fail at mux after the whole download.
+// Mutant: dropping the shared output-directory check on either arm.
+func TestJobCreateRefusesAQuotedOutputDirectory(t *testing.T) {
+	f := newJobsFixture(t)
+	for _, body := range []map[string]any{
+		{"videoId": "abcd1234567", "outputDirectory": `"D:\Archives\VTuber"`},
+		{"platform": "twitch", "twitchType": TwitchListingType,
+			"url": "https://www.twitch.tv/somechannel/videos", "outputDirectory": `"/mnt/archive"`},
+	} {
+		rec := doRequest(t, f.router, "POST", "/api/jobs", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), config.PathRuleQuoted) {
+			t.Errorf("%v: want 400 naming the quotes, got %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // A ".." inside a folder name is not traversal: both arms of the add route
 // use the segment rule (config.PathHasTraversal) like every config path
 // field. Mutant: restoring strings.Contains(dir, "..") on either arm.
@@ -1164,7 +1226,7 @@ func TestJobCreateAcceptsDotsInsideAFolderName(t *testing.T) {
 			"url": "https://www.twitch.tv/somechannel/videos", "outputDirectory": dir},
 	} {
 		rec := doRequest(t, f.router, "POST", "/api/jobs", body)
-		if strings.Contains(rec.Body.String(), "path traversal") {
+		if strings.Contains(rec.Body.String(), config.PathRuleTraversal) {
 			t.Errorf("%v: refused as traversal: %d %s", body, rec.Code, rec.Body.String())
 		}
 	}

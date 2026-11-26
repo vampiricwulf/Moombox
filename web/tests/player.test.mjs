@@ -442,7 +442,8 @@ test("refreshing the job list mid-playback never re-selects the playing video", 
   assert.deepEqual(selections, [], "no re-selection");
 
   // An sl-change that arrives WHILE the option list is being rebuilt (the
-  // rebuild awaits the select) must be ignored, not treated as a user pick.
+  // rebuild awaits the select) carrying the value the rebuild writes back is
+  // the rebuild's own, not a user pick.
   let sawRead, release;
   const read = new Promise((r) => { sawRead = r; });
   const gate = new Promise((r) => { release = r; });
@@ -451,15 +452,149 @@ test("refreshing the job list mid-playback never re-selects the playing video", 
   const rebuilding = h.player.loadPlayerJobList();
   await read;
   await h.flush();
-  select.value = "j2";
   select.dispatchEvent(new h.window.Event("sl-change"));
   release();
   await rebuilding;
   await h.flush();
 
-  assert.deepEqual(selections, [], "a mid-rebuild sl-change is not a user pick");
+  assert.deepEqual(selections, [], "the rebuild's own sl-change is not a user pick");
   assert.equal(select.value, "j1");
   assert.equal(h.video.src, playingSrc);
+});
+
+// web-modules-1: a pick made inside the rebuild's option-mutation window (the
+// await on the select's updateComplete) used to be dropped, and the rebuild
+// then wrote back the value it had read before the pick.
+//
+// Mutants: return from the listener without keeping the pick; keep it but
+// never apply it after the write-back; apply a kept pick the new list lacks.
+for (const [name, rebuiltJobs, kept] of [
+  ["still listed", ["j1", "j2"], true],
+  ["gone from the new list", ["j1"], false],
+]) {
+  test(`a pick made while the picker writes its options is applied (${name})`, { skip }, async () => {
+    const j1 = finished("j1");
+    const h = harness.makePlayer({ jobs: [j1, finished("j2")], archived: [], watchState: {} });
+    const select = h.select();
+    await h.player.loadPlayerJobList();
+    await h.selectJob("j1");
+    select.value = "j1";
+
+    h.http.on("GET /api/jobs", () => rebuiltJobs.map((id) => finished(id)));
+    let sawRead, release;
+    const read = new Promise((r) => { sawRead = r; });
+    const gate = new Promise((r) => { release = r; });
+    Object.defineProperty(select, "updateComplete", { configurable: true, get() { sawRead(); return gate; } });
+    const rebuilding = h.player.loadPlayerJobList();
+    await read;
+    await h.flush();
+
+    // The operator picks j2 while the rebuild waits on the select.
+    select.value = "j2";
+    select.dispatchEvent(new h.window.Event("sl-change"));
+    release();
+    await rebuilding;
+    await h.flush();
+
+    const want = kept ? "j2" : "j1";
+    assert.equal(select.value, want, "the picker names the newest pick it still lists");
+    assert.equal(h.player.playerJob?.id, want, "and that recording plays");
+  });
+}
+
+// A pick kept inside a rebuild that is then superseded must not outlive a
+// later pick made outside any window: the next rebuild used to apply the
+// stale one over it. Mutant: drop the clear on a pick acted on directly.
+test("a pick kept by a superseded rebuild never overrides a later direct pick", { skip }, async () => {
+  const jobs = ["j1", "j2", "j3"].map((id) => finished(id));
+  const h = harness.makePlayer({ jobs, archived: [], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  select.value = "j1";
+
+  // Rebuild N parks inside its option-mutation window.
+  let sawRead, releaseN, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gateN = new Promise((r) => { releaseN = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gateN; },
+  });
+  const rebuildN = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  // Rebuild N+1 starts and waits on its fetch.
+  let releaseN1;
+  const gateN1 = new Promise((r) => { releaseN1 = r; });
+  h.http.on("GET /api/jobs/archived", () => gateN1);
+  const rebuildN1 = h.player.loadPlayerJobList();
+  await h.flush();
+
+  // The operator picks j2 inside N's window: kept for later.
+  select.value = "j2";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  gated = false;
+  releaseN();
+  await rebuildN;
+  await h.flush();
+
+  // N was superseded; outside any window the operator picks j3, and it loads.
+  select.value = "j3";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  await h.flush();
+  assert.equal(h.player.playerJob?.id, "j3");
+
+  releaseN1([]);
+  await rebuildN1;
+  await h.flush();
+  assert.equal(select.value, "j3", "the picker keeps the newest pick");
+  assert.equal(h.player.playerJob?.id, "j3", "and the stale kept pick did not load over it");
+});
+
+// The same kept pick when the newer rebuild fails outright: it is applied then
+// from the options shown, not left for a rebuild minutes later. Mutant: drop
+// the catch-path apply.
+test("a pick kept by a superseded rebuild is applied when the newer rebuild fails", { skip }, async () => {
+  const jobs = ["j1", "j2"].map((id) => finished(id));
+  const h = harness.makePlayer({ jobs, archived: [], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  select.value = "j1";
+
+  let sawRead, releaseN, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gateN = new Promise((r) => { releaseN = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gateN; },
+  });
+  const rebuildN = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  let failN1;
+  const gateN1 = new Promise((_, reject) => { failN1 = reject; });
+  h.http.on("GET /api/jobs/archived", () => gateN1);
+  const rebuildN1 = h.player.loadPlayerJobList();
+  await h.flush();
+
+  select.value = "j2";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  gated = false;
+  releaseN();
+  await rebuildN;
+  await h.flush();
+  assert.equal(h.player.playerJob?.id, "j1", "superseded: nothing applied yet");
+
+  failN1(new TypeError("Failed to fetch"));
+  await rebuildN1;
+  await h.flush();
+  assert.equal(select.value, "j2");
+  assert.equal(h.player.playerJob?.id, "j2", "the kept pick loaded once the newest rebuild failed");
+  assert.equal(h.player._pickDuringRebuild, null);
 });
 
 // ── 10. Seek event order (Phases 3+4 fix wave, F1) ──────────────────────────
@@ -547,6 +682,40 @@ test("a superseded job-list rebuild does not restore its stale selection", { ski
   assert.equal(select.value, "j2", "the superseded rebuild left the selection alone");
   assert.equal(h.player._rebuildsActive, 0, "both rebuilds left the mutation window");
 });
+
+for (const [name, rebuiltJobs] of [
+  ["still listed", ["j1", "j2"]],
+  ["deleted by the rebuild", ["j2"]],
+]) {
+  test(`a pick made while a single rebuild is fetching is kept (old recording ${name})`, { skip }, async () => {
+    const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], archived: [], watchState: {} });
+    const select = h.select();
+    await h.player.loadPlayerJobList();
+    await h.selectJob("j1");
+    select.value = "j1";
+
+    // The rebuild a WebSocket job update fires: its archived list answers
+    // only when released, and its active list no longer has j1 in the
+    // deletion case.
+    h.http.on("GET /api/jobs", () => rebuiltJobs.map((id) => finished(id)));
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    h.http.on("GET /api/jobs/archived", () => gate);
+    const rebuild = h.player.loadPlayerJobList();
+    await h.flush();
+
+    // Meanwhile the operator picks j2, and it loads.
+    select.value = "j2";
+    await h.selectJob("j2");
+
+    release([]);
+    await rebuild;
+    await h.flush();
+    assert.equal(select.value, "j2", "the picker still names the recording that plays");
+    assert.equal(h.player.playerJob?.id, "j2", "the rebuild did not tear down the new pick");
+    assert.equal(h.player._rebuildsActive, 0);
+  });
+}
 
 test("a job selection that throws is logged and hands focus back to the player", { skip }, async () => {
   const h = harness.makePlayer({ jobs: [finished("j1"), finished("j2")], watchState: {} });
@@ -768,6 +937,47 @@ test("a message is consumed a tick early and the animation delay holds its entry
   assert.equal(anim.currentTime, 0, "and not advanced into the flight");
   assert.equal(anim.options.fill, "both", "the untransformed first keyframe holds through the delay");
   assert.equal(anim.el.style.left, "1280px", "parked at the right edge for the whole delay");
+});
+
+// A buffering stall fires no `pause`, so the overlay's animations, on the
+// document clock, flew on over a frozen picture. `waiting` holds them and
+// `playing` lets them go; a message placed during the stall starts held; a
+// paused video is never resumed by either event.
+//
+// Mutants: drop the waiting or the playing listener; leave _nicoStalled out
+// of ctx.paused.
+test("the overlay holds its flight while the video stalls to buffer", { skip }, async () => {
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json" })],
+    watchState: {},
+    chat: chatOf([msg(5000, "first"), msg(6000, "during the stall")]),
+    geom: { overlay: { w: 1280, h: 408 }, rowH: 24, msgW: 200 },
+    storage: { "player-sidebar-toggle": "false" },
+  });
+  await h.selectJob("j1");
+  h.video.paused = false;
+  h.tick(4100);
+  const first = h.anims.at(-1);
+  assert.equal(first.state, "running");
+
+  h.video.dispatchEvent(new h.window.Event("waiting"));
+  assert.equal(first.state, "paused", "a stall holds the flight");
+
+  // A tick during the wait (a re-anchor, the seed) places its message held.
+  h.tick(5100);
+  const second = h.anims.at(-1);
+  assert.notEqual(second, first);
+  assert.equal(second.state, "paused", "placed during the stall, so it starts held");
+
+  h.video.dispatchEvent(new h.window.Event("playing"));
+  assert.deepEqual([first.state, second.state], ["running", "running"], "the picture moves again");
+
+  // Paused by the operator: a wait and its end resume nothing.
+  h.video.paused = true;
+  h.video.dispatchEvent(new h.window.Event("pause"));
+  h.video.dispatchEvent(new h.window.Event("waiting"));
+  h.video.dispatchEvent(new h.window.Event("playing"));
+  assert.deepEqual([first.state, second.state], ["paused", "paused"], "a paused video stays held");
 });
 
 test("a message first seen after it entered starts that far into its flight", { skip }, async () => {

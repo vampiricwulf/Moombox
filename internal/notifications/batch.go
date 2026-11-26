@@ -72,9 +72,10 @@ type batcher struct {
 	timer batchTimer
 	// mode is the target's delivery mode (lifecycle.go), set at construction
 	// by newTargetQueue and rebound by applyTargets through setMode on every
-	// config load. ModeEdit turns this whole stage off for the target: an
-	// edited message is ONE job's embed rewritten in place, so it can never
-	// share a POST with another job's. The zero value reads as ModeSeparate,
+	// config load. ModeEdit keeps lifecycle events out of the window (an edited
+	// message is ONE job's embed rewritten in place, so it can never share a
+	// POST with another job's); the per-job auth alert still coalesces
+	// (batchableIn). The zero value reads as ModeSeparate,
 	// which is what a bare newBatcher gets.
 	mode string
 
@@ -103,20 +104,15 @@ func newBatcher(window time.Duration, clock batchClock, emit emitFunc, logger in
 // was closed. mention/mentionAllowed travel with the embed so a flush can
 // decide the message's single ping.
 func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
-	// Edit mode gates the whole stage, as the first thing Add does: an edited
-	// message is ONE job's embed rewritten in place, so it can never share a
-	// POST with another job's. Everything below is written as if the target is
-	// separate-mode, which past this point it is — save for a flip landing in the
-	// gap before the append, which the append's own hold re-checks.
+	// The mode is read first: on an edit-mode target a lifecycle event is ONE
+	// job's embed rewritten in place, so it can never share a POST with
+	// another job's, and goes out at once (batchableIn). A flip landing in the
+	// gap before the append is re-checked under the append's own hold.
 	b.mu.Lock()
-	editMode := b.mode == ModeEdit
+	mode := b.mode
 	b.mu.Unlock()
-	if editMode {
-		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
-		return
-	}
 
-	if !isBatchable(e.Opts) {
+	if !batchableIn(mode, e.Opts) {
 		// Deliberately AHEAD of the embeds already coalesced: an error must not
 		// wait 5 s behind a backfill sweep. Ahead of OTHER jobs' embeds only,
 		// though: when the window holds one this embed follows — the same
@@ -137,11 +133,11 @@ func (b *batcher) Add(e Embed, mention string, allowed *AllowedMentions) {
 		b.betweenModeCheckAndAppend()
 	}
 	b.mu.Lock()
-	if b.mode == ModeEdit {
+	if !batchableIn(b.mode, e.Opts) {
 		// Re-checked under the hold that appends: a setMode(ModeEdit) landing
 		// between the check above and this lock has already released the
-		// window, so appending here would arm a fresh one on an edit-mode
-		// target and hold this embed the full 5 s. Emit it at once instead,
+		// window, so appending a lifecycle embed here would arm a fresh one on
+		// an edit-mode target and hold it the full 5 s. Emit it at once instead,
 		// with mu released first (emit is never called under it).
 		b.mu.Unlock()
 		b.emit(Message{Embeds: []Embed{e}, Mention: mention, MentionAllowed: allowed})
@@ -228,9 +224,10 @@ func (b *batcher) Stop() { b.Flush() }
 // window goes out through the already-rebound dispatch and becomes that job's
 // lifecycle message; a multi-embed window posts plain (dispatchOne's
 // single-embed guard) — the same reason applyTargets flushes a retired
-// target's window rather than letting it evaporate. Releasing the window on
-// the way back to separate mode costs nothing (it is empty, because edit mode
-// never opened one) and keeps the rule one sentence long.
+// target's window rather than letting it evaporate. On the way back to
+// separate mode the window can hold only per-job auth alerts (the one kind an
+// edit-mode target coalesces), and they go out as the plain posts they always
+// are; releasing it on every flip keeps the rule one sentence long.
 //
 // The window and the mode move under ONE hold, and the emit happens after it:
 // an Add landing between a flush and a later swap would otherwise join a
@@ -263,6 +260,16 @@ func (b *batcher) setMode(mode string) {
 	for _, embeds := range splitMessages(pending) {
 		b.emit(Message{Embeds: embeds, Mention: mention, MentionAllowed: allowed})
 	}
+}
+
+// batchableIn is isBatchable for a target in mode: on an edit-mode target a
+// lifecycle event (found, added) never coalesces, because it IS the job's one
+// edited message and cannot share a POST with another job's. The per-job
+// "Authentication Required" is never a lifecycle message, so it still folds
+// into the window there (owner ruling R4-10): one dead cookie parking N jobs
+// is one post and one ping on every target.
+func batchableIn(mode string, opts SendOptions) bool {
+	return isBatchable(opts) && !(mode == ModeEdit && lifecycleEvents[opts.Event])
 }
 
 // isBatchable reports whether a send coalesces.

@@ -90,20 +90,37 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func(), rl
 		if edit {
 			target = byID(postedID)
 		}
+		// replaced is the entry this save overwrites, -1 for an add.
+		replaced := -1
 		switch {
 		case target >= 0 && held >= 0 && held != target:
 			mu.Unlock()
 			jsonError(rw, fmt.Sprintf("channel %s is %s, which another entry already has: remove this one instead", newChannels[target].ID, newChannels[held].ID), http.StatusConflict)
 			return
 		case target >= 0:
-			newChannels[target] = channel
+			replaced = target
 		case held >= 0 && !edit:
 			mu.Unlock()
 			jsonError(rw, "channel "+newChannels[held].ID+" is already configured", http.StatusConflict)
 			return
 		case held >= 0:
-			newChannels[held] = channel
-		default:
+			replaced = held
+		}
+		// The path rules for the output directory, against the entry this
+		// save replaces: a stored override the operator did not change
+		// passes, so the enable toggle never trips on one.
+		storedDir := ""
+		if replaced >= 0 {
+			storedDir = newChannels[replaced].OutputDirectory
+		}
+		if rule := config.OutputDirOverrideRule(channel.OutputDirectory, storedDir); rule != "" {
+			mu.Unlock()
+			jsonError(rw, "Output directory "+rule, http.StatusBadRequest)
+			return
+		}
+		if replaced >= 0 {
+			newChannels[replaced] = channel
+		} else {
 			newChannels = append(newChannels, channel)
 		}
 		cfg.Channels = newChannels

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 
@@ -270,6 +271,9 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	if a.OnImportFile != nil {
 		cb := a.OnImportFile
 		return safeCmdOr(func() tea.Msg {
+			if refusal := importTooLarge(path); refusal != "" {
+				return importResultMsg{Err: refusal}
+			}
 			importedTitle, err := cb(path, title, channel)
 			if err != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -279,6 +283,12 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	}
 
 	return safeCmdOr(func() tea.Msg {
+		// A file over the server's cap is refused here, before a byte is
+		// sent: the request is chunked (no Content-Length), so the server
+		// learns its size only by spooling 500 MB of it to disk.
+		if refusal := importTooLarge(path); refusal != "" {
+			return importResultMsg{Err: refusal}
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -315,12 +325,13 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		// (importOutcome, internal/web/routes/import_routes.go): a
 		// byte-identical file re-adopted, or a different one left alone
 		// while this archive took " (2)" — and any chat left out for
-		// matching no video's name.
+		// matching no video's name, and any other entry it did not keep.
 		var result struct {
 			Title  string `json:"title"`
 			Import struct {
 				Renamed       []json.RawMessage `json:"renamed"`
 				UnpairedChats []string          `json:"unpairedChats"`
+				Skipped       []string          `json:"skipped"`
 				Note          string            `json:"note"`
 			} `json:"import"`
 		}
@@ -338,7 +349,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		return importResultMsg{
 			Title: importedTitle,
 			Note:  result.Import.Note,
-			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0,
+			Warn:  len(result.Import.Renamed) > 0 || len(result.Import.UnpairedChats) > 0 || len(result.Import.Skipped) > 0,
 		}
 	}, func(text string) tea.Msg { return importResultMsg{Err: text} })
 }
@@ -803,6 +814,19 @@ func releaseOpener(goos string, p opener) {
 		}()
 		_ = p.Wait()
 	}()
+}
+
+// importTooLarge is the refusal of an archive past the import's upload cap
+// (constants.MaxImportUploadBytes, the server's own), naming both sizes; ""
+// for one within it, or one that cannot be read — the open after it reports
+// that.
+func importTooLarge(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() <= constants.MaxImportUploadBytes {
+		return ""
+	}
+	return fmt.Sprintf("Import refused: %s is %s; an archive import takes at most %s",
+		filepath.Base(path), utils.FormatFileSize(info.Size()), utils.FormatFileSize(constants.MaxImportUploadBytes))
 }
 
 // newImportRequest builds the archive-import POST. The metadata headers are

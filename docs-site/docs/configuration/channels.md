@@ -343,6 +343,10 @@ Edge cases:
   started or finished. See
   [`paths.output_directory`](paths-and-logs.md#pathsoutput_directory).
 - A relative path is resolved against Moombox's working directory.
+- A path wrapped in quotes (as Explorer's *Copy as path* produces) or with a
+  `..` segment is refused in both UIs, as the [path settings](paths-and-logs.md)
+  are: remove the quotes. A value saved before this rule keeps working and
+  does not block other edits of the channel.
 - The disk-space alerts and the backlog's disk gate measure the **global**
   output directory's volume (and the staging directory's, when that is a
   different one), not a per-channel folder on another drive.
@@ -470,15 +474,18 @@ twitch_vod_backlog = true
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `false` | `true` or `false` | Next Twitch live check (a channel not yet listed since Moombox started is listed then; after that, hourly) | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
+| `false` | `true` or `false` | Next Twitch live check (a channel not yet listed since Moombox started, or since this was turned back on, is listed then; after that, hourly) | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
 
 Archive the channel's new clips. Once an hour, as part of the Twitch live
 check, Moombox lists the channel's clips and queues each one it has no job for yet as a `Queued` backlog job,
 paced by [archive slots](#channelsarchive_slots).
 
-- The first listing after Moombox starts reaches back one week. Later ones
-  reach back a day; after a longer gap in listings (an outage, the machine
-  asleep) they reach back a week, then a month, never further.
+- The first listing after Moombox starts reaches back one week, and so does
+  the first one after you turn this back on, or enable or re-add the
+  channel: clips made while it was off are not caught up beyond that week.
+  Later listings reach back a day; after a longer gap in listings (an
+  outage, the machine asleep) they reach back a week, then a month, never
+  further.
 - Clips are not filtered by the channel's [terms](#channelsterms).
 - A clip you paste into **Add video** always works, whether this is on or
   not.

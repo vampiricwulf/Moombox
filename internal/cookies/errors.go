@@ -80,6 +80,23 @@ var (
 	// wrong advice. HTTP consumers can map to 503.
 	ErrServiceStopped = errors.New("cookie service stopped")
 
+	// ErrNoDisplay is returned by StartSetup on Linux when neither DISPLAY
+	// nor WAYLAND_DISPLAY is set (owner ruling R4-7): the browser login opens
+	// a window, and without a display Firefox exits at once (the UI then
+	// said a window had opened, and Finish answered "no login detected")
+	// and Chromium never answers CDP. Also true of a desktop host where
+	// Moombox runs as a service without those variables. The sentence names
+	// the two browser-free routes; both UIs show it verbatim.
+	ErrNoDisplay = errors.New("this host has no display for a browser window; use Import cookies.txt or Read a Firefox profile instead")
+
+	// ErrBrowserExitedEarly is returned by StartSetup's Chromium-family
+	// launch when the browser (every process of its Job Object or process
+	// group, not just the one Moombox spawned) is gone before its CDP
+	// endpoint answered. It replaces a 15 s wait ending in a bare CDP
+	// timeout. Never decided from an exit code: a launcher's exit is not the
+	// browser's.
+	ErrBrowserExitedEarly = errors.New("the browser exited before it opened")
+
 	// ErrSetupCancelled is returned by FinishSetup after CancelSetup has
 	// flipped the cancelled flag — the setup state is still partially
 	// populated but the user explicitly aborted.

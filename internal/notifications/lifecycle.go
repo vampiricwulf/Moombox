@@ -777,9 +777,9 @@ func (m *Manager) planLifecycle(t notificationTarget, opts SendOptions) lifecycl
 // is single-attempt, because the owner's 15 s force-exit cap must not be spent
 // on one lifecycle edit's retry ladder.
 func (m *Manager) dispatchOne(t notificationTarget, msg Message, once bool) error {
-	// A batched message is several jobs' embeds in one POST and by ruling
-	// never belongs to an edit-mode target; guard anyway, because a body with
-	// ten embeds cannot be one job's lifecycle message.
+	// A batched message is several embeds in one POST: on an edit-mode target
+	// only per-job auth alarms batch (batchableIn), and a body with more than
+	// one embed can never be one job's lifecycle message, so it posts plain.
 	if len(msg.Embeds) != 1 {
 		return sendPlain(t.sender, msg, once)
 	}

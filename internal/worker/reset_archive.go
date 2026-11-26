@@ -74,7 +74,7 @@ const asideMarkerPrefix = "moombox-owner "
 // sidecar, the description and the thumbnail. They go wherever the archive
 // goes: a live chat cannot be fetched again, and the new recording's finalize
 // writes its own at the same names.
-var archiveSidecarExts = []string{".chat.json", chatRawSidecarSuffix, ".description", ".jpg", ".webp", ".png"}
+var archiveSidecarExts = append([]string{".chat.json", ChatRawSidecarSuffix, DescriptionSidecarSuffix}, ThumbnailExts...)
 
 // archiveSetAsideByReset returns the single-file archive a reset of job sets
 // aside, "" when there is none: the file output_file names (only a finalize
@@ -148,7 +148,7 @@ var renameArchive = utils.ReplaceFile
 // recording shares ("<stem>.restart-<ts>").
 func asideBase(path string) string {
 	lower := strings.ToLower(path)
-	for _, ext := range []string{".chat.json", chatRawSidecarSuffix} {
+	for _, ext := range []string{".chat.json", ChatRawSidecarSuffix} {
 		if strings.HasSuffix(lower, ext) {
 			return path[:len(path)-len(ext)]
 		}

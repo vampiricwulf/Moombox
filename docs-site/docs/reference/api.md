@@ -123,7 +123,7 @@ direct loopback connection (see
 | `POST` | `/api/auth/login` | Body `{password}`. Sets the session and client-token cookies. |
 | `POST` | `/api/auth/logout` | Ends the session, revokes this browser's client token, clears both cookies. Open dashboards reconnect their live connection, and one that is no longer signed in is refused. |
 | `POST` | `/api/auth/set-password` | Body `{currentPassword, newPassword}`. Set or change the password (8–128 characters). Needs a logged-in session or a local/private address; the first password needs a session or this machine. |
-| `POST` | `/api/auth/remove-password` | Body `{currentPassword}`. Removes the password and resets access to `localhost`. |
+| `POST` | `/api/auth/remove-password` | Body `{currentPassword}`. Removes the password. From `external`/`public` it also resets access to `localhost` and answers `networkAccessChanged: true`; `lan` and `localhost` are left as they are. |
 | `GET` | `/api/client-tokens` | List remembered clients: `id`, `tokenPrefix`, `label`, `createdAt`, `lastUsedAt`, shortened `lastIp`. |
 | `DELETE` | `/api/client-tokens/{id}` | Revoke one remembered client (`{id}` is the token's ID). |
 
@@ -134,7 +134,7 @@ direct loopback connection (see
 | `GET` | `/api/jobs` | Active (not archived) jobs. Optional `?offset=` and `?limit=` (1–1000) switch to `{data, pagination}`. |
 | `GET` | `/api/jobs/archived` | Archived jobs (`Finished` jobs older than [`monitors.hide_finished_age_days`](../configuration/monitors.md#monitorshide_finished_age_days)); same pagination. |
 | `GET` | `/api/jobs/{id}` | One job, with the staging facts the details dialog uses. |
-| `POST` | `/api/jobs` | Add a job (Shared). Body at minimum `{url}`: a YouTube video or stream, or a Twitch channel, VOD, clip, video list or collection (a list queues one VOD job per video). Optional fields include `outputDirectory`, `selectedVideoItag`/`selectedAudioItag`, `startTime`/`endTime` and `quality_preference` (Twitch). |
+| `POST` | `/api/jobs` | Add a job (Shared). Body at minimum `{url}`: a YouTube video or stream, or a Twitch channel, VOD, clip, video list or collection (a list queues one VOD job per video). Optional fields include `outputDirectory`, `selectedVideoItag`/`selectedAudioItag`, `startTime`/`endTime` and `quality_preference` (Twitch). `outputDirectory` follows the path rules of `paths.output_directory`: a value wrapped in quotes or with a `..` segment is refused with 400. |
 | `POST` | `/api/jobs/{id}/cancel` | Cancel an active job. |
 | `POST` | `/api/jobs/{id}/resume` | Resume a YouTube job from its staging files (from `Error`, `Cancelled`, `COOKIES?`, or `Finished` with an incomplete tail). |
 | `POST` | `/api/jobs/{id}/retry` | Same as `resume`. |
@@ -143,7 +143,7 @@ direct loopback connection (see
 | `POST` | `/api/jobs/{id}/mux` | Mux what is already in staging without downloading again. |
 | `POST` | `/api/jobs/{id}/recover-asides` | Mux the recordings set aside by a mid-stream restart into their own files. |
 | `POST` | `/api/jobs/{id}/open-folder` | Local. Open the job's folder in Explorer (Windows) or the desktop file manager (Linux). |
-| `DELETE` | `/api/jobs/{id}` | Delete the job's row (an active job is cancelled first). Files stay on disk and show up as orphaned. |
+| `DELETE` | `/api/jobs/{id}` | Delete the job's row (an active job is cancelled first). Files stay on disk and show up as orphaned. A YouTube job leaves a processing-history entry, so the monitors do not find or archive the video again (live or upcoming streams included) until the entry is removed under Orphaned. |
 | `GET` | `/api/jobs/{id}/logs` | The job's own log lines. |
 | `GET` | `/api/formats/{videoId}` | Shared. Available formats for an 11-character YouTube video ID. Refused when started by another site's page. |
 
@@ -184,7 +184,7 @@ direct loopback connection (see
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/status` | Version, uptime, memory, disk, cookie status per platform, next monitor checks, per-channel health, BotGuard sidecar health, pending update, admission holds. |
+| `GET` | `/api/status` | Version, uptime, memory, disk, cookie status per platform, next monitor checks, per-channel health, BotGuard sidecar health, pending update, admission holds, the archive import's upload limit in bytes (`importMaxBytes`). |
 | `GET` | `/api/stats` | The figures on the Stats tab (`disk`, `storage`, `activity`), plus `twitchHints`, which only the API shows: `hits` and `misses` counters, since Moombox started, of Twitch jobs that reused the stream details the Twitch monitor had just fetched (a hit) or had to ask Twitch again (a miss). Hits that stay at zero while the monitor keeps finding Twitch broadcasts mean every Twitch job is making that extra request. |
 | `GET` | `/api/logs` | Recent log lines. |
 | `POST` | `/api/monitors/check-now` | Poll all monitors now (once per 30 s). |
@@ -224,7 +224,7 @@ direct loopback connection (see
 |---|---|---|
 | `GET` | `/api/files/orphaned` | Output files and staging folders no job uses. |
 | `DELETE` | `/api/files/orphaned` | Body `{paths:[…]}`. Delete them. |
-| `GET` | `/api/history/orphaned` | History rows with no job, which stop a video being discovered again. |
+| `GET` | `/api/history/orphaned` | History rows with no job, which stop a video being discovered again. A deleted YouTube job leaves one. |
 | `DELETE` | `/api/history/orphaned` | Body `{videoIds:[…]}`. Remove them so the videos can be found again. A row whose video has a job by now is kept; `removed` in the answer is the number of rows removed. |
 | `POST` | `/api/import` | Upload a zip archive to import as a job (5 per minute). |
 
@@ -298,7 +298,7 @@ dashboard.
 | `disk_status` | `{free, total, usedPct, warnLevel}` | A disk-space reading |
 | `update_available` | Release info | A newer release is found |
 | `update_cleared` | `{tagName}` | The pending release was skipped or withdrawn |
-| `status_changed` | None (`null`) | Cookie authentication, a re-login flag or the BotGuard sidecar's health changed. Read `GET /api/status` again. |
+| `status_changed` | None (`null`) | Cookie authentication, a re-login flag, the BotGuard sidecar's health or the active cookie platforms (a Settings save) changed. Read `GET /api/status` again. |
 | `pong` | — | Answer to `ping` |
 
 ## Related
