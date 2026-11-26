@@ -106,25 +106,11 @@ const parserArmRetryInterval = time.Hour
 
 // parserArmState is one channel's run of parser-failure-arm stops: how many
 // scans in a row the arm stopped each tab, and, once any tab reaches two,
-// when the sweep may queue the channel again. windowDays and withMembership
-// are what the stopped scan ran with: a sweep that asks for more (a widened
-// window, membership newly eligible) is new work and is not held back. In
-// memory only: a restart forgets it and the first scan after boot runs at
-// once.
+// when the sweep may queue the channel again. In memory only: a restart
+// forgets it and the first scan after boot runs at once.
 type parserArmState struct {
-	fails          map[string]int
-	retryAt        time.Time
-	windowDays     int
-	withMembership bool
-}
-
-// holds reports whether the back-off still holds ref's next scan at now: the
-// retry time has not come and ref asks for nothing the stopped scan lacked.
-func (st *parserArmState) holds(ref ChannelRef, now time.Time) bool {
-	if st == nil || !now.Before(st.retryAt) {
-		return false
-	}
-	return ref.WindowDays <= st.windowDays && (st.withMembership || !ref.WithMembership)
+	fails   map[string]int
+	retryAt time.Time
 }
 
 // TabPageFetchFunc fetches ONE page of a channel tab ("videos", "streams",
@@ -523,8 +509,7 @@ func (bw *BackfillWorker) noteParserArm(ref ChannelRef, err error) bool {
 		return false
 	}
 	prev := bw.parserArm[chID]
-	st := &parserArmState{fails: make(map[string]int, len(tabs)),
-		windowDays: ref.WindowDays, withMembership: ref.WithMembership}
+	st := &parserArmState{fails: make(map[string]int, len(tabs))}
 	repeated := false
 	for _, tab := range tabs {
 		n := 1
@@ -627,11 +612,10 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 		if force {
 			// The manual re-run is the operator asking now.
 			delete(bw.parserArm, ref.ChID)
-		} else if bw.parserArm[ref.ChID].holds(ref, bw.now()) {
+		} else if st := bw.parserArm[ref.ChID]; st != nil && bw.now().Before(st.retryAt) {
 			// The parser-failure arm stopped the same tab twice running:
 			// the channel still needs its backfill, and its error state is
-			// still up, but the next attempt waits (parserArmRetryInterval)
-			// unless the config now asks for a wider or membership scan.
+			// still up, but the next attempt waits (parserArmRetryInterval).
 			continue
 		}
 		if !force {
