@@ -33,20 +33,59 @@ import (
 // the ordinary finalize (muxAndFinalize: stream copy, thumbnail, metadata,
 // Finished). No chat is captured: a clip has none.
 
-// RecordPastedClip enters a clip row an add path just created (POST
-// /api/jobs, `moombox add`) in the processing history, as the monitor's
-// OnClipFound does for the clips its sweep finds. The sweep of a channel
-// whose twitch_archive_clips is on skips a clip whose job ID is in the history or
-// is a job now (TwitchMonitor.sweepClips); a pasted clip was only the
-// second, so once its Finished row was deleted the next sweep whose window
-// still held it archived it again — the dedupe by slug that archives a clip
-// once held for the monitor's clips only. A row of any other kind is left
-// out of the history, as every other manual add is.
-func RecordPastedClip(db *database.Database, job *database.Job) error {
-	if !jobfilter.IsClipJob(job) {
+// RecordManualTwitchAdd enters a Twitch row an add path just created (POST
+// /api/jobs, `moombox add`) in the processing history, as the monitors do
+// for the rows they create, when its job ID is a key a Twitch monitor path
+// reads there (owner ruling RV-3):
+//
+//   - a clip, "tw_clip_<slug>": the clip sweep of a channel whose
+//     twitch_archive_clips is on skips a clip whose job ID is in the history
+//     or is a job now (TwitchMonitor.sweepClips);
+//   - a VOD, "tw_v<id>": the VOD backlog skips one in the history
+//     (QueueTwitchVideos with SkipHistory);
+//   - a live capture of a broadcast Twitch already named, "tw_<stream id>":
+//     the live monitor skips a broadcast in the history
+//     (TwitchMonitor.processStreamInfo).
+//
+// Each was only "a job now" before, so once the operator deleted the row the
+// next sweep, listing or live check archived it again, and the Delete left
+// nothing under Orphaned History Entries to say so or to remove. The row
+// written here is that entry (a Twitch delete writes none of its own,
+// DeleteJobLeavingHistory).
+//
+// A live add of a channel that is not live yet is left out:
+// "tw_manual_<login>_<n>" (the route) and the bare login (the CLI) are keys
+// no monitor reads, so a row under one would hold nothing back.
+func RecordManualTwitchAdd(db *database.Database, job *database.Job) error {
+	if !manualTwitchAddIsAMonitorKey(job) {
 		return nil
 	}
 	return db.AddToHistory(job.ID)
+}
+
+// manualTwitchAddIsAMonitorKey reports whether job's ID is one a Twitch
+// monitor path looks up in the processing history (RecordManualTwitchAdd).
+func manualTwitchAddIsAMonitorKey(job *database.Job) bool {
+	if job == nil || job.Platform != "twitch" {
+		return false
+	}
+	if jobfilter.IsClipJob(job) {
+		return true
+	}
+	if id, ok := twitch.VodIDFromJobID(job.ID); ok {
+		return id != ""
+	}
+	// twitch.BuildJobID's live shape: "tw_" and the stream's numeric ID.
+	stream, ok := strings.CutPrefix(job.ID, "tw_")
+	if !ok || stream == "" {
+		return false
+	}
+	for _, r := range stream {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // TwitchClipDownload is what stream processing hands the clip download: the

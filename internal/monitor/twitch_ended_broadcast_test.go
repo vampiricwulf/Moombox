@@ -107,14 +107,17 @@ func TestAutoRetryRefusesTheLatchedRow(t *testing.T) {
 // broadcast live offers OnStreamRecover the Error row its park reason marks —
 // under a reworded error, the text routing nothing — and offers neither the
 // row whose budget is spent, the row that downloaded a segment, the
-// ended-offline row (the operator's Mux), nor a row with no reason under
+// ended-offline row (the operator's Mux), nor a row the operator added by URL
+// (in the history since owner ruling RV-3), nor a row with no reason under
 // that same reworded text, nor one with the flap's frozen text and no reason:
 // the one-release text fallback is gone, and a row from before the reason
 // existed is given it when the database is opened.
 //
 // Mutants: TwitchAutoRetryPending keyed on the error text (the reworded
 // twitch_offline row is not offered); the reason read without the budget or
-// the segment term; the text read again (the bare-text row is offered).
+// the segment term; the text read again (the bare-text row is offered);
+// processStreamInfo back on TwitchAutoRetryPending (the manual row is
+// offered).
 func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 	rows := []struct {
 		login, stream string
@@ -122,13 +125,15 @@ func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 		reason        database.ParkReason
 		retries       int
 		seq           bool
+		manual        bool
 	}{
-		{"flap", "100", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 1, false},
-		{"spent", "200", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, jobstate.MaxTwitchAutoRetries, false},
-		{"started", "300", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 0, true},
-		{"ended", "400", "Twitch says the channel is not live", database.ParkReasonTwitchEndedOffline, 0, false},
-		{"unmarked", "500", "Twitch says the channel is not live", database.ParkReasonNone, 0, false},
-		{"baretext", "600", database.LegacyTwitchOfflineError, database.ParkReasonNone, 0, false},
+		{"flap", "100", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 1, false, false},
+		{"manual", "700", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 0, false, true},
+		{"spent", "200", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, jobstate.MaxTwitchAutoRetries, false, false},
+		{"started", "300", "Twitch says the channel is not live", database.ParkReasonTwitchOffline, 0, true, false},
+		{"ended", "400", "Twitch says the channel is not live", database.ParkReasonTwitchEndedOffline, 0, false, false},
+		{"unmarked", "500", "Twitch says the channel is not live", database.ParkReasonNone, 0, false, false},
+		{"baretext", "600", database.LegacyTwitchOfflineError, database.ParkReasonNone, 0, false, false},
 	}
 	var chans []config.ChannelConfig
 	streams := map[string]string{}
@@ -146,7 +151,7 @@ func TestTwitch_OfflineFlapIsOfferedRecoveryByItsParkReason(t *testing.T) {
 	for _, r := range rows {
 		id := "tw_" + r.stream
 		if _, err := tm.db.AddJob(&database.Job{ID: id, VideoID: r.stream, URL: "https://twitch.tv/" + r.login,
-			Platform: "twitch", Status: database.StatusError}); err != nil {
+			Platform: "twitch", Status: database.StatusError, ManuallyAdded: r.manual}); err != nil {
 			t.Fatal(err)
 		}
 		tm.db.AddToHistory(id)

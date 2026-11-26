@@ -1670,8 +1670,8 @@ export const MAX_TWITCH_AUTO_RETRIES = 2;
 export function pendingAutoAction(job) {
   if (!job || job.platform !== "twitch" || job.status !== "Error") return "";
   if (job.parkReason === "twitch_end_unconfirmed") return "auto_mux";
-  // A manual add writes no history row, so the monitor's recovery never
-  // reaches it (jobstate.PendingAutoAction); its end latch is still the mux's.
+  // The monitor's recovery never re-initialises a manual add
+  // (jobstate.PendingAutoAction); its end latch is still the mux's.
   if (job.manuallyAdded) return "";
   if (job.parkReason !== "twitch_offline" && job.parkReason !== "twitch_unreachable") return "";
   if (job.lastVideoSeq !== undefined && job.lastVideoSeq !== null) return "";

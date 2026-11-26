@@ -376,26 +376,37 @@ func TestTwitchClipKeepsAnOutcomeThatLandedFirst(t *testing.T) {
 	}
 }
 
-// TestRecordPastedClipEntersOnlyClips: a pasted clip is entered in the
-// processing history (the twitch_archive_clips sweep's dedupe), and every other
-// manual add is left out of it, as it always was.
+// TestRecordManualTwitchAddEntersTheKeysAMonitorReads: a Twitch job added by
+// URL is entered in the processing history when its ID is one a monitor path
+// looks up there (owner ruling RV-3) — a clip (the clip sweep), a VOD (the
+// backlog), a live broadcast Twitch named (the live monitor) — so its Delete
+// leaves an Orphaned entry that holds it back. An add that waits for an
+// offline channel has an ID no monitor reads, and is left out, as is any
+// YouTube row (its Delete writes its own).
 //
-// Mutants: the jobfilter.IsClipJob check dropped (the live channel's row is
-// entered); the AddToHistory call dropped (the clip is not).
-func TestRecordPastedClipEntersOnlyClips(t *testing.T) {
+// Mutants: the key check dropped (the waiting add is entered); the VOD or
+// stream arm dropped (that row is not); the AddToHistory call dropped.
+func TestRecordManualTwitchAddEntersTheKeysAMonitorReads(t *testing.T) {
 	_, db := testWorkerSetup(t)
-	clip := &database.Job{ID: "tw_clip_X", VideoID: "tw_clip_X", Platform: "twitch"}
-	live := &database.Job{ID: "tw_manual_ea_1", VideoID: "tw_manual_ea_1", Platform: "twitch"}
-	for _, j := range []*database.Job{clip, live} {
-		if err := RecordPastedClip(db, j); err != nil {
+	for _, tc := range []struct {
+		id, platform string
+		want         bool
+	}{
+		{"tw_clip_X", "twitch", true},
+		{twitch.BuildJobID("2412345678", true), "twitch", true},
+		{twitch.BuildJobID("51234567890", false), "twitch", true},
+		{"tw_manual_ea_1", "twitch", false},
+		{"ea", "twitch", false}, // the CLI's waiting add
+		{"tw_v", "twitch", false},
+		{"dQw4w9WgXcQ", "youtube", false},
+	} {
+		job := &database.Job{ID: tc.id, VideoID: tc.id, Platform: tc.platform}
+		if err := RecordManualTwitchAdd(db, job); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if seen, _ := db.HasProcessed(clip.ID); !seen {
-		t.Error("the pasted clip is not in the processing history")
-	}
-	if seen, _ := db.HasProcessed(live.ID); seen {
-		t.Error("a live channel's manual add was entered in the processing history")
+		if seen, _ := db.HasProcessed(tc.id); seen != tc.want {
+			t.Errorf("%s (%s) in the processing history = %v, want %v", tc.id, tc.platform, seen, tc.want)
+		}
 	}
 }
 

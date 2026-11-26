@@ -312,8 +312,10 @@ func (db *Database) DeleteJob(id string) error {
 // R4-3), a job added by URL or by import as well as one a monitor created
 // (whose row AddToHistory already wrote). Removing the row from the Orphaned
 // list reopens the video. A YouTube job's ID is its video ID, the key history
-// uses. A Twitch job is deleted as DeleteJob does: only the Twitch monitor
-// writes its rows. So is a job whose ID is not a YouTube video ID (an
+// uses. A Twitch job is deleted as DeleteJob does: its history row, when it
+// has one, was written when the job was created, by the monitor or by the
+// add (worker.RecordManualTwitchAdd, owner ruling RV-3), and a delete leaves
+// it in place. So is a job whose ID is not a YouTube video ID (an
 // import's "imp_" placeholder): no monitor can find it again, so its row
 // would only clutter the Orphaned list. DeleteJob stays for the deletes that
 // are not the operator's (an import rolling back its own row).

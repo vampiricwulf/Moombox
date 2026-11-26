@@ -225,8 +225,8 @@ func addVideo(input, configPath string) {
 				kind = "clip"
 			}
 			fmt.Printf("Added Twitch %s %s to queue.\n", kind, jobID)
-			if err := worker.RecordPastedClip(db, job); err != nil {
-				fmt.Fprintf(os.Stderr, "Could not record the clip in the processing history: %v\n", err)
+			if err := worker.RecordManualTwitchAdd(db, job); err != nil {
+				fmt.Fprintf(os.Stderr, "Could not record the job in the processing history: %v\n", err)
 			}
 			login := ""
 			if tw.Type == utils.TwitchChannel {

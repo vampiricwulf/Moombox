@@ -95,11 +95,15 @@ func AutoMuxPending(job *database.Job) bool {
 // recovery can reach, else AutoActionNone. Derived from the row, never
 // persisted.
 //
-// Reach: the recovery (monitor.processStreamInfo) acts only on a row it finds
-// HasProcessed under twitch.BuildJobID's "tw_<stream id>", and a manual add
-// writes no history row (and a manual add of an offline channel is
-// "tw_manual_<login>_<n>"), so a ManuallyAdded row is never offered one —
-// TwitchAutoRetryPending, which the monitor and setJobError read, keeps
+// Reach: the recovery (monitor.processStreamInfo) acts on a row it finds
+// HasProcessed under twitch.BuildJobID's "tw_<stream id>", and only when this
+// function answers AutoActionRetry for it. A ManuallyAdded row is never
+// offered one: before owner ruling RV-3 a manual add wrote no history row, so
+// the recovery never found it; a manual add of a live broadcast has one now
+// (worker.RecordManualTwitchAdd), and the monitor asks here, so the row is
+// still left to the operator (a manual add of an offline channel is
+// "tw_manual_<login>_<n>", which the recovery never looks up).
+// TwitchAutoRetryPending, which setJobError reads, keeps
 // answering for it as before; only this derived answer drops it. The
 // automatic mux does reach a manual row: dispatchEndedBroadcasts reads the
 // login from either id shape.
