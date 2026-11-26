@@ -435,7 +435,10 @@ retried about once an hour, and the badge stays up in between. **Re-scan Feed
 History** (or ++r++ ++b++ in the terminal UI) retries at once. So does a
 wider archive window for the channel, or its membership content becoming
 available: both ask for more than the failed scan did. The same scan still
-waits the hour.
+waits the hour. The wait also ends when the members-only tab was the only
+one that failed and the channel no longer scans it (membership discovery
+turned off, or no usable sign-in): the next feed check finishes the scan
+without it.
 
 ## Troubleshooting
 

@@ -187,3 +187,61 @@ func TestSweep_RepeatedParserArmFailuresBackOff(t *testing.T) {
 		t.Fatal("an arm failure that follows a fetch failure is a first one and retries on the next sweep")
 	}
 }
+
+// A backed-off channel whose new request no longer includes the tab that
+// failed does not wait (owner ruling RV-9). The membership tab alone stopped
+// the arm twice running; membership discovery is then turned off (or the
+// cookies stop being eligible), so the scan now asked would never fetch the
+// failing page. It runs on the next sweep and completes, instead of leaving
+// the error state up for the rest of the hour. The test above keeps the
+// other side: a request without membership still waits when a tab every scan
+// fetches is the one that failed.
+//
+// Mutant: the asksFailingTab clause dropped from Sweep's wait (the last
+// sweep scans nothing).
+func TestSweep_BackOffEndsWhenTheFailingTabIsNoLongerAsked(t *testing.T) {
+	db := newTestDB(t)
+	scans := make(chan bool, 8)
+	states := make(chan BackfillState, 8)
+	bw := newTestBackfillWorker(t, db, withScan(func(_ context.Context, _ *config.ChannelConfig, _ string, _ int, withMembership bool) error {
+		scans <- withMembership
+		if withMembership {
+			return &undatableTabError{chID: backfillTestChannel, tab: "membership"}
+		}
+		return nil
+	}))
+	bw.OnProgress = func(_, _ string, _ int, state BackfillState) { states <- state }
+	startWorker(t, bw)
+	// sweep runs one Sweep and returns the state its scan ended in, "" when
+	// it scanned nothing.
+	sweep := func(withMembership bool) BackfillState {
+		t.Helper()
+		bw.Sweep([]ChannelRef{refFor(backfillTestCh(), 7, withMembership)}, false)
+		inflight, _ := inflightState(bw)
+		if fl := inflight[backfillTestChannel]; fl != nil {
+			recvWithin(t, fl.done, "the scan's cleanup")
+		}
+		select {
+		case asked := <-scans:
+			if asked != withMembership {
+				t.Fatalf("scan asked with membership = %v, want %v", asked, withMembership)
+			}
+			return recvWithin(t, states, "the scan's state")
+		default:
+			return ""
+		}
+	}
+
+	if got := sweep(true); got != BackfillError {
+		t.Fatalf("first scan state = %q, want %q", got, BackfillError)
+	}
+	if got := sweep(true); got != BackfillError {
+		t.Fatalf("second scan state = %q, want %q", got, BackfillError)
+	}
+	if got := sweep(true); got != "" {
+		t.Fatalf("the membership tab failed twice running and the same request scanned again (%q)", got)
+	}
+	if got := sweep(false); got != BackfillDone {
+		t.Fatalf("a request without the failing membership tab ended %q, want it scanned at once and %q", got, BackfillDone)
+	}
+}
