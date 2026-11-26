@@ -261,9 +261,12 @@ func launchAndSupervise() {
 			// recoverFailedBoot preserves what's left with manual
 			// instructions; this branch schedules no cleanup of the artifact,
 			// and the next start keeps it as well (a failure marker holds
-			// the ~, and after an exit 3 cleanupOrphans renames it back to
-			// .old and that start is armed, owner ruling RV-10), so a manual
-			// rollback stays one rename away. A boot whose
+			// the ~, and after an exit 3 before the release's milestone
+			// cleanupOrphans renames it back to .old and that start is
+			// armed, owner ruling RV-10), so a manual rollback stays one
+			// rename away. An exit 3 after the milestone is the exception:
+			// the next start removes the ~, and the notice says so
+			// (startupErrorKeepNote). A boot whose
 			// artifact is already gone (it reached the milestone sweep before
 			// dying) never gets here: judgeChildExit sends it to crash
 			// supervision.
@@ -550,7 +553,7 @@ func (b *postUpdateBoot) recoverFailedBoot(exePath string, code int) bool {
 			return true
 		}
 	}
-	preserveUpdateRollback(exePath, b.artifact, code)
+	preserveUpdateRollback(exePath, b.artifact, b.tag, code)
 	return false
 }
 
@@ -966,6 +969,35 @@ func sweptFailedReleaseNote(marker, failedPath string) string {
 	return "\n(" + failedPath + " has since been removed: this binary started successfully, so the release kept for a failed restart is no longer needed.)"
 }
 
+// startupErrorKeepNote is the part of the exit-3 notice that says what happens
+// to the previous binary at backup after this launcher exits. It promises the
+// keep and the automatic rollback only when the next start will deliver them
+// (cleanupOrphans, armInterruptedUpdate): the breadcrumb still names tag, the
+// release the launcher recorded for this boot, and, when backup is the Windows
+// ~, no failed-update marker holds it where it is. Otherwise it says the file
+// is not kept. That is the case when the release already reached its started
+// milestone (which removes the breadcrumb) and then exited 3 on a restart
+// inside the post-update window, a port just changed to one in use for
+// example: the next start arms nothing and removes a ~.
+func startupErrorKeepNote(exePath, backup, tag string) string {
+	image := exePath + updater.LauncherImageSuffix
+	stillFirstStart := tag != "" && pendingUpdateTag(exePath) == tag
+	if stillFirstStart && !(backup == image && failureMarkerHoldsLauncherImage(exePath)) {
+		moves := ""
+		if backup == image {
+			moves = fmt.Sprintf(" (the next start moves it to %s)", exePath+updater.OldSuffix)
+		}
+		return fmt.Sprintf("It is kept until this release has started properly once%s, and Moombox\n"+
+			"goes back to it by itself if this release then fails right after starting.\n", moves)
+	}
+	started := ""
+	if tag != "" && !stillFirstStart {
+		started = "This release has already started properly once. "
+	}
+	return started + "That file is not kept for a rollback:\n" +
+		"Moombox does not go back to it by itself, and a later start can remove it.\n"
+}
+
 // preserveUpdateRollback runs when the first boot of a freshly-applied
 // update fails AND automatic rollback was not possible (the restore itself
 // failed, or — exit 3 — the rollback was never attempted; a boot whose
@@ -979,32 +1011,32 @@ func sweptFailedReleaseNote(marker, failedPath string) string {
 // The one exception is exitCodeStartupError, which gets the honest notice and
 // NO marker — see the branch below. backup is the update's rollback artifact
 // as handleUpdateRestart named it (or the .old armInterruptedUpdate armed the
-// boot with), which both texts point the operator at.
-func preserveUpdateRollback(exePath, backup string, exitCode int) {
+// boot with), which both texts point the operator at. tag is the release the
+// launcher recorded for the boot ("" when it found no breadcrumb), which the
+// startup-error notice reads to say only what the next start will really do.
+func preserveUpdateRollback(exePath, backup, tag string, exitCode int) {
 	// A deterministic startup failure is not a failed update, and the marker
 	// is what the NEXT boot announces as "Previous Update Failed" — with
 	// instructions whose first step is to replace the binary. An operator who
 	// follows them on a port conflict lands on the older release and gets the
 	// good one marked skipped. Same preservation, honest notice, no marker
-	// (CORE-23). The artifact is not cleaned up on this path, and the next
-	// start keeps it too: .old stays where it is, and the Windows ~ is renamed
-	// back to .old (cleanupOrphans), so that start is armed to roll back
-	// (armInterruptedUpdate, owner ruling RV-10) and a manual rollback stays
-	// one rename away until the release has started properly once.
+	// (CORE-23). The artifact is not cleaned up on this path. While the
+	// breadcrumb still names the release (it has not reached its started
+	// milestone) the next start keeps it too: .old stays where it is, and the
+	// Windows ~ is renamed back to .old (cleanupOrphans), so that start is
+	// armed to roll back (armInterruptedUpdate, owner ruling RV-10) and a
+	// manual rollback stays one rename away until the release has started
+	// properly once. The notice promises that only when it holds
+	// (startupErrorKeepNote).
 	if classifyPostUpdateExit(exitCode) == postUpdatePreserve {
-		kept := ""
-		if oldPath := exePath + updater.OldSuffix; backup != oldPath {
-			kept = fmt.Sprintf(" (the next start moves it to %s)", oldPath)
-		}
 		fmt.Fprintf(os.Stderr,
 			"\nMoombox could not start after a self-update (exit code %d): a startup/environment\n"+
 				"failure — a config it cannot load, a port it cannot bind, a database it refuses —\n"+
 				"not a broken release. Fix the cause and start Moombox again.\n"+
 				"The previous version's binary is still at:\n  %s\n"+
-				"It is kept until this release has started properly once%s, and Moombox\n"+
-				"goes back to it by itself if this release then fails right after starting.\n"+
+				"%s"+
 				"Rolling back by hand is not the fix and would make automatic checks skip this release.\n",
-			exitCode, backup, kept)
+			exitCode, backup, startupErrorKeepNote(exePath, backup, tag))
 		return
 	}
 	msg := fmt.Sprintf(

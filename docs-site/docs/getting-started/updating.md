@@ -136,10 +136,15 @@ renamed back to `<binary>.old` when Moombox starts.
   environment, not the release, so there is no rollback. Moombox stops and
   prints where the previous binary still is (`<binary>.old` on Linux,
   `<binary>~` on Windows, `<binary>.old` on both when this was not the
-  first attempt). Fix the cause and start Moombox again. The previous binary
-  stays on disk (on Windows the next start renames `<binary>~` to
-  `<binary>.old`), and that start can still roll back by itself if the new
-  version then crashes.
+  first attempt). Fix the cause and start Moombox again. If the new version
+  had not yet started successfully, the previous binary stays on disk (on
+  Windows the next start renames `<binary>~` to `<binary>.old`), and that
+  start can still roll back by itself if the new version then crashes. If it
+  had already started successfully once and reports the startup error on a
+  restart soon after (a port just changed to one in use, for example), the
+  previous binary is no longer kept: there is no automatic rollback, and a
+  later start removes it. The message Moombox prints says which of the two
+  applies.
 - **Moombox cannot start the new version's process at all, on a start that
   follows an attempt that was cut short:** nothing is rolled back and no version
   is skipped. That is the system refusing to start a process, not the

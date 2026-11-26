@@ -447,6 +447,49 @@ func TestAnEarlierUpdatesFailureMarkerDoesNotDisarmTheNextUpdate(t *testing.T) {
 	}
 }
 
+// The exit-3 notice promises the keep and the automatic rollback only when the
+// next start delivers them. A release that reached its milestone (breadcrumb
+// resolved) and then exits 3 on a settings restart inside the post-update
+// window still has the ~ as its recorded artifact, and the notice used to say
+// the next start would move it to .old and stay armed, when that start removes
+// it and arms nothing.
+//
+// Mutants: startupErrorKeepNote always promising (the "started" case prints
+// the promise); never promising (the first-start case loses it).
+func TestTheStartupErrorNoticePromisesOnlyWhatTheNextStartDoes(t *testing.T) {
+	const promise, moves = "goes back to it by itself if", "the next start moves it to"
+	for _, tc := range []struct {
+		name    string
+		started bool
+	}{
+		{"before the milestone", false},
+		{"after the milestone", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exePath, boot := firstUpdateRestarted(t)
+			if tc.started {
+				resolveLandedUpdateBreadcrumb(exePath, "2.0.1", &nopLogger{})
+			}
+			stderr := captureStderr(t, func() { boot.recoverFailedBoot(exePath, exitCodeStartupError) })
+			for _, s := range []string{promise, moves} {
+				if got := strings.Contains(stderr, s); got == tc.started {
+					t.Errorf("notice contains %q = %v, want %v:\n%s", s, got, !tc.started, stderr)
+				}
+			}
+			if got := strings.Contains(stderr, "already started properly once"); got != tc.started {
+				t.Errorf("notice says the release already started = %v, want %v:\n%s", got, tc.started, stderr)
+			}
+
+			// What the notice describes is what the next start does.
+			cleanupOrphans(exePath, "2.0.1")
+			var next postUpdateBoot
+			if armed := next.armInterruptedUpdate(exePath, "2.0.1"); armed == tc.started {
+				t.Errorf("next start armed = %v, but the notice said otherwise", armed)
+			}
+		})
+	}
+}
+
 // The other side of RV-10: once the release has started properly, the ~ is
 // an old launcher image again. The milestone resolves the breadcrumb, a stop
 // after it schedules the delete as before, and a start that still finds the ~
