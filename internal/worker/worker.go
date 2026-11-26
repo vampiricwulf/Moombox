@@ -1604,6 +1604,14 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			// cancellation's own handling.
 			if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) {
 				w.handleCancellation(job)
+				if archive, gone := finishedRowGone(dlErr); gone {
+					// Deleted after its archive was written: the recording is
+					// in place under no row, and staging is reclaimed as a
+					// finished finalize's is (writeFinished).
+					w.logger.Info("the job was deleted after its recording was written; the archive is left for the orphan scan",
+						"jobID", job.ID, "output", archive)
+					w.cleanupStagingAfterMux(job.ID, jobCtx.StagingDir)
+				}
 				return
 			}
 			// A download whose setup fetch met a connectivity outage waits for

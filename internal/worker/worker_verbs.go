@@ -740,13 +740,24 @@ func (w *DownloadWorker) muxJob(jobID string, failure func(error) string, bootRe
 		defer w.queue.ReleaseDownloadSlot(jobID)
 
 		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			if archive, gone := finishedRowGone(err); gone {
+				// The mux finished and the row was deleted before it could
+				// be marked Finished: the archive is in place under no row,
+				// and staging is reclaimed as a finished mux's is.
+				w.logger.Info("MuxJob: the job was deleted after its recording was written; the archive is left for the orphan scan",
+					"jobID", jobID, "output", archive)
+				w.cleanupStagingAfterMux(jobID, jobCtx.StagingDir)
+				return
+			}
 			if errors.Is(err, ErrCancelled) {
 				// The finalize's Muxing write found an outcome on the row —
 				// an operator's Cancel this listener has yet to hear, or
 				// another outcome no cancel follows — and nothing was muxed.
 				// It stands: read as a failure, the Error write below landed
-				// on it, whatever this mux's ctx said.
-				w.logger.Info("MuxJob: the row already holds an outcome; nothing muxed, staging is kept", "jobID", jobID)
+				// on it, whatever this mux's ctx said. Or the outcome landed
+				// after the archive was written, before the Finished write
+				// (writeFinished): err then names the file.
+				w.logger.Info("MuxJob: the row already holds an outcome; staging is kept", "jobID", jobID, "err", err)
 				return
 			}
 			if ctx.Err() != nil && root.Err() == nil {

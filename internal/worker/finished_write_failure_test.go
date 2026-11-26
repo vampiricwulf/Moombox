@@ -171,7 +171,10 @@ func TestAFinishedWriteOnADeletedRowIsACancel(t *testing.T) {
 //
 // Mutant: the ctx arm dropped from the wait (the call takes the full hour).
 func TestAFinishedWriteRetryStopsWithItsContext(t *testing.T) {
-	w, _, _, _, dbPath := finishedWriteFixture(t, false)
+	w, db, _, _, dbPath := finishedWriteFixture(t, false)
+	// As a finalize finds it: Muxing, not the fixture's Error, which is an
+	// outcome writeFinished keeps.
+	db.UpdateJobFields("j-fw", map[string]any{"status": database.StatusMuxing})
 	finishedWriteRetries = []time.Duration{time.Hour}
 	failJobWritesWhere(t, dbPath, `NEW.status = 'Finished'`)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,5 +213,89 @@ func TestStagingIsKeptWhenTheRowCannotBeRead(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(staging, "video.mp4")); err != nil {
 		t.Errorf("the staged recording was deleted on a row read that failed: %v", err)
+	}
+}
+
+// A row deleted after the archive was written and before the Finished write
+// leaves the recording in place under no row. The run ends as a cancelled
+// one, but staging is reclaimed as a finished mux's is: before R3-1 the
+// finalize answered nil here and the staging was reclaimed, and keeping it
+// held the whole raw recording until the orphan sweep.
+//
+// Mutant: the deleted-row branch dropped from muxJob (staging is kept).
+func TestAJobDeletedBeforeItsFinishedWriteHasItsStagingReclaimed(t *testing.T) {
+	w, db, rec, staging, _ := finishedWriteFixture(t, false)
+	w.logger = discardLogger{}
+	w.orchestrator.logger = &onInfoLogger{
+		prefix: "download complete",
+		hook: func() {
+			if err := db.DeleteJob("j-fw"); err != nil {
+				t.Errorf("DeleteJob: %v", err)
+			}
+		},
+	}
+
+	if err := w.MuxJob("j-fw"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	if row, _ := db.GetJob("j-fw"); row != nil {
+		t.Fatalf("row = %+v, want it deleted", row)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Errorf("staging was kept for a deleted job whose archive was written (stat: %v)", err)
+	}
+	if sent := rec.ByEvent("finished"); len(sent) != 0 {
+		t.Errorf("%d Download Finished notifications sent for a deleted job", len(sent))
+	}
+}
+
+// A retry of the Finished write is decided on the read before it, so it
+// applies only while the row holds no outcome: a Cancel that landed between
+// the attempts stands, and staging is kept.
+//
+// Mutant: the retry made with the unconditional UpdateJobFields (the row is
+// turned Finished over the Cancel).
+func TestAFinishedWriteRetryLeavesAnOutcomeThatLandedMeanwhile(t *testing.T) {
+	w, db, rec, staging, dbPath := finishedWriteFixture(t, false)
+	failJobWritesWhere(t, dbPath, `NEW.status = 'Finished'`)
+	w.logger = discardLogger{}
+	w.orchestrator.logger = &onWarnLogger{
+		msg: "the Finished write did not land; trying it again",
+		hook: func() {
+			rawExec(t, dbPath, `DROP TRIGGER fail_job_writes`)
+			rawExec(t, dbPath, `UPDATE jobs SET status = 'Cancelled' WHERE id = 'j-fw'`)
+		},
+	}
+
+	if err := w.MuxJob("j-fw"); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+
+	row, _ := db.GetJob("j-fw")
+	if row == nil || row.Status != database.StatusCancelled {
+		t.Fatalf("row = %+v, want the Cancel to stand", row)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "video.mp4")); err != nil {
+		t.Errorf("the staged recording is gone: %v", err)
+	}
+	if sent := rec.ByEvent("finished"); len(sent) != 0 {
+		t.Errorf("%d Download Finished notifications sent for a Cancelled job", len(sent))
+	}
+}
+
+// A split archive's failed Finished write names the set of parts, not part 1
+// alone, which an operator would read as the whole recording.
+//
+// Mutant: part 1's path returned for every split.
+func TestAFinishedWriteFailureNamesEverySplitPart(t *testing.T) {
+	parts := []database.Segment{{FilePath: "a - part1.mp4"}, {FilePath: "a - part2.mp4"}, {FilePath: "a - part3.mp4"}}
+	if got := splitArchiveName(parts, "a"); !strings.Contains(got, "a - part1.mp4") || !strings.Contains(got, "2 more parts") {
+		t.Errorf("splitArchiveName(3 parts) = %q, want part 1 and the 2 parts beside it", got)
+	}
+	if got := splitArchiveName(parts[:1], "a"); got != "a - part1.mp4" {
+		t.Errorf("splitArchiveName(1 part) = %q, want the part's path alone", got)
 	}
 }

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -1321,12 +1322,19 @@ var finishedWriteRetries = []time.Duration{500 * time.Millisecond, time.Second, 
 // busy_timeout, an I/O error, a full or read-only volume), the write applied
 // but its read-back failed, or the row was deleted. A fresh read tells them
 // apart: a Finished row is the write, and the finalize goes on with it; a row
-// that is gone is the operator's delete, answered ErrCancelled as
-// writeUnlessOutcome answers it; anything else is a write that did not land,
-// and it is made again after each of finishedWriteRetries, until ctx ends.
-// Still not Finished after the last, the error names the file and the way to
-// record it: staging is kept by every caller's error path, and the Mux action
+// that is gone is the operator's delete, answered with finishedRowGoneError,
+// which is ErrCancelled as writeUnlessOutcome answers it and carries the
+// archive's path so the caller can say where it is and reclaim staging; a row
+// that holds another outcome (Error, Cancelled) keeps it, answered
+// ErrCancelled; anything else is a write that did not land, and it is made
+// again after each of finishedWriteRetries, until ctx ends. Still not
+// Finished after the last, the error names the file and the way to record
+// it: staging is kept by every caller's error path, and the Mux action
 // re-finalizes from it at the same name.
+//
+// Only the first write is unconditional, as it always was. A retry is decided
+// on the read before it, so it applies only while the row holds no outcome
+// (State machines rule 3): an Error or a Cancel that landed in between stands.
 //
 // The finishing mark the callers hold covers the retries as it covers the
 // first write, so a Cancel in between is still answered "already finishing".
@@ -1337,10 +1345,14 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 	for attempt := 0; ; attempt++ {
 		cur, err := o.db.GetJob(jobID)
 		if err == nil && cur == nil {
-			return nil, ErrCancelled
+			return nil, &finishedRowGoneError{written: written}
 		}
 		if err == nil && cur.Status == database.StatusFinished {
 			return cur, nil
+		}
+		if err == nil && cur.IsTerminal() {
+			return nil, fmt.Errorf("%w: the row became %s before it could be marked Finished; the recording was written to %s and staging is kept",
+				ErrCancelled, cur.Status, written)
 		}
 		if attempt >= len(finishedWriteRetries) {
 			break
@@ -1354,11 +1366,51 @@ func (o *DownloadOrchestrator) writeFinished(ctx context.Context, jobID string, 
 		}
 		o.logger.Warn("the Finished write did not land; trying it again",
 			"jobID", jobID, "attempt", attempt+2, "of", len(finishedWriteRetries)+1)
-		if job := o.db.UpdateJobFields(jobID, updates); job != nil {
-			return job, nil
-		}
+		// Applied, the next pass reads the Finished row and returns it.
+		o.db.UpdateJobFieldsUnlessTerminal(jobID, updates)
 	}
 	return nil, fmt.Errorf("the recording was written to %s, but the database refused to mark the job Finished; staging is kept, use Mux to record it", written)
+}
+
+// finishedRowGoneError is writeFinished's answer for a row deleted after its
+// archive was written. It is ErrCancelled to every caller (the run ends as a
+// cancelled one), and it names the archive: the recording is in place under
+// no row, so the caller reclaims staging as a finished finalize would
+// (cleanupStagingAfterMux supports a row that is gone, and still keeps
+// set-aside recordings, unmuxed parts and mux gaps) and logs where the
+// archive is.
+type finishedRowGoneError struct{ written string }
+
+func (e *finishedRowGoneError) Error() string {
+	return "the job was deleted after its recording was written to " + e.written
+}
+
+func (e *finishedRowGoneError) Unwrap() error { return ErrCancelled }
+
+// splitArchiveName names a split archive for writeFinished's error: every
+// part, not part 1 alone, so an operator reading it does not take the first
+// part for the whole recording. fallback is used when there are no parts.
+func splitArchiveName(segments []database.Segment, fallback string) string {
+	switch {
+	case len(segments) == 0:
+		return fallback
+	case len(segments) == 1:
+		return segments[0].FilePath
+	case len(segments) == 2:
+		return segments[0].FilePath + " and 1 more part beside it"
+	default:
+		return fmt.Sprintf("%s and %d more parts beside it", segments[0].FilePath, len(segments)-1)
+	}
+}
+
+// finishedRowGone reports the archive path when err is writeFinished's
+// deleted-row answer.
+func finishedRowGone(err error) (string, bool) {
+	var gone *finishedRowGoneError
+	if errors.As(err, &gone) {
+		return gone.written, true
+	}
+	return "", false
 }
 
 // keepIncompleteTailProgress strips the progress/percent overwrites from a
@@ -1608,11 +1660,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	// As the single-file finalize: a write that did not land ends it here,
 	// ahead of the notification, and the caller keeps staging.
-	written := filepath.Join(outputDir, filenameBase)
-	if len(segments) > 0 {
-		written = segments[0].FilePath
-	}
-	finishedJob, err := o.writeFinished(ctx, jobCtx.Job.ID, updates, written)
+	finishedJob, err := o.writeFinished(ctx, jobCtx.Job.ID, updates, splitArchiveName(segments, filepath.Join(outputDir, filenameBase)))
 	if err != nil {
 		return err
 	}
