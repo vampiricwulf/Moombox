@@ -230,6 +230,11 @@ func TestAMergeCutShortByShutdownStaysMuxing(t *testing.T) {
 			if err := os.WriteFile(media, []byte("not a recording"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			// A staged thumbnail, so the finalize that finishes fetches none
+			// from YouTube.
+			if err := os.WriteFile(filepath.Join(staging, "thumbnail.jpg"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			if tc.stopping {
 				w.stopBegun.Store(true)
 			}
