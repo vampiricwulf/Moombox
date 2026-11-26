@@ -33,15 +33,15 @@ const (
 	// more than discordRetryAfterCap, and dropping the alert at the head of
 	// the queue for it lost a notification the queue behind would have waited
 	// for anyway. Used only at the 429 check; discordRetryAfterCap still
-	// bounds waitForBucket and the give-up arming. One such wait may run past
-	// discordMaxSleepTotal, as the ladder's first sleep only, so the worst
-	// hold one notification puts on its queue is ~3x15s requests + 60s = ~105s.
+	// bounds waitForBucket and the give-up arming. A 429's wait may take the
+	// ladder's cumulative sleep past discordMaxSleepTotal up to this cap, so the
+	// worst hold one notification puts on its queue is ~3x15s requests + 60s = ~105s.
 	// A longer, missing or malformed Retry-After still drops at once.
 	discordRetryAfterWaitCap = 60 * time.Second
 	// discordMaxSleepTotal caps CUMULATIVE inter-attempt sleep, bounding one
 	// notification's worst-case hold on its target's queue at ~3x15s requests
-	// + 30s sleep = ~75s, or ~105s when the ladder's first sleep is the one long
-	// Retry-After wait discordRetryAfterWaitCap allows. Two large Retry-After
+	// + 30s sleep = ~75s, or ~105s when a 429's wait takes the sleep up to
+	// discordRetryAfterWaitCap, which only a 429 may do. Two large Retry-After
 	// waits would exceed it — a webhook still rate-limited after one honored
 	// wait gives up instead.
 	//
@@ -503,11 +503,14 @@ func (d *DiscordWebhook) deliver(method, endpoint string, body []byte, wantBody 
 			}
 			return nil, fmt.Errorf("%w (gave up after %d attempts)", lastErr, discordMaxAttempts)
 		}
-		// One Retry-After wait longer than the budget is allowed, as the
-		// ladder's first sleep (discordRetryAfterWaitCap); it spends the
-		// budget, so any later sleep gives up.
+		// A 429's wait may take the cumulative sleep up to
+		// discordRetryAfterWaitCap, so one long Retry-After is waited out
+		// wherever it lands in the ladder (after a 5xx backoff too); a second
+		// long one is past it and gives up, and a 5xx backoff after a long
+		// wait is past discordMaxSleepTotal and gives up. Either way the
+		// cumulative sleep never exceeds discordRetryAfterWaitCap.
 		budget := discordMaxSleepTotal
-		if r.status == http.StatusTooManyRequests && err == nil && slept == 0 {
+		if r.status == http.StatusTooManyRequests && err == nil {
 			budget = max(budget, discordRetryAfterWaitCap)
 		}
 		if slept+delay > budget {

@@ -3,6 +3,7 @@ package notifications
 import (
 	"io"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 )
@@ -71,26 +72,39 @@ func TestA429TheLadderGetsPastArmsNothing(t *testing.T) {
 
 // R4-9: a 429 asking for more than discordRetryAfterCap but no more than
 // discordRetryAfterWaitCap is waited out once, so the notification at the
-// head of the queue is delivered instead of dropped. A second long wait in the
-// same ladder is past the budget and gives up.
+// head of the queue is delivered instead of dropped, wherever in the ladder it
+// lands (after a 5xx's 2 s backoff too). A second long wait in the same ladder
+// is past the budget and gives up.
 //
 // Mutants: the 429 check back on discordRetryAfterCap (no wait, delivered
-// fails); the budget left at discordMaxSleepTotal (the 45 s wait gives up).
+// fails); the budget left at discordMaxSleepTotal (the 45 s wait gives up);
+// the long wait allowed only as the ladder's first sleep (the 5xx row drops).
 func TestA429RetryAfterUpToTheWaitCapIsWaitedOutOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		limited   int // how many requests are answered 429 before a 204
+		first5xx  bool // the first request is answered 503
+		limited   int  // how many requests are then answered 429 before a 204
 		delivered bool
 		hits      int
+		sleeps    []time.Duration
 	}{
-		{"one 45 s wait, then delivered", 1, true, 2},
-		{"a second 45 s wait gives up", 2, false, 2},
+		{"one 45 s wait, then delivered", false, 1, true, 2, []time.Duration{45 * time.Second}},
+		{"a second 45 s wait gives up", false, 2, false, 2, []time.Duration{45 * time.Second}},
+		{"a 45 s wait after a 5xx backoff, then delivered", true, 1, true, 3,
+			[]time.Duration{discordRetryBackoff[0], 45 * time.Second}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sleeps := recordDiscordSleeps(t)
 			hits := 0
 			f := newFakeDiscord(t, func(n int, _ recordedReq, rw http.ResponseWriter) {
 				hits = n + 1
+				if tc.first5xx {
+					if n == 0 {
+						rw.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					n--
+				}
 				if n < tc.limited {
 					rw.Header().Set("Retry-After", "45")
 					rw.WriteHeader(http.StatusTooManyRequests)
@@ -106,8 +120,8 @@ func TestA429RetryAfterUpToTheWaitCapIsWaitedOutOnce(t *testing.T) {
 			if hits != tc.hits {
 				t.Errorf("requests = %d, want %d", hits, tc.hits)
 			}
-			if got := sleeps(); len(got) != 1 || got[0] != 45*time.Second {
-				t.Errorf("sleeps = %v, want exactly one 45s wait", got)
+			if got := sleeps(); !slices.Equal(got, tc.sleeps) {
+				t.Errorf("sleeps = %v, want %v", got, tc.sleeps)
 			}
 		})
 	}
