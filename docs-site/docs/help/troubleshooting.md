@@ -465,8 +465,11 @@ If Twitch has rotated out the built-in Client-ID, set a current one in
 The cookie guide has its own table of messages:
 [Cookies and sign-in](../guide/cookies.md). The ones met most often:
 
-- **"failed to update cookie file — rotated session cookies were discarded
-  and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+- **"failed to update cookie file — renewed session cookies are in memory
+  only and the file will go stale"** — Moombox could not rewrite `cookies.txt`.
+  It tries again every minute but logs this warning at most once an hour, so
+  search a long enough stretch of the log. Until then the renewed session
+  lives in memory only: it keeps working until Moombox restarts, then is lost.
   In Docker this is almost always a `cookies.txt` bind-mounted on its own or
   read-only; keep it inside the `/data` volume instead. Elsewhere, check the
   file's permissions.

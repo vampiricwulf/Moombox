@@ -182,11 +182,12 @@ output directory:
     Put your cookie file at `./data/cookies.txt` on the host; the `./data`
     mount already exposes it at `/data/cookies.txt`, where the seeded
     configuration points. A line such as `- ./cookies.txt:/data/cookies.txt`
-    (with or without `:ro`) breaks Moombox's cookie upkeep: about every 30
-    minutes it rewrites the file with the session values YouTube rotates back,
-    using a temporary file and a rename, and a rename cannot replace a
-    single-file bind mount. The write fails with only a warning in the log,
-    and the session quietly expires until downloads start failing for a
+    (with or without `:ro`) breaks Moombox's cookie upkeep: it writes the
+    session values YouTube renews back to the file, using a temporary file
+    and a rename, and a rename cannot replace a single-file bind mount. The
+    write fails with only a warning in the log. The renewed session lives on
+    in memory, so nothing looks wrong, but it is lost at the next restart
+    (an image update, a host reboot), and downloads then start failing for a
     reason that looks unrelated.
 
 ### Running as a non-root user
@@ -349,9 +350,11 @@ container never qualifies. If you want to hear about new releases, turn
 - **Dashboard returns 403 Forbidden.** You are connecting over global IPv6, or
   from an address that `lan` does not admit. See
   [Network access in a container](#network-access-in-a-container).
-- **"failed to update cookie file — rotated session cookies were discarded"
-  warnings.** Usually `cookies.txt` is bind-mounted on its own (or read-only).
-  Remove that volume line and keep the file in `./data`.
+- **"failed to update cookie file — renewed session cookies are in memory
+  only and the file will go stale" warnings.** Usually `cookies.txt` is
+  bind-mounted on its own (or read-only). The session keeps working until
+  Moombox restarts, then is lost. Remove that volume line and keep the file
+  in `./data`.
 - **Members-only downloads fail after a few days.** The cookie session
   expired. Paste a fresh export in Settings → Cookies.
 
