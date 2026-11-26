@@ -30,6 +30,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/childproc"
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -84,7 +85,14 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 	// doesn't collapse every remote client into a single 5/min bucket.
 	importRL.ClientIP = func(r *http.Request) string { return web.EffectiveClientIP(store, r) }
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
-		// Max 500MB upload
+		// Max 500MB upload. A body that says up front it is larger — a
+		// browser and curl send Content-Length for a file — is refused
+		// before anything is spooled; a chunked one (the TUI's) is cut by
+		// the copy below.
+		if req.ContentLength > maxImportUpload {
+			jsonError(rw, importTooLargeMessage, http.StatusRequestEntityTooLarge)
+			return
+		}
 		req.Body = http.MaxBytesReader(rw, req.Body, maxImportUpload)
 
 		contentType := req.Header.Get("Content-Type")
@@ -161,7 +169,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, logg
 		tmpFile.Close()
 		if err != nil {
 			if importUploadTooLarge(err) {
-				jsonError(rw, "upload too large (max 500 MB)", http.StatusRequestEntityTooLarge)
+				jsonError(rw, importTooLargeMessage, http.StatusRequestEntityTooLarge)
 				return
 			}
 			jsonError(rw, "failed to read upload", http.StatusBadRequest)
@@ -1182,8 +1190,12 @@ func chooseImportStem(importsDir, outputDir, base string, files []*importFile) (
 	return "", fmt.Errorf("every name up to %q: %w", fmt.Sprintf("%s (%d)", base, importMaxDisambiguation), errImportNameTaken)
 }
 
-// maxImportUpload caps an import upload (the whole request body).
-const maxImportUpload = 500 * 1024 * 1024
+// maxImportUpload caps an import upload (the whole request body): the one
+// value both clients check a file against before uploading it.
+const maxImportUpload = constants.MaxImportUploadBytes
+
+// importTooLargeMessage is the 413 an upload over maxImportUpload gets.
+var importTooLargeMessage = fmt.Sprintf("upload too large (max %d MB)", maxImportUpload>>20)
 
 // importDiskSpace reads the output volume an import writes to; a variable so
 // a test can stand one in.

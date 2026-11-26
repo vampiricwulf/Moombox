@@ -827,6 +827,13 @@ export class MoomboxApp {
           this.serverUtcOffsetMinutes = status.utcOffsetMinutes;
           this.settings?._wireTemplatePreview?.();
         }
+        // The archive import's upload cap (constants.MaxImportUploadBytes),
+        // which the Imports panel checks a chosen file against before
+        // uploading it.
+        if (Number.isFinite(status.importMaxBytes) && status.importMaxBytes !== this.importMaxBytes) {
+          this.importMaxBytes = status.importMaxBytes;
+          this.imports?.showImportLimit?.();
+        }
         if (status.version) {
           if (this._version && status.version !== this._version) {
             // The server restarted on a DIFFERENT version — an update

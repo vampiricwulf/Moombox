@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,5 +275,32 @@ func TestImportRefusesWithoutRoomOnTheOutputVolume(t *testing.T) {
 			}
 			assertNothingImported(t, f, tc.name)
 		})
+	}
+}
+
+// TestImportRefusesADeclaredOversizeBodyUpFront (imports-3): a body whose
+// Content-Length is past the cap — what a browser sends for a file — is a
+// 413 before the spool is created, not after up to 500 MB were written; and
+// /api/status carries the cap the dashboard checks a file against first.
+//
+// Mutants: no Content-Length check (the spool directory appears); the
+// status field dropped or a different value.
+func TestImportRefusesADeclaredOversizeBodyUpFront(t *testing.T) {
+	f := newImportFixture(t)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	storedEntry(t, zw, guardVideoName, []byte("video"))
+	req := importRequest(closeZip(t, zw, &buf))
+	req.ContentLength = maxImportUpload + 1
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "max 500 MB") {
+		t.Errorf("declared oversize body: %d %s, want 413 naming the cap", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.outputDir, "imports")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the refused upload reached the spool (imports/: %v)", err)
+	}
+	if got := getSidecarStatusBody(t)["importMaxBytes"]; got != float64(maxImportUpload) {
+		t.Errorf("/api/status importMaxBytes = %v, want %d", got, maxImportUpload)
 	}
 }

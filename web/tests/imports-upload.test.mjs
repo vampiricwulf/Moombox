@@ -158,3 +158,27 @@ test("a refused import shows the server's reason", { skip }, async () => {
   assert.equal(h.el("import-status-text").textContent, reason);
   assert.ok(h.toasts().some((t) => t.textContent.includes(reason) && t.variant === "danger"));
 });
+
+// imports-3: the server's upload cap comes from /api/status (importMaxBytes,
+// constants.MaxImportUploadBytes); the dropzone names it, and a file past it
+// is refused when chosen — nothing is uploaded, Import stays hidden — where
+// it used to be sent and refused only once the server had spooled 500 MB.
+//
+// Mutants: setImportFile without the size check (the big file is taken);
+// the cap not read from the status (the small file is refused or the hint
+// stays empty); the check refusing a file AT the cap.
+test("a file over the server's upload cap is refused before uploading", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: { importMaxBytes: 10 } } });
+  assert.equal(h.app.importMaxBytes, 10, "the cap was not read from /api/status");
+  h.app.imports.initImports();
+  assert.equal(h.el("import-max-size").textContent, " (max 10B)");
+
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+  assert.equal(h.app.imports.importFile, null, "the oversize file was taken");
+  assert.equal(h.el("import-submit-btn").style.display, "none", "Import was offered for it");
+  assert.ok(h.toasts().some((t) => /big\.zip is 11B; an archive import takes at most 10B/.test(t.textContent) && t.variant === "warning"));
+
+  const atCap = new h.window.File(["x".repeat(10)], "ok.zip");
+  h.app.imports.setImportFile(atCap);
+  assert.equal(h.app.imports.importFile, atCap, "a file at the cap was refused");
+});

@@ -9,7 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // importAnsweredWith runs A Z's upload against a stand-in server that answers
@@ -129,6 +133,50 @@ func TestImportRefusalKeepsTheFieldTypeable(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("focus %d: typed after a refusal, field = %q, want %q", focus, got, want)
+		}
+	}
+}
+
+// imports-3: an archive past the import's upload cap is refused before a
+// byte is sent — the TUI's request is chunked, so the server learns its size
+// only by spooling 500 MB of it — naming both sizes; a small one is sent.
+//
+// Mutant: importFileCmd opening and posting the file without the size check.
+func TestImportRefusesAnArchiveOverTheCapBeforeSending(t *testing.T) {
+	for _, tc := range []struct {
+		size int64
+		sent bool
+	}{
+		{constants.MaxImportUploadBytes + 1, false},
+		{1 << 10, true},
+	} {
+		var hits atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"x"}`)
+		}))
+		a := NewApp()
+		_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		a.SetWebPort(func() int { return port })
+		zipPath := filepath.Join(t.TempDir(), "big.zip")
+		f, err := os.Create(zipPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(tc.size); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		msg, _ := a.importFileCmd(zipPath)().(importResultMsg)
+		srv.Close()
+		if got := hits.Load() > 0; got != tc.sent {
+			t.Errorf("size %d: sent = %v, want %v (%+v)", tc.size, got, tc.sent, msg)
+		}
+		if !tc.sent && (!strings.Contains(msg.Err, "big.zip") || !strings.Contains(msg.Err, utils.FormatFileSize(constants.MaxImportUploadBytes))) {
+			t.Errorf("size %d: refusal %q does not name the file and the cap", tc.size, msg.Err)
 		}
 	}
 }

@@ -23,6 +23,7 @@ export class ImportController {
 
   initImports() {
     this.importInitialized = true;
+    this.showImportLimit();
 
     const dropzone = document.getElementById("import-dropzone");
     const fileInput = document.getElementById("import-file-input");
@@ -114,6 +115,22 @@ export class ImportController {
     if (cancelBtn) cancelBtn.style.display = "none";
   }
 
+  /**
+   * The server's upload cap (importMaxBytes from /api/status,
+   * constants.MaxImportUploadBytes), or null until a status read brought it.
+   */
+  _maxBytes() {
+    const max = this.app.importMaxBytes;
+    return Number.isFinite(max) && max > 0 ? max : null;
+  }
+
+  /** Names the cap in the dropzone once it is known. */
+  showImportLimit() {
+    const el = document.getElementById("import-max-size");
+    const max = this._maxBytes();
+    if (el) el.textContent = max ? ` (max ${formatBytes(max)})` : "";
+  }
+
   setImportFile(file) {
     // Swapping the file mid-upload hid the progress bar and its Cancel button
     // while the old file kept uploading.
@@ -121,6 +138,16 @@ export class ImportController {
       this.app.showToast(this._importing()
         ? "The archive is being imported — wait for it to finish before choosing another file"
         : "An import is uploading — cancel it before choosing another file", "warning");
+      const fileInput = document.getElementById("import-file-input");
+      if (fileInput) fileInput.value = "";
+      return;
+    }
+    // A file over the server's cap is refused here, before a byte is sent:
+    // the server would refuse it too, but only once the upload began, and a
+    // browser may report that answer as a network error.
+    const max = this._maxBytes();
+    if (max && file.size > max) {
+      this.app.showToast(`${file.name} is ${formatBytes(file.size)}; an archive import takes at most ${formatBytes(max)}`, "warning");
       const fileInput = document.getElementById("import-file-input");
       if (fileInput) fileInput.value = "";
       return;

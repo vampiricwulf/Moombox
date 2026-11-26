@@ -472,7 +472,10 @@ Opens a file browser in the `import` folder under Moombox's working directory
 (created if missing). Pick a `.zip` (++up++ / ++down++, ++right++ or ++enter++
 to open or select, ++left++ or ++backspace++ to go up), then optionally
 override the title and channel (++tab++ switches field) and press ++enter++ to
-import.
+import. A file over the 500 MB upload limit is refused before anything is
+sent ("Import refused: *name* is 3.0GB; an archive import takes at most
+500.0MB"). After a refused import the dialog stays on the title and channel
+step, with the marked field ready to type in.
 
 ### Trim Video (`A T`)
 

@@ -465,7 +465,8 @@ A trim is refused when:
 your library as a `Finished` job.
 
 1. Drag a `.zip` onto the drop area, or click it to browse. Only `.zip` files
-   are accepted.
+   are accepted, up to the upload limit the drop area names (500 MB): a
+   larger file is refused at once with a warning, before anything is sent.
 2. Optionally fill in **Title** (otherwise taken from the chat file or the
    file name) and **Channel** (otherwise from the chat file, or "Import").
 3. Click **Import**. A progress bar shows the upload; **Cancel** stops it

@@ -1925,6 +1925,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 				"goroutines": runtime.NumGoroutine(),
 			},
 			"version": deps.Version,
+			// The archive import's upload cap, which the dashboard checks a
+			// chosen file against before uploading it (POST /api/import).
+			"importMaxBytes": maxImportUpload,
 		}
 
 		// Update status from shared atomic
