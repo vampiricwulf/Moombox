@@ -145,7 +145,7 @@ it once there is one (for example `finished (5678 messages)`).
 | `downloading` | Messages are being received. |
 | `unavailable` | The video has no chat, or the capture ended without any messages. |
 | `finished` | The capture completed. |
-| `incomplete` | Shown in the warning colour. The capture **ended without completing** — a Twitch VOD's chat stopped paging, a Twitch live chat connection ran out of reconnects, you cancelled the job, or the download ended in `Error` — so messages may be missing. The archive that was written is intact. The chat's resume data is kept in staging, which keeps that staging folder around for a while (see [When staging is cleaned up](storage.md#when-staging-is-cleaned-up)). |
+| `incomplete` | Shown in the warning colour. The capture **ended without completing** — a Twitch VOD's chat stopped paging, you cancelled the job, or the download ended in `Error` — so messages may be missing. The archive that was written is intact. The chat's resume data is kept in staging, which keeps that staging folder around for a while (see [When staging is cleaned up](storage.md#when-staging-is-cleaned-up)). |
 
 ## Finished
 
