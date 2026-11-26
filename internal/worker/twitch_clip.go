@@ -72,13 +72,18 @@ func (sp *StreamProcessor) getClip(ctx context.Context, slug string) (*twitch.Tw
 // picks the rendition to download. A failure that never reached Twitch is
 // returned as an error, as a VOD's is (twitchVodFetchError), so processJob
 // waits an outage out and reads the clip again; an answer from Twitch is the
-// clip's verdict. A re-hashed clip op is ClipAPIChangedError, whose text is
+// clip's verdict, except a server error or a rate limit, also returned as an
+// error (twitchTransientAnswerError) so that a swept clip takes the backlog
+// retry. A re-hashed clip op is ClipAPIChangedError, whose text is
 // the job's error as it stands: "Twitch changed its clip API
 // (ShareClipRenderStatus); update Moombox" (owner decision D26).
 func (sp *StreamProcessor) processTwitchClip(ctx context.Context, job *database.Job, slug string) (*StreamProcessResult, error) {
 	clip, err := sp.getClip(ctx, slug)
 	if err != nil {
 		if err := twitchVodFetchError(ctx, "twitch clip error", err); err != nil {
+			return nil, err
+		}
+		if err := twitchTransientAnswerError("twitch clip error", err); err != nil {
 			return nil, err
 		}
 		return &StreamProcessResult{

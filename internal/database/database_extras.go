@@ -22,24 +22,35 @@ func (db *Database) HasProcessed(videoID string) (bool, error) {
 	return true, nil
 }
 
-// AddToHistory adds a video ID to the processing history. History is never
-// pruned: a row is the only record that keeps a video whose job was deleted
-// from being archived again, however old it is. Re-recording a present ID
-// leaves its date alone.
+// AddToHistory records that a job was created under videoID (the job ID).
+// Every caller writes it right after AddJob added the row (and
+// DeleteJobLeavingHistory writes the same marked row for a YouTube job the
+// operator deletes, so a job added by URL has one too), so the row is
+// marked job_created: once the job is deleted, it is the record that keeps
+// the video from being archived again and, for a YouTube broadcast, from
+// being found again while it is upcoming or live (HasJobBlockingRedetection,
+// owner ruling R4-3). History is never pruned, however old a row is.
+// Re-recording a present ID leaves its date alone but marks it: a row from
+// before v28 left unmarked, whose video gets a job now, is a job's row from
+// here on.
 func (db *Database) AddToHistory(videoID string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.db.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now)
+	_, err := db.db.ExecContext(db.getCtx(),
+		`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
+		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, videoID, now)
 	return err
 }
 
 // OrphanedHistoryEntry is a processing-history row whose job no longer exists —
-// the job was deleted, or the video was skipped and never jobbed. While the row
-// remains, the monitor treats the video as already-processed (HasProcessed) and
-// won't re-discover it, even though nothing is tracking it anymore. Removing the
-// row lets the video be picked up again.
+// the job was deleted, or (a row from before DECAPI stopped writing them) the
+// video was skipped and never jobbed. While the row remains, the monitors treat
+// the video as already processed (HasProcessed) and won't archive it again; a
+// deleted job's row also keeps a YouTube stream that is still upcoming or live
+// from being found again (HasJobBlockingRedetection). Removing the row lets the
+// video be picked up again.
 type OrphanedHistoryEntry struct {
 	VideoID string `json:"videoId"`
 	AddedAt string `json:"addedAt"`

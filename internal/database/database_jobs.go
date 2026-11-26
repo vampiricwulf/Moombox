@@ -305,6 +305,80 @@ func (db *Database) DeleteJob(id string) error {
 	return nil
 }
 
+// DeleteJobLeavingHistory is the operator's Delete (the Web route and the
+// TUI). For a YouTube job it also leaves the job's history row marked
+// job_created, in the same transaction, so every deleted YouTube job holds
+// its video back from re-detection (HasJobBlockingRedetection, owner ruling
+// R4-3), a job added by URL or by import as well as one a monitor created
+// (whose row AddToHistory already wrote). Removing the row from the Orphaned
+// list reopens the video. A YouTube job's ID is its video ID, the key history
+// uses. A Twitch job is deleted as DeleteJob does: only the Twitch monitor
+// writes its rows. So is a job whose ID is not a YouTube video ID (an
+// import's "imp_" placeholder): no monitor can find it again, so its row
+// would only clutter the Orphaned list. DeleteJob stays for the deletes that
+// are not the operator's (an import rolling back its own row).
+func (db *Database) DeleteJobLeavingHistory(job *Job) error {
+	if job.Platform == "twitch" || !isYouTubeVideoID(job.ID) {
+		return db.DeleteJob(job.ID)
+	}
+	deleted, err := db.deleteJobLeavingHistoryTx(job.ID)
+	if err != nil || !deleted {
+		return err
+	}
+	db.notifyJobDeleted(job.ID)
+	return nil
+}
+
+// isYouTubeVideoID reports whether id has a YouTube video ID's shape, the
+// only IDs a YouTube monitor finds: exactly 11 characters from [A-Za-z0-9_-]
+// (utils' videoIDRegex).
+func isYouTubeVideoID(id string) bool {
+	if len(id) != 11 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// deleteJobLeavingHistoryTx runs DeleteJobLeavingHistory's transaction under
+// db.mu, rolled back before the lock is released. It reports whether a job
+// row was deleted; a row already gone writes nothing, as DeleteJob would.
+func (db *Database) deleteJobLeavingHistoryTx(id string) (bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	ctx := db.getCtx()
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO history (video_id, added_at, job_created) VALUES (?, ?, 1)
+		 ON CONFLICT(video_id) DO UPDATE SET job_created = 1`, id, now); err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", id)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // HasActiveJob checks if there's an active (non-terminal) job for the given video ID.
 func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	db.mu.RLock()
@@ -313,6 +387,44 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	var one int
 	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 FROM jobs WHERE video_id = ? AND status NOT IN (?, ?, ?) LIMIT 1`,
 		videoID, StatusFinished, StatusError, StatusCancelled).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// HasJobBlockingRedetection reports whether a YouTube monitor should leave
+// videoID alone instead of probing it and offering it as found. Two things
+// hold a video back. A job row for it in any status but Finished (owner ruling
+// R4-4). Or, with no job row at all, the history row a deleted job left
+// (job_created, owner ruling R4-3): the operator deleted the job, so a stream
+// still upcoming or live is not created again; removing the row from the
+// Orphaned list reopens it. A history row not marked job_created (one DECAPI
+// wrote for a skip or give-up, before it stopped writing those, or an orphan
+// already there at the v28 upgrade) holds nothing back. An active row is
+// already being worked on; a Cancelled or Error row is the operator's (or the
+// pipeline's) settled answer, and createYouTubeJob's duplicate path never
+// acts on one, so probing it every cycle only spent a player request and
+// logged a "Video found" for nothing. Finished stays eligible: a broadcast
+// that comes back under the same ID re-arms an incomplete-tail job on
+// re-detection. HasActiveJob is the Twitch monitor's gate and stays as it is
+// (its offline auto-retry needs Error rows to pass).
+func (db *Database) HasJobBlockingRedetection(videoID string) (bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var one int
+	// history is keyed by job ID, which for a YouTube job is the video ID:
+	// the deleted-job clause matches it against jobs.id (ListOrphanedHistory's
+	// rule), so a Finished job's own row never counts.
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 WHERE
+		EXISTS (SELECT 1 FROM jobs WHERE video_id = ? AND status != ?)
+		OR EXISTS (SELECT 1 FROM history h WHERE h.video_id = ? AND h.job_created = 1
+		           AND NOT EXISTS (SELECT 1 FROM jobs WHERE id = h.video_id))`,
+		videoID, StatusFinished, videoID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

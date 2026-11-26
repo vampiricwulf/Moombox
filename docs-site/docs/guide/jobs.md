@@ -94,7 +94,9 @@ instead of ending in `Error`:
   third retry in a row fails, the job ends in `Error` with *(gave up after 3
   retries)* added to the error. A video that is really gone (removed,
   private, members-only) is not retried. A disk-full retry keeps its
-  staging and resumes from the last checkpoint.
+  staging and resumes from the last checkpoint. A Twitch backlog VOD or a
+  swept clip takes the same retries when Twitch answers with a server error
+  or a rate limit.
 - **A YouTube rate limit**: the job goes back to `Queued` for an hour, and
   this does not count against its three retries. Only a rate limit that has
   lasted **24 hours with at least 3 refusals** ends the job in `Error`, with
@@ -377,9 +379,13 @@ same job at the same time (see [When two actions collide](#when-two-actions-coll
 Removes the job from the list. It does **not** delete any files: the archive, its chat and thumbnail, and any
 staging stay on disk and appear in the dashboard's **Orphaned** tab (TUI:
 ++a++ ++o++), where you can delete them. The video also stays in Moombox's
-processed history, so the monitors do not pick it up again — remove its
-entry under **Orphaned History Entries** on the same tab if you want it
-archived again.
+processed history (a job you added by URL or imported as well as one a
+monitor found),
+so the monitors do not pick it up again, even a stream that is still
+upcoming or live — remove its entry under **Orphaned History Entries** on
+the same tab if you want it archived again. A job deleted before you
+upgraded to this release holds back only finished videos (see
+[Storage](storage.md)).
 
 ### Watched
 

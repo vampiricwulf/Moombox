@@ -544,8 +544,10 @@ uses it), the delete is refused with "No longer an orphan. Refresh the list."
 
 Video IDs the monitor recorded as already processed but which no longer have
 a job — usually a job you deleted. While an entry remains, the monitor will
-not discover that video again. **Remove** (per row, or **Delete All**) lets
-the monitor pick it up again on its next pass. A YouTube video ID links to
+not discover that video again, even a stream that is still upcoming or live
+(an entry already here when you upgraded holds back only finished videos;
+see [Storage](storage.md)). **Remove** (per row, or **Delete All**) lets the
+monitor pick it up again on its next pass. A YouTube video ID links to
 its watch page and a Twitch VOD ID (`tw_v…`) to its twitch.tv page; other
 Twitch IDs (a live stream's `tw_…`, a clip's `tw_clip_…`) name no page and
 are shown as plain text.

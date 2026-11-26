@@ -634,16 +634,23 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		title = body[:idx]
 	}
 
-	// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-	active, err := dm.db.HasActiveJob(videoID)
+	// Skip a video whose job row is in any status but Finished: active, or
+	// settled by a Cancel or an Error that no re-detection acts on (owner
+	// ruling R4-4) — probing it every cycle bought nothing. Finished passes: a
+	// stream may restart on the same URL, and an incomplete-tail job is
+	// resumed on re-detection. A video whose job was deleted is skipped too,
+	// while the history row the Delete left stands (owner ruling R4-3); the
+	// read is live every cycle, so removing that row from the Orphaned list
+	// reopens the video on the next one.
+	held, err := dm.db.HasJobBlockingRedetection(videoID)
 	if err != nil {
-		// Don't swallow DB errors — proceeding as if no active job could
+		// Don't swallow DB errors — proceeding as if no job could
 		// create duplicates if the DB was simply busy. Log and abort this
 		// entry for the current cycle.
-		dm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+		dm.logger.Debug("HasJobBlockingRedetection query failed", "videoID", videoID, "err", err)
 		return nil
 	}
-	if active {
+	if held {
 		return nil
 	}
 

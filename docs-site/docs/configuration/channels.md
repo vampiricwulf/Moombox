@@ -474,15 +474,18 @@ twitch_vod_backlog = true
 
 | Default | Allowed values | Takes effect | Where to change |
 |---|---|---|---|
-| `false` | `true` or `false` | Next Twitch live check (a channel not yet listed since Moombox started is listed then; after that, hourly) | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
+| `false` | `true` or `false` | Next Twitch live check (a channel not yet listed since Moombox started, or since this was turned back on, is listed then; after that, hourly) | Dashboard: Add/Edit Channel → **Also archive new clips (Twitch only)** (badge **Archive clips**). TUI: channel editor → **Archive new clips (Twitch only)**. |
 
 Archive the channel's new clips. Once an hour, as part of the Twitch live
 check, Moombox lists the channel's clips and queues each one it has no job for yet as a `Queued` backlog job,
 paced by [archive slots](#channelsarchive_slots).
 
-- The first listing after Moombox starts reaches back one week. Later ones
-  reach back a day; after a longer gap in listings (an outage, the machine
-  asleep) they reach back a week, then a month, never further.
+- The first listing after Moombox starts reaches back one week, and so does
+  the first one after you turn this back on, or enable or re-add the
+  channel: clips made while it was off are not caught up beyond that week.
+  Later listings reach back a day; after a longer gap in listings (an
+  outage, the machine asleep) they reach back a week, then a month, never
+  further.
 - Clips are not filtered by the channel's [terms](#channelsterms).
 - A clip you paste into **Add video** always works, whether this is on or
   not.

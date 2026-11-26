@@ -143,7 +143,7 @@ direct loopback connection (see
 | `POST` | `/api/jobs/{id}/mux` | Mux what is already in staging without downloading again. |
 | `POST` | `/api/jobs/{id}/recover-asides` | Mux the recordings set aside by a mid-stream restart into their own files. |
 | `POST` | `/api/jobs/{id}/open-folder` | Local. Open the job's folder in Explorer (Windows) or the desktop file manager (Linux). |
-| `DELETE` | `/api/jobs/{id}` | Delete the job's row (an active job is cancelled first). Files stay on disk and show up as orphaned. |
+| `DELETE` | `/api/jobs/{id}` | Delete the job's row (an active job is cancelled first). Files stay on disk and show up as orphaned. A YouTube job leaves a processing-history entry, so the monitors do not find or archive the video again (live or upcoming streams included) until the entry is removed under Orphaned. |
 | `GET` | `/api/jobs/{id}/logs` | The job's own log lines. |
 | `GET` | `/api/formats/{videoId}` | Shared. Available formats for an 11-character YouTube video ID. Refused when started by another site's page. |
 
@@ -224,7 +224,7 @@ direct loopback connection (see
 |---|---|---|
 | `GET` | `/api/files/orphaned` | Output files and staging folders no job uses. |
 | `DELETE` | `/api/files/orphaned` | Body `{paths:[…]}`. Delete them. |
-| `GET` | `/api/history/orphaned` | History rows with no job, which stop a video being discovered again. |
+| `GET` | `/api/history/orphaned` | History rows with no job, which stop a video being discovered again. A deleted YouTube job leaves one. |
 | `DELETE` | `/api/history/orphaned` | Body `{videoIds:[…]}`. Remove them so the videos can be found again. A row whose video has a job by now is kept; `removed` in the answer is the number of rows removed. |
 | `POST` | `/api/import` | Upload a zip archive to import as a job (5 per minute). |
 

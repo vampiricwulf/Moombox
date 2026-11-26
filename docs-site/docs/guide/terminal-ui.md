@@ -492,8 +492,10 @@ twice deletes the selected one.
 ### Orphaned items (`A O`)
 
 Lists files and folders in the staging and output folders that no job owns,
-and processing-history entries with no job. A history entry stops the monitor from
-re-discovering that video; removing it lets the video be picked up again.
+and processing-history entries with no job. A history entry stops the monitors from
+re-discovering that video, even a stream still upcoming or live; removing it
+lets the video be picked up again (see [Storage](storage.md) for entries from
+before the upgrade).
 `D` twice (within 3 seconds) deletes the selected item, `A` twice deletes every
 item in the current group, `R` refreshes. See [Storage](storage.md).
 

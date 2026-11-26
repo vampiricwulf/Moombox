@@ -301,7 +301,7 @@ func (s *runState) runTUI() {
 				s.log.Warn("TUI delete: job did not exit within timeout; removing anyway", "jobID", jobID)
 			}
 		}
-		if err := s.db.DeleteJob(jobID); err != nil {
+		if err := s.db.DeleteJobLeavingHistory(job); err != nil {
 			s.log.Error("Failed to delete job", slog.String("error", err.Error()))
 		}
 	}

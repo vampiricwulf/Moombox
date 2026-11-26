@@ -1413,7 +1413,7 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			}
 		}
 
-		if err := db.DeleteJob(jobID); err != nil {
+		if err := db.DeleteJobLeavingHistory(job); err != nil {
 			jsonError(rw, "failed to delete job", http.StatusInternalServerError)
 			return
 		}
