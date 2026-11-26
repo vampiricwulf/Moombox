@@ -638,7 +638,10 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	// settled by a Cancel or an Error that no re-detection acts on (owner
 	// ruling R4-4) — probing it every cycle bought nothing. Finished passes: a
 	// stream may restart on the same URL, and an incomplete-tail job is
-	// resumed on re-detection.
+	// resumed on re-detection. A video whose job was deleted is skipped too,
+	// while the history row the Delete left stands (owner ruling R4-3); the
+	// read is live every cycle, so removing that row from the Orphaned list
+	// reopens the video on the next one.
 	held, err := dm.db.HasJobBlockingRedetection(videoID)
 	if err != nil {
 		// Don't swallow DB errors — proceeding as if no job could

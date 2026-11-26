@@ -1113,6 +1113,7 @@ Key methods:
 - `OnJobsChange(fn) -> unsubscribe`: Subscribe to full-list refreshes. Fired only by the bulk writers `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, never by a single add or delete.
 - `AddToHistory(videoID)`: Records video ID to prevent re-downloading.
 - `HasProcessed(videoID) -> (bool, error)`: Reports whether the video ID is in history, i.e. was jobbed before.
+- `HasJobBlockingRedetection(videoID) -> (bool, error)`: The YouTube monitors' job gate: a job row in any status but Finished (owner ruling R4-4), or, with no job row, the history row a deleted job left (`job_created`, owner ruling R4-3). `HasActiveJob` stays the Twitch monitor's gate.
 - `JobExists(id) -> bool`: O(1) existence check.
 
 ### worker.DownloadWorker

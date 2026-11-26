@@ -323,8 +323,14 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 }
 
 // HasJobBlockingRedetection reports whether a YouTube monitor should leave
-// videoID alone instead of probing it and offering it as found (owner ruling
-// R4-4): a job row for it exists in any status but Finished. An active row is
+// videoID alone instead of probing it and offering it as found. Two things
+// hold a video back. A job row for it in any status but Finished (owner ruling
+// R4-4). Or, with no job row at all, the history row a deleted job left
+// (job_created, owner ruling R4-3): the operator deleted the job, so a stream
+// still upcoming or live is not created again; removing the row from the
+// Orphaned list reopens it. A history row not marked job_created (one DECAPI
+// wrote for a skip or give-up, before it stopped writing those, or an orphan
+// already there at the v28 upgrade) holds nothing back. An active row is
 // already being worked on; a Cancelled or Error row is the operator's (or the
 // pipeline's) settled answer, and createYouTubeJob's duplicate path never
 // acts on one, so probing it every cycle only spent a player request and
@@ -337,8 +343,14 @@ func (db *Database) HasJobBlockingRedetection(videoID string) (bool, error) {
 	defer db.mu.RUnlock()
 
 	var one int
-	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 FROM jobs WHERE video_id = ? AND status != ? LIMIT 1`,
-		videoID, StatusFinished).Scan(&one)
+	// history is keyed by job ID, which for a YouTube job is the video ID:
+	// the deleted-job clause matches it against jobs.id (ListOrphanedHistory's
+	// rule), so a Finished job's own row never counts.
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 WHERE
+		EXISTS (SELECT 1 FROM jobs WHERE video_id = ? AND status != ?)
+		OR EXISTS (SELECT 1 FROM history h WHERE h.video_id = ? AND h.job_created = 1
+		           AND NOT EXISTS (SELECT 1 FROM jobs WHERE id = h.video_id))`,
+		videoID, StatusFinished, videoID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

@@ -605,17 +605,16 @@ func TestEscalation_NoCookiesNoEscalation(t *testing.T) {
 // restart on the same video ID, so a store-driven vod+started row with NO
 // job row must still be probed (a stream that ended before we saw it live,
 // on include_non_live_content=false, is otherwise never looked at again).
-// The history row (§8's HasProcessed trap) is seeded via db.AddToHistory
-// directly, matching a DECAPI give-up — the predicate is the jobs table,
-// never HasProcessed.
+// The history row (§8's HasProcessed trap) is a skip row with no job ever
+// created, matching a DECAPI give-up — the predicate is the jobs table,
+// never HasProcessed. (The row a deleted job leaves holds the video back,
+// owner ruling R4-3; that is TestFeed_ADeletedJobsStreamIsNotFoundAgain.)
 func TestWalk_RestartCarveOut(t *testing.T) {
 	db := newTestDB(t)
 	now := fixedNow()
 	seedRow(t, db, "UC1", "r1", now.AddDate(0, 0, -1), "started", "rss", "vod") // in-window ended broadcast
 	// History row WITHOUT a job row (the HasProcessed trap, §8): via history only.
-	if err := db.AddToHistory("r1"); err != nil {
-		t.Fatalf("AddToHistory: %v", err)
-	}
+	addSkipHistoryRow(t, db, "r1")
 
 	var probed []string
 	fm := newTestFeedMonitor(t, db, withProbe(recordingProbe(&probed)), withNow(now))

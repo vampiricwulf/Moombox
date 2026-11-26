@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 27
+const schemaVersion = 28
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -173,8 +173,9 @@ CREATE TABLE IF NOT EXISTS trims (
 );
 
 CREATE TABLE IF NOT EXISTS history (
-    video_id TEXT PRIMARY KEY,
-    added_at TEXT NOT NULL
+    video_id    TEXT PRIMARY KEY,
+    added_at    TEXT NOT NULL,
+    job_created INTEGER NOT NULL DEFAULT 0  -- v28: 1 = written as a job was created (owner ruling R4-3)
 );
 
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -801,6 +802,15 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 28 {
+		if err := db.migrateV28(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(28); err != nil {
+			return err
+		}
+	}
+
 	// Data only, no version: see the function for why it runs on every Open.
 	db.backfillTwitchOfflineParkReasons()
 
@@ -1081,6 +1091,27 @@ func (db *Database) migrateV26() error {
 func (db *Database) migrateV27() error {
 	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN live_edge_reason TEXT`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v27 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV28 adds history.job_created (owner ruling R4-3): 1 marks a row
+// written as a job was created, which is what lets the history row a Delete
+// leaves hold a YouTube broadcast back from re-detection, while a row DECAPI
+// wrote for a video it skipped or gave up on (before it stopped writing those)
+// does not. Every writer today is a job creation (AddToHistory sets the flag),
+// so only the rows already there are in doubt, and the backfill is
+// conservative: a row whose video has a job now is marked; a row with no job
+// is left unmarked, since nothing tells a deleted job's row from a skip row,
+// and an unmarked row never holds back a live or upcoming stream. Both
+// statements are idempotent.
+func (db *Database) migrateV28() error {
+	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE history ADD COLUMN job_created INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
+		return fmt.Errorf("v28 alter: %w", err)
+	}
+	if _, err := db.db.ExecContext(db.getCtx(),
+		`UPDATE history SET job_created = 1 WHERE job_created = 0 AND video_id IN (SELECT id FROM jobs)`); err != nil {
+		return fmt.Errorf("v28 backfill: %w", err)
 	}
 	return nil
 }

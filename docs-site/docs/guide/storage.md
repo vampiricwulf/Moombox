@@ -221,9 +221,15 @@ that space, act on the job and then click **Refresh**:
 
 **Orphaned History Entries** lists videos that Moombox remembers as already
 processed but that no longer have a job — usually jobs you deleted. While an
-entry remains, the monitors do not pick that video up again; delete the
-entry to let them archive it again. History entries are never dropped for
-their age: an entry stays until you delete it here.
+entry remains, the monitors do not pick that video up again, even a stream
+that is still upcoming or live; delete the entry to let them find it and
+archive it again. History entries are never dropped for their age: an entry
+stays until you delete it here.
+
+An entry that was already in this list when you upgraded to a release that
+tells the two apart may be for a video Moombox skipped rather than one you
+deleted, so it holds back only finished videos: a stream with such an entry
+that is still upcoming or live is picked up as usual.
 
 ## Disk space
 
