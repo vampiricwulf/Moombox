@@ -159,7 +159,7 @@ Mouse clicks and the wheel only move the selection.
 | ++left++ / ++right++ | Toggle, cycle a choice, or step presets. |
 | ++shift+left++ / ++shift+right++ | Previous / next section. |
 | ++tab++ | Next section (wraps). |
-| ++shift+down++ | Go to the **Save & Return** / **Return** buttons. |
+| ++shift+down++ | Go to the **Save & Return** / **Return** buttons (not in the Channels section, where it moves the selected channel down). |
 | Buttons: ++left++ / ++right++, ++enter++, ++up++ | Pick a button, activate it, back to the fields. |
 | ++esc++ | Close (asks to save if there are unsaved changes). |
 | Save prompt: `Y` / `N` / ++esc++ | Save and close / discard and close / keep editing. |
