@@ -76,6 +76,7 @@ Open **Settings → Integrations**. The **yt-dlp PO Token Plugin** card shows:
 | Badge **Not installed** | No plugin file in the folder. |
 | Badge **Installed** | The file is there and points at the address Moombox is serving now. |
 | Badge **Config mismatch** | The file points at a different port, or at `http` while Moombox serves `https` (or the other way round). A warning says *The installed plugin configuration doesn't match. Click Update to fix.* |
+| Badge **Outdated** | The file points at the right address but was written by an older Moombox, which wrote different code (for example, before the HTTPS plugin stopped going through a proxy). A warning says *The installed plugin was written by an older Moombox. Click Update to replace it.* |
 | Badge **Unrecognized file** | A file with the plugin's name exists but Moombox cannot read its address (a truncated or hand-edited file). A warning says *Click Reinstall to replace it.* |
 | Badge **Error** | The status could not be read. |
 | **Plugin directory:** | yt-dlp's plugin folder on this machine. |
@@ -84,7 +85,7 @@ Open **Settings → Integrations**. The **yt-dlp PO Token Plugin** card shows:
 The button below changes with the state:
 
 - **Install** writes the file.
-- **Update** (on a mismatch) rewrites it with the current port and scheme.
+- **Update** (on a mismatch, or an outdated file) rewrites it with the current port, scheme and code.
 - **Reinstall** (when it is already correct) writes it again anyway.
 - **Refresh** re-reads the status.
 
@@ -101,7 +102,8 @@ Press ++e++ ++y++ (**yt-dlp Plugin**). The dialog lists:
   this platform)*
 - **Moombox port:** the port Moombox serves, and whether HTTPS is on
 - **Plugin points:** the port and HTTPS setting in the installed file
-- **Plugin state:** *not recognized — I reinstalls it*, for an unreadable file
+- **Plugin state:** *not recognized — I reinstalls it*, for an unreadable file,
+  or *outdated — I updates it*, for a file an older Moombox wrote
 - **Mismatch:** *yes — I rewrites it to match*, on a port or scheme mismatch
 - **Plugin path:** the folder to give yt-dlp's `--plugin-dirs` option
 
@@ -153,6 +155,10 @@ Other ways to load or point it:
     ```bash
     yt-dlp --extractor-args "youtubepot-moombox:base_url=http://127.0.0.1:8080" "URL"
     ```
+
+    The plugin never sends its requests through a proxy, whatever
+    `HTTPS_PROXY` or the system proxy says, so the address must be reachable
+    directly from the machine yt-dlp runs on.
 
 !!! warning "The *extractor args without a plugin* line"
     The dashboard's **Manual usage** section also shows a command of the form

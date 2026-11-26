@@ -266,3 +266,30 @@ func TestYtdlpDialogFlagsAnUnrecognisedFile(t *testing.T) {
 		t.Errorf("the plugin-path row's label appears %d times, want exactly 1:\n%s", n, v)
 	}
 }
+
+// TestYtdlpDialogFlagsAnOutdatedFile: a file an older Moombox wrote (its
+// version marker older or missing) has the right address, so before
+// ytdlpplugin.Info.Outdated it read as a healthy install here and on the
+// dashboard's card. Both forms now say so and name the key that fixes it.
+//
+// Mutants: dropping the Outdated row from statusRows, or from bareStatusRows.
+func TestYtdlpDialogFlagsAnOutdatedFile(t *testing.T) {
+	port := 774
+	info := ytdlpplugin.Info{Installed: true, Outdated: true, PluginDir: "/plug", CurrentPort: 774,
+		InstalledPort: &port, InstalledScheme: "http", ExtractedPath: "/plug/moombox"}
+	app := NewApp()
+	app.OnYtdlpPluginStatus = func() (ytdlpplugin.Info, error) { return info, nil }
+	_, cmd := app.dispatchAction("E Y", nil)
+	app.Update(runCmd(t, cmd))
+
+	v := app.ytdlpDlg.View()
+	if !strings.Contains(v, "outdated — I updates it") {
+		t.Errorf("the overlay does not report the outdated file:\n%s", v)
+	}
+	if strings.Contains(v, "Mismatch:") {
+		t.Errorf("an outdated file with the right address is reported as a mismatch:\n%s", v)
+	}
+	if bare := bareYtdlp(30, 6, info).View(); !strings.Contains(bare, "Outdated: I updates it") {
+		t.Errorf("the bare form does not report the outdated file:\n%s", bare)
+	}
+}

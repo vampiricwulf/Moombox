@@ -2,6 +2,7 @@ package ytdlpplugin
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -148,7 +149,7 @@ func TestInfoJSONKeys(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "pluginDir", "portMismatch", "unparseable"}
+	want := []string{"currentPort", "extractedPath", "httpsEnabled", "installed", "installedPort", "installedScheme", "outdated", "pluginDir", "portMismatch", "unparseable"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("JSON keys = %v, want %v", got, want)
 	}
@@ -209,5 +210,80 @@ func TestStatusFlagsAnUnparseablePluginFile(t *testing.T) {
 	}
 	if info.InstalledPort != nil {
 		t.Errorf("InstalledPort = %v, want nil", *info.InstalledPort)
+	}
+}
+
+// TestGeneratedPluginBypassesProxiesInBothFlavours: the plugin's requests go
+// to 127.0.0.1 (or base_url), which no proxy can reach on the operator's
+// behalf. The HTTP flavour passed proxies={'all': None}; the HTTPS flavour
+// called urlopen(context=...), whose default opener reads HTTPS_PROXY and the
+// Windows Internet Options proxy, and so lost the server whenever one was set.
+//
+// Mutants: the HTTPS helper back on urlopen, or the opener built without
+// ProxyHandler({}); the HTTP helper without proxies={'all': None}.
+func TestGeneratedPluginBypassesProxiesInBothFlavours(t *testing.T) {
+	https := Generate(774, true)
+	for _, want := range []string{
+		"urllib.request.ProxyHandler({})",
+		"return _LOCALHOST_OPENER.open(req, timeout=timeout)",
+	} {
+		if !strings.Contains(https, want) {
+			t.Errorf("HTTPS flavour lacks %q", want)
+		}
+	}
+	if strings.Contains(https, "urlopen(") {
+		t.Error("HTTPS flavour still calls urlopen, whose default opener uses the system proxy")
+	}
+	if http := Generate(774, false); !strings.Contains(http, "proxies={'all': None}") {
+		t.Error("HTTP flavour lost proxies={'all': None}")
+	}
+}
+
+// TestStatusFlagsAPluginFileWithAnOlderMarker: a file an older Moombox wrote
+// points at the right address, so it used to read as a healthy install while
+// carrying code this Moombox no longer writes (the proxied HTTPS helper).
+// Its version marker — missing in every file written before the marker
+// existed — now marks it Outdated, and the install route's "already
+// installed" answer (UpToDate) no longer covers it.
+//
+// Mutants: Outdated never set; set for a current file; UpToDate ignoring it.
+func TestStatusFlagsAPluginFileWithAnOlderMarker(t *testing.T) {
+	redirectPluginDir(t)
+	if err := Install(774, true); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	info, err := Status(774, true)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if info.Outdated || !info.UpToDate() {
+		t.Fatalf("a file this Moombox just wrote: Outdated=%v UpToDate=%v, want false/true", info.Outdated, info.UpToDate())
+	}
+
+	current, err := os.ReadFile(File())
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := regexp.MustCompile(`(?m)^MOOMBOX_PLUGIN_VERSION = \d+\n`)
+	if !marker.Match(current) {
+		t.Fatal("the generated file carries no MOOMBOX_PLUGIN_VERSION line")
+	}
+	for name, content := range map[string]string{
+		"no marker":    marker.ReplaceAllString(string(current), ""),
+		"older marker": marker.ReplaceAllString(string(current), fmt.Sprintf("MOOMBOX_PLUGIN_VERSION = %d\n", PluginVersion-1)),
+	} {
+		if err := os.WriteFile(File(), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := Status(774, true)
+		if err != nil {
+			t.Fatalf("%s: Status: %v", name, err)
+		}
+		if !info.Outdated || info.UpToDate() {
+			t.Errorf("%s: Outdated=%v UpToDate=%v, want true/false", name, info.Outdated, info.UpToDate())
+		}
+		if info.PortMismatch || info.Unparseable {
+			t.Errorf("%s: PortMismatch=%v Unparseable=%v, want both false (the address still matches)", name, info.PortMismatch, info.Unparseable)
+		}
 	}
 }

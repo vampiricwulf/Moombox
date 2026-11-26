@@ -62,8 +62,7 @@ func YtdlpRoutes(r chi.Router, currentPort func() int, httpsEnabled bool) {
 		// plugin" — dropping the cause (permission denied, a read-only
 		// file system) that the TUI's I key shows.
 		if !body.Force {
-			if info, err := ytdlpplugin.Status(port, httpsEnabled); err == nil &&
-				info.Installed && !info.Unparseable && !info.PortMismatch {
+			if info, err := ytdlpplugin.Status(port, httpsEnabled); err == nil && info.UpToDate() {
 				jsonResponse(rw, map[string]any{
 					"success":          true,
 					"alreadyInstalled": true,

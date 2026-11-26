@@ -2633,6 +2633,7 @@ export class SettingsController {
     const portEl = document.getElementById("ytdlp-plugin-port");
     const mismatchWarning = document.getElementById("ytdlp-port-mismatch-warning");
     const unparseableWarning = document.getElementById("ytdlp-unparseable-warning");
+    const outdatedWarning = document.getElementById("ytdlp-outdated-warning");
     const installBtn = document.getElementById("ytdlp-install-btn");
     const manualCmd = document.getElementById("ytdlp-manual-cmd");
     const extractorCmd = document.getElementById("ytdlp-extractor-cmd");
@@ -2648,12 +2649,18 @@ export class SettingsController {
       if (status.installed && status.unparseable) {
         badge.variant = "warning";
         badge.textContent = "Unrecognized file";
-      } else if (status.installed && !status.portMismatch) {
-        badge.variant = "success";
-        badge.textContent = "Installed";
       } else if (status.installed && status.portMismatch) {
         badge.variant = "warning";
         badge.textContent = "Config mismatch";
+      } else if (status.installed && status.outdated) {
+        // A file an older Moombox wrote (older or missing version marker):
+        // it points at the right address but this Moombox writes different
+        // code, so it is offered as an Update like a mismatch.
+        badge.variant = "warning";
+        badge.textContent = "Outdated";
+      } else if (status.installed) {
+        badge.variant = "success";
+        badge.textContent = "Installed";
       } else {
         badge.variant = "neutral";
         badge.textContent = "Not installed";
@@ -2681,19 +2688,21 @@ export class SettingsController {
       // state (_ytdlpReinstall below is true: installed and not mismatched), and
       // that path passes force, so the advice is actionable as written.
       unparseableWarning.style.display = status.unparseable ? "" : "none";
+      outdatedWarning.style.display = status.outdated ? "" : "none";
 
       // Update button text. When it reads "Reinstall" the install call must
       // pass force — otherwise the server short-circuits "already installed"
-      // and never rewrites the file. ("Update" rewrites anyway: the port or
-      // scheme mismatch defeats the short-circuit.)
-      this._ytdlpReinstall = !!status.installed && !status.portMismatch;
+      // and never rewrites the file. ("Update" rewrites anyway: a port or
+      // scheme mismatch, or an outdated file, defeats the short-circuit.)
+      const needsUpdate = !!status.portMismatch || !!status.outdated;
+      this._ytdlpReinstall = !!status.installed && !needsUpdate;
       if (status.installed) {
         let icon = installBtn.querySelector("sl-icon");
         if (!icon) { icon = document.createElement("sl-icon"); icon.slot = "prefix"; }
         icon.name = "arrow-clockwise";
         installBtn.textContent = "";
         installBtn.prepend(icon);
-        installBtn.append(status.portMismatch ? "Update" : "Reinstall");
+        installBtn.append(needsUpdate ? "Update" : "Reinstall");
       } else {
         let icon = installBtn.querySelector("sl-icon");
         if (!icon) { icon = document.createElement("sl-icon"); icon.slot = "prefix"; }
