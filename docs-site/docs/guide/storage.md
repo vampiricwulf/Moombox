@@ -186,9 +186,9 @@ lists what no job needs any more. Click **Refresh** to rescan.
 
 **Orphaned Files** lists:
 
-- **staging** folders that belong to no job, to a `Finished` job whose
-  staging is not kept, to a `Queued`, `Error`, `Cancelled` or `COOKIES?`
-  job, or whose keep period has expired. The job's title and status are shown when
+- **staging** folders that belong to no job, to an `Error` or `Cancelled`
+  job, to a `Finished` job whose staging is not kept, or whose keep period
+  has expired. The job's title and status are shown when
   the job still exists, and any set-aside recordings inside are named so you
   can see you are about to delete footage;
 - **output** files that no job names, such as the files of a deleted job
@@ -197,16 +197,26 @@ lists what no job needs any more. Click **Refresh** to rescan.
 - **trim** files that no trim record names.
 
 Delete entries one by one with the trash icon, or **Delete All**. Both ask
-first. Folders of active jobs (`Upcoming`, `Live`, `Downloading`, `Muxing`)
-are never listed, and a path that a job has claimed since the list was read
-is refused with a message asking you to refresh.
+first. A path that a job has claimed since the list was read is refused
+with a message asking you to refresh.
+
+The staging folder of a job that is still on its way is never listed: a job
+that is `Queued`, `Upcoming`, `Live`, `Downloading`, `Muxing` or `COOKIES?`,
+and a Twitch `Error` job that is waiting for its automatic mux (its details
+say *Muxes automatically once Twitch confirms the broadcast over*). To free
+that space, act on the job and then click **Refresh**:
+
+- **Cancel** the job. It becomes `Cancelled`, and its folder is listed.
+- **Delete** the job, where Delete is offered (`COOKIES?` and `Error`). The
+  folder then belongs to no job, and is listed.
+- For the job waiting for its automatic mux, you can also **Mux** it
+  yourself to archive what it recorded, or **Reinitialize** it, which
+  deletes the folder and downloads again from the start.
 
 !!! warning
-    The staging folder of an `Error`, `Cancelled` or `COOKIES?` job is listed
-    too, and so is that of a `Queued` backlog video sent back for a retry
-    (which resumes from it). It is the only copy of whatever that job
-    recorded: deleting it means Resume and Mux have nothing left to work
-    with.
+    The staging folder of an `Error` or `Cancelled` job is the only copy of
+    whatever that job recorded: deleting it means Resume and Mux have
+    nothing left to work with.
 
 **Orphaned History Entries** lists videos that Moombox remembers as already
 processed but that no longer have a job — usually jobs you deleted. While an

@@ -517,9 +517,10 @@ ask first.
     warns that this is captured footage that is deleted too. A `Finished`
     job's staging that still holds a set-aside recording is never listed
     here, however old it is. Such a folder shows up only when its job is
-    not `Finished` (for example `Error`, `Cancelled`, `COOKIES?` or
-    `Queued`) or the job no longer exists. Consider **Recover** in the job's
-    details first.
+    `Error` or `Cancelled`, or the job no longer exists; the folders that
+    are never listed are in
+    [Orphaned files](storage.md#orphaned-files). Consider **Recover** in the
+    job's details first.
 
 If something stopped being an orphan since the list was drawn (a job now
 uses it), the delete is refused with "No longer an orphan. Refresh the list."
