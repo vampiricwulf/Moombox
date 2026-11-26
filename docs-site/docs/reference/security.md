@@ -315,7 +315,8 @@ Where Moombox writes these values into a log line, a job's error text or a
 notification, it replaces the sensitive part with `<redacted>` first:
 
 - The signed parts of YouTube media URLs (your public IP, signatures, PO
-  tokens) and the playback session in Twitch stream URLs.
+  tokens), the playback session in Twitch stream URLs, and the signature and
+  playback token in a Twitch clip's download URL.
 - PO tokens in crash output (which also cuts every URL to its scheme and
   host).
 - Notification webhook URLs, which are cut down to the scheme and host (for
