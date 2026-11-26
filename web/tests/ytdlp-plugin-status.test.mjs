@@ -61,12 +61,3 @@ test("a current plugin file reads Installed with no warning", { skip }, async ()
   const got = await card(base);
   assert.deepEqual(got, { badge: "Installed", outdated: false, mismatch: false, button: "Reinstall", force: true });
 });
-
-// A file that is both is named by its mismatch first: that is what stops
-// yt-dlp reaching Moombox at all.
-test("a mismatched outdated file reads Config mismatch", { skip }, async () => {
-  const got = await card({ ...base, outdated: true, portMismatch: true, installedPort: 775 });
-  assert.equal(got.badge, "Config mismatch");
-  assert.equal(got.mismatch, true);
-  assert.equal(got.button, "Update");
-});

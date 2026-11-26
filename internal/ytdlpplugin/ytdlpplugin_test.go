@@ -285,5 +285,14 @@ func TestStatusFlagsAPluginFileWithAnOlderMarker(t *testing.T) {
 		if info.PortMismatch || info.Unparseable {
 			t.Errorf("%s: PortMismatch=%v Unparseable=%v, want both false (the address still matches)", name, info.PortMismatch, info.Unparseable)
 		}
+		// The same old file under another port: the mismatch is the one
+		// reason shown (the rewrite fixes both).
+		info, err = Status(775, true)
+		if err != nil {
+			t.Fatalf("%s: Status on another port: %v", name, err)
+		}
+		if !info.PortMismatch || info.Outdated {
+			t.Errorf("%s on another port: PortMismatch=%v Outdated=%v, want true/false", name, info.PortMismatch, info.Outdated)
+		}
 	}
 }

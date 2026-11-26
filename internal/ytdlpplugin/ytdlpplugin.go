@@ -87,7 +87,9 @@ type Info struct {
 	// Outdated is an installed, parseable file whose MOOMBOX_PLUGIN_VERSION
 	// marker is older than PluginVersion, or missing: this Moombox would write
 	// different code, so both UIs offer the rewrite. False for an unparseable
-	// file, which already says to reinstall.
+	// file, which already says to reinstall, and for a PortMismatch, which
+	// already says to rewrite (the one rewrite fixes both): each state shows
+	// one reason, and the bare E Y form has no row to spare for two.
 	Outdated bool `json:"outdated"`
 }
 
@@ -131,7 +133,7 @@ func Status(port int, httpsEnabled bool) (Info, error) {
 				info.InstalledPort = &parsed
 				info.InstalledScheme = scheme
 				info.PortMismatch = p != port || scheme != expectedScheme
-				info.Outdated = parseVersion(string(data)) < PluginVersion
+				info.Outdated = !info.PortMismatch && parseVersion(string(data)) < PluginVersion
 			} else {
 				// A file we cannot read the base URL out of. Reported rather
 				// than treated as a healthy install: reinstalling is the fix,

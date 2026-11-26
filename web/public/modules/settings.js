@@ -2655,7 +2655,8 @@ export class SettingsController {
       } else if (status.installed && status.outdated) {
         // A file an older Moombox wrote (older or missing version marker):
         // it points at the right address but this Moombox writes different
-        // code, so it is offered as an Update like a mismatch.
+        // code, so it is offered as an Update like a mismatch. The server
+        // never sets outdated beside portMismatch (ytdlpplugin.Status).
         badge.variant = "warning";
         badge.textContent = "Outdated";
       } else if (status.installed) {

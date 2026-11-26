@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -289,7 +290,12 @@ func TestYtdlpDialogFlagsAnOutdatedFile(t *testing.T) {
 	if strings.Contains(v, "Mismatch:") {
 		t.Errorf("an outdated file with the right address is reported as a mismatch:\n%s", v)
 	}
-	if bare := bareYtdlp(30, 6, info).View(); !strings.Contains(bare, "Outdated: I updates it") {
-		t.Errorf("the bare form does not report the outdated file:\n%s", bare)
-	}
+	// Bare: the row is on screen, and the frame exact, at every compact size.
+	compactSizes(func(w, h int) {
+		bare := bareYtdlp(w, h, info).View()
+		wantExact(t, fmt.Sprintf("outdated at %dx%d", w, h), bare, w, h)
+		if !strings.Contains(bare, "Outdated: I updates it") {
+			t.Errorf("%dx%d: the bare form does not report the outdated file:\n%s", w, h, bare)
+		}
+	})
 }
