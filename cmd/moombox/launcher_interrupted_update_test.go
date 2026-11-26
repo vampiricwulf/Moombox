@@ -188,10 +188,9 @@ func TestAFreshStartArmsOnlyAnUpdateNeverBooted(t *testing.T) {
 // and the boot stays armed with it.
 //
 // Mutants: armInterruptedUpdate renaming .old to ~ as handleUpdateRestart does
-// on Windows — the ~ is deleted on the way out and .old is gone; the childRestart
-// arm calling handleUpdateRestart instead of restartArtifact (Windows) — the
-// restart renames .old to ~ and the stop deletes it; the stop
-// checked after the post-update rule in classifyChildExit — the stop is
+// on Windows — .old is gone; the childRestart arm calling handleUpdateRestart
+// instead of restartArtifact (Windows) — the restart renames .old to ~; the
+// stop checked after the post-update rule in classifyChildExit — the stop is
 // rolled back.
 func TestAStopDuringAnInterruptedUpdatesBootKeepsOld(t *testing.T) {
 	for _, tc := range []struct {
@@ -226,7 +225,7 @@ func TestAStopDuringAnInterruptedUpdatesBootKeepsOld(t *testing.T) {
 			action, _ := boot.judge(false, tc.code, 5*time.Second, tc.terminating, 0)
 			switch action {
 			case childPropagate:
-				deferDeleteOldLauncher(exePath)
+				boot.sweepLauncherImage(exePath)
 			case childPostUpdateFailure:
 				var restored bool
 				captureStderr(t, func() { restored = boot.recoverFailedBoot(exePath, tc.code) })
@@ -259,10 +258,18 @@ func TestAStopDuringAnInterruptedUpdatesBootKeepsOld(t *testing.T) {
 //
 // Mutants: the call deleted, moved into the loop (every respawn, the restored
 // binary's included, would be re-armed from disk), or passed another version.
+//
+// Two more things the loop owes owner ruling RV-10, which no test can drive
+// either: the start's sweep runs before the arm (it is what puts a kept ~
+// back at .old for the arm to find), with the running version, and no exit
+// schedules the ~ file's deletion except through the record
+// (sweepLauncherImage). Mutants: cleanupOrphans moved after the arm; any exit
+// calling deferDeleteOldLauncher itself.
 func TestTheLauncherArmsAnInterruptedUpdateBeforeItsFirstChild(t *testing.T) {
 	const want = "boot.armInterruptedUpdate(exePath, version)"
 	_, body := funcBody(t, "launcher.go", "launchAndSupervise")
 	callAt, loopAt, calls := -1, -1, 0
+	sweepAt := -1
 	for i, st := range body.List {
 		if _, ok := st.(*ast.ForStmt); ok && loopAt < 0 {
 			loopAt = i
@@ -271,6 +278,17 @@ func TestTheLauncherArmsAnInterruptedUpdateBeforeItsFirstChild(t *testing.T) {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				switch id.Name {
+				case "cleanupOrphans":
+					sweepAt = i
+					if got := types.ExprString(call); got != "cleanupOrphans(exePath, version)" {
+						t.Errorf("launchAndSupervise calls %s, want cleanupOrphans(exePath, version)", got)
+					}
+				case "deferDeleteOldLauncher":
+					t.Errorf("launchAndSupervise calls deferDeleteOldLauncher itself in statement %d, want every exit to go through boot.sweepLauncherImage", i)
+				}
 			}
 			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "armInterruptedUpdate" {
 				calls++
@@ -284,5 +302,8 @@ func TestTheLauncherArmsAnInterruptedUpdateBeforeItsFirstChild(t *testing.T) {
 	}
 	if calls != 1 || loopAt < 0 || callAt >= loopAt {
 		t.Fatalf("launchAndSupervise calls armInterruptedUpdate %d times (last at statement %d, the loop at %d), want once, before the loop", calls, callAt, loopAt)
+	}
+	if sweepAt < 0 || sweepAt >= callAt {
+		t.Errorf("launchAndSupervise sweeps at statement %d and arms at %d, want the sweep first", sweepAt, callAt)
 	}
 }

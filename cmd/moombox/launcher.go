@@ -387,8 +387,9 @@ type postUpdateBoot struct {
 // its release, no new update was applied, so the restart is a config restart
 // of the same binary. It reports "" and leaves .old alone, and restarted
 // carries the boot forward with .old as its artifact. Renaming .old to ~ there
-// would move an artifact nothing holds for no reason, and record it under a
-// name the next start would have to rename back (cleanupOrphans).
+// would report an artifact, and restarted would read that as a new update:
+// it would clear atFreshStart, and a child that then could not be spawned
+// would be rolled back although no boot happened (owner ruling RV-2).
 func (b *postUpdateBoot) restartArtifact(exePath string, wasFirst bool) string {
 	if b.atFreshStart && wasFirst && b.tag != "" &&
 		b.artifact == exePath+updater.OldSuffix && pendingUpdateTag(exePath) == b.tag {
