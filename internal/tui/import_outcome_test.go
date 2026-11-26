@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -180,5 +181,25 @@ func TestImportRefusesAnArchiveOverTheCapBeforeSending(t *testing.T) {
 		if !tc.sent && (!strings.Contains(msg.Err, "big.zip") || !strings.Contains(msg.Err, utils.FormatFileSize(constants.MaxImportUploadBytes))) {
 			t.Errorf("size %d: refusal %q does not name the file and the cap", tc.size, msg.Err)
 		}
+	}
+}
+
+// The import's note names the zip entries it left out by their own names,
+// and a zip entry's name can carry an escape sequence (a style, an OSC 8
+// hyperlink). The feedback line draws the note with every control character
+// as a space, as it draws the title.
+//
+// Mutant: msg.Note drawn without displayText (the escape reaches the line).
+func TestImportNoteIsDrawnWithoutControlCharacters(t *testing.T) {
+	a := NewApp()
+	a.width, a.height = 60, 40
+	msg := importAnsweredWith(t, a, http.StatusCreated,
+		`{"title":"Stream","import":{"skipped":["x"],"note":"left out \u001b]8;;https://example.invalid\u0007notes.txt\u001b]8;;\u0007: not named after the recording"}}`)
+	a.Update(msg)
+	if !strings.Contains(a.feedback.msg, "notes.txt") {
+		t.Fatalf("feedback %q, want the note with the entry's name", a.feedback.msg)
+	}
+	if i := strings.IndexFunc(a.feedback.msg, unicode.IsControl); i >= 0 {
+		t.Errorf("feedback %q carries a control character at byte %d", a.feedback.msg, i)
 	}
 }
