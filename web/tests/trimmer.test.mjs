@@ -340,3 +340,52 @@ test("a page reloaded mid-trim shows the trim still running", { skip }, async ()
   assert.equal(runningRow(r.h, "tA"), undefined, "a trim that ended while the socket was down kept its bar");
   assert.deepEqual(trimsShown(r.h), ["tA"]);
 });
+
+// ── Stopping a running trim ───────────────────────────────────────────────
+//
+// A running trim had no control: the only stop was restarting Moombox. Its
+// row now has Stop, which sends DELETE on the running trim's id (the server
+// stops it through TrimService.StopTrim); the outcome is its trim_status
+// frame, marked stopped, which is toasted as no failure.
+
+// Mutants: drop the Stop button from the running row; drop the
+// data-stop-trim delegation (the click sends nothing); drop stopTrim's
+// stoppingTrims check (a second click sends a second DELETE).
+test("a running trim's Stop sends one stop for that trim", { skip }, async () => {
+  const r = await trimRace();
+  let release;
+  r.h.http.on("DELETE /api/jobs/:id/trims/:trimId", () => new Promise((resolve) => { release = resolve; }));
+  r.h.app.showConfirm = async () => true;
+  await r.openDetails("A");
+  trimStatus(r.h, runningFrame("tA", "A", 10));
+  const stop = runningRow(r.h, "tA").querySelector("[data-stop-trim]");
+  assert.ok(stop, "the running trim has no Stop");
+  await r.click(stop);
+  await r.click(stop);
+  const sent = r.h.http.calls.filter((c) => c.method === "DELETE");
+  assert.deepEqual(sent.map((c) => c.url), ["/api/jobs/A/trims/tA"], "Stop sent the wrong requests");
+  release(response({ body: { success: true, stopped: true } }));
+  for (let i = 0; i < 6; i++) await r.h.flush();
+  assert.equal(r.h.app.stoppingTrims.size, 0, "the stop's busy mark outlived its answer");
+});
+
+// Mutant: drop handleTrimStatus's stopped arm — a stopped trim is toasted as
+// failed.
+test("a stopped trim is toasted as stopped, not failed", { skip }, async () => {
+  const r = await trimRace();
+  trimStatus(r.h, { id: "tB", jobId: "B", state: "failed", stopped: true, startTime: 70, endTime: 80, error: "Stopped" });
+  assert.match(said(r.h), /Trim 1:10 – 1:20 of "title B" stopped/);
+  assert.doesNotMatch(said(r.h), /failed/);
+  trimStatus(r.h, { id: "tC", jobId: "C", state: "failed", stopped: true, startTime: 70, endTime: 80, error: "The job was deleted before the trim finished" });
+  assert.match(said(r.h), /stopped: The job was deleted before the trim finished/);
+});
+
+// Mutant: drop the !response.ok throw — a refused stop says nothing.
+test("a refused stop names the server's reason", { skip }, async () => {
+  const r = await trimRace();
+  r.h.http.on("DELETE /api/jobs/:id/trims/:trimId", () => response({ status: 409, body: { error: "the trim has finished encoding and is being saved" } }));
+  r.h.app.showConfirm = async () => true;
+  await r.h.app.stopTrim("A", "tA");
+  await r.h.flush();
+  assert.match(said(r.h), /Failed to stop trim: the trim has finished encoding and is being saved/);
+});

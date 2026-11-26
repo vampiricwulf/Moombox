@@ -106,6 +106,12 @@ export class JobDetailsController {
           this.app.deleteTrim(btn.dataset.jobId, btn.dataset.trimId);
           return;
         }
+        const stopBtn = e.target.closest("[data-stop-trim]");
+        if (stopBtn) {
+          e.stopPropagation();
+          this.app.stopTrim(stopBtn.dataset.jobId, stopBtn.dataset.trimId);
+          return;
+        }
         if (e.target.closest("#details-mark-watched")) {
           await this._setWatched(true);
           return;
@@ -540,16 +546,21 @@ export class JobDetailsController {
               </div>
             `;
     }).join('');
-    // A trim the server is encoding: its range, a bar, and the percentage
-    // (updateRunningTrim moves the last two in place). Last, as the newest.
+    // A trim the server is encoding: its range, a bar, the percentage
+    // (updateRunningTrim moves those two in place) and Stop, shown busy
+    // while its request is out (app.stoppingTrims). Last, as the newest.
     const runningRows = running.map((t) => {
       const range = `${esc(this.app.formatTimestamp(t.startTime))} - ${esc(this.app.formatTimestamp(t.endTime))}`;
       const pct = trimPercent(t.progress);
+      const stopping = this.app.stoppingTrims?.has(t.id) ? " loading" : "";
       return `
               <div class="trim-item trim-item-running" data-running-trim="${esc(t.id)}">
                 <span class="trim-running-range"><strong>${range}</strong> (trimming)</span>
                 <sl-progress-bar class="trim-progress" value="${pct}" label="Trimming ${range}"></sl-progress-bar>
                 <span class="trim-progress-text">${pct}%</span>
+                <sl-button size="small" variant="default" data-stop-trim data-job-id="${esc(job.id)}" data-trim-id="${esc(t.id)}"${stopping}>
+                  Stop
+                </sl-button>
               </div>
             `;
     }).join('');
