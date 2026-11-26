@@ -200,19 +200,32 @@ func TestClipSweepFilterReachesBackToTheLastWholeListing(t *testing.T) {
 // disabled or removed) and comes back is a fresh opt-in, whose first sweep
 // asks for the last week as a restart's does, not a month's catch-up for the
 // time it was out. The poll forgets it where it sees it gone, also when no
-// channel is left opted in, or no Twitch channel is enabled at all (both
-// return before the sweep starts).
+// channel is left opted in, no Twitch channel is enabled at all (both return
+// before the sweep starts), or the device is offline; and a channel save
+// (PruneHealth, kickMonitors) forgets it at once, so off and on again
+// between two polls is seen too.
 //
 // Mutants: the prune dropped from doCheck (the return asks LAST_MONTH); the
-// prune placed after doCheck's no-channels return, or inside startClipSweep
-// (the disabled channel, or the switched-off one, asks LAST_MONTH).
+// prune placed after doCheck's offline or no-channels return, or inside
+// startClipSweep (the offline, disabled or switched-off case asks
+// LAST_MONTH); the prune dropped from PruneHealth (the between-polls case
+// asks LAST_MONTH).
 func TestClipSweepReEnableIsAFreshOptIn(t *testing.T) {
+	clipsOff := func(ch *config.ChannelConfig) { ch.TwitchArchiveClips = false }
+	pollOnline := func(ctx context.Context, tm *TwitchMonitor) { tm.doCheck(ctx) }
 	for _, tc := range []struct {
 		name  string
 		leave func(*config.ChannelConfig)
+		see   func(ctx context.Context, tm *TwitchMonitor) // what notices the channel gone
 	}{
-		{"clips switched off", func(ch *config.ChannelConfig) { ch.TwitchArchiveClips = false }},
-		{"channel disabled", func(ch *config.ChannelConfig) { off := false; ch.Enabled = &off }},
+		{"clips switched off", clipsOff, pollOnline},
+		{"channel disabled", func(ch *config.ChannelConfig) { off := false; ch.Enabled = &off }, pollOnline},
+		{"clips switched off while offline", clipsOff, func(ctx context.Context, tm *TwitchMonitor) {
+			tm.IsOnline = func() bool { return false }
+			tm.doCheck(ctx)
+			tm.IsOnline = nil
+		}},
+		{"clips switched off and on between polls", clipsOff, func(_ context.Context, tm *TwitchMonitor) { tm.PruneHealth() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -244,7 +257,7 @@ func TestClipSweepReEnableIsAFreshOptIn(t *testing.T) {
 				gone := on
 				tc.leave(&gone)
 				setChannel(gone)
-				tm.doCheck(ctx) // sees it gone
+				tc.see(ctx, tm)
 				synctest.Wait()
 
 				time.Sleep(10 * 24 * time.Hour)
