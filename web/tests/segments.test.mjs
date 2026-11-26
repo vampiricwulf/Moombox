@@ -70,6 +70,7 @@ test("a second cross-part seek while paused does not start playback", () => {
   assert.equal(video.plays, 0);
 });
 
+// Mutant: reset leaves the pending record (getGlobalTime keeps answering 90).
 test("reset drops a pending seek", () => {
   const video = fakeVideo();
   const seg = twoParts(video);
@@ -77,5 +78,32 @@ test("reset drops a pending seek", () => {
   seg.reset();
   video.dispatchEvent(new Event("loadeddata"));
   assert.equal(video.plays, 0, "the aborted seek did not resume");
-  assert.equal(seg._pendingSeek, null);
+
+  seg.init("j1", [
+    { segmentIndex: 0, durationSeconds: 60 },
+    { segmentIndex: 1, durationSeconds: 60 },
+  ]);
+  seg.loadSegment(0, video);
+  video.currentTime = 5;
+  assert.equal(seg.getGlobalTime(video), 5, "the element, not the dropped target");
+});
+
+// A part that fails to load (a 404, a decode error) never fires loadeddata.
+// The pending seek must not outlive it: getGlobalTime would keep answering
+// the stale target, and every later seek in that part would wait on a load
+// that never comes instead of setting currentTime.
+//
+// Mutant: drop the error listener.
+test("a part that fails to load drops the pending seek", () => {
+  const video = fakeVideo();
+  const seg = twoParts(video);
+  seg.seekToGlobalTime(90, video); // part 1 at 30 s
+  video.dispatchEvent(new Event("error"));
+
+  video.currentTime = 12;
+  assert.equal(seg.getGlobalTime(video), 72, "the element again, not the stale target");
+  seg.seekToGlobalTime(100, video); // within part 1
+  assert.equal(video.currentTime, 40, "a seek in the failed part sets the position itself");
+  video.dispatchEvent(new Event("loadeddata"));
+  assert.equal(video.plays, 0, "no stale resume");
 });

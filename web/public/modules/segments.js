@@ -109,7 +109,8 @@ export class SegmentPlayer {
    * clicks) cannot read the play state or the position from the element:
    * both come from the pending record, and the second seek replaces the
    * first one's target on the same load instead of setting currentTime on an
-   * element that has not loaded yet.
+   * element that has not loaded yet. A load that fails (the element's error
+   * event) drops the pending record.
    * @param {number} globalSeconds
    * @param {HTMLVideoElement} video
    */
@@ -145,6 +146,14 @@ export class SegmentPlayer {
             this._pendingSeek = null;
             video.currentTime = globalSeconds - seg.startOffset;
             if (wasPlaying) safePlay(video);
+          }, { once: true, signal: this._seekAbort.signal });
+          // A part that fails to load never fires loadeddata: the seek is
+          // dropped, so a later seek in that part sets currentTime itself and
+          // getGlobalTime reads the element again.
+          video.addEventListener("error", () => {
+            this._seekAbort?.abort();
+            this._seekAbort = null;
+            this._pendingSeek = null;
           }, { once: true, signal: this._seekAbort.signal });
         } else {
           video.currentTime = globalSeconds - seg.startOffset;
