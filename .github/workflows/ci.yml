@@ -495,33 +495,6 @@ jobs:
         timeout-minutes: 10
         run: bash .github/scripts/retry.sh 3 300 go mod download
 
-      - name: Fetch the real-player cipher fixture
-        # The Go tests that send a real child a real YouTube player
-        # (internal/bgutils/sidecar: the "solve cipher" round trip and the
-        # prepared-player store) read internal/cipher/testdata/
-        # player_cb017549.js, which is YouTube's code and gitignored. They
-        # run with it in one job only: the windows shard whose packages
-        # include internal/bgutils/sidecar, as test-shard.sh says, so moving
-        # the package keeps this step with it. The switch that turns their
-        # skip into a failure is set only once the download and its pinned
-        # checksum pass: a failed download is a warning and the tests skip,
-        # so a YouTube outage or a retired player URL never turns the run
-        # red. Every other shard skips them.
-        if: matrix.flavour == 'windows'
-        timeout-minutes: 3
-        continue-on-error: true
-        run: |
-          pkgs=$(bash .github/scripts/test-shard.sh "$FLAVOUR/$SHARD")
-          if ! grep -q '/internal/bgutils/sidecar$' <<<"$pkgs"; then
-            echo "this shard does not run internal/bgutils/sidecar"
-            exit 0
-          fi
-          if bash .github/scripts/fetch-cipher-fixture.sh; then
-            echo "MOOMBOX_REQUIRE_CIPHER_FIXTURE=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning title=Cipher fixture::could not fetch the pinned YouTube player; the real-player cipher tests skip in this run"
-          fi
-
       - name: Build BotGuard sidecar payload
         id: sidecar
         # --ignore-scripts: a compromised dep's postinstall could exfiltrate
@@ -556,6 +529,38 @@ jobs:
         with:
           path: ~/.cache/apt-ffmpeg
           key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-image.outputs.image }}-v1
+
+      - name: Fetch the real-player cipher fixture
+        # The Go tests that send a real child a real YouTube player
+        # (internal/bgutils/sidecar: the "solve cipher" round trip and the
+        # prepared-player store) read internal/cipher/testdata/
+        # player_cb017549.js, which is YouTube's code and gitignored. They
+        # run with it in one job only: the windows shard whose packages
+        # include internal/bgutils/sidecar, as test-shard.sh says, so moving
+        # the package keeps this step with it. It runs after the embed
+        # blobs are in place because test-shard.sh lists a rest shard with
+        # go list ./..., which fails without them. The switch that turns
+        # their skip into a failure is set only once the download and its
+        # pinned checksum pass: a failed download is a warning and the
+        # tests skip, so a YouTube outage or a retired player URL never
+        # turns the run red. Every other shard skips them.
+        if: matrix.flavour == 'windows'
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          pkgs=$(bash .github/scripts/test-shard.sh "$FLAVOUR/$SHARD") || {
+            echo "::warning title=Cipher fixture::could not list this shard's packages; the real-player cipher tests skip in this run"
+            exit 0
+          }
+          if ! grep -q '/internal/bgutils/sidecar$' <<<"$pkgs"; then
+            echo "this shard does not run internal/bgutils/sidecar"
+            exit 0
+          fi
+          if bash .github/scripts/fetch-cipher-fixture.sh; then
+            echo "MOOMBOX_REQUIRE_CIPHER_FIXTURE=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning title=Cipher fixture::could not fetch the pinned YouTube player; the real-player cipher tests skip in this run"
+          fi
 
       - name: go test
         id: gotest
