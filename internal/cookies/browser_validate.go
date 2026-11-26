@@ -99,7 +99,7 @@ func ValidateBrowserPathQuick(path, browserType string) error {
 	// by its own name alone.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return fmt.Errorf("resolving %q: %w", path, err)
+		return fmt.Errorf("cannot tell where %q leads (%w); give the browser's real path", path, err)
 	}
 	if suffix := importWrittenSuffix(resolved); suffix != "" {
 		return fmt.Errorf("%q leads to %q, which ends in %q, a name an import writes: %w", path, resolved, suffix, errImportWrittenName)
