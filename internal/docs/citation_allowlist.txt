@@ -24,3 +24,24 @@
 # class as the embed blobs in buildArtifacts — a build PREREQUISITE, not doc
 # rot — but a directory, which that map (keyed on file citations) cannot hold.
 .claude/skills/moombox-upstream-porting/SKILL.md|bgutil-sidecar/node_modules/bgutils-js
+
+# internal/cipher/testdata/ holds the real YouTube player bodies the cipher
+# tests read. They are gitignored downloads (.github/scripts/
+# fetch-cipher-fixture.sh, fetch-ejs-vector-players.sh), absent from a fresh
+# clone and from every CI shard that does not fetch them, and the tests skip
+# without them. The docs name the file and its directory to say exactly that,
+# so a clean checkout must not read the citation as doc rot. Same class as the
+# embed blobs in buildArtifacts, but the directory itself is untracked too.
+operations.md|internal/cipher/testdata/player_cb017549.js
+# (the directory form of the same gitignored fixture location)
+operations.md|internal/cipher/testdata/
+# (the same directory, cited where the ejs vector bodies are described)
+platform-services.md|internal/cipher/testdata/
+# (the same gitignored fixture, cited under Local verification and CI)
+CLAUDE.md|internal/cipher/testdata/player_cb017549.js
+
+# web/tests/node_modules is `npm ci` output: gitignored and absent from a
+# fresh clone. CLAUDE.md cites it to say local-gate.sh --full fails when it
+# has no jsdom; the directory existing is the reader's prerequisite, not a
+# claim about the tree.
+CLAUDE.md|web/tests/node_modules
