@@ -363,9 +363,11 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 
 // TestRunnerStopsAtOnceOnTerm sends TERM to a run whose test sleeps: the run
 // ends at once rather than when the test would, the test's processes are
-// ended, and nothing of the run is left. (Ctrl+C takes the same trap; a
-// background job of a non-interactive shell, which is all a test can start,
-// has INT ignored, so TERM stands in for it here.)
+// ended, and nothing of the run is left. Ctrl+C (INT) takes the same trap,
+// which was checked by hand from a bash parent against a native process
+// tree (cmd.exe running ping): exit 130, the tree gone, nothing left. Sent
+// from this Go-started wrapper, INT did not reach the runner's trap, so TERM
+// stands in for it here.
 func TestRunnerStopsAtOnceOnTerm(t *testing.T) {
 	bash := bashPath(t)
 	r := newRunnerEnv(t, "sleep")
