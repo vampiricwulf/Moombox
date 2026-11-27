@@ -284,6 +284,9 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 //     the main function): the player's other solves must keep being
 //     answered.
 //
+// A recovery whose retry ended in anything but an answer or a stale-JS error
+// opens no window (cancelEviction): the next solve runs it again.
+//
 // The recovery is one at a time per player (the first-send gate), and a solve
 // that waited for another's asks once more before deciding anything.
 func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
@@ -399,6 +402,16 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 		s.clearPlayerSent(playerID)
 
 		retry, retryErr := s.callOnce(ctx, playerID, true, true, sigs, ns)
+		if retryErr != nil && !isStaleJSError(retryErr) {
+			// The recovery did not run to its end: the refetch failed, the
+			// sidecar timed out, the caller gave up. The sidecar may still
+			// hold the old prepared copy, and nothing has been learned about
+			// a fresh one, so the window is not kept: the next solve runs the
+			// recovery again. Kept, every solve of the next ten minutes got
+			// the old copy's stale answer, went to tv, and the first tv
+			// success pinned the player there with main never retried.
+			s.mem.cancelEviction(playerID)
+		}
 		if isStaleJSError(retryErr) {
 			// Same error after a fresh JS fetch with sidecar reload —
 			// either YouTube rotated mid-retry (rare) or our extractor

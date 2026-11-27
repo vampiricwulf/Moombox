@@ -154,6 +154,16 @@ func (m *playerMemory) noteEviction(playerID string) {
 	r.evictedAt, r.mainDead = m.now(), nil
 }
 
+// cancelEviction takes back the window noteEviction opened, for a recovery
+// that did not run to its end: the next solve may start another.
+func (m *playerMemory) cancelEviction(playerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r := m.record(playerID, false); r != nil {
+		r.evictedAt = time.Time{}
+	}
+}
+
 // setMainDead records that the recovery noteEviction opened ended with ejs
 // unable to prepare the main body.
 func (m *playerMemory) setMainDead(playerID string, err error) {

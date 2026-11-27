@@ -516,3 +516,65 @@ func TestSolveArrivingMidRecoveryDoesNotResend(t *testing.T) {
 		}
 	})
 }
+
+// refetchFailsOnce is a player source whose first fetch after an eviction
+// fails in transit.
+type refetchFailsOnce struct {
+	*tvFakeSource
+	failed bool
+}
+
+func (f *refetchFailsOnce) PlayerJS(playerID string) (string, error) {
+	if f.Removed && !f.failed {
+		f.failed = true
+		return "", fmt.Errorf("%w: connection reset", ErrPlayerJSFetch)
+	}
+	return f.tvFakeSource.PlayerJS(playerID)
+}
+
+// TestRecoveryThatDidNotFinishOpensNoWindow: the sidecar holds a stale copy
+// of a player, and the recovery's refetch fails in transit, so the forced
+// reload never reaches the sidecar. That recovery opens no ten-minute window:
+// the next solve evicts and reloads again, and is answered by the fresh main
+// body. With the window kept it got the old copy's stale answer, was refused
+// a recovery and went to tv, which then pinned the player to tv though main
+// was never retried.
+//
+// Mutant: cancelEviction dropped (the second solve asks tv; no second
+// eviction).
+func TestRecoveryThatDidNotFinishOpensNoWindow(t *testing.T) {
+	captureSlog(t)
+	sc := &fakeSidecar{}
+	fresh := false
+	sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+		if strings.HasSuffix(req.PlayerID, "-tv") {
+			return ejsAnswers(req)
+		}
+		if req.ForceReload {
+			fresh = true
+		}
+		if !fresh {
+			return sidecar.SolveCipherResult{}, errors.New("sidecar: ejs solve n: no solutions")
+		}
+		return ejsAnswers(req)
+	}
+	src := &refetchFailsOnce{tvFakeSource: &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"}, tvJS: "tv-js"}}
+	side := newSidecarSolverWith(sc, src)
+	side.markPlayerSent("P1")
+	ctx := context.Background()
+
+	if _, err := side.N(ctx, "P1", "n1"); !errors.Is(err, ErrPlayerJSFetch) {
+		t.Fatalf("first N = %v, want the refetch's failure", err)
+	}
+	got, err := side.N(ctx, "P1", "n2")
+	if err != nil || got != "ejs(n2)" {
+		t.Fatalf("second N = %q, %v; want the fresh main body's answer", got, err)
+	}
+	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1 P1+js P1+js+force" || src.removals != 2 || src.tvFetches != 0 {
+		t.Errorf("sidecar calls %v, evictions %d, tv fetches %d; want a second recovery on main (2 evictions) and nothing of tv",
+			shapes, src.removals, src.tvFetches)
+	}
+	if side.mem.usesTV("P1") {
+		t.Errorf("the player was moved to tv, though its main body solves once reloaded")
+	}
+}
