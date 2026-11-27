@@ -933,13 +933,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; no PO tokens, and signatures are left to the in-process goja solver, until the supervisor gets it up",
+			log.Warn("BotGuard sidecar failed to start; no PO tokens will be minted until the supervisor gets it up (signatures and n are still solved, by the learned sig specs and the in-process goja solver)",
 				slog.String("error", startErr.Error()))
 			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
 			// A first start that never succeeded cannot reach markUnhealthy
 			// (the CAS needs healthy==true), so the supervisor is told by
-			// hand. Same outcome for the operator either way: no PO tokens,
-			// and signatures and n left to goja, until a child comes up.
+			// hand. Same outcome for the operator either way: no PO tokens
+			// until a child comes up; signatures are still solved, from the
+			// learned sig specs and goja last, and n by goja.
 			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
 			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})
@@ -952,11 +953,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 8. Cipher solver
 	// =========================================================================
-	// gojaSolver provides in-process n decryption (and historically sig,
-	// though sig is broken on current YouTube players — see
-	// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
-	// (removed after implementation; read it from git history, e.g.
-	// `git show 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)).
+	// gojaSolver is the in-process sig and n solver, a Go port of ejs run on
+	// goja (owner ruling RV-12), asked last.
 	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
 	// only constructed when the sidecar is healthy. compositeSolver
 	// applies the routing policy and is the one place that decides it (sig:
