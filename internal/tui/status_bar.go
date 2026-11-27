@@ -143,9 +143,11 @@ type StatusBarModel struct {
 	// offline indicates that internet connectivity is unavailable.
 	offline bool
 	// sidecarDown indicates that the BotGuard sidecar is not running. An
-	// alert, not a status: while it is down, signature-ciphered formats
-	// cannot be resolved at all (sig has no goja fallback) and a PO token
-	// mint fails, once the restart grace is spent.
+	// alert, not a status: while it is down, a signature-ciphered format is
+	// resolved only where a learned sig spec answers it (the composite
+	// solver asks nothing else; RoutedResolveURL asks goja last, which
+	// fails on current players) and a PO token mint fails, once the restart
+	// grace is spent.
 	sidecarDown bool
 	// counts is the job tally, recomputed once per SetJobs instead of once
 	// per frame. metricTiers used to call tallyJobs() on every render — one
