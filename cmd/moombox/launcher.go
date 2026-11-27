@@ -46,8 +46,10 @@ func launchAndSupervise() {
 	// Clean up old launcher binary from a previous session (now unlocked),
 	// or hand it back to .old for armInterruptedUpdate below when it is the
 	// rollback artifact of an update that has not started properly yet
-	// (owner ruling RV-10). Windows-only; no-op on Linux.
-	cleanupOrphans(exePath, version)
+	// (owner ruling RV-10). Windows-only; no-op on Linux. keptImage: the ~
+	// was that artifact and could not be renamed back, so this launcher
+	// keeps it too (postUpdateBoot.keptImageTag).
+	keptImage := cleanupOrphans(exePath, version)
 
 	// Forward the stop signals (stopSignals: Ctrl+C, SIGTERM and, on Unix, a
 	// hangup) to the child instead of dying with the default disposition. A
@@ -123,6 +125,9 @@ func launchAndSupervise() {
 	// only through its methods (postUpdateBoot). A fresh start arms it when
 	// an applied update's restart never happened (armInterruptedUpdate).
 	var boot postUpdateBoot
+	if keptImage {
+		boot.keptImageTag = "v" + version
+	}
 	boot.armInterruptedUpdate(exePath, version)
 	// Crash supervision state: consecutive abnormal exits (reset whenever a
 	// child survives launcherHealthyWindow) and the exit code that triggered
@@ -382,6 +387,14 @@ type postUpdateBoot struct {
 	// (restartArtifact) instead of renaming it to ~ as handleUpdateRestart
 	// does on Windows. A restart that arms a new update clears it.
 	atFreshStart bool
+	// keptImageTag is the release whose rollback artifact, the Windows ~,
+	// this start's cleanupOrphans could not rename back to .old (owner ruling
+	// RV-10): the ~ is then the only copy of the previous binary, and this
+	// launcher must not delete it on its way out while the breadcrumb still
+	// names that release (keepsLauncherImage). The start is not armed with
+	// it: whatever held the ~ could make a rollback's rename fail too. The
+	// next start tries the rename again. "" otherwise, and always off Windows.
+	keptImageTag string
 }
 
 // restartArtifact answers for an exit-42 restart what handleUpdateRestart
@@ -504,9 +517,14 @@ func (b *postUpdateBoot) armInterruptedUpdate(exePath, runningVersion string) bo
 // its first child with it (cleanupOrphans, armInterruptedUpdate). Decided from
 // the launcher's own record, never from the names on disk alone: on the
 // second update of one launcher lifetime the artifact is .old and the ~ beside
-// it is a version older, which goes as before. Always false off Windows, where
-// no artifact is ever a ~.
+// it is a version older, which goes as before. Also true while the ~ is the
+// artifact this start could not rename back to .old (keptImageTag), until the
+// breadcrumb no longer names its release. Always false off Windows, where no
+// artifact is ever a ~.
 func (b *postUpdateBoot) keepsLauncherImage(exePath string) bool {
+	if b.keptImageTag != "" && pendingUpdateTag(exePath) == b.keptImageTag {
+		return true
+	}
 	return b.tag != "" && b.artifact == exePath+updater.LauncherImageSuffix &&
 		pendingUpdateTag(exePath) == b.tag
 }
