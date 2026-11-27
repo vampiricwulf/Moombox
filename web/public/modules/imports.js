@@ -242,7 +242,13 @@ export class ImportController {
       } finally {
         this._capChecking = false;
       }
-      if (this.importFile !== file || this.importUploading) return;
+      if (this.importUploading) return;
+      if (this.importFile !== file) {
+        // setImportFile took the new file unchecked, the cap still unknown
+        // then: check it now, so its own click never sends one over the cap.
+        if (this.importFile && this._refuseOversize(this.importFile)) this.clearImportFile();
+        return;
+      }
       if (this._refuseOversize(file)) {
         this.clearImportFile();
         return;

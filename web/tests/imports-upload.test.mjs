@@ -275,3 +275,29 @@ test("a file chosen while Import reads the cap waits for its own click", { skip 
   await h.app.imports.uploadImport();
   assert.ok(PendingXHR.last, "its own click did not send it");
 });
+
+// The same swap with a file over the cap: setImportFile took it unchecked
+// (no cap yet), and its own click finds the cap known, so nothing checked it
+// before sending. It is refused as the status read answers.
+//
+// Mutant: the swap path returning without the size check (big.zip is sent
+// on its own click).
+test("a file over the cap chosen while Import reads the cap is refused", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: {} } });
+  globalThis.XMLHttpRequest = PendingXHR;
+  PendingXHR.last = null;
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["zip"], "a.zip"));
+
+  let answer;
+  h.http.on("GET /api/status", () => new Promise((r) => { answer = r; }));
+  const upload = h.app.imports.uploadImport();
+  await h.flush();
+  h.app.imports.setImportFile(new h.window.File(["x".repeat(11)], "big.zip"));
+  answer({ importMaxBytes: 10 });
+  await upload;
+  assert.equal(h.app.imports.importFile, null, "the oversize file stays chosen");
+  assert.ok(h.toasts().some((t) => /big\.zip is 11B; an archive import takes at most 10B/.test(t.textContent)));
+  await h.app.imports.uploadImport();
+  assert.equal(PendingXHR.last, null, "the oversize file was sent");
+});
