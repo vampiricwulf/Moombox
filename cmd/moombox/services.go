@@ -933,13 +933,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; no PO tokens or signature solving until the supervisor gets it up",
+			log.Warn("BotGuard sidecar failed to start; no PO tokens, and signatures are left to the in-process goja solver, until the supervisor gets it up",
 				slog.String("error", startErr.Error()))
 			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
 			// A first start that never succeeded cannot reach markUnhealthy
 			// (the CAS needs healthy==true), so the supervisor is told by
-			// hand. Same outcome for the operator either way: PO tokens and
-			// sig are unavailable until a child comes up.
+			// hand. Same outcome for the operator either way: no PO tokens,
+			// and signatures and n left to goja, until a child comes up.
 			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
 			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})

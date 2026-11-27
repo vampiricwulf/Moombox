@@ -89,9 +89,8 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	dashURL := videoInfo.DashManifestURL
 
 	// Step 1: Decrypt the DASH manifest URL itself (signature cipher).
-	// Route through the composite solver (sidecar primary; goja fallback)
-	// so sig decryption works on cb017549-family players where the goja
-	// extractor cannot produce a sig algorithm. Asked whatever the player URL
+	// Route through the composite solver (the sidecar, then the learned sig
+	// specs, then goja's port of ejs, asked last). Asked whatever the player URL
 	// and solvers: a URL that needs neither comes back as it is, and one whose
 	// query n has no player or solver to answer it is as unsolved as one the
 	// solvers failed (cipher.ErrNUnsolved).

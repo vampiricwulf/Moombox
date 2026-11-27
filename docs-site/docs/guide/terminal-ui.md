@@ -258,7 +258,7 @@ The right half shows alerts and figures:
 | Indicator | Meaning |
 |---|---|
 | `OFFLINE` (red) | Moombox has lost internet connectivity. |
-| `SIDECAR DOWN` (red) | The BotGuard sidecar is not running: PO tokens cannot be minted and signature-protected YouTube formats cannot be resolved. |
+| `SIDECAR DOWN` (red) | The BotGuard sidecar is not running: PO tokens cannot be minted, and signatures and n are left to the in-process goja solver. |
 | `N selected` (yellow) | Rows ticked for a batch action. |
 | `Backfill <channel>: <tab> p<pages>` (green) | A feed-history backfill scan in progress. |
 | `BF: retry` (dim) | A backfill scan ended incomplete and will be retried: on the next feed check, or about hourly when a tab's dates could not be read twice in a row (a manual rescan, a wider archive window or membership becoming available retries at once, and so does dropping the members-only tab when it was the only one that failed). |
