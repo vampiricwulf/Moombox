@@ -42,7 +42,7 @@ func TestLiveOfflineChannelPlaybackToken(t *testing.T) {
 	if os.Getenv("MOOMBOX_LIVE_TWITCH_PROBE") != "1" {
 		t.Skip("set MOOMBOX_LIVE_TWITCH_PROBE=1 (plus MOOMBOX_LIVE_TWITCH_COOKIES and MOOMBOX_LIVE_TWITCH_OFFLINE_CHANNEL) to run the Arc 12b offline-channel measurement")
 	}
-	path := os.Getenv("MOOMBOX_LIVE_TWITCH_COOKIES")
+	path := liveCookieFile(t, "MOOMBOX_LIVE_TWITCH_COOKIES")
 	if path == "" {
 		t.Skip("set MOOMBOX_LIVE_TWITCH_COOKIES=<path to a signed-in Netscape cookie file> to run the offline-channel measurement")
 	}

@@ -86,6 +86,9 @@ if [ -z "${GOTMPDIR:-}" ] && command -v cygpath >/dev/null 2>&1; then
 	export GOTMPDIR
 fi
 
+# Clear the cookie copies a hard-killed live-test run left (live-tests.sh).
+bash "$wt/.github/scripts/live-tests.sh" --sweep || true
+
 cd "$wt"
 go build ./...
 echo "READY $wt"
