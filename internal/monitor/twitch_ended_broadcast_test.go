@@ -23,7 +23,9 @@ import (
 // is handed on); the channel's error ignored (the failed check's job is handed
 // on); TwitchBroadcastOver replaced by "always over" (the still-live job is
 // handed on); TwitchEndUnconfirmedJobs without its status filter (the Finished
-// row on the offline "finished" channel is handed on).
+// row on the offline "finished" channel is handed on); TwitchEndUnconfirmedJobs
+// not reading twitch_stream_id (the re-initialised broadcast add tw_800,
+// recording 900 while 900 is live, is handed on by its job ID).
 func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 	chans := []config.ChannelConfig{
 		{ID: "offline", Name: "offline", Platform: "twitch"},
@@ -32,6 +34,7 @@ func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 		{ID: "failing", Name: "failing", Platform: "twitch"},
 		{ID: "unmarked", Name: "unmarked", Platform: "twitch"},
 		{ID: "finished", Name: "finished", Platform: "twitch"},
+		{ID: "reinit", Name: "reinit", Platform: "twitch"},
 	}
 	tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
 		infos := make([]*twitch.TwitchStreamInfo, len(logins))
@@ -40,6 +43,8 @@ func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 			switch login {
 			case "samestream":
 				infos[i] = &twitch.TwitchStreamInfo{StreamID: "200", ChannelLogin: login, IsLive: true}
+			case "reinit":
+				infos[i] = &twitch.TwitchStreamInfo{StreamID: "900", ChannelLogin: login, IsLive: true}
 			case "newstream":
 				infos[i] = &twitch.TwitchStreamInfo{StreamID: "301", ChannelLogin: login, IsLive: true}
 			case "failing":
@@ -59,6 +64,7 @@ func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 		{"tw_400", "failing", true},
 		{"tw_500", "unmarked", false},
 		{"tw_600", "finished", true},
+		{"tw_800", "reinit", true},
 	} {
 		park := database.ParkReasonNone
 		if j.marked {
@@ -76,6 +82,9 @@ func TestTwitch_EndedBroadcastOfALatchedCaptureIsHandedOn(t *testing.T) {
 	// A marked row that is no longer in Error (finished some other way) is
 	// nobody's to mux.
 	tm.db.UpdateJobFields("tw_600", map[string]any{"status": database.StatusFinished})
+	// A broadcast add re-initialised onto a later broadcast names it.
+	tm.db.UpdateJobFields("tw_800", map[string]any{"manually_added": true, "twitch_stream_id": "900"})
+	tm.db.AddToHistory("tw_900")
 
 	var handed []string
 	tm.OnBroadcastOver = func(jobID string) { handed = append(handed, jobID) }

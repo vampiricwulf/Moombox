@@ -15,11 +15,11 @@ import (
 // new one and ended the job in Error ("a new broadcast is live"), and the
 // outage path finalized a capture whose broadcast was still running. A row
 // that holds a capture keeps its start: the minute of tolerance does not
-// move it. A monitor-created row's start is not replaced.
+// move it.
 //
 // Mutants: the start not replaced (the restart is refused as a new
 // broadcast); replaced for a row that holds a capture (the restart's
-// jittered start is written); replaced for a monitor-created row.
+// jittered start is written).
 func TestReinitialisedManualTwitchRowTakesTheLaterBroadcastsStart(t *testing.T) {
 	const (
 		oldStart = "2026-11-20T10:00:00Z"
@@ -71,15 +71,6 @@ func TestReinitialisedManualTwitchRowTakesTheLaterBroadcastsStart(t *testing.T) 
 		}
 	})
 
-	t.Run("monitor-created", func(t *testing.T) {
-		sp, db, job := twitchCancelFixture(t, database.StatusUpcoming)
-		db.UpdateJobFields(job.ID, map[string]any{"manually_added": false, "stream_start_time": oldStart})
-		job, _ = db.GetJob(job.ID)
-		run(t, sp, job, newStart)
-		if got := startOf(t, db, job.ID); got != oldStart {
-			t.Errorf("a monitor-created row's start = %q, want %q kept", got, oldStart)
-		}
-	})
 }
 
 // The end-unconfirmed mux of a re-initialised broadcast add: the row tw_800

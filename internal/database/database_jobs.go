@@ -574,13 +574,15 @@ func twitchChannelWaitLogin(id, url string) string {
 // ParkReasonTwitchEndUnconfirmed — a live capture that failed while its
 // broadcast's end was unconfirmed, staging kept — with the fields the Twitch
 // monitor needs to tell whether that broadcast is over: ID, VideoID, URL,
-// ChannelName, StreamStartTime and ManuallyAdded.
+// ChannelName, StreamStartTime, ManuallyAdded and TwitchStreamID (the
+// broadcast a manually added row recorded, which worker.TwitchBroadcastOver
+// compares ahead of the job ID).
 func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added FROM jobs
+		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added, twitch_stream_id FROM jobs
 		 WHERE platform = 'twitch' AND status = ? AND park_reason = ?`,
 		StatusError, ParkReasonTwitchEndUnconfirmed)
 	if err != nil {
@@ -590,13 +592,13 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 	var out []*Job
 	for rows.Next() {
 		var id string
-		var videoID, url, channelName, start sql.NullString
+		var videoID, url, channelName, start, streamID sql.NullString
 		var manual sql.NullInt64
-		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual); err != nil {
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual, &streamID); err != nil {
 			return nil, err
 		}
 		out = append(out, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
-			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, Platform: "twitch",
+			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, TwitchStreamID: streamID.String, Platform: "twitch",
 			Status: StatusError, ParkReason: ParkReasonTwitchEndUnconfirmed})
 	}
 	return out, rows.Err()

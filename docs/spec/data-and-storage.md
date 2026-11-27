@@ -210,7 +210,7 @@ Every registration method returns an unsubscribe function. Each subscriber slice
 | is_vod | INTEGER | 0 | Boolean (0/1) |
 | manually_added | INTEGER | 0 | Boolean (0/1) |
 | allow_non_stream | INTEGER | 0 | Boolean (0/1) |
-| stream_start_time | TEXT | NULL | RFC3339. On a Twitch row, the broadcast identity the restart guard, the outage path and the end-unconfirmed mux read: written once by the live start, and replaced only when a manually added row that holds no capture (a re-initialised one) takes a later broadcast, in the write that claims `Live` beside `twitch_stream_id` |
+| stream_start_time | TEXT | NULL | RFC3339. On a Twitch row, the broadcast identity the restart guard, the outage path and the end-unconfirmed mux read: written once by the live start, and replaced only when a row that holds no capture (a re-initialised one) takes a later broadcast, in the write that claims `Live` (beside `twitch_stream_id` on a manually added row) |
 | stream_end_time | TEXT | NULL | RFC3339 |
 | length_seconds | INTEGER | NULL | Duration in seconds |
 | download_started_at | TEXT | NULL | RFC3339 |
