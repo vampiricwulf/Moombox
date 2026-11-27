@@ -262,8 +262,8 @@ The sidecar's V8 heap ceiling (Node's `--max-old-space-size`). This one is
 hard: when the sidecar's heap reaches it, V8 aborts the sidecar with an
 out-of-memory error. Moombox restarts it automatically after 5 s, then 15 s,
 then 60 s, then every 5 minutes while it keeps failing. While it is down, PO
-tokens cannot be minted and signature-ciphered YouTube formats are
-unavailable. The TUI status bar shows **SIDECAR DOWN** (**POT** on a narrow
+tokens cannot be minted, so the YouTube formats that need one are
+unavailable, and signatures are left to Moombox's in-process solver. The TUI status bar shows **SIDECAR DOWN** (**POT** on a narrow
 terminal) while it is down. If it stays down for 60 seconds you get a
 **BotGuard Sidecar Down** notification (event `sidecar_down`); **BotGuard
 Sidecar Restored** follows when it is back.
