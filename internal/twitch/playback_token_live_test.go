@@ -47,7 +47,7 @@ import (
 // than a hardcoded default: a default would rot, and an offline channel yields
 // no stream playback token at all.
 func TestLivePlaybackTokenShape(t *testing.T) {
-	path := os.Getenv("MOOMBOX_LIVE_TWITCH_COOKIES")
+	path := liveCookieFile(t, "MOOMBOX_LIVE_TWITCH_COOKIES")
 	if path == "" {
 		t.Skip("set MOOMBOX_LIVE_TWITCH_COOKIES=<path to a signed-in Netscape cookie file> to run the playback-token shape probe")
 	}

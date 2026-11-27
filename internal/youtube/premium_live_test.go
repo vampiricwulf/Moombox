@@ -28,7 +28,7 @@ import (
 // signed-in YouTube session>. Nothing from the file is printed; the reply's
 // renewed cookies are dropped (nothing offers them to a store).
 func TestLivePremiumVerdict(t *testing.T) {
-	path := os.Getenv("MOOMBOX_LIVE_YT_COOKIES")
+	path := liveCookieFile(t, "MOOMBOX_LIVE_YT_COOKIES")
 	if path == "" {
 		t.Log("LIVE-SESSION youtube=no_cookies premium=unknown")
 		t.Skip("set MOOMBOX_LIVE_YT_COOKIES=<path to a signed-in Netscape cookie file> to run the session and Premium probe")

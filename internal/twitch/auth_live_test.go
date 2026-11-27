@@ -2,7 +2,6 @@ package twitch
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -44,7 +43,7 @@ import (
 // anyway — it costs one verb and it is the last line of defence if that rule
 // is ever widened.
 func TestLiveAuthenticatedTokenValidate(t *testing.T) {
-	path := os.Getenv("MOOMBOX_LIVE_TWITCH_COOKIES")
+	path := liveCookieFile(t, "MOOMBOX_LIVE_TWITCH_COOKIES")
 	if path == "" {
 		t.Skip("set MOOMBOX_LIVE_TWITCH_COOKIES=<path to a signed-in Netscape cookie file> to run the authenticated token validation check")
 	}
