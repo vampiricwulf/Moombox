@@ -877,7 +877,7 @@ func extractYtcfgAndPlayerResponse(page []byte) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
 	// Extract player URL: the first one that names a player
-	ytcfg.PlayerURL = watchPagePlayerURL(page)
+	ytcfg.PlayerURL, ytcfg.PlayerOnTCL = watchPagePlayerURL(page)
 
 	// The signature timestamp ytcfg states for that player. yt-dlp reads it
 	// before ever opening the player JS (_extract_signature_timestamp:

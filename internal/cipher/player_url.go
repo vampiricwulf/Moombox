@@ -2,21 +2,37 @@ package cipher
 
 import "regexp"
 
-// mainVariantPath is the player JS path below /s/player/<id>/ that yt-dlp
-// fetches by default: its 'main' variant, _PLAYER_JS_VARIANT_MAP['main'] in
-// extractor/youtube/_video.py, chosen by _DEFAULT_PLAYER_JS_VARIANT. That
-// default came in with _construct_player_url (b7b7910d9, #14430), was 'tv'
-// from 1a895c18a (#15818) and is 'main' again since 04d6974f5 (#16269), which
-// is what b77c9304e runs. fa9a87158 (#18124) made it 'tv' once more, because
-// the ejs release yt-dlp ships (0.8.0) throws on the main variant of the
-// players from 05a4ffc0 on; the ejs vendored here since 2026-11-26 (c47fb1b,
-// with 40b7a7d's prototype helpers) solves it, so Moombox stays on main. A
-// page may itself run another variant, one of the `tcl` ones, whose STS and
-// answers differ: youtube.mainVariantSTS. The main variant is the one shape
-// every Moombox player fetch takes — the sidecar's (playerURLForID), and
-// since the watch page's URL is rewritten to it (CanonicalPlayerURL), STS's
-// and the goja fallback's too.
+// mainVariantPath is the player JS path below /s/player/<id>/ of yt-dlp's
+// 'main' variant, _PLAYER_JS_VARIANT_MAP['main'] in
+// extractor/youtube/_video.py. Upstream's default variant became 'main' with
+// df0553153 (#14079; b7b7910d9, #14430, only named the constant
+// _DEFAULT_PLAYER_JS_VARIANT), was 'tv' from 1a895c18a (#15818) and 'main'
+// again from 04d6974f5 (#16269), which is what b77c9304e runs. fa9a87158
+// (#18124) made it 'tv' once more, because the ejs release yt-dlp ships
+// (0.8.0) throws on the main variant of the players from 05a4ffc0 on; the ejs
+// vendored here since 2026-11-26 (c47fb1b, with 40b7a7d's prototype helpers)
+// solves it, so Moombox stays on main (owner ruling RV-11). A page may itself
+// run another variant, one of the `tcl` ones, whose STS and answers differ:
+// youtube.mainVariantSTS. The main variant is the shape every Moombox player
+// fetch takes but one (tvVariantPath) — the sidecar's first
+// (playerURLForID), and since the watch page's URL is rewritten to it
+// (CanonicalPlayerURL), STS's and the goja fallback's too.
 const mainVariantPath = "player_ias.vflset/en_US/base.js"
+
+// tvVariantPath is yt-dlp's 'tv' variant of the same player
+// (_PLAYER_JS_VARIANT_MAP['tv']): the body the sidecar solver has ejs solve
+// with when ejs cannot solve with the main one (sidecarSolver.solve, owner
+// ruling RV-11). The regular variants of one player id state one STS and give
+// one answer to a challenge, so a solver can use either; what differs is the
+// code ejs has to parse, and each ejs breakage so far took one of the two and
+// left the other. The path has no locale. Only fetchTVPlayerJS fetches it,
+// and never through PlayerCache, whose entries are keyed by player id alone.
+const tvVariantPath = "tv-player-ias.vflset/tv-player-ias.js"
+
+// playerVariantURL is the URL of one variant of a player on YouTube's host.
+func playerVariantURL(playerID, variantPath string) string {
+	return "https://www.youtube.com/s/player/" + playerID + "/" + variantPath
+}
 
 // playerPathIDRe is yt-dlp's _extract_player_info, `/s/player/(?P<id>[a-fA-F0-9]{8,})/`:
 // the player id, read only out of a /s/player/<hex>/ path segment. It is

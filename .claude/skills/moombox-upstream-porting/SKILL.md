@@ -31,7 +31,7 @@ Moombox vendors two upstream JS libraries into the BotGuard sidecar:
 The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) implementation in v2.6.16+. The Go-side `internal/cipher/` and `internal/bgutils/` packages are the **fallback** when the sidecar is disabled or down — they reimplement the same algorithms in goja.
 
 **Dual-update obligation:** When upstream ships a fix:
-- **ejs fix** → re-vendor `bgutil-sidecar/vendor/ejs/` to the new commit, bump `VERSION`, run `node build.mjs` to regenerate the bundle. Consider porting the equivalent change to `internal/cipher/` if the goja fallback path needs it (n-decryption mostly; sig is sidecar-only).
+- **ejs fix** → re-vendor `bgutil-sidecar/vendor/ejs/` to the new commit, bump `VERSION`, run `node build.mjs` to regenerate the bundle. Consider porting the equivalent change to `internal/cipher/` if the goja fallback path needs it (goja is the last solver asked, for an n and a signature alike, after the sidecar on the main and the tv variant; it fails on current players).
 - **bgutils-js fix** → bump pin in `bgutil-sidecar/package.json`, run `npm install`, run `node build.mjs`. Consider porting to `internal/bgutils/botguard.go` and friends.
 - **yt-dlp fix** → port to `internal/youtube/` or `internal/twitch/`. No sidecar mirror.
 

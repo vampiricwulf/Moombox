@@ -588,6 +588,12 @@ type YtcfgData struct {
 	// STS is the signature timestamp the page's ytcfg states, or 0; the one
 	// extractSTS prefers to reading the player JS for it.
 	STS int
+	// PlayerOnTCL is set when the watch page named its player on a `tcl`
+	// variant (playerPathIsTCL). PlayerURL cannot say: it is rewritten to the
+	// main variant. With a long STS it is one of the two signs that the
+	// page's own formats are not for the player Moombox solves with
+	// (pageRunsOtherVariant).
+	PlayerOnTCL bool
 	// GvsBindToVideoID mirrors yt-dlp's gvs_bind_to_video_id: true when the
 	// page's player configs carry html5_generate_content_po_token=true, the
 	// experiment under which GVS PO tokens bind to the video ID instead of

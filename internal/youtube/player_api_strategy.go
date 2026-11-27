@@ -1336,10 +1336,16 @@ func mainVariantSTS(sts int) int {
 }
 
 // pageRunsOtherVariant reports whether the page ytcfg was read off runs a
-// player variant whose challenges the main variant does not answer: its STS
-// is longer than a regular variant's (mainVariantSTS).
+// player variant whose challenges the main variant does not answer. Either
+// sign says so: its STS is longer than a regular variant's (mainVariantSTS),
+// or the page named its player on a `tcl` path (YtcfgData.PlayerOnTCL). The
+// path covers a `tcl` page whose ytcfg states no STS, or one the regex did
+// not read: by its STS alone such a page kept its media, which the main
+// variant then solved wrongly. No capture of a `tcl` watch page exists
+// (docs/spec/upstream-ports.md); the path shapes are those of the player
+// files YouTube serves.
 func pageRunsOtherVariant(ytcfg *YtcfgData) bool {
-	return ytcfg != nil && ytcfg.STS > mainVariantSTSMax
+	return ytcfg != nil && (ytcfg.STS > mainVariantSTSMax || ytcfg.PlayerOnTCL)
 }
 
 // dropOtherVariantMedia takes the formats and manifests out of the watch
@@ -1358,8 +1364,10 @@ func (p *PlayerAPI) dropOtherVariantMedia(info *VideoInfo, ytcfg *YtcfgData) {
 	if info == nil || !pageRunsOtherVariant(ytcfg) {
 		return
 	}
-	p.logger.Debug("[PlayerApi] watch page runs another player variant; its formats and manifests are not used",
-		"page_sts", ytcfg.STS, "formats", len(info.Formats))
+	// Info: an operator should be able to see why a job's formats came from
+	// the player calls alone. Once per extraction, on such a page only.
+	p.logger.Info("[PlayerApi] watch page runs another player variant; its formats and manifests are not used",
+		"page_sts", ytcfg.STS, "tcl_player_path", ytcfg.PlayerOnTCL, "formats", len(info.Formats))
 	info.Formats = nil
 	info.DashManifestURL = ""
 	info.HlsManifestURL = ""

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
 
 type stdLogger struct{}
@@ -73,11 +74,11 @@ func run() int {
 		fail("could not extract playerID from URL: %s", playerURL)
 	}
 	playerID := idMatch[1]
-	// Production reconstructs the player URL via playerURLForID, which always
-	// uses the `player_ias.vflset` variant regardless of what the watch page
-	// actually shipped (`player_es6`, `player_es6_tce`, etc). Mirror that
-	// here so the probe exercises the same fetch as the production path.
-	productionPlayerURL := fmt.Sprintf("https://www.youtube.com/s/player/%s/player_ias.vflset/en_US/base.js", playerID)
+	// Production rebuilds the player URL from the id (cipher.PlayerURLForID),
+	// always on the main variant whatever the watch page shipped
+	// (`player_es6`, `player_es6_tce`, etc). The same call here, so the probe
+	// exercises the fetch production makes.
+	productionPlayerURL := cipher.PlayerURLForID(playerID)
 	fmt.Printf("playerID: %s\n", playerID)
 	fmt.Printf("watch-page player URL: %s\n", playerURL)
 	fmt.Printf("production-style URL : %s\n", productionPlayerURL)

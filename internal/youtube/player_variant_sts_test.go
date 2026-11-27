@@ -42,9 +42,10 @@ const otherVariantPageBody = `{
 	}
 }`
 
-// stubWatchPageOnVariant serves a watch page whose ytcfg states sts and whose
-// own player response is otherVariantPageBody.
-func stubWatchPageOnVariant(t *testing.T, sts int) {
+// stubWatchPageOnVariant serves a watch page whose ytcfg states sts (0: none),
+// which named its player on a `tcl` path or not, and whose own player
+// response is otherVariantPageBody.
+func stubWatchPageOnVariant(t *testing.T, sts int, tclPath bool) {
 	t.Helper()
 	var pr map[string]any
 	if err := json.Unmarshal([]byte(otherVariantPageBody), &pr); err != nil {
@@ -54,6 +55,7 @@ func stubWatchPageOnVariant(t *testing.T, sts int) {
 	fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
 		ytcfg := DefaultYtcfg()
 		ytcfg.STS = sts
+		ytcfg.PlayerOnTCL = tclPath
 		ytcfg.PlayerURL = iframePlayerURL
 		return &WatchPageResult{Ytcfg: ytcfg, PlayerResponse: pr}, nil
 	}
@@ -66,25 +68,39 @@ func stubWatchPageOnVariant(t *testing.T, sts int) {
 // b2e6bb0dd), and nothing of the page's own player response's media — its
 // formats, its DASH and HLS manifests — reaches the result, since YouTube
 // built those for the page's player (yt-dlp f31e4c27a skips that response).
-// A page on a regular variant keeps both, so the drop is the long STS's
+// A page on a regular variant keeps both, so the drop is the other variant's
 // alone.
 //
+// A `tcl` page is also known by the path it named its player on, whatever
+// its STS: five digits, or none in ytcfg at all. Read by its STS alone such a
+// page kept media only its own player could solve. These rows are built, as
+// the long-STS one is: no capture of a `tcl` watch page exists.
+//
+// The drop is logged at Info, once per extraction, and not at all for a
+// regular page.
+//
 // Mutants: extractSTS returning ytcfg.STS as stated; either cascade's
-// dropOtherVariantMedia call removed; the drop applied to every page.
+// dropOtherVariantMedia call removed; the drop applied to every page;
+// pageRunsOtherVariant reading the STS alone; the line back at Debug.
 func TestPageOnAnotherVariantSendsTheMainSTSAndLosesItsMedia(t *testing.T) {
 	for _, path := range []string{"public", "authenticated"} {
 		for _, tc := range []struct {
 			name      string
 			pageSTS   int
+			tclPath   bool
 			pageMedia bool
 		}{
 			{name: "tcl page", pageSTS: 20779001, pageMedia: false},
 			{name: "regular page", pageSTS: 20779, pageMedia: true},
+			{name: "tcl path with a five-digit STS", pageSTS: 20779, tclPath: true, pageMedia: false},
+			{name: "tcl path with no STS", pageSTS: 0, tclPath: true, pageMedia: false},
 		} {
 			t.Run(path+"/"+tc.name, func(t *testing.T) {
-				stubWatchPageOnVariant(t, tc.pageSTS)
+				stubWatchPageOnVariant(t, tc.pageSTS, tc.tclPath)
 				tr := serveBodies(t, nil)
 				p := newRetryTestAPI()
+				logs := &infoRecorder{}
+				p.logger = logs
 				get := p.GetVideoInfoPublic
 				if path == "authenticated" {
 					get = p.GetVideoInfoAuthenticated
@@ -94,8 +110,17 @@ func TestPageOnAnotherVariantSendsTheMainSTSAndLosesItsMedia(t *testing.T) {
 					t.Fatalf("extraction: %v", err)
 				}
 				tv := tr.of("7")
-				if len(tv) == 0 || !strings.Contains(tv[0], `"signatureTimestamp":20779,`) && !strings.Contains(tv[0], `"signatureTimestamp":20779}`) {
+				if tc.pageSTS > 0 && (len(tv) == 0 || !strings.Contains(tv[0], `"signatureTimestamp":20779,`) && !strings.Contains(tv[0], `"signatureTimestamp":20779}`)) {
 					t.Errorf("TV request bodies %q, want signatureTimestamp 20779", tv)
+				}
+				dropLines := 0
+				for _, msg := range logs.infos {
+					if strings.Contains(msg, "another player variant") {
+						dropLines++
+					}
+				}
+				if want := map[bool]int{true: 0, false: 1}[tc.pageMedia]; dropLines != want {
+					t.Errorf("Info lines about the dropped media = %d (%q), want %d", dropLines, logs.infos, want)
 				}
 				pageFormat := false
 				for _, f := range info.Formats {
@@ -113,6 +138,47 @@ func TestPageOnAnotherVariantSendsTheMainSTSAndLosesItsMedia(t *testing.T) {
 					t.Errorf("the result has no title")
 				}
 			})
+		}
+	}
+}
+
+// infoRecorder keeps the Info lines an extraction logs.
+type infoRecorder struct {
+	noopLogger
+	infos []string
+}
+
+func (r *infoRecorder) Info(msg string, _ ...any) { r.infos = append(r.infos, msg) }
+
+// TestWatchPageTCLPlayerPath: the page's player URL is rewritten to the main
+// variant, so the variant it named is read off the URL first, as the page
+// gave it. Only the `tcl` family counts: tce and tcc are regular variants,
+// whose STS and answers are main's.
+//
+// Mutants: the flag read off the rewritten URL (never set); the pattern
+// loosened to any `_tc` variant (tce and tcc flagged).
+func TestWatchPageTCLPlayerPath(t *testing.T) {
+	const mainURL = "https://www.youtube.com/s/player/b485e332/player_ias.vflset/en_US/base.js"
+	for _, tc := range []struct {
+		raw string
+		tcl bool
+	}{
+		{`\/s\/player\/b485e332\/player_ias_tcl.vflset\/en_US\/base.js`, true},
+		{`/s/player/b485e332/player_es6_tcl.vflset/en_US/base.js`, true},
+		{`\/s\/player\/b485e332\/tv-player-ias-tcl.vflset\/tv-player-ias-tcl.js`, true},
+		{`\/s\/player\/b485e332\/player_ias.vflset\/en_US\/base.js`, false},
+		{`\/s\/player\/b485e332\/player_es6.vflset\/en_US\/base.js`, false},
+		{`\/s\/player\/b485e332\/player_ias_tce.vflset\/en_US\/base.js`, false},
+		{`\/s\/player\/b485e332\/player_es6_tcc.vflset\/en_US\/base.js`, false},
+		{`\/s\/player\/b485e332\/tv-player-ias.vflset\/tv-player-ias.js`, false},
+	} {
+		page := `<script>ytcfg.set({"PLAYER_JS_URL":"` + tc.raw + `"});</script>`
+		ytcfg, _ := extractYtcfgAndPlayerResponse([]byte(page))
+		if ytcfg.PlayerURL != mainURL || ytcfg.PlayerOnTCL != tc.tcl {
+			t.Errorf("page naming %s: PlayerURL %q, PlayerOnTCL %v; want the main variant's URL and %v", tc.raw, ytcfg.PlayerURL, ytcfg.PlayerOnTCL, tc.tcl)
+		}
+		if got := pageRunsOtherVariant(ytcfg); got != tc.tcl {
+			t.Errorf("page naming %s with no STS: pageRunsOtherVariant = %v, want %v", tc.raw, got, tc.tcl)
 		}
 	}
 }
