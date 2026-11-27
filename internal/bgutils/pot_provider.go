@@ -508,11 +508,6 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 			minter, hasMinter = nil, false
 		}
 	}
-	// Whether this mint goes to the sidecar, for the mint line below: a cached
-	// minter is a goja one, and generateAndMint takes the sidecar when one
-	// is attached.
-	viaSidecar := !hasMinter && pp.sidecar != nil
-
 	pp.mu.Unlock()
 	if expired != nil {
 		pp.safeCleanup(expired, "expired")
@@ -522,10 +517,13 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 	// Without this a panic escapes before the inflight map is cleared or
 	// entry.done is closed, wedging every concurrent waiter on this binding
 	// forever.
-	session, err := func() (s *SessionData, e error) {
+	// viaSidecar is the path that minted, for the mint line below: a cached
+	// minter is a goja one, and generateAndMint says which it took, since a
+	// sidecar can be attached or detached after pp.mu is released here.
+	session, viaSidecar, err := func() (s *SessionData, viaSidecar bool, e error) {
 		defer func() {
 			if r := recover(); r != nil {
-				s = nil
+				s, viaSidecar = nil, false
 				e = fmt.Errorf("bgutils mint panic: %v", r)
 				pp.logger.Error("[PotProvider] mint panic", "binding", bindingPrefix, "panic", r)
 			}
@@ -533,7 +531,8 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 		if hasMinter {
 			pp.minterHits.Add(1)
 			pp.logger.Debug("[PotProvider] using cached minter", "binding", bindingPrefix)
-			return pp.mintPoToken(minter, contentBinding)
+			s, e = pp.mintPoToken(minter, contentBinding)
+			return s, false, e
 		}
 		pp.logger.Debug("[PotProvider] generating new minter", "binding", bindingPrefix)
 		return pp.generateAndMint(ctx, contentBinding, bypassCache, challenge)
@@ -688,7 +687,10 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 	}, nil
 }
 
-func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (*SessionData, error) {
+// generateAndMint mints on the attached sidecar, or on the goja path when
+// none is attached. viaSidecar reports which path it took, read from the
+// same pp.sidecar it chose by.
+func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (session *SessionData, viaSidecar bool, err error) {
 	// Sidecar path: a real Node + V8 + JSDOM subprocess whose DOM
 	// BotGuard's probes accept, so it returns real integrity tokens.
 	// Bypasses the goja minterCache entirely (the sidecar maintains its
@@ -704,7 +706,7 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	pp.mu.Unlock()
 	if sc != nil {
 		if err := pp.awaitSidecar(ctx, sc); err != nil {
-			return nil, err
+			return nil, true, err
 		}
 		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
 		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix, "bypassCache", bypassCache)
@@ -714,7 +716,6 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 		// so a bypassing caller routes through it; the token is identical in
 		// kind, only its minter's freshness differs.
 		var token string
-		var err error
 		if bypassCache {
 			var res sidecar.GvsMintResult
 			res, err = sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
@@ -728,11 +729,11 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 				PoToken:        token,
 				ContentBinding: contentBinding,
 				ExpiresAt:      time.Now().Add(pp.config.sessionTTL()),
-			}, nil
+			}, true, nil
 		}
 		pp.sidecarMintsErr.Add(1)
 		pp.logger.Warn("[PotProvider] sidecar mint failed", "err", err)
-		return nil, fmt.Errorf("sidecar mint: %w", err)
+		return nil, true, fmt.Errorf("sidecar mint: %w", err)
 	}
 
 	// The goja fallback can't consume a challenge-sourced minter today
@@ -740,7 +741,8 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	// "goja-fallback" path) — it always mints from its own generated
 	// challenge via WebPoClient. bypassCache still controls whether that
 	// fallback touches the shared minterCache.
-	return pp.gojaGenerateAndMint(ctx, contentBinding, bypassCache)
+	session, err = pp.gojaGenerateAndMint(ctx, contentBinding, bypassCache)
+	return session, false, err
 }
 
 // gojaGenerateAndMint is the goja fallback. bypassCache=true routes to
