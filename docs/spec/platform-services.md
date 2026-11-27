@@ -1456,8 +1456,8 @@ Each GVS mint attempt logs one line at Info (`[POT] GVS mint`) on success, emitt
 |---|---|
 | `jobID` | the job that requested the mint |
 | `binding` | which rule produced the content binding: `"videoID"` \| `"datasyncID"` \| `"visitorData"` \| `"channelID"` |
-| `tokenLength` | (Info line) length of the minted PO token string — a cheap sanity signal without logging the token itself |
-| `itBytes` | (Info line) the byte length of the integrity token the PO token was minted from, or `unknown` when the token cannot be read — see below |
+| `tokenLength` | (Info line, and the manifestless guessed-binding Warn) length of the minted PO token string — a cheap sanity signal without logging the token itself |
+| `itBytes` | (beside every `tokenLength`) the byte length of the integrity token the PO token was minted from, or `unknown` when the token cannot be read — see below |
 | `source` | (Info line, DASH and HLS) the manifest source label the token was minted for |
 | `videoSource` / `audioSource` | (Info line, VOD and manifestless) the `Format.Source` of the chosen video / audio stream; `""` when that stream is absent |
 | `err` | (Warn line) why there is no token: the mint error, `errEmptyGvsToken`, or `errGuessedGvsBinding` |
