@@ -41,10 +41,11 @@ type PlayerSource interface {
 // playerJS attached.
 //
 // A player is asked on its main body first and, when ejs cannot solve with
-// that, on its tv body (solve; owner ruling RV-11). The sent record and the
-// first-send gates are keyed by the sidecar's player key — the player id for
+// that, on its tv body (solve; owner ruling RV-11). The first-send gates and
+// the send counts are keyed by the sidecar's player key — the player id for
 // the main body, tvPlayerKey for the tv one — so the two bodies of one player
-// have one each.
+// have one each. The sent record is the main body's alone: a tv solve always
+// asks without the JS first.
 type sidecarSolver struct {
 	client sidecarClient
 	src    PlayerSource
@@ -55,7 +56,7 @@ type sidecarSolver struct {
 	mem *playerMemory
 
 	mu   sync.Mutex
-	sent map[string]struct{} // player keys already sent in this sidecar lifetime
+	sent map[string]struct{} // players whose main body was sent in this sidecar lifetime
 	// sending gates the first send of a player's JS: one one-slot channel per
 	// player key. Concurrent first solves used to each ship the ~3 MB player
 	// and each make the sidecar load it — a synchronous pass on its event
@@ -200,6 +201,7 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 		return sidecar.SolveCipherResult{}, dead
 	}
 	key := tvPlayerKey(playerID)
+	sends := s.sendCount(key)
 	res, err := s.ask(ctx, key, "", false, sigs, ns)
 	if !errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		return res, err
@@ -213,13 +215,15 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 		// Another solve found the body unusable while this one waited.
 		return sidecar.SolveCipherResult{}, dead
 	}
-	if s.playerSent(key) {
-		// Another solve sent the body while this one waited for the gate.
+	if s.sendCount(key) != sends {
+		// Another solve sent the body while this one waited for the gate,
+		// and the sidecar may hold it whatever that solve ended in ("no
+		// solutions" is an answer from a loaded body): ask before fetching
+		// about 2.5 MB and sending it again.
 		res, err = s.ask(ctx, key, "", false, sigs, ns)
 		if !errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 			return res, err
 		}
-		s.clearPlayerSent(key)
 	}
 	js, err := tvSrc.TVPlayerJS(ctx, playerID)
 	if err != nil {
@@ -233,15 +237,13 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 		return sidecar.SolveCipherResult{}, err
 	}
 	res, err = s.ask(ctx, key, js, false, sigs, ns)
+	s.noteSend(key)
 	if isPreprocessError(err) {
 		s.mem.setTVDead(playerID, err)
 	}
 	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		// As solveMain: %v, so this no longer reads as a miss to retry.
 		return res, fmt.Errorf("sidecar: tv player not loaded after it was sent: %v", err)
-	}
-	if err == nil {
-		s.markPlayerSent(key)
 	}
 	return res, err
 }

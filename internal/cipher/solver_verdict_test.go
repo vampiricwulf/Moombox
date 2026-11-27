@@ -578,3 +578,75 @@ func TestRecoveryThatDidNotFinishOpensNoWindow(t *testing.T) {
 		t.Errorf("the player was moved to tv, though its main body solves once reloaded")
 	}
 }
+
+// TestBurstOfTVSolvesFetchesTheBodyOnce: three solves of a player that is
+// solved with its tv body arrive together, and the sidecar does not hold
+// that body. One of them fetches it and sends it; the others wait for that
+// send and then ask the sidecar what it holds, whatever the send ended in.
+//
+//   - It solved: the waiters are answered by the loaded body.
+//   - "no solutions": the body loaded but does not answer. The waiters get
+//     the same from one plain ask each. Each used to fetch the 2.5 MB file
+//     and send it again.
+//   - ejs threw preparing it: the waiters get that verdict and ask nothing.
+//
+// Mutants: the send not counted, or the count not read once the gate is
+// taken (a fetch and a send per waiter); tvDead not read again once the gate
+// is taken (in the last row the waiters fetch and send again).
+func TestBurstOfTVSolvesFetchesTheBodyOnce(t *testing.T) {
+	noSolutions := errors.New("sidecar: ejs solve n: no solutions")
+	for _, tc := range []struct {
+		name      string
+		sendErr   error // what a JS-carrying ask ends in
+		loadedErr error // what the loaded body answers a plain ask with
+		wantPlain int
+	}{
+		{"the body solves", nil, nil, 5},
+		{"the body loads and has no solutions", noSolutions, noSolutions, 5},
+		{"ejs cannot prepare the body", errors.New("sidecar: ejs preprocess: tv broke"), nil, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				captureSlog(t)
+				sc := newLockedSidecar()
+				sc.hold = func(req sidecar.SolveCipherRequest) bool { return req.PlayerJS != "" }
+				loaded := false
+				sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+					if req.PlayerID != "P1-tv" {
+						return sidecar.SolveCipherResult{}, fmt.Errorf("unexpected player key %q", req.PlayerID)
+					}
+					if req.PlayerJS != "" {
+						if isPreprocessError(tc.sendErr) {
+							return sidecar.SolveCipherResult{}, tc.sendErr
+						}
+						loaded = true
+					}
+					if !loaded {
+						return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+					}
+					if tc.loadedErr != nil {
+						return sidecar.SolveCipherResult{}, tc.loadedErr
+					}
+					return ejsAnswers(req)
+				}
+				src := &lockedSource{}
+				side := newSidecarSolverWith(sc, src)
+				side.mem.setTV("P1")
+
+				for _, err := range solveNTogether(side, sc, 3) {
+					if tc.sendErr == nil && err != nil {
+						t.Errorf("solve = %v, want the tv body's answer", err)
+					}
+					if tc.sendErr != nil && !errors.Is(err, ErrPlayerJSStale) {
+						t.Errorf("solve = %v, want ErrPlayerJSStale", err)
+					}
+				}
+				shapes := sc.shapes()
+				fetches, _ := src.counts()
+				if sends, plain := countShape(shapes, "P1-tv+js"), countShape(shapes, "P1-tv"); fetches != 1 || sends != 1 || plain != tc.wantPlain {
+					t.Errorf("tv fetches %d, sends %d, plain asks %d (%v); want 1, 1 and %d", fetches, sends, plain, shapes, tc.wantPlain)
+				}
+			})
+		})
+	}
+}

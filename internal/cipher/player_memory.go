@@ -9,7 +9,8 @@ import (
 // in a sidecar request: "<id>-tv". The sidecar keys its loaded players, its
 // prepared-player store and its idle eviction by that key alone, so the two
 // bodies of one player never stand in for each other there. The suffixed key
-// exists only in sidecar requests and in sidecarSolver's sent record: it is
+// exists only in sidecar requests and in sidecarSolver's gates and send
+// counts: it is
 // never handed to a PlayerSource, to CacheKey or to the sig spec store, which
 // all know a player by its id. The main body's key is the player id itself.
 const tvKeySuffix = "-tv"
