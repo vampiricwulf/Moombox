@@ -436,7 +436,7 @@ Parses IRC messages into structured chat events, handling PRIVMSG (chat messages
 
 ### Goja Runtime Shims
 
-Cipher solving runs YouTube's `player.js` in a Goja VM, and the goja-fallback BotGuard path also executes the BotGuard interpreter under Goja. YouTube's code expects browser APIs that don't exist in a bare JS runtime. The `internal/goja/` package provides a real-class DOM shim embedded as `dom-real.js`:
+Cipher solving runs YouTube's `player.js` in a bare Goja VM, with only the globals ejs's own setup gives it (owner ruling RV-12; no DOM shim). The goja-fallback BotGuard path executes the BotGuard interpreter under Goja too, and that code expects browser APIs that don't exist in a bare JS runtime. The `internal/goja/` package provides a real-class DOM shim embedded as `dom-real.js`:
 
 - **DOM class hierarchy** — Real `EventTarget`, `Node`, `Element`, `HTMLElement` + 25 specific subclasses (HTMLDivElement, HTMLBodyElement, etc.) so `instanceof` chains return true. Tree-aware `dispatchEvent` with full capture → target → bubble propagation. Supports the full WHATWG event model including `preventDefault` / `stopPropagation` / signals / once / passive.
 - **Document + Window** — Real `Document` / `HTMLDocument` / `Window` classes with `createElement` (returns the right HTML subclass per `_htmlTagMap`), `querySelector` / `querySelectorAll` (small selector parser: tag/#id/.class/[attr]/conjunction), `getElementById`, initial `<html><head/><body/></html>` tree at startup.
