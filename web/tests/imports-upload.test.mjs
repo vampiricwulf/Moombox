@@ -245,3 +245,33 @@ test("a cap read that a newer status read supersedes still refuses the oversize 
   answers[1]({ importMaxBytes: 10 });
   await newer;
 });
+
+// A file chosen while Import reads the unknown cap was never submitted, yet
+// the upload went on with it once the status answered: the drop swapped
+// this.importFile and uploadImport read it again after the await. The new
+// file now stays selected for its own Import click.
+//
+// Mutant: uploadImport re-reading this.importFile after the status read
+// (b.zip is sent).
+test("a file chosen while Import reads the cap waits for its own click", { skip }, async () => {
+  const h = await harness.makeApp({ initialState: { status: {} } });
+  globalThis.XMLHttpRequest = PendingXHR;
+  PendingXHR.last = null;
+  h.app.imports.initImports();
+  h.app.imports.setImportFile(new h.window.File(["zip"], "a.zip"));
+
+  let answer;
+  h.http.on("GET /api/status", () => new Promise((r) => { answer = r; }));
+  const upload = h.app.imports.uploadImport();
+  await h.flush();
+  const b = new h.window.File(["zip"], "b.zip");
+  h.app.imports.setImportFile(b);
+  answer({ importMaxBytes: 10 });
+  await upload;
+  assert.equal(PendingXHR.last, null, "the file chosen during the read was sent without its own click");
+  assert.equal(h.app.imports.importFile, b, "the new file stays selected");
+  assert.equal(h.app.imports.importUploading, false);
+
+  await h.app.imports.uploadImport();
+  assert.ok(PendingXHR.last, "its own click did not send it");
+});
