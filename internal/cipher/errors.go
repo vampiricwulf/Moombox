@@ -46,17 +46,21 @@ var (
 // substitute a higher-quality alternative.
 var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")
 
-// ErrPlayerJSStale signals that the sidecar (or another solver) reported
-// it could not solve a challenge against its cached preprocessed player
-// JS — the canonical case being ejs's "no solutions" error after YouTube
-// rotates the cipher algorithm. The sidecarSolver eats this once: it
-// invalidates disk + in-memory + sidecar caches and retries with fresh
-// JS (once per player within staleVerdictWindow). A failure that persists
-// is then tried on the player's tv body, and only when that fails too
-// does this sentinel reach the caller, indicating either an actual
-// Moombox extractor bug or a player rotation we can't yet handle. Callers should treat this as
-// "cipher pipeline is broken for this player; surfacing as a real error
-// rather than masking with goja fallback."
+// ErrPlayerJSStale signals that the sidecar reported it could not solve a
+// challenge against its cached preprocessed player JS — the canonical case
+// being ejs's "no solutions" error after YouTube rotates the cipher
+// algorithm. The sidecarSolver eats this once: it invalidates disk +
+// in-memory + sidecar caches and retries with fresh JS (once per player
+// within staleVerdictWindow). A failure that persists is then tried on the
+// player's tv body, and only when that fails too does this sentinel reach
+// the caller. It then means the sidecar has nothing left for this player:
+// ejs cannot solve with its main body or its tv body, a break in ejs or a
+// player it does not handle yet. The caller asks goja last
+// (compositeSolver.N and Batch for an n, RoutedResolveURL for a signature),
+// which does not answer current players; when that fails too the sentinel
+// is still the one errors.Is sees, and the worker reads it as a failure
+// every format of the player shares (systemicResolveFailure,
+// internal/worker/challenge_free.go), not as one format's.
 var ErrPlayerJSStale = errors.New("cipher: player JS is stale or unsupported")
 
 // ErrNUnsolved signals a stream URL that carries an n challenge no solver

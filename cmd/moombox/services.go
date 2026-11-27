@@ -876,7 +876,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// token at all: BotGuard answers the in-process run with the websafe
 	// fallback only, and webpo_client rejects that as a token. Downloads
 	// that need no PO token keep working; PO-token-gated formats, and every
-	// signature-ciphered format (sig solving is sidecar-only), wait for the
+	// signature-ciphered format (the sidecar's or a learned sig spec's to answer;
+	// goja is asked last and fails on current players), wait for the
 	// supervisor below to bring the sidecar back.
 	//
 	// First launch extracts the embedded payload (roughly 115-150 MB,
@@ -888,7 +889,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	//
 	// The sidecar is SUPERVISED. Started once and never restarted, a crashed
 	// or OOM-aborted child latched unhealthy for the rest of a 24/7 run,
-	// taking every signature-ciphered format (sig is sidecar-only) and every
+	// taking every signature-ciphered format (bar the learned sig specs) and every
 	// real PO token with it.
 	var bgSupervisor *sidecar.Supervisor
 	if cfg.Bgutils.UseSidecar {
@@ -959,8 +960,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// `git show 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)).
 	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
 	// only constructed when the sidecar is healthy. compositeSolver
-	// applies the routing policy (sig: sidecar-only; n: sidecar primary,
-	// goja fallback). PlayerAPI continues to take *GojaResolver directly
+	// applies the routing policy (sig: sidecar, then the sig specs; n: sidecar,
+	// then goja; RoutedResolveURL asks goja last for a signature too). PlayerAPI continues to take *GojaResolver directly
 	// so its existing GetSolvers/GetSts call sites work unchanged; the
 	// composite is constructed for downstream callers that take the
 	// cipher.Solver interface (currently a placeholder until those
