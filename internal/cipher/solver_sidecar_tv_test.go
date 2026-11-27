@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -428,5 +429,56 @@ func TestGojaAnswersTheSigAloneTheNStaysRouted(t *testing.T) {
 	}
 	if res.URL != "https://example.com/videoplayback?n=routed-n&sig=goja-sig" {
 		t.Errorf("URL = %q, want goja's signature and the routed solver's n", res.URL)
+	}
+}
+
+// mainFetchFails is a player source whose main body cannot be fetched.
+type mainFetchFails struct {
+	*tvFakeSource
+	err error
+}
+
+func (f *mainFetchFails) PlayerJS(string) (string, error) { return "", f.err }
+
+// TestMainFileGoneGoesToTV: the main body's fetch gets a definite answer that
+// the file is not there. Goja reads the main body only, so it has nothing
+// either; the owner's order is main, tv, goja, and the tv body is asked
+// before goja, with the same single Warn. A fetch that failed in transit says
+// nothing about the player: tv is not asked for it, and goja is next.
+//
+// Mutants: only ErrPlayerJSStale sending a solve on to tv (goja answers the
+// first row); every fetch failure sending it on (tv answers the second).
+func TestMainFileGoneGoesToTV(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fetchErr  error
+		want      string
+		wantWarns int
+	}{
+		{"not there", fmt.Errorf("%w: %w", ErrPlayerJSFetch, playerFetchStatus(404)), "tv-n(n1)", 1},
+		{"failed in transit", fmt.Errorf("%w: connection reset", ErrPlayerJSFetch), "goja-n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlog(t)
+			sc := newVariantSidecar()
+			src := &mainFetchFails{
+				tvFakeSource: &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1"}, tvJS: "tv-js"},
+				err:          tc.fetchErr,
+			}
+			goja := &countingGoja{staticSolver: staticSolver{n: map[string]string{"n1": "goja-n"}}}
+			c := newCompositeSolverWith(newSidecarSolverWith(sc, src), goja)
+
+			got, err := c.N(context.Background(), "P1", "n1")
+			if err != nil || got != tc.want {
+				t.Fatalf("N = %q, %v; want %q", got, err, tc.want)
+			}
+			warns := warnLines(logs.String())
+			if len(warns) != tc.wantWarns {
+				t.Fatalf("Warn lines = %q, want %d", warns, tc.wantWarns)
+			}
+			if tc.wantWarns == 1 && (!strings.Contains(warns[0], "from=main") || !strings.Contains(warns[0], "to=tv") || !strings.Contains(warns[0], "status 404")) {
+				t.Errorf("Warn = %q, want the move from main to tv with the fetch's answer", warns[0])
+			}
+		})
 	}
 }

@@ -90,7 +90,7 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 				return nil, fmt.Errorf("cipher: routed sig failed and no goja fallback: %w", err)
 			}
 			if w, ok := routedSolver.(gojaFallNoter); ok {
-				w.noteGojaFall(ctx, playerID, "sig", err)
+				w.noteGojaFall(playerID, "sig", err)
 			}
 			var gojaErr error
 			decryptedSig, gojaErr = gojaSig(ctx, gojaResolver, req.PlayerURL, req.EncryptedSignature)

@@ -177,11 +177,14 @@ func TestTVFetchVerdict(t *testing.T) {
 // TestGojaFallWarnsOnlyWhenTheSidecarWasAsked: with no sidecar half
 // installed ([bgutils] use_sidecar = false) goja is all there is, and
 // nothing is logged for using it, for n or for a signature. A sidecar half
-// that failed a signature logs the fall once, whatever the number of
-// signatures.
+// that timed out says nothing about the player either, and does not spend
+// the player's one line: when ejs then really cannot solve its signatures,
+// the fall is logged, once, whatever the number of signatures.
 //
-// Mutants: noteGojaFall logging with no sidecar installed; the signature
-// path not noting the fall.
+// Mutants: noteGojaFall logging whatever the sidecar's failure was (a Warn
+// with no sidecar installed, and one for the timeout); the timeout spending
+// the player's line (no Warn for the real failure); the signature path not
+// noting the fall.
 func TestGojaFallWarnsOnlyWhenTheSidecarWasAsked(t *testing.T) {
 	goja, err := NewGojaResolver(t.TempDir(), &testLogger{})
 	if err != nil {
@@ -204,7 +207,15 @@ func TestGojaFallWarnsOnlyWhenTheSidecarWasAsked(t *testing.T) {
 		t.Errorf("with no sidecar installed: Warn lines %q, want none", warns)
 	}
 
-	failing := newCompositeSolverWith(&staticSolver{sigErr: ErrPlayerJSStale, n: map[string]string{"rawnvalue": "routed-n"}}, goja)
+	half := &staticSolver{sigErr: errors.New("sidecar: solveCipher: timed out"), n: map[string]string{"rawnvalue": "routed-n"}}
+	failing := newCompositeSolverWith(half, goja)
+	if _, err := RoutedResolveURL(ctx, failing, goja, req); err != nil {
+		t.Fatalf("RoutedResolveURL with a sidecar that timed out: %v", err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 0 {
+		t.Errorf("after a sidecar timeout: Warn lines %q, want none", warns)
+	}
+	half.sigErr = ErrPlayerJSStale
 	for range 2 {
 		if _, err := RoutedResolveURL(ctx, failing, goja, req); err != nil {
 			t.Fatalf("RoutedResolveURL with a failing sidecar: %v", err)
@@ -715,5 +726,43 @@ func TestTVPlayerThatStopsSolvingIsStale(t *testing.T) {
 	}
 	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1-tv P1-tv" {
 		t.Errorf("sidecar calls = %v, want two plain asks of the tv key", shapes)
+	}
+}
+
+// TestGojaFallFromBatchWarnsOnce: a Batch whose n entries go to goja is a
+// fall like N's, and the two share the player's one Warn.
+//
+// Mutant: Batch not noting the fall (no Warn until N is asked; here N comes
+// second, so the count alone would not tell — the line must be there after
+// the Batch).
+func TestGojaFallFromBatchWarnsOnce(t *testing.T) {
+	logs := captureSlog(t)
+	goja := &staticSolver{n: map[string]string{"n1": "goja-n"}}
+	c := newCompositeSolverWith(&staticSolver{nErr: fmt.Errorf("%w: ejs preprocess: broke", ErrPlayerJSStale)}, goja)
+	ctx := context.Background()
+	if _, ns, err := c.Batch(ctx, "P1", nil, []string{"n1"}); err != nil || ns["n1"] != "goja-n" {
+		t.Fatalf("Batch = %v, %v; want goja's answer", ns, err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 1 || !strings.Contains(warns[0], "challenge=n") {
+		t.Fatalf("Warn lines after the Batch = %q, want the one for the fall to goja", warns)
+	}
+	if _, err := c.N(ctx, "P1", "n1"); err != nil {
+		t.Fatalf("N: %v", err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 1 {
+		t.Errorf("Warn lines after the Batch and an N = %q, want still one", warns)
+	}
+}
+
+// TestPlayerMemoryIsBounded: the memory holds playerMemorySize players, and
+// the oldest record goes when one more is made.
+func TestPlayerMemoryIsBounded(t *testing.T) {
+	m := newPlayerMemory()
+	for i := range playerMemorySize + 1 {
+		m.setTV(fmt.Sprintf("player%d", i))
+	}
+	if len(m.players) != playerMemorySize || m.usesTV("player0") || !m.usesTV("player1") || !m.usesTV(fmt.Sprintf("player%d", playerMemorySize)) {
+		t.Errorf("after %d players: %d records, oldest kept = %v; want %d records without the oldest",
+			playerMemorySize+1, len(m.players), m.usesTV("player0"), playerMemorySize)
 	}
 }

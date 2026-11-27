@@ -146,13 +146,15 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 // RV-11: "stay on main, retry tv, then goja" — goja is the caller's, after
 // this has failed).
 //
-// The tv body is asked only when the main one ended in ErrPlayerJSStale, the
-// failure that is ejs's and the player's: the sidecar being down, a timeout
-// or a player fetch that failed would fail tv alike. It is asked once. When
-// it solves, the player is remembered as a tv one (playerMemory) and every
-// later solve skips main; a Warn says so, once per player. When it fails too,
-// the main body's ErrPlayerJSStale is returned with the tv failure beside it.
-// A PlayerSource that cannot yield a tv body (TVPlayerSource) gets no retry.
+// The tv body is asked only when the main one ended in a failure that is the
+// player's own (playerFailure): ejs cannot solve with the body
+// (ErrPlayerJSStale), or its file is not there (a 404 or 403 on the fetch).
+// The sidecar being down, a timeout or a fetch that failed in transit would
+// fail tv alike. It is asked once. When it solves, the player is remembered
+// as a tv one (playerMemory) and every later solve skips main; a Warn says
+// so, once per player. When it fails too, the main body's error is returned
+// with the tv failure beside it. A PlayerSource that cannot yield a tv body
+// (TVPlayerSource) gets no retry.
 func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	if s.mem.usesTV(playerID) {
 		res, err := s.solveTV(ctx, playerID, sigs, ns)
@@ -164,7 +166,7 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 		return res, err
 	}
 	res, err := s.solveMain(ctx, playerID, sigs, ns)
-	if !errors.Is(err, ErrPlayerJSStale) || ctx.Err() != nil {
+	if !playerFailure(err) || ctx.Err() != nil {
 		return res, err
 	}
 	if _, ok := s.src.(TVPlayerSource); !ok {
@@ -175,7 +177,7 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 		return tvRes, fmt.Errorf("%w (tv variant: %v)", err, tvErr)
 	}
 	if s.mem.setTV(playerID) {
-		slog.Warn("cipher: ejs cannot solve with this player's main variant; its tv variant solves, and is used for this player from now on",
+		slog.Warn("cipher: the sidecar cannot solve with this player's main variant; its tv variant solves, and is used for this player from now on",
 			"playerID", playerID, "from", "main", "to", "tv", "err", err)
 	}
 	return tvRes, nil
@@ -430,6 +432,21 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 	}
 
 	return result, err
+}
+
+// playerFailure reports whether a failed solve failed on the player itself,
+// so that asking again with the same body ends the same: ejs cannot solve
+// with it (ErrPlayerJSStale), or the fetch of its file got a definite answer
+// that it is not to be had (a 404 for a player YouTube has pulled, a 403).
+// A timeout, a sidecar that is down or a fetch that failed in transit is
+// none of the player's doing. This is what sends a solve on from the main
+// body to the tv one, and what the Warn for a fall to goja is kept for
+// (compositeSolver.noteGojaFall).
+func playerFailure(err error) bool {
+	if errors.Is(err, ErrPlayerJSStale) {
+		return true
+	}
+	return errors.Is(err, ErrPlayerJSFetch) && !retryablePlayerFetch(err)
 }
 
 // isStaleJSError matches the substring patterns ejs emits when its
