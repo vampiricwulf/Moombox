@@ -26,7 +26,7 @@
 
 ## Test Baseline
 
-- **Packages:** 47 in `go list ./...`. `go test -count=1 ./...` reports **44 ok / 0 fail**; the other three have no test files (`tools/sidecar-sig-probe`, `web`, `internal/ffmpegtest`).
+- **Packages:** 47 in `go list ./...`, 44 of them with test files; the other three have none (`tools/sidecar-sig-probe`, `web`, `internal/ffmpegtest`). The 44 is counted from the tree, not read from a `go test -count=1 ./...` run.
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
