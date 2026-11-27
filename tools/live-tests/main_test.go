@@ -239,6 +239,7 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 		cwd      string
 		want     []string
 		channel  string // the live channel the internal/twitch run must get
+		onlyPkg  string // when set, the one package that may run
 	}{
 		{name: "pass", args: []string{"youtube-auth"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree,
 			want: []string{"PASS  internal/youtube", "RESULT: PASS"}},
@@ -252,7 +253,8 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			mode: "pass", calls: 1, cookies: true, cwd: "othertree", want: []string{"PASS  internal/bgutils"}},
 		{name: "pot-accept without a video", args: []string{"pot-accept"}, mode: "pass", calls: 0,
 			want: []string{"SKIP", "no video"}},
-		{name: "cipher without its fixture", args: []string{"--worktree", "{tree}", "cipher"}, mode: "pass", calls: 0,
+		{name: "cipher without its fixture", args: []string{"--worktree", "{tree}", "cipher"}, mode: "pass", calls: 1, cookies: true,
+			cwd: "othertree", onlyPkg: "internal/youtube",
 			want: []string{"SKIP", "no player fixture"}},
 		{name: "twitch picks a live channel", args: []string{"twitch"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree, channel: "somechannel",
 			want: []string{"Twitch channel: somechannel"}},
@@ -310,6 +312,9 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 				}
 				if !strings.Contains(strings.ToLower(c["tmp"]), "live-tmp") {
 					t.Errorf("a test's TMP is outside the run directory: %s", c["tmp"])
+				}
+				if tc.onlyPkg != "" && c["pkg"] != tc.onlyPkg {
+					t.Errorf("package %s ran; only %s should", c["pkg"], tc.onlyPkg)
 				}
 				if tc.channel != "" && c["pkg"] == "internal/twitch" && c["channel"] != tc.channel {
 					t.Errorf("the Twitch channel tests got channel %q, want %q", c["channel"], tc.channel)

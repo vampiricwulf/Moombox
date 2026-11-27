@@ -19,8 +19,9 @@
 #   cookies       every test that reads the cookie file (YouTube and Twitch;
 #                 the Twitch channel is picked as for twitch)
 #   bgutils       the sidecar's live PO-token mints and its death fallback
-#   cipher        the sidecar cipher solver against the player fixtures, and
-#                 today's player (main and tv bodies) against sidecar and goja
+#   cipher        the sidecar cipher solver against the player fixtures
+#                 (skipped when the tree has none), and today's player (main
+#                 and tv bodies) against sidecar and goja, which needs none
 #   all           youtube twitch bgutils cipher
 #   goja          opt-in, NOT in all: the goja BotGuard check, expected to FAIL
 #                 while BotGuard rejects goja
@@ -557,11 +558,15 @@ for g in "${groups[@]}"; do
 		echo "### live-tests skip group=pot-accept reason=no video: pass --video or set MOOMBOX_POT_ACCEPT_VIDEO" | tee -a "$log"
 		continue
 	fi
-	if [ "$g" = cipher ] && [ ! -f "$tree/internal/cipher/testdata/player_cb017549.js" ]; then
-		echo "### live-tests skip group=cipher reason=no player fixture in that tree: run bash .github/scripts/fetch-cipher-fixture.sh" | tee -a "$log"
-		continue
-	fi
-	while IFS=$'\t' read -r p t; do run_pkg "$g" "$tree" "$p" "$t"; done < <(group_entries "$g")
+	while IFS=$'\t' read -r p t; do
+		# Only the fixture tests need the fixture: today's player
+		# (internal/youtube TestLiveCurrentPlayerSolves) runs without it.
+		if [ "$g" = cipher ] && [ "$p" = internal/cipher ] && [ ! -f "$tree/internal/cipher/testdata/player_cb017549.js" ]; then
+			echo "### live-tests skip group=cipher reason=internal/cipher: no player fixture in that tree: run bash .github/scripts/fetch-cipher-fixture.sh" | tee -a "$log"
+			continue
+		fi
+		run_pkg "$g" "$tree" "$p" "$t"
+	done < <(group_entries "$g")
 done
 
 echo
