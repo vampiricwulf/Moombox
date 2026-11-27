@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
@@ -105,6 +106,19 @@ func pagePlayerURL(page string) string {
 	return ""
 }
 
+// tclPlayerPathRe matches a player URL whose file is one of the `tcl`
+// variants: player_ias_tcl.vflset/..., player_es6_tcl.vflset/...,
+// tv-player-ias-tcl.vflset/tv-player-ias-tcl.js. The variant is named in the
+// first path segment below the player id.
+var tclPlayerPathRe = regexp.MustCompile(`/s/player/[a-fA-F0-9]{8,}/[^/]*[_-]tcl\b`)
+
+// playerPathIsTCL reports whether a player URL, as a page states it
+// (JSON-escaped or not, before normalizePlayerJSURL rewrites it to the main
+// variant), names a `tcl` variant of its player.
+func playerPathIsTCL(raw string) bool {
+	return tclPlayerPathRe.MatchString(strings.ReplaceAll(raw, `\/`, "/"))
+}
+
 // watchPagePlayerURL is pagePlayerURL over the watch page's bytes. It walks
 // the matches one at a time rather than collecting them, and never turns the
 // ~5 MB page into a string: on a page whose first match names the player it
@@ -113,14 +127,19 @@ func pagePlayerURL(page string) string {
 // leading with a non-player scriptSrc ran its extraction on that script and
 // had it remembered for six hours as the fallback (resolvePlayerURL), over
 // the homepage's real player.
-func watchPagePlayerURL(page []byte) string {
+//
+// tcl says whether the page named that player on a `tcl` variant
+// (playerPathIsTCL), read off the URL as the page gave it: the URL returned
+// is already the main variant's, and no longer says.
+func watchPagePlayerURL(page []byte) (playerURL string, tcl bool) {
 	for rest := page; ; {
 		loc := jsURLRegex.FindSubmatchIndex(rest)
 		if loc == nil {
-			return ""
+			return "", false
 		}
-		if u := normalizePlayerJSURL(string(rest[loc[2]:loc[3]])); cipher.PlayerIDOf(u) != "" {
-			return u
+		raw := string(rest[loc[2]:loc[3]])
+		if u := normalizePlayerJSURL(raw); cipher.PlayerIDOf(u) != "" {
+			return u, playerPathIsTCL(raw)
 		}
 		rest = rest[loc[1]:]
 	}
