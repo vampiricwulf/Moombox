@@ -337,7 +337,8 @@ jobs:
         # test's skip into a failure is set only once the download and its
         # pinned checksum pass: a failed download is a warning and the test
         # skips, so a YouTube outage or a retired player URL never turns the
-        # run red. The Go side runs in one test shard (see "Fetch the
+        # run red. The Go side runs in the windows shards that run
+        # internal/bgutils/sidecar or internal/cipher (see "Fetch the
         # real-player cipher fixture" there).
         timeout-minutes: 3
         continue-on-error: true
