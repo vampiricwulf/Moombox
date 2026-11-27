@@ -547,6 +547,13 @@ func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 // names it by a channel URL, twitch.tv/<login> with no further path: a VOD
 // (twitch.tv/videos/<id>) or a clip (clips.twitch.tv/<slug>,
 // twitch.tv/<login>/clip/<slug>) waits on no channel.
+//
+// worker.TwitchJobLogin (over extractTwitchLoginFromJob) answers a different
+// question, "which channel does this row belong to", and disagrees on
+// purpose: it gives <login> for a twitch.tv/<login>/clip/<slug> URL and falls
+// back to the channel name, while this gives "" for every VOD and clip row,
+// since those wait on no live broadcast. database cannot import worker; keep
+// the two in step when a Twitch URL shape is added.
 func twitchChannelWaitLogin(id, url string) string {
 	if rest, ok := strings.CutPrefix(id, "tw_manual_"); ok {
 		if i := strings.LastIndex(rest, "_"); i > 0 {
