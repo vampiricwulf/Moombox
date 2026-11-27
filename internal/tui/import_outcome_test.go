@@ -210,8 +210,8 @@ func TestImportNoteIsDrawnWithoutControlCharacters(t *testing.T) {
 // style reached the screen. SetError now stores it with every control
 // character as a space, for every caller.
 //
-// Mutant: SetError storing err as it came (the hyperlink's escape reaches
-// the bare form; the normal form is checked too).
+// Mutant: SetError storing err as it came (the stored error carries the
+// escape, and it reaches the bare form).
 func TestImportRefusalIsDrawnWithoutControlCharacters(t *testing.T) {
 	a := NewApp()
 	a.width, a.height = 80, 30
@@ -219,6 +219,9 @@ func TestImportRefusalIsDrawnWithoutControlCharacters(t *testing.T) {
 		`{"error":"the zip holds more than one recording: \u001b]8;;https://example.invalid\u001b\u005ca.mp4\u001b]8;;\u001b\u005c, b.mp4"}`)
 	a.importDlg.Open(t.TempDir())
 	a.Update(msg)
+	if i := strings.IndexFunc(a.importDlg.errorMsg, unicode.IsControl); i >= 0 {
+		t.Errorf("the dialog's error %q carries a control character at byte %d", a.importDlg.errorMsg, i)
+	}
 	for _, size := range [][2]int{{80, 30}, {40, 10}} {
 		a.importDlg.SetSize(size[0], size[1])
 		view := a.importDlg.View()
