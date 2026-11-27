@@ -205,3 +205,66 @@ func TestGojaLearningLeavesTheSidecarFree(t *testing.T) {
 		t.Error("the sidecar did not learn the length goja had failed to")
 	}
 }
+
+// TestBatchWaitsOutTheGraceBeforeGoja: a mixed batch that meets an installed
+// sidecar down, with no spec for its signature, waits out the readiness
+// grace for the child (PR-R3) as Sig does, and only then goes to goja for
+// the signature and the n.
+//
+// Mutants: Batch's not-ready arm failing the signatures with sidecarDown
+// (an error); goja asked before the wait (answered at once).
+func TestBatchWaitsOutTheGraceBeforeGoja(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := &reportingSidecar{permutingSidecar: newPermutingSidecar()}
+		goja := &specGoja{
+			staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "goja-N1"}},
+			specs:        map[string][]int{},
+		}
+		c := newCompositeSolverWith(side, goja)
+		start := time.Now()
+		sr, nr, err := c.Batch(context.Background(), specPlayer, []string{sigA}, []string{"N1"})
+		if err != nil || sr[sigA] != "goja-A" || nr["N1"] != "goja-N1" {
+			t.Fatalf("Batch with the sidecar down for good = %v, %v, %v; want goja's answers", sr, nr, err)
+		}
+		if waited := time.Since(start); waited < sidecarReadyGrace {
+			t.Errorf("goja was asked after %v, want after the %v grace", waited, sidecarReadyGrace)
+		}
+	})
+}
+
+// gojaCountingSigs is a goja half that counts the signatures it is asked.
+type gojaCountingSigs struct {
+	staticSolver
+	asked atomic.Int32
+}
+
+func (g *gojaCountingSigs) Sig(ctx context.Context, p, k string) (string, error) {
+	g.asked.Add(1)
+	return g.staticSolver.Sig(ctx, p, k)
+}
+
+// TestGojaIsNotAskedOnceTheCallerHasGivenUp: a caller whose context has
+// ended gets its own error, in Sig and in Batch, and goja is not asked: a
+// compiled player answers whatever the context says, and the answer would
+// be handed to a caller that has gone.
+//
+// Mutants: Sig's or Batch's ctx check before goja dropped (goja asked).
+func TestGojaIsNotAskedOnceTheCallerHasGivenUp(t *testing.T) {
+	goja := &gojaCountingSigs{staticSolver: staticSolver{sig: map[string]string{sigA: "gojaX"}}}
+	side := newPermutingSidecar()
+	side.setDown(true)
+	c := newCompositeSolverWith(side, goja)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, c := range map[string]*compositeSolver{"sidecar failing": c, "no sidecar": newCompositeSolverWith(nil, goja)} {
+		if _, _, err := c.Batch(ctx, specPlayer, []string{sigA}, nil); err == nil {
+			t.Errorf("%s: Batch with an ended context: no error", name)
+		}
+		if _, err := c.Sig(ctx, specPlayer, sigA); err == nil {
+			t.Errorf("%s: Sig with an ended context: no error", name)
+		}
+	}
+	if n := goja.asked.Load(); n != 0 {
+		t.Errorf("goja was asked %d times for a caller that had given up, want none", n)
+	}
+}
