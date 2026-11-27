@@ -691,6 +691,42 @@ test("a pick kept by a superseded rebuild does not load after the picker is clea
   assert.equal(select.value, "");
 });
 
+// The same order inside the window: the operator picks j2 while rebuild N is
+// parked in its option-mutation window, then clears the picker before N
+// leaves it. The listener only recorded a non-empty value there, so the kept
+// j2 survived the clear and N loaded it. Mutant: the window branch ignoring
+// an empty value (j2 loads).
+test("a clear inside a rebuild window drops the pick kept there", { skip }, async () => {
+  const jobs = ["j1", "j2"].map((id) => finished(id));
+  const h = harness.makePlayer({ jobs, archived: [], watchState: {} });
+  const select = h.select();
+  await h.player.loadPlayerJobList();
+  await h.selectJob("j1");
+  select.value = "j1";
+
+  let sawRead, releaseN, gated = true;
+  const read = new Promise((r) => { sawRead = r; });
+  const gateN = new Promise((r) => { releaseN = r; });
+  Object.defineProperty(select, "updateComplete", {
+    configurable: true,
+    get() { if (!gated) return Promise.resolve(); sawRead(); return gateN; },
+  });
+  const rebuildN = h.player.loadPlayerJobList();
+  await read;
+  await h.flush();
+
+  select.value = "j2";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  select.value = "";
+  select.dispatchEvent(new h.window.Event("sl-change"));
+  gated = false;
+  releaseN();
+  await rebuildN;
+  await h.flush();
+  assert.notEqual(h.player.playerJob?.id, "j2", "the pick kept before the clear loaded after it");
+  assert.equal(h.player._pickDuringRebuild, null);
+});
+
 // ── 10. Seek event order (Phases 3+4 fix wave, F1) ──────────────────────────
 
 test("a seek's pre-`seeked` timeupdate counts nothing as dropped", { skip }, async () => {
