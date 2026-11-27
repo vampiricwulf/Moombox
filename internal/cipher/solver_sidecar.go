@@ -339,7 +339,6 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 			// What the solve ahead of this one found stands for this one.
 			return sidecar.SolveCipherResult{}, dead
 		}
-		recoveries, _ = s.mem.recoveryState(playerID)
 		if s.sendCount(playerID) != sends {
 			// Another solve sent the body while this one waited: ask what
 			// the sidecar holds now before sending anything.

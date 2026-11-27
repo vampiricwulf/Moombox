@@ -528,6 +528,52 @@ func TestSolveArrivingMidRecoveryDoesNotResend(t *testing.T) {
 	})
 }
 
+// TestSolveArrivingMidRecoveryAsksWhatItLeft: the same arrival, on a player
+// whose recovery succeeds. The sidecar has dropped the stale copy for the
+// forced reload, so the solves that arrive meanwhile are told the player is
+// not loaded. Once the recovery is done they ask again, without the JS, and
+// are answered by the body it loaded: the body is not sent a second time.
+//
+// Mutant: the waiter sending the body without asking first (one JS-carrying
+// call per arrival).
+func TestSolveArrivingMidRecoveryAsksWhatItLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc := newLockedSidecar()
+		dropped, fresh := false, false
+		sc.hold = func(req sidecar.SolveCipherRequest) bool {
+			if req.ForceReload {
+				dropped = true
+			}
+			return req.ForceReload
+		}
+		sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			switch {
+			case req.PlayerJS != "":
+				dropped, fresh = false, true
+			case dropped:
+				return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+			}
+			if !fresh {
+				return sidecar.SolveCipherResult{}, errors.New("sidecar: ejs solve n: no solutions")
+			}
+			return ejsAnswers(req)
+		}
+		src := &lockedSource{}
+		side := newSidecarSolverWith(sc, src)
+		side.markPlayerSent("P1")
+		for _, err := range solveNTogether(side, sc, 3) {
+			if err != nil {
+				t.Errorf("solve = %v, want the reloaded body's answer", err)
+			}
+		}
+		shapes := sc.shapes()
+		_, removals := src.counts()
+		if strings.Join(shapes, " ") != "P1 P1+js+force P1 P1 P1 P1" || removals != 1 {
+			t.Errorf("sidecar calls = %v, evictions %d; want one forced reload, two plain asks per later solve, 1 eviction", shapes, removals)
+		}
+	})
+}
+
 // refetchFailsOnce is a player source whose first fetch after an eviction
 // fails in transit.
 type refetchFailsOnce struct {
