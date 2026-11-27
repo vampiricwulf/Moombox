@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,29 +99,91 @@ func TestRedactFailsClosedWithoutItsCookieFile(t *testing.T) {
 	}
 }
 
-// bashPath finds a POSIX bash: Git for Windows' on Windows (never WSL's
-// System32 bash, which cannot see these paths), PATH's elsewhere.
+// bashPath finds the bash the runner runs under: on Windows the MSYS bash of
+// Git for Windows (usr/bin/bash.exe), which is what "bash" is in a Git Bash
+// window, never the bin/bash.exe launcher stub (a native program: a TERM
+// sent to it goes through Git for Windows' native-kill emulation instead of
+// reaching the runner as a signal) nor WSL's System32 bash (which cannot see
+// these paths); PATH's elsewhere. The bash's own directories are put first on
+// PATH by bashEnv, as a Git Bash window has them, so the runner finds ps,
+// awk, mktemp and cygpath however go test was started. It logs which bash it
+// picked and its runtime, so a failure names them.
 func bashPath(t *testing.T) string {
 	t.Helper()
+	bashOnce.Do(findBash)
+	if bashFound == "" {
+		t.Skip(bashSkip)
+	}
+	logBash(t, bashFound)
+	return bashFound
+}
+
+var (
+	bashOnce  sync.Once
+	bashFound string
+	bashSkip  string
+	// bashDirs are the directories bashEnv puts first on PATH (Windows only).
+	bashDirs []string
+)
+
+func findBash() {
 	if runtime.GOOS != "windows" {
 		p, err := exec.LookPath("bash")
 		if err != nil {
-			t.Skip("no bash on PATH")
+			bashSkip = "no bash on PATH"
+			return
 		}
-		return p
+		bashFound = p
+		return
 	}
 	git, err := exec.LookPath("git")
 	if err != nil {
-		t.Skip("no git on PATH, so no Git Bash")
+		bashSkip = "no git on PATH, so no Git Bash"
+		return
 	}
-	for _, rel := range []string{`..\bin\bash.exe`, `..\..\bin\bash.exe`, `..\usr\bin\bash.exe`} {
-		p := filepath.Join(filepath.Dir(git), rel)
+	// git.exe lives in cmd, bin or mingw64/bin of the Git root.
+	for _, rel := range []string{`..`, `..\..`} {
+		root := filepath.Clean(filepath.Join(filepath.Dir(git), rel))
+		p := filepath.Join(root, "usr", "bin", "bash.exe")
 		if _, err := os.Stat(p); err == nil {
-			return p
+			bashFound = p
+			bashDirs = []string{filepath.Join(root, "usr", "bin"), filepath.Join(root, "mingw64", "bin")}
+			return
 		}
 	}
-	t.Skip("Git Bash not found beside git")
-	return ""
+	bashSkip = "Git Bash (usr/bin/bash.exe) not found beside git"
+}
+
+// bashEnv returns env with bashDirs first on PATH.
+func bashEnv(env []string) []string {
+	if len(bashDirs) == 0 {
+		return env
+	}
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(k, "PATH") {
+			if found {
+				continue
+			}
+			found = true
+			kv = k + "=" + strings.Join(append(append([]string{}, bashDirs...), v), string(os.PathListSeparator))
+		}
+		out = append(out, kv)
+	}
+	if !found {
+		out = append(out, "PATH="+strings.Join(bashDirs, string(os.PathListSeparator)))
+	}
+	return out
+}
+
+func logBash(t *testing.T, bash string) {
+	t.Helper()
+	cmd := exec.Command(bash, "-c", `echo "$BASH_VERSION $(uname -sr) ps=$(command -v ps) taskkill=$(command -v taskkill)"`)
+	cmd.Env = bashEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	t.Logf("bash: %s (%s, err=%v)", bash, strings.TrimSpace(string(out)), err)
 }
 
 const fakeGo = `#!/usr/bin/env bash
@@ -195,7 +258,7 @@ func newRunnerEnv(t *testing.T, mode string) *runnerEnv {
 	fake := filepath.Join(r.dir, "fakego")
 	os.WriteFile(fake, []byte(fakeGo), 0o755)
 	r.record = filepath.Join(r.dir, "record.txt")
-	r.env = append(os.Environ(),
+	r.env = append(bashEnv(os.Environ()),
 		"MOOMBOX_LIVE_STATE_DIR="+filepath.ToSlash(r.state),
 		"MOOMBOX_LIVE_SETTINGS="+filepath.ToSlash(settings),
 		"MOOMBOX_LIVE_GO_TEST="+filepath.ToSlash(fake),
@@ -375,29 +438,76 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 // from this Go-started wrapper, INT did not reach the runner's trap, so TERM
 // stands in for it here.
 func TestRunnerStopsAtOnceOnTerm(t *testing.T) {
+	t.Parallel()
+	runInterrupted(t, `kill -TERM $p`, "trap TERM")
+}
+
+// TestRunnerCleansUpAfterAHardKill ends the runner's own bash with no chance
+// to run a trap (taskkill /F of its Windows process alone, or SIGKILL),
+// which is what CI's Windows runner once did to it: its watchdog then ends
+// the sleeping test and removes the run directory and the lock, so no
+// cookie copy waits for the next run's sweep.
+func TestRunnerCleansUpAfterAHardKill(t *testing.T) {
+	t.Parallel()
+	kill := `kill -KILL $p`
+	if runtime.GOOS == "windows" {
+		kill = `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' taskkill /F /PID "$(cat /proc/$p/winpid)"`
+	}
+	runInterrupted(t, kill, "watchdog: runner gone")
+}
+
+// runInterrupted starts the runner on a test that sleeps for a minute, waits
+// until the test has started, runs kill (with $p the runner's pid) and checks
+// that the run ended at once, the test with it, and nothing was left. The
+// runner's trace (a test hook) must hold want. On failure it prints the
+// trace: which signal the trap saw, the pids kill_tree knew, and what
+// taskkill answered.
+func runInterrupted(t *testing.T, kill, want string) {
 	bash := bashPath(t)
 	r := newRunnerEnv(t, "sleep")
+	trace := filepath.Join(r.dir, "trace.txt")
+	r.env = append(r.env, "MOOMBOX_LIVE_TRACE="+filepath.ToSlash(trace))
 	wrapper := `"$@" & p=$!
 for _ in $(seq 1 100); do [ -s "$FAKE_RECORD" ] && break; sleep 0.2; done
 sleep 1
-kill -TERM $p
-wait $p`
+echo "wrapper: stopping runner $p with: $KILL"
+` + "eval \"$KILL\"" + `
+echo "wrapper: kill exit $?"
+wait $p
+echo "wrapper: runner exit $?"`
 	start := time.Now()
 	cmd := exec.Command(bash, "-c", wrapper, "wrap", bash, r.script, "--no-probe", "youtube-auth")
-	cmd.Env = r.env
+	cmd.Env = append(r.env, "KILL="+kill)
 	out, _ := cmd.CombinedOutput()
-	if took := time.Since(start); took > 40*time.Second {
+	took := time.Since(start)
+	// The trace is logged on every run (go test -v shows it), the console
+	// only on a failure.
+	defer func() {
+		tr, err := os.ReadFile(trace)
+		if err != nil {
+			t.Logf("no runner trace (%v): the runner never started or never got that far", err)
+		} else {
+			t.Logf("runner trace (the wrapper returned after %v):\n%s", took, tr)
+		}
+		if t.Failed() {
+			t.Logf("console:\n%s", out)
+		}
+	}()
+	if took > 40*time.Second {
 		t.Errorf("the interrupted run took %v; it waited for the test", took)
 	}
 	if len(readCalls(r.record)) != 1 {
-		t.Fatalf("the stand-in never started:\n%s", out)
+		t.Fatalf("the stand-in never started")
 	}
-	time.Sleep(65 * time.Second)
+	time.Sleep(65*time.Second - time.Since(start))
 	if _, err := os.Stat(r.record + ".late"); err == nil {
 		t.Error("the sleeping test outlived the interrupted run")
 	}
 	if left := r.leftovers(); len(left) != 0 {
-		t.Errorf("left behind after an interrupt: %v\n%s", left, out)
+		t.Errorf("left behind after an interrupt: %v", left)
+	}
+	if tr, _ := os.ReadFile(trace); !strings.Contains(string(tr), want) {
+		t.Errorf("the runner's trace lacks %q", want)
 	}
 }
 
@@ -468,7 +578,7 @@ func TestRunnerStateIsTheScriptsCheckout(t *testing.T) {
 	dir := t.TempDir()
 	repo, other := filepath.Join(dir, "repo"), filepath.Join(dir, "other")
 	var env []string
-	for _, kv := range os.Environ() {
+	for _, kv := range bashEnv(os.Environ()) {
 		if !strings.HasPrefix(kv, "MOOMBOX_LIVE_") && !strings.HasPrefix(kv, "GIT_") {
 			env = append(env, kv)
 		}
