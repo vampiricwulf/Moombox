@@ -37,6 +37,10 @@ moombox.log
 moombox.json
 config.toml
 cookies.txt
+# Any other cookie export dropped here (a test account, a browser export): never tracked
+cookies.*.txt
+cookies-*.txt
+*.cookies.txt
 staging/
 output/
 browser-profile/
