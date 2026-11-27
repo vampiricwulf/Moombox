@@ -157,14 +157,14 @@ func TestCompositeBatch_SigOnlyRoutesToSidecar(t *testing.T) {
 
 func TestCompositeBatch_NOnlyFallsBackToGojaOnSidecarError(t *testing.T) {
 	side := &staticSolver{nErr: errors.New("sidecar n down")}
-	goja := &staticSolver{n: map[string]string{"A": "gojaA", "B": "gojaB"}}
+	goja := &staticSolver{n: map[string]string{"A": "A-goja", "B": "B-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	_, ns, err := c.Batch(context.Background(), "P1", nil, []string{"A", "B"})
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	if ns["A"] != "gojaA" || ns["B"] != "gojaB" {
+	if ns["A"] != "A-goja" || ns["B"] != "B-goja" {
 		t.Errorf("expected goja fallback values; got %v", ns)
 	}
 }
@@ -172,7 +172,7 @@ func TestCompositeBatch_NOnlyFallsBackToGojaOnSidecarError(t *testing.T) {
 func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
 	side := &staticSolver{
 		sig: map[string]string{"X": "sideX"},
-		n:   map[string]string{"A": "sideA"},
+		n:   map[string]string{"A": "side-n"},
 	}
 	goja := &staticSolver{}
 	c := newCompositeSolverWith(side, goja)
@@ -184,7 +184,7 @@ func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
 	if sigs["X"] != "sideX" {
 		t.Errorf("expected sidecar sig; got %v", sigs)
 	}
-	if ns["A"] != "sideA" {
+	if ns["A"] != "side-n" {
 		t.Errorf("expected sidecar n; got %v", ns)
 	}
 }
@@ -257,7 +257,7 @@ func TestCompositeBatch_MixedSidecarFailsEntireBatch(t *testing.T) {
 		nErr: errors.New("sidecar n down"),
 	}
 	goja := &staticSolver{
-		n: map[string]string{"A": "gojaA", "B": "gojaB"},
+		n: map[string]string{"A": "A-goja", "B": "B-goja"},
 	}
 	c := newCompositeSolverWith(side, goja)
 
@@ -273,7 +273,7 @@ func TestCompositeBatch_MixedSinglesidecarRoundTrip(t *testing.T) {
 	side := &countingBatchSolver{
 		inner: &staticSolver{
 			sig: map[string]string{"X": "sideX"},
-			n:   map[string]string{"A": "sideA"},
+			n:   map[string]string{"A": "side-n"},
 		},
 		onBatch: func() { callCount++ },
 	}
@@ -334,5 +334,26 @@ func TestCompositeSetSidecarSwapsTheSigPath(t *testing.T) {
 	c.SetSidecar(nil)
 	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
 		t.Fatalf("Sig after SetSidecar(nil): err = %v, want ErrSidecarUnavailable", err)
+	}
+}
+
+// TestCompositeBatchChecksNAnswers: Batch holds an n answer to checkNResult
+// as N does. The sidecar's exception sentinel (an answer ending with its own
+// challenge) sends the batch's n entries to goja while its signatures stand,
+// and goja's empty answer fails the batch rather than reaching a URL.
+//
+// Mutants: the sidecar's answers returned unchecked (row one gets the
+// sentinel); goja's taken unchecked (row two gets no error).
+func TestCompositeBatchChecksNAnswers(t *testing.T) {
+	side := &staticSolver{sig: map[string]string{"X": "sideX"}, n: map[string]string{"nchal": "boom-nchal"}}
+	c := newCompositeSolverWith(side, &staticSolver{n: map[string]string{"nchal": "solved"}})
+	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"nchal"})
+	if err != nil || sigs["X"] != "sideX" || ns["nchal"] != "solved" {
+		t.Errorf("sidecar n sentinel: Batch = %v, %v, %v; want the sidecar's signature and goja's n", sigs, ns, err)
+	}
+
+	c = newCompositeSolverWith(side, &staticSolver{n: map[string]string{"nchal": ""}})
+	if _, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"nchal"}); err == nil {
+		t.Errorf("goja's empty n: Batch = %v, nil; want an error", ns)
 	}
 }

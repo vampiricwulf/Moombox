@@ -163,7 +163,7 @@ func TestBatchSignaturesFallToGojaLast(t *testing.T) {
 	goja := &specGoja{
 		staticSolver: staticSolver{
 			sig: map[string]string{sigA: "goja-A", sigC: "goja-C"},
-			n:   map[string]string{"N1": "goja-N1"},
+			n:   map[string]string{"N1": "N1-goja"},
 		},
 		specs: map[string][]int{},
 	}
@@ -191,7 +191,7 @@ func TestBatchSignaturesFallToGojaLast(t *testing.T) {
 				t.Errorf("%s: sig %q = %q, want %q", name, in, sr[in], w)
 			}
 		}
-		if nr["N1"] != "goja-N1" {
+		if nr["N1"] != "N1-goja" {
 			t.Errorf("%s: n = %q, want goja's", name, nr["N1"])
 		}
 	}
@@ -275,13 +275,13 @@ func TestBatchWaitsOutTheGraceBeforeGoja(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &reportingSidecar{permutingSidecar: newPermutingSidecar()}
 		goja := &specGoja{
-			staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "goja-N1"}},
+			staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "N1-goja"}},
 			specs:        map[string][]int{},
 		}
 		c := newCompositeSolverWith(side, goja)
 		start := time.Now()
 		sr, nr, err := c.Batch(context.Background(), specPlayer, []string{sigA}, []string{"N1"})
-		if err != nil || sr[sigA] != "goja-A" || nr["N1"] != "goja-N1" {
+		if err != nil || sr[sigA] != "goja-A" || nr["N1"] != "N1-goja" {
 			t.Fatalf("Batch with the sidecar down for good = %v, %v, %v; want goja's answers", sr, nr, err)
 		}
 		if waited := time.Since(start); waited < sidecarReadyGrace {
@@ -318,10 +318,10 @@ func TestBatchAsksAChildThatDiedUnderItOnceMore(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		side := &dyingSidecar{reportingSidecar: &reportingSidecar{permutingSidecar: newPermutingSidecar()}, backIn: 5 * time.Second}
 		side.up.Store(true)
-		goja := &gojaCountingSigs{staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "goja-N1"}}}
+		goja := &gojaCountingSigs{staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "N1-goja"}}}
 		c := newCompositeSolverWith(side, goja)
 		sr, nr, err := c.Batch(context.Background(), specPlayer, []string{sigA}, []string{"N1"})
-		if err != nil || sr[sigA] != scramble(sigA) || nr["N1"] != "n-N1" {
+		if err != nil || sr[sigA] != scramble(sigA) || nr["N1"] != "N1-n" {
 			t.Fatalf("Batch over a child that died and came back = %v, %v, %v; want the sidecar's answers", sr, nr, err)
 		}
 		if n := goja.asked.Load(); n != 0 {

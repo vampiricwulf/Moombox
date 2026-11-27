@@ -464,7 +464,9 @@ func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string,
 // in Sig's and N's order when it fails: the signatures from the player's sig
 // specs, and from goja for any no spec answers (owner ruling RV-12), and the
 // n entries from goja. A mixed batch the sidecar cannot answer is no longer
-// lost whole: it used to fail as soon as one signature had no spec.
+// lost whole: it used to fail as soon as one signature had no spec. Every n
+// answer, the sidecar's and goja's, is held to checkNResult as N holds it:
+// a bad sidecar n sends the n entries to goja, a bad goja n fails the batch.
 //
 // Implementations MUST return a result for every input in sigs and
 // ns on success, or return an error. Partial maps are a contract
@@ -508,6 +510,8 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 		sr, nr, err := sc.Batch(ctx, playerID, sigs, ns)
 		if err == nil {
 			// sidecarSolver.Batch already validated completeness; trust it.
+			// Its n answers are held to checkNResult as N holds them: a bad
+			// one sends the n entries to goja, the signatures standing.
 			if len(sigs) > 0 {
 				solved := make(map[string]string, len(sigs))
 				for _, sig := range sigs {
@@ -515,7 +519,13 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 				}
 				c.learnSigSpecs(ctx, sc, playerID, solved)
 			}
-			return sr, nr, nil
+			if err = checkNResults(ns, nr); err == nil {
+				return sr, nr, nil
+			}
+			if len(sigs) > 0 {
+				sigResults = sr
+			}
+			sigsAnswered = true
 		}
 		// Sidecar failed: the signatures from the specs if they answer
 		// every one; a child that died under the batch asked once more
@@ -537,11 +547,16 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 								solved[sig] = sr[sig]
 							}
 							c.learnSigSpecs(ctx, up, playerID, solved)
-							return sr, nr, nil
+							if err = checkNResults(ns, nr); err == nil {
+								return sr, nr, nil
+							}
+							sigResults, sigsAnswered = sr, true
 						}
 					}
 				}
-				sigErr = sidecarDown(sc, err)
+				if !sigsAnswered {
+					sigErr = sidecarDown(sc, err)
+				}
 			}
 		}
 		if c.goja != nil && (len(ns) > 0 || sigErr != nil) {
@@ -589,14 +604,27 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 		}
 		for _, n := range ns {
 			out, err := c.goja.N(ctx, playerID, n)
+			if err == nil {
+				err = checkNResult(n, out)
+			}
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("goja n: %w", err)
 			}
 			nResults[n] = out
 		}
 	}
 
 	return sigResults, nResults, nil
+}
+
+// checkNResults is checkNResult over every n answer of a batch.
+func checkNResults(ns []string, out map[string]string) error {
+	for _, n := range ns {
+		if err := checkNResult(n, out[n]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sigFromSpec answers encryptedSig from the player's stored spec for its

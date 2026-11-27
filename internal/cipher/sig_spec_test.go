@@ -79,7 +79,7 @@ func (p *permutingSidecar) N(_ context.Context, _, n string) (string, error) {
 	if err := p.failing(); err != nil {
 		return "", err
 	}
-	return "n-" + n, nil
+	return n + "-n", nil
 }
 
 func (p *permutingSidecar) Batch(_ context.Context, _ string, sigs, ns []string) (map[string]string, map[string]string, error) {
@@ -109,7 +109,7 @@ func (p *permutingSidecar) Batch(_ context.Context, _ string, sigs, ns []string)
 	}
 	nr := make(map[string]string, len(ns))
 	for _, n := range ns {
-		nr[n] = "n-" + n
+		nr[n] = n + "-n"
 	}
 	return sr, nr, nil
 }
@@ -353,7 +353,7 @@ func (s *specGoja) putSigSpec(playerID string, length int, spec []int) {
 // the error with specs present; the nil-sidecar arm returning
 // ErrSidecarUnavailable with specs present.
 func TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown(t *testing.T) {
-	goja := &specGoja{staticSolver: staticSolver{n: map[string]string{"N1": "gojaN1"}}, specs: map[string][]int{}}
+	goja := &specGoja{staticSolver: staticSolver{n: map[string]string{"N1": "N1-goja"}}, specs: map[string][]int{}}
 	side := newPermutingSidecar()
 	c := newCompositeSolverWith(side, goja)
 	ctx := context.Background()
@@ -367,7 +367,7 @@ func TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Batch with the sidecar failing: %v", err)
 	}
-	if sr[sigB] != scramble(sigB) || nr["N1"] != "gojaN1" {
+	if sr[sigB] != scramble(sigB) || nr["N1"] != "N1-goja" {
 		t.Fatalf("Batch with the sidecar failing = %v, %v; want sig from the spec and n from goja", sr, nr)
 	}
 	if _, _, err := c.Batch(ctx, specPlayer, []string{sigB, sigB + "x"}, nil); err == nil {
