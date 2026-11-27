@@ -32,8 +32,8 @@ func (h *healthSidecar) SolveCipher(ctx context.Context, req sidecar.SolveCipher
 }
 
 // TestCompositeSidecarReadyAndItsTypedSigFailure is audit G10's cipher half:
-// the health accessor the extraction ranks the JS-less client on, and the
-// sig failure the worker's challenge-free fallback classifies on. A sidecar
+// the health accessor the solvability predicate (ChallengesSolvable) starts
+// from, and the sig failure the worker's challenge-free fallback classifies on. A sidecar
 // that was configured but is down — crashed, or waiting on the supervisor's
 // restart — used to fail every sig request with its own untyped "sidecar:
 // unhealthy", read like one request's failure; it is ErrSidecarUnavailable
