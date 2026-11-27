@@ -230,11 +230,24 @@ const preparedCopyInfix = ".prepared-ejs-"
 // port's, those an earlier or later port wrote (another ejsPortVersion or
 // ejsPortRevision), and the regex extractor's (legacyPreprocessedPath). A
 // changed body and Remove drop them all, so no binary run again over this
-// directory compiles a copy of a body that has since changed. The key is
-// hex, so it holds nothing a glob reads as a pattern.
+// directory compiles a copy of a body that has since changed. This port's
+// copy and the regex extractor's are named outright; the others are found by
+// listing the directory (not a glob, which would read a '[' in the cache
+// path as a pattern), so a listing that fails still drops those two.
 func (pc *PlayerCache) preparedCopies(playerURL string) []string {
-	matches, _ := filepath.Glob(filepath.Join(pc.cacheDir, CacheKey(playerURL)+preparedCopyInfix+"*.js"))
-	return append(matches, pc.legacyPreprocessedPath(playerURL))
+	own := pc.FilePathPreprocessed(playerURL)
+	paths := []string{own, pc.legacyPreprocessedPath(playerURL)}
+	prefix := CacheKey(playerURL) + preparedCopyInfix
+	entries, _ := os.ReadDir(pc.cacheDir)
+	for _, e := range entries {
+		name := e.Name()
+		if e.Type().IsRegular() && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".js") {
+			if p := filepath.Join(pc.cacheDir, name); p != own {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
 }
 
 // legacyPreprocessedPath is where the regex extractor kept its prepared
