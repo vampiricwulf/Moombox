@@ -51,9 +51,10 @@ var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")
 // JS — the canonical case being ejs's "no solutions" error after YouTube
 // rotates the cipher algorithm. The sidecarSolver eats this once: it
 // invalidates disk + in-memory + sidecar caches and retries with fresh
-// JS. Persistent failure (retry also fails) surfaces this sentinel to
-// the caller, indicating either an actual Moombox extractor bug or a
-// player rotation we can't yet handle. Callers should treat this as
+// JS (once per player within staleVerdictWindow). A failure that persists
+// is then tried on the player's tv body, and only when that fails too
+// does this sentinel reach the caller, indicating either an actual
+// Moombox extractor bug or a player rotation we can't yet handle. Callers should treat this as
 // "cipher pipeline is broken for this player; surfacing as a real error
 // rather than masking with goja fallback."
 var ErrPlayerJSStale = errors.New("cipher: player JS is stale or unsupported")

@@ -419,7 +419,8 @@ type FetchResult struct {
 // The URL fetched is always the main variant of the player asked for
 // (CanonicalPlayerURL), whatever variant the caller named. The disk entry is
 // keyed by player id alone, so it can only hold one variant's body, and the
-// sidecar (playerURLForID) always asks for the main one: a caller fetching
+// sidecar (playerURLForID) asks through here for the main one only (its tv
+// retry goes around this cache, fetchTVPlayerJS): a caller fetching
 // another variant under the same key overwrote the sidecar's file with a
 // body of another length, read as a rotation, and a 304 against the other
 // variant's validators served the sidecar that variant's code (audit G50).

@@ -295,3 +295,65 @@ func TestConcurrentStaleSolvesRecoverOnce(t *testing.T) {
 		}
 	})
 }
+
+// firstCallGate is a sidecar whose ejs throws preparing every body, and
+// whose first call waits for release.
+type firstCallGate struct {
+	mu      sync.Mutex
+	calls   []sidecar.SolveCipherRequest
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *firstCallGate) SolveCipher(_ context.Context, req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+	g.mu.Lock()
+	g.calls = append(g.calls, req)
+	first := len(g.calls) == 1
+	g.mu.Unlock()
+	if first {
+		close(g.started)
+		<-g.release
+	}
+	return sidecar.SolveCipherResult{}, errMainPreprocess
+}
+
+// TestBurstOfFirstSolvesOnABrokenPlayerSendsItOnce: several solves of a
+// player nothing has sent yet arrive together (streams going live at once),
+// and ejs throws preparing its body. One of them sends it and runs the
+// recovery; the ones that waited for the first-send gate take what it found,
+// and ask the sidecar nothing. Each used to send the body and have the
+// sidecar prepare it again.
+//
+// Mutant: the memory not read again once the gate is taken (one more send
+// per waiter).
+func TestBurstOfFirstSolvesOnABrokenPlayerSendsItOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc := &firstCallGate{started: make(chan struct{}), release: make(chan struct{})}
+		src := &fakePlayerSource{playerID: "P1", js: "main-js"}
+		side := newSidecarSolverWith(sc, src)
+		errs := make(chan error, 3)
+		solve := func() {
+			defer func() {
+				if r := recover(); r != nil {
+					errs <- fmt.Errorf("panic: %v", r)
+				}
+			}()
+			_, err := side.N(context.Background(), "P1", "n1")
+			errs <- err
+		}
+		go solve()
+		<-sc.started // the first solve is inside its first send
+		go solve()
+		go solve()
+		synctest.Wait() // the other two wait for the gate
+		close(sc.release)
+		for range 3 {
+			if err := <-errs; !errors.Is(err, ErrPlayerJSStale) {
+				t.Errorf("solve = %v, want ErrPlayerJSStale", err)
+			}
+		}
+		if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1+js P1+js+force" {
+			t.Errorf("sidecar calls = %v, want the first solve's send and its recovery only", shapes)
+		}
+	})
+}

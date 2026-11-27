@@ -284,7 +284,14 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 			return sidecar.SolveCipherResult{}, err
 		}
 		defer release()
-		includeJS = !s.playerSent(playerID)
+		// What the solve ahead of this one found stands for this one too: a
+		// burst of first solves on a player ejs cannot prepare would
+		// otherwise each send the body and have the sidecar prepare it.
+		if dead := s.mem.mainDead(playerID); dead != nil {
+			return sidecar.SolveCipherResult{}, dead
+		}
+		recoveries, held = s.mem.recoveryState(playerID)
+		includeJS = !held && !s.playerSent(playerID)
 	}
 	result, err := s.callOnce(ctx, playerID, includeJS, false, sigs, ns)
 
