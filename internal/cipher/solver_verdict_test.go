@@ -822,6 +822,45 @@ func TestGojaFallNotThePlayersSpendsNoWarn(t *testing.T) {
 	}
 }
 
+// TestGojaFallWithTVUnansweredSpendsNoWarn: the main body fails for good and
+// the tv ask then fails in transit, so nothing was heard about the tv body.
+// That fall to goja logs no Warn and leaves the player's one line for the
+// solve that hears from both bodies; the error is still the main body's
+// ErrPlayerJSStale, which the worker's fallbacks read.
+//
+// Mutants: solve not marking the unanswered tv ask, or noteGojaFall not
+// reading the mark (a Warn after the first solve, none new after the second);
+// the mark put on a tv failure that is the body's own (no Warn at all).
+func TestGojaFallWithTVUnansweredSpendsNoWarn(t *testing.T) {
+	logs := captureSlog(t)
+	sc := newVariantSidecar()
+	src := &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"},
+		tvErr: fmt.Errorf("%w: connection reset", ErrPlayerJSFetch)}
+	side := newSidecarSolverWith(sc, src)
+	goja := &staticSolver{n: map[string]string{"n1": "goja-n"}}
+	c := newCompositeSolverWith(side, goja)
+	ctx := context.Background()
+
+	if _, err := side.N(ctx, "P1", "n1"); !errors.Is(err, ErrPlayerJSStale) {
+		t.Fatalf("sidecar N with the tv fetch failing in transit = %v, want ErrPlayerJSStale", err)
+	}
+	if got, err := c.N(ctx, "P1", "n1"); err != nil || got != "goja-n" {
+		t.Fatalf("N = %q, %v; want goja's answer", got, err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 0 {
+		t.Fatalf("Warn lines with tv unanswered = %q, want none", warns)
+	}
+
+	src.tvErr, src.tvJS = nil, "tv-js"
+	sc.tvErr = errors.New("sidecar: ejs preprocess: tv broke too")
+	if got, err := c.N(ctx, "P1", "n1"); err != nil || got != "goja-n" {
+		t.Fatalf("N with both bodies failing = %q, %v; want goja's answer", got, err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 1 || !strings.Contains(warns[0], "goja") {
+		t.Errorf("Warn lines once tv answered that it cannot solve = %q, want the one for the fall to goja", warns)
+	}
+}
+
 // TestGojaFallFromBatchWarnsOnce: a Batch whose n entries go to goja is a
 // fall like N's, and the two share the player's one Warn.
 //

@@ -141,6 +141,14 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 	return ok
 }
 
+// errTVNotAnswered marks a failed solve whose main body failed on the player
+// itself and whose tv ask then ended without an answer about the tv body: a
+// timeout, a tv fetch that failed in transit. The error still reads as the
+// main body's (ErrPlayerJSStale, for the worker's fallbacks), and the next
+// solve asks tv again; compositeSolver.noteGojaFall keeps the player's one
+// Warn for a solve that heard from both bodies.
+var errTVNotAnswered = errors.New("the ask got no answer about this body")
+
 // solve answers the challenges with the sidecar, on the player's main body
 // and, when ejs cannot solve with that one, on its tv body (owner ruling
 // RV-11: "stay on main, retry tv, then goja" — goja is the caller's, after
@@ -153,7 +161,8 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 // fail tv alike. It is asked once. When it solves, the player is remembered
 // as a tv one (playerMemory) and every later solve skips main; a Warn says
 // so, once per player. When it fails too, the main body's error is returned
-// with the tv failure beside it. A PlayerSource that cannot yield a tv body
+// with the tv failure beside it, marked errTVNotAnswered when that failure
+// was not the tv body's own. A PlayerSource that cannot yield a tv body
 // (TVPlayerSource) gets no retry.
 func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	if s.mem.usesTV(playerID) {
@@ -174,6 +183,12 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 	}
 	tvRes, tvErr := s.solveTV(ctx, playerID, sigs, ns)
 	if tvErr != nil {
+		if !isStaleJSError(tvErr) && !playerFailure(tvErr) {
+			// The tv ask did not get to an answer about the tv body (a
+			// timeout, a fetch that failed in transit): the main body's
+			// failure stands, and the error says tv is still to be asked.
+			return tvRes, fmt.Errorf("%w (tv variant: %w: %v)", err, errTVNotAnswered, tvErr)
+		}
 		return tvRes, fmt.Errorf("%w (tv variant: %v)", err, tvErr)
 	}
 	if s.mem.setTV(playerID) {

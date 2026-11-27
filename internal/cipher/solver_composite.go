@@ -385,7 +385,8 @@ type gojaFallNoter interface {
 // a player that timed out once and breaks for real later is still announced:
 //
 //   - a timeout or a fetch that failed in transit says nothing about the
-//     player (a Debug line);
+//     player (a Debug line), on the main body or, the main one having
+//     failed for good, on the tv one (errTVNotAnswered);
 //   - the caller's own context ended: the solve stopped where it was, the
 //     main body's failure in hand and the tv body never asked;
 //   - the sidecar is down or not installed, or its child died under the
@@ -396,7 +397,7 @@ func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string,
 	if !solverReady(c.sidecar()) || errors.Is(err, ErrSidecarUnavailable) || ctx.Err() != nil {
 		return
 	}
-	if !playerFailure(err) {
+	if !playerFailure(err) || errors.Is(err, errTVNotAnswered) {
 		slog.Debug("cipher: the sidecar failed a solve; goja, the last solver asked, is tried",
 			"playerID", playerID, "challenge", op, "err", err)
 		return
