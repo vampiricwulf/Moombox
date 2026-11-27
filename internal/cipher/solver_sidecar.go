@@ -61,6 +61,10 @@ type sidecarSolver struct {
 	// and each make the sidecar load it — a synchronous pass on its event
 	// loop that stalls every PO-token request queued behind it. Guarded by mu.
 	sending map[string]chan struct{}
+	// sends counts the JS-carrying asks made per player key, whatever they
+	// ended in. A solve that had to wait for a key's gate reads it to tell
+	// that another solve sent the body meanwhile. Guarded by mu.
+	sends map[string]uint64
 }
 
 // adoptMemory replaces the solver's player memory with one that outlives it.
@@ -81,6 +85,7 @@ func newSidecarSolverWith(s sidecarClient, src PlayerSource) *sidecarSolver {
 		mem:     newPlayerMemory(),
 		sent:    make(map[string]struct{}),
 		sending: make(map[string]chan struct{}),
+		sends:   make(map[string]uint64),
 	}
 }
 
@@ -112,6 +117,20 @@ func (s *sidecarSolver) clearPlayerSent(playerID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sent, playerID)
+}
+
+// noteSend records that a JS-carrying ask was made under key.
+func (s *sidecarSolver) noteSend(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sends[key]++
+}
+
+// sendCount is how many JS-carrying asks have been made under key.
+func (s *sidecarSolver) sendCount(key string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends[key]
 }
 
 func (s *sidecarSolver) playerSent(playerID string) bool {
@@ -294,8 +313,32 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 		recoveries, held = s.mem.recoveryState(playerID)
 		includeJS = !held && !s.playerSent(playerID)
 	}
+	sends := s.sendCount(playerID)
 	result, err := s.callOnce(ctx, playerID, includeJS, false, sigs, ns)
 
+	if errors.Is(err, sidecar.ErrPlayerNotLoaded) && release == nil {
+		// The body is to be sent again, and that is one solve's to do at a
+		// time, like a first send. A solve that arrived while another's
+		// recovery was under way (held, so it asked without the JS and took no
+		// gate) used to send the body beside it: for a player ejs cannot
+		// prepare the sidecar holds nothing, so every such arrival shipped
+		// about 3 MB and cost the sidecar one more failed preparation.
+		var gateErr error
+		if release, gateErr = s.claimFirstSend(ctx, playerID); gateErr != nil {
+			return sidecar.SolveCipherResult{}, gateErr
+		}
+		defer release()
+		if dead := s.mem.mainDead(playerID); dead != nil {
+			// What the solve ahead of this one found stands for this one.
+			return sidecar.SolveCipherResult{}, dead
+		}
+		recoveries, _ = s.mem.recoveryState(playerID)
+		if s.sendCount(playerID) != sends {
+			// Another solve sent the body while this one waited: ask what
+			// the sidecar holds now before sending anything.
+			result, err = s.callOnce(ctx, playerID, false, false, sigs, ns)
+		}
+	}
 	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		s.clearPlayerSent(playerID)
 		result, err = s.callOnce(ctx, playerID, true, false, sigs, ns)
@@ -424,8 +467,11 @@ func (s *sidecarSolver) callOnce(ctx context.Context, playerID string, includeJS
 		}
 	}
 	res, err := s.ask(ctx, playerID, js, forceReload, sigs, ns)
-	if err == nil && includeJS {
-		s.markPlayerSent(playerID)
+	if includeJS {
+		s.noteSend(playerID)
+		if err == nil {
+			s.markPlayerSent(playerID)
+		}
 	}
 	return res, err
 }

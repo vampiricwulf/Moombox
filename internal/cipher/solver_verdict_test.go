@@ -357,3 +357,162 @@ func TestBurstOfFirstSolvesOnABrokenPlayerSendsItOnce(t *testing.T) {
 		}
 	})
 }
+
+// lockedSidecar is a sidecar stub for solves that run side by side: respond
+// runs under mu, and the first call hold picks waits for release before it
+// is answered.
+type lockedSidecar struct {
+	mu      sync.Mutex
+	calls   []sidecar.SolveCipherRequest
+	respond func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error)
+	hold    func(req sidecar.SolveCipherRequest) bool
+	held    bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func newLockedSidecar() *lockedSidecar {
+	return &lockedSidecar{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (l *lockedSidecar) SolveCipher(_ context.Context, req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, req)
+	wait := l.hold != nil && !l.held && l.hold(req)
+	if wait {
+		l.held = true
+	}
+	l.mu.Unlock()
+	if wait {
+		close(l.started)
+		<-l.release
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.respond(req)
+}
+
+// shapes is callShapes of the calls made so far.
+func (l *lockedSidecar) shapes() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return callShapes(l.calls)
+}
+
+// countShape is how many of shapes are want.
+func countShape(shapes []string, want string) int {
+	n := 0
+	for _, s := range shapes {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
+// lockedSource is a PlayerSource and TVPlayerSource for solves that run side
+// by side. It counts what it is asked.
+type lockedSource struct {
+	mu        sync.Mutex
+	tvFetches int
+	removals  int
+}
+
+func (s *lockedSource) PlayerJS(string) (string, error) { return "main-js", nil }
+
+func (s *lockedSource) RemovePlayerJS(string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removals++
+	return nil
+}
+
+func (s *lockedSource) TVPlayerJS(context.Context, string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tvFetches++
+	return "tv-js", nil
+}
+
+func (s *lockedSource) counts() (tvFetches, removals int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tvFetches, s.removals
+}
+
+// solveNTogether starts the first solve, waits until the sidecar holds one of
+// its calls, starts the others, lets them run until they block, then
+// releases the held call and returns every solve's answer. Inside a synctest
+// bubble.
+func solveNTogether(side *sidecarSolver, sc *lockedSidecar, solves int) []error {
+	type answer struct {
+		out string
+		err error
+	}
+	answers := make(chan answer, solves)
+	solve := func(ch string) {
+		defer func() {
+			if r := recover(); r != nil {
+				answers <- answer{err: fmt.Errorf("panic: %v", r)}
+			}
+		}()
+		out, err := side.N(context.Background(), "P1", ch)
+		if err == nil && out != "ejs("+ch+")" {
+			err = fmt.Errorf("answer %q for challenge %q", out, ch)
+		}
+		answers <- answer{out, err}
+	}
+	go solve("n0")
+	<-sc.started
+	for i := 1; i < solves; i++ {
+		go solve(fmt.Sprintf("n%d", i))
+	}
+	synctest.Wait()
+	close(sc.release)
+	errs := make([]error, 0, solves)
+	for range solves {
+		errs = append(errs, (<-answers).err)
+	}
+	return errs
+}
+
+// ejsAnswers answers every n challenge of req as the stub's ejs would.
+func ejsAnswers(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+	res := sidecar.SolveCipherResult{NResults: map[string]string{}}
+	for _, c := range req.NChallenges {
+		res.NResults[c] = "ejs(" + c + ")"
+	}
+	return res, nil
+}
+
+// TestSolveArrivingMidRecoveryDoesNotResend: ejs throws preparing a player's
+// main body, so the sidecar holds nothing of it. One solve is inside the
+// recovery's forced reload when two more arrive. They are within the window
+// the recovery opened, so they ask without the JS and are told the player is
+// not loaded. They used to send the body again there, each of them, outside
+// the first-send gate; now they wait for the recovery and take what it found.
+//
+// Mutant: the not-loaded re-send made without taking the gate (one more
+// JS-carrying call per arrival).
+func TestSolveArrivingMidRecoveryDoesNotResend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sc := newLockedSidecar()
+		sc.hold = func(req sidecar.SolveCipherRequest) bool { return req.ForceReload }
+		sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			if req.PlayerJS == "" {
+				return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+			}
+			return sidecar.SolveCipherResult{}, errMainPreprocess
+		}
+		// No tv body: the main side alone is under test.
+		side := newSidecarSolverWith(sc, &fakePlayerSource{playerID: "P1", js: "main-js"})
+		for _, err := range solveNTogether(side, sc, 3) {
+			if !errors.Is(err, ErrPlayerJSStale) {
+				t.Errorf("solve = %v, want ErrPlayerJSStale", err)
+			}
+		}
+		if shapes := sc.shapes(); strings.Join(shapes, " ") != "P1+js P1+js+force P1 P1" {
+			t.Errorf("sidecar calls = %v, want the first send, the recovery, and one plain ask per later solve", shapes)
+		}
+	})
+}
