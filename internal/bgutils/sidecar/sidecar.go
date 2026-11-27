@@ -3,9 +3,9 @@
 // The sidecar is a Node.js process running our bgutil-sidecar JS code
 // (JSDOM + bgutils-js) under a real V8 engine. Moombox spawns one per
 // process, pipes JSON-RPC requests to it via stdin/stdout, and consumes
-// PO tokens that pass Google's BotGuard timing fingerprint check (which
-// our pure-goja path can't satisfy because the interpreter runs ~100x
-// faster than V8 -- see "Why a Sidecar" in docs/spec/platform-services.md).
+// PO tokens that Google's BotGuard accepts (which our pure-goja path can't
+// mint: BotGuard's program aborts under its incomplete DOM stand-in, not on
+// timing -- see "Why a Sidecar" in docs/spec/platform-services.md).
 //
 // Lifecycle:
 //

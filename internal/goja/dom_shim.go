@@ -14,15 +14,17 @@ import (
 // Event, CustomEvent, etc.). Loaded after the legacy hand-stub block so
 // the constructs declared inside override the flat-object stubs while
 // keeping the same global names. "Why a Sidecar" in
-// docs/spec/platform-services.md records what this build-out reached
-// (API parity) and why it stopped there (the timing gap sits below the
-// API surface).
+// docs/spec/platform-services.md records what this build-out reached (the
+// common DOM surface) and what BotGuard still finds missing (no
+// iframe.contentWindow, randomised DOM probes); it is not a timing gap.
 //
 //go:embed js/dom-real.js
 var domRealJS string
 
 // RegisterDOMShim registers minimal DOM stubs on a Goja runtime.
-// This provides just enough browser-like environment for BotGuard and cipher functions.
+// This provides just enough browser-like environment for BotGuard. The
+// cipher does not use it: the goja fallback's port of ejs runs the player in
+// a bare runtime with ejs's own setup globals (internal/cipher, getFromPrepared).
 func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	if userAgent == "" {
 		userAgent = constants.UserAgents.Web
@@ -309,17 +311,17 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.MutationObserver = function() { this.observe = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
 	globalThis.IntersectionObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
 	globalThis.ResizeObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
-	// AbortController / ReadableStream / CustomEvent / CSS / Intl
-	// stay in the shared shim. test.42 briefly moved them cipher-only on
-	// the hypothesis that BotGuard fingerprints these and the stub shape
-	// could trip the websafe-fallback verdict. That broke cipher when
-	// the on-disk preprocessed-code cache (Q4) hit — the cached code
-	// was generated when these globals lived in dom_shim, so it doesn't
-	// inline them itself, and a fresh VM without them threw
-	// ReferenceError on Intl. The BotGuard websafe-fallback verdict
-	// already happened pre-Phase-5 (older logs show "Using websafe
-	// fallback token" at INFO level long before this arc), so adding
-	// these stubs is not the trigger. Keeping them shared is correct.
+	// AbortController / ReadableStream / CustomEvent / CSS / Intl are
+	// here for the goja BotGuard path, the one user of this shim. The
+	// cipher no longer loads it: since the ejs port (owner ruling RV-12)
+	// it runs a prepared player in a bare runtime (getFromPrepared,
+	// mbgoja.NewPlainRuntime) with ejs's setup globals carried in the
+	// prepared copy itself. History: test.42 once moved these stubs
+	// cipher-only, on the guess that BotGuard fingerprints them and
+	// their shape caused the websafe-fallback verdict. That broke the
+	// regex-era cipher, whose cached prepared copies expected them from
+	// this shim (Intl threw ReferenceError), and the verdict predates
+	// the stubs anyway, so they were put back here.
 	globalThis.AbortController = function() {
 		this.signal = { aborted: false, addEventListener: function() {}, removeEventListener: function() {} };
 		this.abort = function() { this.signal.aborted = true; };

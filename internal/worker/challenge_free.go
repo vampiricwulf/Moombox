@@ -24,12 +24,12 @@ var errChallengesUnsolvable = errors.New("the player's JS challenges cannot be s
 // failure audit G10 found Moombox answering one itag at a time:
 //
 //   - cipher.ErrSidecarUnavailable: no sidecar configured, or the one
-//     configured is down. A signature is the sidecar's or a learned sig
-//     spec's to answer (goja, asked last, fails on current players), so no
-//     signatureCipher format resolves until it is back. A child that went down is waited for
-//     first, within a minute of the outage's start (the composite solver's
-//     sidecarReadyGrace, owner decision PR-R3), so a supervisor restart does
-//     not reach here.
+//     configured is down, and neither a learned sig spec nor goja, asked
+//     last (owner ruling RV-12), answered the signature, so no
+//     signatureCipher format of the player resolves until it is back. A
+//     child that went down is waited for first, within a minute of the
+//     outage's start (the composite solver's sidecarReadyGrace, owner
+//     decision PR-R3), so a supervisor restart does not reach here.
 //   - cipher.ErrPlayerJSStale: ejs could not solve the player even after a
 //     fresh fetch of it — the case of a player rotation ejs does not handle
 //     yet.

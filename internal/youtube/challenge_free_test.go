@@ -156,22 +156,22 @@ func TestJSLessExtractionRanksVisionOSFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		authed        bool
-		hook          func() bool
+		hook          func(string) bool
 		tv            string
 		wantSource    string
 		wantVisionOS  int
 		wantJSLess    bool
 		wantHlsSource string
 	}{
-		{"JS-less: visionos asked and ranked first", false, func() bool { return false }, tvSignedBody(true), "visionos", 1, true, "visionos"},
-		{"solvable: unchanged", false, func() bool { return true }, tvSignedBody(true), "tv_public", 0, false, "tv_public"},
+		{"JS-less: visionos asked and ranked first", false, func(string) bool { return false }, tvSignedBody(true), "visionos", 1, true, "visionos"},
+		{"solvable: unchanged", false, func(string) bool { return true }, tvSignedBody(true), "tv_public", 0, false, "tv_public"},
 		{"no hook: unchanged", false, nil, tvSignedBody(true), "tv_public", 0, false, "tv_public"},
-		{"JS-less, the chain ran: visionos asked once", false, func() bool { return false }, audioOnlyTV, "visionos", 1, true, "visionos"},
-		{"signed in, JS-less: visionos ranked first too", true, func() bool { return false }, tvSignedBody(true), "visionos", 1, true, "visionos"},
-		{"signed in, solvable: unchanged", true, func() bool { return true }, tvSignedBody(true), "tv_auth", 0, false, "tv_auth"},
-		{"JS-less, upcoming: visionos not asked", false, func() bool { return false }, upcomingTVBody, "", 0, true, ""},
-		{"signed in, JS-less, members-only: visionos not asked", true, func() bool { return false }, membersOnlyBody, "", 0, true, ""},
-		{"JS-less, no master: none added", false, func() bool { return false }, tvSignedBody(false), "visionos", 1, true, ""},
+		{"JS-less, the chain ran: visionos asked once", false, func(string) bool { return false }, audioOnlyTV, "visionos", 1, true, "visionos"},
+		{"signed in, JS-less: visionos ranked first too", true, func(string) bool { return false }, tvSignedBody(true), "visionos", 1, true, "visionos"},
+		{"signed in, solvable: unchanged", true, func(string) bool { return true }, tvSignedBody(true), "tv_auth", 0, false, "tv_auth"},
+		{"JS-less, upcoming: visionos not asked", false, func(string) bool { return false }, upcomingTVBody, "", 0, true, ""},
+		{"signed in, JS-less, members-only: visionos not asked", true, func(string) bool { return false }, membersOnlyBody, "", 0, true, ""},
+		{"JS-less, no master: none added", false, func(string) bool { return false }, tvSignedBody(false), "visionos", 1, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubWatchPage(t)
@@ -249,7 +249,7 @@ func TestCookielessFormatsRankJSLessly(t *testing.T) {
 		orig := apiClient
 		apiClient = &http.Client{Transport: tr}
 		p := NewPlayerAPI(nil, noopLogger{})
-		p.SetJSChallengeSolvable(func() bool { return tc.solvable })
+		p.SetJSChallengeSolvable(func(string) bool { return tc.solvable })
 		got, err := p.CookielessFormats(context.Background(), "test1234567", "vd")
 		apiClient = orig
 		if err != nil || len(got) == 0 {
@@ -260,5 +260,92 @@ func TestCookielessFormatsRankJSLessly(t *testing.T) {
 				t.Errorf("solvable=%v: itag %d at AuthLevel %v, want %d", tc.solvable, f.Itag, f.AuthLevel, tc.want)
 			}
 		}
+	}
+}
+
+// TestJSLessIsDecidedOnTheExtractionsPlayer is owner ruling RV-16's
+// extraction half: whether the JS challenges can be solved is asked about the
+// player the extraction runs on (resolvePlayerURL's), so a hook that can
+// solve every player but one — the cipher composite's ChallengesSolvable with
+// the sidecar down and goja refusing that one — ranks JS-lessly for that
+// player only, on both cascades; and CookielessFormats, which fetches no
+// page, asks about the player the last extraction ran on.
+//
+// Mutants: the cascades asking the hook about "" (or before the player URL
+// is resolved) instead of the player (the refused rows rank normally); the
+// hook's answer ignored (the other-player rows rank JS-lessly);
+// CookielessFormats asking about "" (its refused row).
+func TestJSLessIsDecidedOnTheExtractionsPlayer(t *testing.T) {
+	const (
+		refused = "https://www.youtube.com/s/player/aaaa1111/player_ias.vflset/en_US/base.js"
+		other   = "https://www.youtube.com/s/player/bbbb2222/player_ias.vflset/en_US/base.js"
+	)
+	type resp = struct {
+		status int
+		body   string
+	}
+	hook := func(u string) bool { return u != refused }
+	for _, tc := range []struct {
+		name       string
+		authed     bool
+		player     string
+		wantJSLess bool
+		wantSource string
+	}{
+		{"public, the refused player", false, refused, true, "visionos"},
+		{"public, another player", false, other, false, "tv_public"},
+		{"signed in, the refused player", true, refused, true, "visionos"},
+		{"signed in, another player", true, other, false, "tv_auth"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := fetchWatchPage
+			fetchWatchPage = func(context.Context, string, string) (*WatchPageResult, error) {
+				y := DefaultYtcfg()
+				y.PlayerURL = tc.player
+				return &WatchPageResult{Ytcfg: y}, nil
+			}
+			t.Cleanup(func() { fetchWatchPage = orig })
+			tr := &clientKeyedTransport{responses: map[string]resp{"7": {http.StatusOK, tvSignedBody(true)}, "101": {http.StatusOK, visionosDirectBody}}}
+			origClient := apiClient
+			apiClient = &http.Client{Transport: tr}
+			t.Cleanup(func() { apiClient = origClient })
+			p := newRetryTestAPI()
+			p.SetJSChallengeSolvable(hook)
+			extract := p.GetVideoInfoPublic
+			if tc.authed {
+				extract = p.GetVideoInfoAuthenticated
+			}
+			info, err := extract(context.Background(), "test1234567")
+			if info == nil || err != nil {
+				t.Fatalf("GetVideoInfo = %+v, %v", info, err)
+			}
+			// The signatureCipher tv copy is ranked, not passed over, while the
+			// player can be solved; visionos's wins only for the refused one.
+			for _, f := range info.Formats {
+				if (f.Itag == 299 || f.Itag == 140) && f.Source != tc.wantSource {
+					t.Errorf("itag %d from %s, want %s", f.Itag, f.Source, tc.wantSource)
+				}
+			}
+			if info.JSLess != tc.wantJSLess {
+				t.Errorf("JSLess = %v, want %v", info.JSLess, tc.wantJSLess)
+			}
+
+			// The cookieless re-extract the worker runs next asks about the
+			// player this extraction ran on.
+			want := AuthLevelVisionOS
+			if tc.wantJSLess {
+				want = AuthLevelVisionOSJSLess
+			}
+			tr.responses["101"] = resp{http.StatusOK, adequateOKBody}
+			got, err := p.CookielessFormats(context.Background(), "test1234567", "vd")
+			if err != nil || len(got) == 0 {
+				t.Fatalf("CookielessFormats = %v, %v", got, err)
+			}
+			for _, f := range got {
+				if f.AuthLevel == nil || *f.AuthLevel != want {
+					t.Errorf("CookielessFormats: itag %d at AuthLevel %v, want %d", f.Itag, f.AuthLevel, want)
+				}
+			}
+		})
 	}
 }

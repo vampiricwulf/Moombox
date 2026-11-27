@@ -11,6 +11,7 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -363,7 +364,7 @@ func TestStatusBucketsMatchTheDashboard(t *testing.T) {
 		const job = { title: "", channelName: "", videoId: "", status, platform: "youtube" };
 		return applyFilterTokens([job], parseFilterQuery(query)).length === 1;
 	}`)
-	vm := goja.New()
+	vm := mbgoja.NewPlainRuntime()
 	if _, err := vm.RunString(src.String()); err != nil {
 		t.Fatalf("the dashboard's filter modules do not evaluate: %v", err)
 	}

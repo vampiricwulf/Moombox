@@ -462,10 +462,10 @@ func (tm *TwitchMonitor) processStreamInfo(ctx context.Context, ch *config.Chann
 
 	// A manually added job that names this very broadcast holds it while the
 	// row is active or Cancelled (owner ruling RV-8). manualJobClaims above
-	// reads only the waited-for rows and only while they run; this one goes
-	// by the stream ID the row holds, so it also covers a `moombox add` row,
-	// a re-initialised broadcast add, and the seconds between the Cancel a
-	// Delete starts with and the history row it ends with.
+	// reads the rows only while they wait or record; this one goes by the
+	// stream ID the row holds, so it also covers a row muxing the broadcast,
+	// and the seconds between the Cancel a Delete starts with and the
+	// history row it ends with.
 	held, hErr := tm.db.ManualTwitchJobHoldsStream(info.StreamID)
 	if hErr != nil {
 		tm.logger.Debug("ManualTwitchJobHoldsStream query failed", "streamID", info.StreamID, "err", hErr)

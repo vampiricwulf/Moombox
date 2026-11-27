@@ -9,7 +9,8 @@
 # fetched, never committed. The tests that read it skip without it, unless
 # MOOMBOX_REQUIRE_CIPHER_FIXTURE=1 is set, which makes them fail instead. CI
 # sets that only after this script succeeded (.github/workflows/ci.yml, the js
-# job and the windows test shard that runs internal/bgutils/sidecar), so a
+# job and the windows test shards that run internal/bgutils/sidecar or
+# internal/cipher), so a
 # YouTube outage or a retired player URL makes them skip with a warning
 # rather than turn the run red.
 #

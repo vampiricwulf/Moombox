@@ -441,8 +441,11 @@ export class PlayerController {
       const val = jobSelect.value;
       if (this._rebuildsActive > 0) {
         // Kept for the rebuild to apply once it has written the option list
-        // (loadPlayerJobList); the value it writes back is its own event.
-        if (val && val !== this._restoringValue) this._pickDuringRebuild = val;
+        // (loadPlayerJobList); the value it writes back is its own event. A
+        // clear drops the kept pick: the rebuild never writes back an empty
+        // value, so an empty one here is the operator's newest choice.
+        if (!val) this._pickDuringRebuild = null;
+        else if (val !== this._restoringValue) this._pickDuringRebuild = val;
         return;
       }
       if (val) {

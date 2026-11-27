@@ -306,4 +306,31 @@ func TestTheLauncherArmsAnInterruptedUpdateBeforeItsFirstChild(t *testing.T) {
 	if sweepAt < 0 || sweepAt >= callAt {
 		t.Errorf("launchAndSupervise sweeps at statement %d and arms at %d, want the sweep first", sweepAt, callAt)
 	}
+
+	// The sweep's answer reaches the record: a ~ it could not rename back to
+	// .old is kept on the way out (keptImageTag, r3-launcher-updater-ops-1).
+	// Mutant: the result of cleanupOrphans dropped, or never recorded.
+	kept := ""
+	for _, st := range body.List {
+		if as, ok := st.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 &&
+			types.ExprString(as.Rhs[0]) == "cleanupOrphans(exePath, version)" {
+			kept = types.ExprString(as.Lhs[0])
+		}
+	}
+	recorded := false
+	for _, st := range body.List {
+		ifs, ok := st.(*ast.IfStmt)
+		if !ok || kept == "" || types.ExprString(ifs.Cond) != kept {
+			continue
+		}
+		for _, inner := range ifs.Body.List {
+			if as, ok := inner.(*ast.AssignStmt); ok && len(as.Lhs) == 1 &&
+				types.ExprString(as.Lhs[0]) == "boot.keptImageTag" && types.ExprString(as.Rhs[0]) == `"v" + version` {
+				recorded = true
+			}
+		}
+	}
+	if !recorded {
+		t.Errorf("launchAndSupervise does not record cleanupOrphans's answer as boot.keptImageTag (kept in %q)", kept)
+	}
 }

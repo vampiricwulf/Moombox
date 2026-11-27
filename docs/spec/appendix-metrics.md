@@ -2,7 +2,7 @@
 
 > **Last verified:** 2026-11-12
 >
-> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, and on 2026-11-09 `internal/jobverbs` and `internal/jobstate`, each with its row and its share of the Totals and of the Test Baseline's package count. Every row and the Totals were regenerated again on 2026-11-09, and again on 2026-11-10 after the improvement sweep, whose file splits account for most of the new source files (`internal/worker` 79 to 83, three of them `worker_verbs.go`, `worker_failure.go` and `worker_staging_claims.go`; `internal/tui` 49 to 70; `cmd/moombox` 36 to 39). On 2026-11-12 `internal/keepawake` was added with its row, and the Totals, the Test Baseline's package count and the rows of the packages that arc touched (`worker`, `monitor`, `config`, `logger`, `connectivity`, `disk`, `keepawake`) were regenerated; the other rows are as of 2026-11-10. On 2026-11-14 the Key Dependencies versions were set from `go.mod`. On 2026-11-26 `internal/ffmpegtest` was added with its row and its share of the Totals and of the Test Baseline's package count.
+> The Package Scale table and the Totals were regenerated on 2026-10-16, after Wave 30 was integrated: the table with the script below, the Totals by the same count (`wc -l` per file) over the tracked files (`git ls-files`; `web/public/` less `vendor/`). Since the 2026-10-10 pass two packages were added — `internal/treeguard`, the test-only guard every tested package's `TestMain` runs through, and `internal/childproc`, which starts every FFmpeg and ffprobe tied to the process that runs it — and none removed. `internal/engine` (20 to 23), `internal/worker` (to 56), `internal/notifications` (to 13) and `internal/connectivity` (3 to 4) gained source files this round, and `cmd/moombox` 6 (26 to 32: the stop signals, the crash output capture, the daemon record, the outage alerts). The Runtime, Test Baseline (the package count and the two packages without tests) and Key Dependencies sections were checked against the tree the same day. On 2026-10-30 `internal/httpx/httpxtest` was added, and on 2026-11-09 `internal/jobverbs` and `internal/jobstate`, each with its row and its share of the Totals and of the Test Baseline's package count. Every row and the Totals were regenerated again on 2026-11-09, and again on 2026-11-10 after the improvement sweep, whose file splits account for most of the new source files (`internal/worker` 79 to 83, three of them `worker_verbs.go`, `worker_failure.go` and `worker_staging_claims.go`; `internal/tui` 49 to 70; `cmd/moombox` 36 to 39). On 2026-11-12 `internal/keepawake` was added with its row, and the Totals, the Test Baseline's package count and the rows of the packages that arc touched (`worker`, `monitor`, `config`, `logger`, `connectivity`, `disk`, `keepawake`) were regenerated; the other rows are as of 2026-11-10. On 2026-11-14 the Key Dependencies versions were set from `go.mod`. On 2026-11-26 `internal/ffmpegtest` was added with its row and its share of the Totals and of the Test Baseline's package count; the same day the `cipher` and `goja` rows were regenerated after the Go port of ejs replaced the regex extractor (owner ruling RV-12), and goja's Key Dependencies version was set from `go.mod`. The Totals were not regenerated for that change. The same day `tools/live-tests` (the live test runner's helper, owner ruling RV-15) was added, a package with tests outside `internal/`, counted in the Test Baseline (47 packages by `go list ./...`, three of them without test files).
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 >
@@ -26,7 +26,7 @@
 
 ## Test Baseline
 
-- **Packages:** 46 in `go list ./...`. `go test -count=1 ./...` reports **43 ok / 0 fail**; the other three have no test files (`tools/sidecar-sig-probe`, `web`, `internal/ffmpegtest`).
+- **Packages:** 47 in `go list ./...`, 44 of them with test files; the other three have none (`tools/sidecar-sig-probe`, `web`, `internal/ffmpegtest`). The 44 is counted from the tree, not read from a `go test -count=1 ./...` run.
 - **Browser detection table:** `knownBrowsers` (`internal/cookies/autocookies_detect.go`) has **10 entries** — four Gecko, six Chromium. The full table with type keys is in [data-and-storage.md](data-and-storage.md) § Cookies.
 
 ## Key Dependencies
@@ -39,7 +39,7 @@
 | charm.land/huh/v2 | v2.0.3 | TUI forms |
 | charm.land/lipgloss/v2 | v2.1.0 | TUI styling |
 | charm.land/glamour/v2 | v2.0.1 | Markdown rendering (release notes) |
-| dop251/goja | v0.0.0-20260915 | JS engine |
+| dop251/goja | v0.0.0-20261125 (`5e92a7e2`) | JS engine |
 | modernc.org/sqlite | v1.62.0 | SQLite driver |
 | coder/websocket | v1.8.15 | WebSocket (was nhooyr.io/websocket — upstream moved) |
 | BurntSushi/toml | v1.6.0 | Config parsing |
@@ -63,11 +63,11 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | web/ | ~4,700 | 9 | 28 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
 | chat/ | ~4,280 | 4 | 29 | YouTube live chat downloader (polling + batching) |
 | utils/ | ~4,190 | 28 | 32 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap, canonical paths |
-| cipher/ | ~4,090 | 15 | 21 | YouTube signature cipher: sidecar-routed + goja fallback |
+| cipher/ | ~5,110 | 14 | 29 | YouTube signature cipher: sidecar-routed + goja fallback (a Go port of ejs) |
 | config/ | ~3,440 | 9 | 29 | TOML config, FlexDuration, channel terms, migrations |
 | bgutils/ | ~2,350 | 6 | 12 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja path) |
 | bgutils/sidecar/ | ~2,320 | 7 | 16 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
-| goja/ | ~1,510 | 5 | 13 | JS runtime shims (minimal DOM, timers, encoding) |
+| goja/ | ~1,520 | 5 | 13 | JS runtime shims (minimal DOM, timers, encoding) |
 | updater/ | ~1,440 | 5 | 9 | GitHub release checker, self-updater, Ed25519, signed release manifest |
 | cookies/dpapi/ | ~1,110 | 6 | 9 | Windows DPAPI decryption for browser cookie stores |
 | logger/ | ~1,220 | 4 | 5 | slog wrapper, file rotation, ring buffer, pub/sub |

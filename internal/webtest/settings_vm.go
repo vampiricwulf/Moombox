@@ -17,6 +17,7 @@ import (
 
 	"github.com/dop251/goja"
 
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -53,7 +54,7 @@ var utilsImportRe = regexp.MustCompile(`(?s)import \{[^}]*\} from "\./utils\.js"
 // _test.go helper.
 func SettingsVM(t testing.TB) *goja.Runtime {
 	t.Helper()
-	vm := goja.New()
+	vm := mbgoja.NewPlainRuntime()
 	for _, mod := range []string{"public/modules/utils.js", "public/modules/settings.js"} {
 		raw, err := webassets.PublicFS.ReadFile(mod)
 		if err != nil {

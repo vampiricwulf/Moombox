@@ -79,7 +79,7 @@ func (p *permutingSidecar) N(_ context.Context, _, n string) (string, error) {
 	if err := p.failing(); err != nil {
 		return "", err
 	}
-	return "n-" + n, nil
+	return n + "-n", nil
 }
 
 func (p *permutingSidecar) Batch(_ context.Context, _ string, sigs, ns []string) (map[string]string, map[string]string, error) {
@@ -109,7 +109,7 @@ func (p *permutingSidecar) Batch(_ context.Context, _ string, sigs, ns []string)
 	}
 	nr := make(map[string]string, len(ns))
 	for _, n := range ns {
-		nr[n] = "n-" + n
+		nr[n] = n + "-n"
 	}
 	return sr, nr, nil
 }
@@ -345,14 +345,15 @@ func (s *specGoja) putSigSpec(playerID string, length int, spec []int) {
 }
 
 // Batch learns from a sidecar batch, and while the sidecar is down answers
-// the sigs from the specs and the ns from goja; one sig with no spec still
-// fails the batch, as before.
+// the sigs from the specs and the ns from goja; one sig with no spec goes
+// to goja, last, and fails the batch when goja (here, with no sig answers)
+// cannot answer it either.
 //
 // Mutants: Batch not learning on success; the failed-sidecar arm returning
 // the error with specs present; the nil-sidecar arm returning
 // ErrSidecarUnavailable with specs present.
 func TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown(t *testing.T) {
-	goja := &specGoja{staticSolver: staticSolver{n: map[string]string{"N1": "gojaN1"}}, specs: map[string][]int{}}
+	goja := &specGoja{staticSolver: staticSolver{n: map[string]string{"N1": "N1-goja"}}, specs: map[string][]int{}}
 	side := newPermutingSidecar()
 	c := newCompositeSolverWith(side, goja)
 	ctx := context.Background()
@@ -366,11 +367,11 @@ func TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Batch with the sidecar failing: %v", err)
 	}
-	if sr[sigB] != scramble(sigB) || nr["N1"] != "gojaN1" {
+	if sr[sigB] != scramble(sigB) || nr["N1"] != "N1-goja" {
 		t.Fatalf("Batch with the sidecar failing = %v, %v; want sig from the spec and n from goja", sr, nr)
 	}
 	if _, _, err := c.Batch(ctx, specPlayer, []string{sigB, sigB + "x"}, nil); err == nil {
-		t.Fatalf("Batch with one sig of an unlearned length: want the sidecar's error")
+		t.Fatalf("Batch with one sig of an unlearned length goja cannot answer: want the sidecar's error")
 	}
 
 	c.SetSidecar(nil)

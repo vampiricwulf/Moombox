@@ -94,7 +94,7 @@ func TestLiveLoginMarkersPresent(t *testing.T) {
 // verdict and reports presence, never any cookie value, and the Service is
 // built with noopLogger so the probe's own logging is discarded too.
 func TestLiveAuthenticatedAccountProbe(t *testing.T) {
-	path := os.Getenv("MOOMBOX_LIVE_YT_COOKIES")
+	path := liveCookieFile(t, "MOOMBOX_LIVE_YT_COOKIES")
 	if path == "" {
 		t.Skip("set MOOMBOX_LIVE_YT_COOKIES=<path to a signed-in Netscape cookie file> to run the authenticated liveness check")
 	}

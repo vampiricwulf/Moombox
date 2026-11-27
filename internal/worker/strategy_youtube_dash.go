@@ -27,9 +27,10 @@ import (
 // n-param decryption); otherwise we'd re-decrypt an already-decrypted
 // URL and produce garbage. DECISIONS #7.
 //
-// routedSolver is the composite cipher.Solver; it is tried first so
-// the sidecar V8 ejs path handles n on cb017549-family players.
-// Falls back to the goja resolver (cipherSolver) if nil or on error.
+// routedSolver is the composite cipher.Solver: the sidecar's V8 ejs first,
+// so it handles n on cb017549-family players, and goja last within it. The
+// goja resolver (cipherSolver) is asked directly only when routedSolver is
+// nil.
 //
 // An n that is not solved (cipher.ErrNUnsolved), or a URL that carries none
 // and so comes back as it went in, is "" too: an unchanged URL repairs
@@ -66,8 +67,9 @@ func resolveFreshDashURL(ctx context.Context, jobID string, routedSolver cipher.
 // and injects PO token into the manifest URL path.
 //
 // routedSolver is the composite cipher.Solver (sidecar primary, goja fallback)
-// and is used for all sig/n-param URL decryption.  cipherSolver (*GojaResolver)
-// is every n solve's goja fallback, and is what the OnCipherFailure retry path
+// and is used for all sig/n-param URL decryption; goja is asked last within
+// it.  cipherSolver (*GojaResolver) is the same goja, asked directly only
+// when routedSolver is nil, and is what the OnCipherFailure retry path
 // invalidates.
 //
 // A manifest whose n challenge no solver answers fails the setup
@@ -87,9 +89,8 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	dashURL := videoInfo.DashManifestURL
 
 	// Step 1: Decrypt the DASH manifest URL itself (signature cipher).
-	// Route through the composite solver (sidecar primary; goja fallback)
-	// so sig decryption works on cb017549-family players where the goja
-	// extractor cannot produce a sig algorithm. Asked whatever the player URL
+	// Route through the composite solver (the sidecar, then the learned sig
+	// specs, then goja's port of ejs, asked last). Asked whatever the player URL
 	// and solvers: a URL that needs neither comes back as it is, and one whose
 	// query n has no player or solver to answer it is as unsolved as one the
 	// solvers failed (cipher.ErrNUnsolved).

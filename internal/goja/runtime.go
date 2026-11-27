@@ -9,9 +9,40 @@ import (
 	"github.com/dop251/goja"
 )
 
+// MaxCallStackSize is the deepest JavaScript call stack any goja runtime in
+// Moombox may reach (owner ruling RV-13). goja's own default is effectively
+// unbounded: in the RV-13 research an endless recursion grew to depth 985,087
+// and 306 MB in 5 s before anything stopped it. Past this depth
+// goja aborts the run with a *goja.StackOverflowError.
+//
+// JavaScript try/catch does not see that abort: the whole run ends, unlike V8,
+// which throws a catchable RangeError. A script that probes its own recursion
+// depth is therefore aborted instead of answered.
+//
+// Measured on Windows x64, goja 5e92a7e2 (2026-11-26): the three testdata
+// players compile and solve sig and n with a limit of 20 and fail at 15, so
+// the cipher needs fewer than 20 frames. The BotGuard program's need is not
+// measured: its goja run is declined today (TestBotGuardLiveFingerprint) and
+// fails the same way with this limit, with none and with a limit of 30, so it
+// never gets deep enough to tell. Hence the wide headroom.
+// At this limit an endless recursion aborts in about 3 ms having allocated
+// about 9 MB; recursing through a native call (Array.prototype.forEach) stops
+// at depth 5,000, since each round costs two frames, in about 25 ms and 22 MB.
+const MaxCallStackSize = 10000
+
+// NewPlainRuntime creates a bare goja runtime that has the call-stack bound
+// and nothing else. Every goja runtime in the tree is made here, test helpers
+// included (TestEveryGojaRuntimeIsMadeByNewPlainRuntime holds that), so none
+// can run without the bound.
+func NewPlainRuntime() *goja.Runtime {
+	vm := goja.New()
+	vm.SetMaxCallStackSize(MaxCallStackSize)
+	return vm
+}
+
 // NewRuntime creates a new Goja runtime with common setup (encoding, timers, etc.).
 func NewRuntime() *goja.Runtime {
-	vm := goja.New()
+	vm := NewPlainRuntime()
 	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
 	return vm
 }
@@ -38,33 +69,6 @@ func NewRuntimeWithShims(ctx context.Context, userAgent string) (*goja.Runtime, 
 	}
 
 	return vm, tm, nil
-}
-
-// NewRuntimeForCipher creates a Goja runtime suitable for running YouTube
-// player.js inside a cipher solver. Compared to NewRuntimeWithShims:
-//   - Registers encoding (real TextEncoder/TextDecoder, btoa, atob).
-//     The cipher previously hand-stubbed TextEncoder to return Uint8Array(0),
-//     which would silently miscompute any signature touching TextEncoder
-//     (audit reports/goja.md API6 + cipher.md D1/D4).
-//   - Registers DOM shim (document, navigator, location, screen, performance,
-//     storage, XMLHttpRequest, crypto.{getRandomValues,subtle,randomUUID},
-//     plus AbortController / ReadableStream / CustomEvent / CSS / Intl).
-//   - Does NOT register timers — cipher uses vm.Interrupt() externally for
-//     timeout enforcement; setTimeout in player.js init paths becomes a
-//     ReferenceError but those paths aren't hit during sig/n extraction.
-//
-// Audit reports/goja.md C4 + reports/cipher.md D1/D4.
-func NewRuntimeForCipher(userAgent string) (*goja.Runtime, error) {
-	vm := NewRuntime()
-
-	if err := RegisterEncoding(vm); err != nil {
-		return nil, fmt.Errorf("register encoding: %w", err)
-	}
-	if err := RegisterDOMShim(vm, userAgent); err != nil {
-		return nil, fmt.Errorf("register DOM shim: %w", err)
-	}
-
-	return vm, nil
 }
 
 // ErrExecutionTimeout is what RunStringWithTimeout's error wraps when the

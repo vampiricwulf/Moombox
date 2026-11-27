@@ -8,6 +8,7 @@ import (
 	"github.com/dop251/goja"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 	webassets "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -84,7 +85,7 @@ func utilsModuleVM(t *testing.T) *goja.Runtime {
 	}
 	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	src = regexp.MustCompile(`(?m)^export `).ReplaceAllString(src, "")
-	vm := goja.New()
+	vm := mbgoja.NewPlainRuntime()
 	if _, err := vm.RunString(src); err != nil {
 		t.Fatalf("utils.js does not evaluate — the browser would fail the same way: %v", err)
 	}

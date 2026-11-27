@@ -158,26 +158,32 @@ var launcherWarnf = func(format string, args ...any) {
 // launcher lifetime, whose rename to ~ failed): the ~ beside it is one
 // version older and is removed as before. The breadcrumb can be trusted for
 // this because the milestone removes it before it sweeps .old
-// (resolveLandedUpdateBreadcrumb). A ~ that cannot be renamed is left where
-// it is.
-func cleanupOrphans(exePath, runningVersion string) {
+// (resolveLandedUpdateBreadcrumb). A ~ that cannot be renamed (something
+// holds it without delete sharing, an antivirus scan of the freshly unmapped
+// image) is left where it is, and cleanupOrphans reports true: it is still
+// that update's only rollback artifact, so this launcher must not delete it
+// on its way out either (postUpdateBoot.keepsLauncherImage), and the next
+// start tries the rename again. It reports false in every other case.
+func cleanupOrphans(exePath, runningVersion string) (keptImage bool) {
 	image := exePath + updater.LauncherImageSuffix
 	if pendingUpdateTag(exePath) == "v"+runningVersion && !failureMarkerHoldsLauncherImage(exePath) {
 		oldPath := exePath + updater.OldSuffix
 		if _, err := os.Stat(oldPath); err != nil {
 			if _, err := os.Stat(image); err == nil {
 				if err := os.Rename(image, oldPath); err != nil {
-					launcherWarnf("warning: could not rename %s back to %s (%v) — the previous binary stays there, and this start is not armed to roll back to it\n",
+					launcherWarnf("warning: could not rename %s back to %s (%v) — the previous binary stays there, this start is not armed to roll back to it, and the next start tries again\n",
 						image, oldPath, err)
+					return true
 				}
-				return
+				return false
 			}
 		}
 	}
 	if len(updater.FailureMarkers(exePath)) > 0 {
-		return
+		return false
 	}
 	os.Remove(image)
+	return false
 }
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.

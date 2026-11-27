@@ -582,7 +582,6 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// cascade parses (see extractionState) — it is what keeps the DRM-skip
 	// report to one line per extraction rather than one per client.
 	ctx = withExtractionState(ctx)
-	extractionStateFrom(ctx).markJSLess(p.jsLess())
 
 	// Fetch watch page
 	if err := p.auth.SyncCookies(); err != nil {
@@ -637,6 +636,10 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// then STS (signatureTimestamp) for format decryption — so the page's
 	// own parse and every client below carry both.
 	ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, ytcfg.PlayerURL)
+	// The JS-less ranking (no solver can answer this player's challenges) is
+	// decided on the player the extraction runs on (owner ruling RV-16),
+	// before any client is asked.
+	extractionStateFrom(ctx).markJSLess(p.jsLess(ytcfg.PlayerURL))
 	sts := p.extractSTS(ctx, ytcfg)
 
 	// Parse watch page player response
@@ -1077,7 +1080,6 @@ func (p *PlayerAPI) fallbackYtcfg(withSession bool) *YtcfgData {
 func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// One extraction's scratch state — see GetVideoInfoAuthenticated.
 	ctx = withExtractionState(ctx)
-	extractionStateFrom(ctx).markJSLess(p.jsLess())
 
 	wp, err := fetchWatchPage(ctx, videoID, p.auth.ConsentCookieHeader())
 	pageFetched := err == nil
@@ -1110,6 +1112,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	// The player URL and STS for the public path too (see the
 	// authenticated path).
 	wp.Ytcfg.PlayerURL = p.resolvePlayerURL(ctx, videoID, wp.Ytcfg.PlayerURL)
+	extractionStateFrom(ctx).markJSLess(p.jsLess(wp.Ytcfg.PlayerURL))
 	stsPublic := p.extractSTS(ctx, wp.Ytcfg)
 
 	var wpParsed *VideoInfo
@@ -2260,7 +2263,7 @@ func stampManifestSources(info *VideoInfo, label string) {
 // failure (a timeout, a cancel, an HTTP status) when there was one.
 func (p *PlayerAPI) CookielessFormats(ctx context.Context, videoID, visitorData string) ([]Format, error) {
 	ctx = withExtractionState(ctx)
-	extractionStateFrom(ctx).markJSLess(p.jsLess())
+	extractionStateFrom(ctx).markJSLess(p.jsLess(p.rememberedPlayerURL()))
 	formatPool := []Format{}
 	tally := &mismatchTally{}
 	p.tryCookielessFallbacks(ctx, videoID, visitorData, &formatPool, tally, nil)

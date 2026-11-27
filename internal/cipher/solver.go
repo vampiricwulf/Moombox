@@ -32,11 +32,17 @@ type GojaResolver struct {
 	solverOrder []string
 	compileSlot compileSlot // serializes compilation to prevent thundering herd
 	// timedOut maps the CacheKey of a player whose compile ran out of
-	// compileTimeout to the time it may be compiled again. Read and written
-	// under timedOutMu; held to maxTimedOutPlayers entries.
+	// compileTimeout, or whose body the port could not prepare
+	// (ErrExtractorMismatch), to when it may be tried again and why it was
+	// refused. Read and written under timedOutMu; held to
+	// maxTimedOutPlayers entries.
 	timedOutMu sync.Mutex
-	timedOut   map[string]time.Time
-	logger     interface {
+	timedOut   map[string]refusal
+	// noNAnswer maps the CacheKey of a player whose prepared copy answered an
+	// n with no answer (noteNAnswer) to when that mark ends. Under timedOutMu,
+	// held to maxTimedOutPlayers entries; read by refuses only.
+	noNAnswer map[string]time.Time
+	logger    interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -71,10 +77,21 @@ func (c *compileSlot) release() { <-c.ch }
 var compileTimeout = 120 * time.Second
 
 // compileRefusal is how long a player whose compile ran out of
-// compileTimeout is refused instead of compiled again. Without it every
-// later request for that player re-ran the script for the full bound while
-// holding the compile slot.
+// compileTimeout, or whose body the port could not prepare, is refused
+// instead of tried again. Without it every later request for that player
+// re-ran the script for the full bound, or fetched and parsed the body again
+// (about 0.1 s each), while holding the compile slot. A fetch that finds a
+// new body replacing the cached one under the player's URL ends the refusal
+// (unrefuse); a cold fetch after the cache was removed does not.
 const compileRefusal = 10 * time.Minute
+
+// refusal is one entry of the refusal list: until when, and the failure
+// that put it there (wrapping mbgoja.ErrExecutionTimeout or
+// ErrExtractorMismatch).
+type refusal struct {
+	until time.Time
+	cause error
+}
 
 // maxTimedOutPlayers caps the refusal list. Players rotate a few times a
 // week, so more than a handful at once means the list is being churned;
@@ -92,51 +109,92 @@ var ErrCompileRefused = errors.New("cipher: player compile timed out recently; n
 // refusedUntil returns when the player under key may be compiled again, or
 // the zero time when it is not refused. An expired entry is dropped.
 func (s *GojaResolver) refusedUntil(key string) time.Time {
-	s.timedOutMu.Lock()
-	defer s.timedOutMu.Unlock()
-	until, ok := s.timedOut[key]
-	if !ok {
-		return time.Time{}
-	}
-	if !resolverNow().Before(until) {
-		delete(s.timedOut, key)
-		return time.Time{}
-	}
-	return until
+	return s.refusalOf(key).until
 }
 
-// refuse records that the player under key timed out compiling.
-func (s *GojaResolver) refuse(key string) {
+// refusalOf returns the player's refusal, the zero one when it is not
+// refused. An expired entry is dropped.
+func (s *GojaResolver) refusalOf(key string) refusal {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	r, ok := s.timedOut[key]
+	if !ok {
+		return refusal{}
+	}
+	if !resolverNow().Before(r.until) {
+		delete(s.timedOut, key)
+		return refusal{}
+	}
+	return r
+}
+
+// refuses reports whether the player at playerURL is on the refusal list now
+// (the composite's ChallengesSolvable, owner ruling RV-16).
+func (s *GojaResolver) refuses(playerURL string) bool {
+	key := CacheKey(playerURL)
+	if !s.refusedUntil(key).IsZero() {
+		return true
+	}
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	until, ok := s.noNAnswer[key]
+	return ok && resolverNow().Before(until)
+}
+
+// unrefuse ends the player's refusal: a fetch found a body other than the
+// cached one (FetchResult.Replaced), so the failure on the old one says
+// nothing about it. A cold fetch does not count, and InvalidateSolver does
+// not call it: a per-job 403 invalidates a player whose body may well be the
+// same, and a timed-out compile lifted that way costs the slot up to
+// compileTimeout again (owner ruling R3-9).
+func (s *GojaResolver) unrefuse(key string) {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	delete(s.timedOut, key)
+	delete(s.noNAnswer, key)
+}
+
+// refuse records that the player under key failed with cause: its compile
+// timed out, or the port could not prepare its body.
+func (s *GojaResolver) refuse(key string, cause error) {
 	s.timedOutMu.Lock()
 	defer s.timedOutMu.Unlock()
 	now := resolverNow()
 	if s.timedOut == nil {
-		s.timedOut = make(map[string]time.Time)
+		s.timedOut = make(map[string]refusal)
 	}
-	for k, until := range s.timedOut {
-		if !now.Before(until) {
+	for k, r := range s.timedOut {
+		if !now.Before(r.until) {
 			delete(s.timedOut, k)
 		}
 	}
 	for len(s.timedOut) >= maxTimedOutPlayers {
 		var oldest string
-		for k, until := range s.timedOut {
-			if oldest == "" || until.Before(s.timedOut[oldest]) {
+		for k, r := range s.timedOut {
+			if oldest == "" || r.until.Before(s.timedOut[oldest].until) {
 				oldest = k
 			}
 		}
 		delete(s.timedOut, oldest)
 	}
-	s.timedOut[key] = now.Add(compileRefusal)
+	s.timedOut[key] = refusal{until: now.Add(compileRefusal), cause: cause}
 }
 
-// refusedErr is the error for a refused player, or nil when it is not.
+// refusedErr is the error for a refused player, or nil when it is not. A
+// player the port could not prepare is refused with that failure, so the
+// error still wraps ErrExtractorMismatch.
 func (s *GojaResolver) refusedErr(key, playerID string) error {
-	until := s.refusedUntil(key)
-	if until.IsZero() {
+	r := s.refusalOf(key)
+	if r.until.IsZero() {
 		return nil
 	}
-	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until.Format(time.RFC3339))
+	until := r.until.Format(time.RFC3339)
+	if errors.Is(r.cause, ErrExtractorMismatch) {
+		s.logger.Debug("cipher: the goja port could not prepare this player lately; not preparing it again yet",
+			"playerID", playerID, "until", until)
+		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
+	}
+	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until)
 }
 
 // NewGojaResolver creates a new GojaResolver with the given cache directory.
@@ -241,13 +299,21 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	if err != nil {
 		// Don't cache errors — allow retry on next request (may be transient).
 		// The compileSlot serialization prevents thundering herd during this request.
-		// The one exception is a compile that ran out of compileTimeout: the
-		// script on disk is the same next time, so that player is refused for
+		// The exceptions are failures the player's body decides: a compile
+		// that ran out of compileTimeout, and a body the port could not
+		// prepare (ErrExtractorMismatch; a fetch failure never wraps it). The
+		// body is the same next time, so that player is refused for
 		// compileRefusal. A cancelled context is the caller's, not the player's.
 		if errors.Is(err, mbgoja.ErrExecutionTimeout) {
-			s.refuse(key)
+			s.refuse(key, err)
 			s.logger.Error("cipher: solver compilation timed out; refusing this player for a while",
 				"playerID", playerID, "timeout", compileTimeout, "refusedFor", compileRefusal)
+			return nil, err
+		}
+		if errors.Is(err, ErrExtractorMismatch) {
+			s.refuse(key, err)
+			s.logger.Warn("cipher: the goja port could not prepare this player; not trying it again for a while",
+				"playerID", playerID, "refusedFor", compileRefusal, "error", err.Error())
 			return nil, err
 		}
 		s.logger.Error("cipher: solver compilation failed", "playerID", playerID, "error", err.Error())
@@ -262,53 +328,31 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 
 func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
-	playerJS, changed, err := s.playerCache.Fetch(ctx, playerURL)
+	fr, err := s.playerCache.FetchDetail(ctx, playerURL)
 	if err != nil {
 		// PlayerCache.Fetch already includes "fetch player JS" in its message;
 		// wrap with a different verb to avoid "fetch player JS: fetch player JS: ..."
 		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
 	}
-	// Fetch already removed the preprocessed.js sidecar on changed=true; we
+	// Fetch already removed the prepared copy on changed=true; we
 	// only need to drop in-memory solverData here. compileSolver is normally
 	// called when solverData has no entry, so this is mostly defensive against
 	// future call sites and against the path where Fetch coincidentally
 	// rotates the JS while compileSolver is racing in.
-	if changed {
+	playerJS := fr.JS
+	if fr.Changed {
 		s.dropSolverData(CacheKey(playerURL))
 	}
+	if fr.Replaced {
+		s.unrefuse(CacheKey(playerURL))
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// Log extraction strategy results for debugging
-	urlClassName := findURLClassName(playerJS)
-	nArrayCands := findNArrayCandidates(playerJS)
-	sigOldCands := findSigCandidates(playerJS)
-	alrSigChains := findAlrTransformChains(playerJS)
-
-	s.logger.Debug("cipher: extraction results", "playerID", playerID, "size", len(playerJS),
-		"urlClassName", urlClassName,
-		"nArrayCandidates", len(nArrayCands),
-		"sigOldCandidates", len(sigOldCands),
-		"alrSigChains", len(alrSigChains))
-
-	if urlClassName == "" && len(nArrayCands) == 0 {
-		s.logger.Warn("cipher: no n-param strategy succeeded (URL class + array candidates)",
-			"playerID", playerID)
-	}
-	if len(sigOldCands) == 0 && len(alrSigChains) == 0 {
-		s.logger.Debug("cipher: no sig strategy succeeded (ALR chains + old candidates)",
-			"playerID", playerID)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	// Second-tier cache: skip the 200-500ms extraction + preprocessing
-	// pass when the .preprocessed.js sidecar is on disk. Only the slow
-	// path runs preprocessPlayerWithBranch + writes the sidecar back.
-	// Audit reports/cipher.md Q4.
+	// Second-tier cache: skip the parse and match (about 0.1 s) when the
+	// prepared copy is on disk. Only the slow path runs preprocessPlayer
+	// and writes the copy back. Audit reports/cipher.md Q4.
 	preprocessed, ppErr := s.playerCache.GetPreprocessed(playerURL)
 	if ppErr != nil {
 		s.logger.Debug("cipher: preprocessed cache read failed", "playerID", playerID, "err", ppErr)
@@ -316,12 +360,14 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	if preprocessed != "" {
 		s.logger.Debug("cipher: preprocessed cache hit", "playerID", playerID)
 	} else {
-		var branch string
-		preprocessed, branch, err = preprocessPlayerWithBranch(playerJS)
+		var st prepareStats
+		preprocessed, st, err = preprocessPlayer(playerJS)
 		if err != nil {
 			return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
 		}
-		s.logger.Debug("cipher: extraction branch", "playerID", playerID, "branch", branch)
+		s.logger.Debug("cipher: player prepared", "playerID", playerID, "size", len(playerJS),
+			"solvers", st.solvers, "routes", st.routes, "stringPool", st.pool,
+			"kept", st.kept, "dropped", st.dropped)
 		if putErr := s.playerCache.PutPreprocessed(playerURL, preprocessed); putErr != nil {
 			s.logger.Debug("cipher: preprocessed cache write failed", "playerID", playerID, "err", putErr)
 		}
@@ -421,8 +467,12 @@ func containsKey(order []string, key string) bool {
 // swaps it to act at exactly that point (cancel the caller).
 var compileStarting = func() {}
 
-// getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
-// The code is expected to set _result.sig and _result.n when invoked with a _result object.
+// getFromPrepared is ejs getFromPrepared: it runs a prepared player
+// (preprocessPlayer) as the body of function(_result){...}, as ejs runs it
+// with Function("_result", code), and takes the sig and n functions it leaves
+// on _result. The runtime is a bare one (mbgoja.NewPlainRuntime, with the
+// call-stack bound): the prepared copy carries ejs setup.ts, the only globals
+// the player needs to load, and no DOM shim is registered.
 //
 // goja.RunString and vm.NewObject can panic on certain malformed inputs (stack
 // overflows in deep recursion, some parser states). Without recovery the
@@ -442,13 +492,7 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 		}
 	}()
 
-	// internal/goja's runtime registers real TextEncoder/TextDecoder and the
-	// shared DOM shim. Empty UA → internal/goja defaults to Chrome 131. Audit
-	// reports/goja.md C4 + cipher.md D1/D4.
-	vm, vmErr := mbgoja.NewRuntimeForCipher("")
-	if vmErr != nil {
-		return nil, fmt.Errorf("init cipher VM: %w", vmErr)
-	}
+	vm := mbgoja.NewPlainRuntime()
 
 	// Create result container
 	resultObj := vm.NewObject()
@@ -456,8 +500,9 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 		return nil, err
 	}
 
-	// Execute the preprocessed code
-	_, err = mbgoja.RunStringWithTimeout(context.Background(), vm, code, compileTimeout)
+	// Run the prepared code. The newline before the close keeps a trailing
+	// line comment in the player from swallowing it.
+	_, err = mbgoja.RunStringWithTimeout(context.Background(), vm, "(function(_result){"+code+"\n})(_result)", compileTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("run preprocessed code: %w", err)
 	}
@@ -523,10 +568,11 @@ func playerURLForID(playerID string) string {
 	return playerVariantURL(playerID, mainVariantPath)
 }
 
-// Sig satisfies cipher.Solver. Returns ErrSigUnavailable when the
-// player's sig algorithm could not be extracted by the goja patterns
-// (typical on current YouTube players where sig is no longer
-// statically representable — see the cipher-via-ejs-sidecar spec).
+// Sig satisfies cipher.Solver. Returns ErrSigUnavailable only when the
+// prepared copy left no sig function. A copy from preprocessPlayer always
+// has one (it sets _result.n and _result.sig together), so for a real player
+// this is effectively unreachable: a player the port cannot match fails
+// earlier, in GetSolvers, with ErrExtractorMismatch.
 func (s *GojaResolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
 	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
 	if err != nil {
@@ -539,8 +585,10 @@ func (s *GojaResolver) Sig(ctx context.Context, playerID, encryptedSig string) (
 }
 
 // N satisfies cipher.Solver. Returns a non-sentinel error when the
-// goja extractor failed to extract an n algorithm; callers should
-// treat that as a hard failure rather than substituting a fallback.
+// prepared copy left no n function, which, as for Sig, a copy from
+// preprocessPlayer never does: a player the port cannot match fails earlier,
+// in GetSolvers, with ErrExtractorMismatch. Callers should treat either as a
+// hard failure rather than substituting a fallback.
 func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
 	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
 	if err != nil {
@@ -549,7 +597,59 @@ func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (stri
 	if !solvers.HasN() {
 		return "", fmt.Errorf("cipher: n unavailable for player %s", playerID)
 	}
-	return solvers.DecryptN(encryptedN)
+	out, err := solvers.DecryptN(encryptedN)
+	if err == nil {
+		s.noteNAnswer(playerURLForID(playerID), encryptedN, out)
+	}
+	return out, err
+}
+
+// noteNAnswer holds the prepared copy's n answer to checkNResult, and when it
+// is no answer (the exception sentinel, or nothing) marks the player as one
+// goja does not work for, for compileRefusal (owner ruling RV-16): the mark
+// is read by refuses, so ChallengesSolvable, and by nothing else. GetSolvers
+// never reads it, so goja still compiles and asks the player — its
+// signatures may well work, and so may another challenge's n — and a later
+// good n ends the mark. Every place a goja n is run calls it (N, solveN's
+// goja branch, ResolveURL); a run that errored (CipherTimeout, a panic,
+// ErrSolverDead) says nothing certain about the player and marks nothing.
+// It returns checkNResult's verdict.
+func (s *GojaResolver) noteNAnswer(playerURL, challenge, out string) error {
+	key := CacheKey(playerURL)
+	cerr := checkNResult(challenge, out)
+	s.timedOutMu.Lock()
+	if cerr == nil {
+		delete(s.noNAnswer, key)
+		s.timedOutMu.Unlock()
+		return nil
+	}
+	now := resolverNow()
+	until, marked := s.noNAnswer[key]
+	first := !marked || !now.Before(until)
+	if s.noNAnswer == nil {
+		s.noNAnswer = make(map[string]time.Time)
+	}
+	for k, u := range s.noNAnswer {
+		if !now.Before(u) {
+			delete(s.noNAnswer, k)
+		}
+	}
+	if _, ok := s.noNAnswer[key]; !ok && len(s.noNAnswer) >= maxTimedOutPlayers {
+		var oldest string
+		for k, u := range s.noNAnswer {
+			if oldest == "" || u.Before(s.noNAnswer[oldest]) {
+				oldest = k
+			}
+		}
+		delete(s.noNAnswer, oldest)
+	}
+	s.noNAnswer[key] = now.Add(compileRefusal)
+	s.timedOutMu.Unlock()
+	if first {
+		s.logger.Warn("cipher: the goja port's n answer for this player is no answer; while the sidecar is down its challenges count as unsolvable for a while",
+			"playerID", PlayerIDFromURL(playerURL), "for", compileRefusal, "error", cerr.Error())
+	}
+	return cerr
 }
 
 // Batch satisfies cipher.Solver. Goja has no round-trip overhead so
@@ -597,14 +697,20 @@ func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []st
 // against fresh JS from YouTube and produce 403s at the CDN.
 func (s *GojaResolver) PlayerJS(playerID string) (string, error) {
 	playerURL := playerURLForID(playerID)
-	js, changed, err := s.playerCache.Fetch(context.Background(), playerURL)
+	fr, err := s.playerCache.FetchDetail(context.Background(), playerURL)
 	if err != nil {
 		return "", err
 	}
-	if changed {
+	if fr.Changed {
 		s.dropSolverData(CacheKey(playerURL))
 	}
-	return js, nil
+	// Only a body that replaced a cached one ends a refusal: the cold fetch
+	// after InvalidateSolver or RemovePlayerJS (a job's 403, the sidecar's
+	// stale-JS recovery) reports Changed for what may be the same body.
+	if fr.Replaced {
+		s.unrefuse(CacheKey(playerURL))
+	}
+	return fr.JS, nil
 }
 
 // RemovePlayerJS satisfies cipher.PlayerSource. Drops every cache layer
@@ -678,6 +784,11 @@ func callWithTimeout(vm *gojavm.Runtime, label string, fn func() (gojavm.Value, 
 	v, err := mbgoja.CallWithTimeout(vm, callTimeout, "cipher "+label, fn)
 	if err != nil {
 		return "", fmt.Errorf("%s decrypt: %w", label, err)
+	}
+	// ejs answers null when the URL it built holds no answer; String() would
+	// make that the text "null" and put it in a URL.
+	if v == nil || gojavm.IsUndefined(v) || gojavm.IsNull(v) {
+		return "", fmt.Errorf("%s decrypt: the solver gave no answer", label)
 	}
 	return v.String(), nil
 }

@@ -13,8 +13,9 @@ import (
 // keeping the inode alive for any process holding it open), so the
 // child's CleanupOldBinary handles everything. The previous binary of an
 // update stays at .old here, so there is no `~` to keep for a boot that never
-// reached its milestone either (the Windows half of owner ruling RV-10).
-func cleanupOrphans(exePath, runningVersion string) {}
+// reached its milestone either (the Windows half of owner ruling RV-10), and
+// none is ever kept.
+func cleanupOrphans(exePath, runningVersion string) (keptImage bool) { return false }
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
 // Linux needs no rename dance (the child's post-milestone

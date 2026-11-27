@@ -49,8 +49,9 @@ func answers(out func(challenge string) string) func(string) (string, error) {
 // Mutants: checkNResult's suffix arm dropped (the sentinel rows install
 // "enhanced_except_…", the identity row the challenge), its empty arm
 // dropped (that row installs an empty n); solveN not checking the routed
-// answer (every routed row but the error one installs it) or the goja answer
-// (the goja rows install it); RoutedResolveURL's failure turned back into a
+// answer (every routed row but the error one installs it), the composite not
+// checking goja's (the routed-and-goja rows install it) or solveN not
+// checking goja's (the goja-alone row installs it); RoutedResolveURL's failure turned back into a
 // Warn and the URL as it came (every RoutedResolveURL row returns the URL);
 // RoutedDecryptNInURL's likewise, per form (that form's rows return the
 // URL); ResolveURL's missing-n-function case back to a Warn (the "player
@@ -75,23 +76,29 @@ func TestNUnsolvedFailsTheURL(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var goja *GojaResolver
+			routed := tc.routed
 			if !tc.noGoja {
 				goja = gojaWithN(t, tc.gojaN)
+				// As production wires it: goja asked last, inside the
+				// composite (owner rulings RV-11 and RV-12).
+				if routed != nil {
+					routed = newCompositeSolverWith(tc.routed, goja)
+				}
 			}
 			for _, entry := range []struct {
 				name string
 				call func() (string, error)
 			}{
 				{"ResolveFormatURL (query)", func() (string, error) {
-					return ResolveFormatURL(context.Background(), tc.routed, goja, nTestPlayerURL,
+					return ResolveFormatURL(context.Background(), routed, goja, nTestPlayerURL,
 						ResolveFormatRequest{URL: "https://r1.googlevideo.com/videoplayback?itag=18&n=" + nChallenge + "&c=TVHTML5"})
 				}},
 				{"RoutedDecryptNInURL (query)", func() (string, error) {
-					return RoutedDecryptNInURL(context.Background(), tc.routed, goja, nTestPlayerURL,
+					return RoutedDecryptNInURL(context.Background(), routed, goja, nTestPlayerURL,
 						"https://r1.googlevideo.com/videoplayback?itag=18&n="+nChallenge)
 				}},
 				{"RoutedDecryptNInURL (path)", func() (string, error) {
-					return RoutedDecryptNInURL(context.Background(), tc.routed, goja, nTestPlayerURL,
+					return RoutedDecryptNInURL(context.Background(), routed, goja, nTestPlayerURL,
 						"https://r1.googlevideo.com/videoplayback/id/abc.1/itag/299/n/"+nChallenge+"/sq/1")
 				}},
 			} {
@@ -188,11 +195,14 @@ func TestNUnsolvedWithNothingToSolveWith(t *testing.T) {
 // as yt-dlp's director asks its next provider after an invalid response
 // (jsc/_director.py:105-124). Both URL forms get the goja answer.
 //
-// Mutant: solveN not checking the routed answer (the sentinel is installed
-// and goja never asked).
+// The composite is where the routed answer is checked and goja asked next
+// (owner rulings RV-11 and RV-12).
+//
+// Mutant: compositeSolver.N not checking the sidecar's answer (the sentinel
+// is installed and goja never asked).
 func TestNInvalidRoutedAnswerFallsToGoja(t *testing.T) {
-	routed := &staticSolver{n: map[string]string{nChallenge: "enhanced_except_AAAAAAAA_" + nChallenge}}
 	goja := gojaWithN(t, answers(func(string) string { return nAnswer }))
+	routed := newCompositeSolverWith(&staticSolver{n: map[string]string{nChallenge: "enhanced_except_AAAAAAAA_" + nChallenge}}, goja)
 
 	res, err := RoutedResolveURL(context.Background(), routed, goja, ResolveURLRequest{
 		StreamURL: "https://r1.googlevideo.com/videoplayback?itag=18&n=" + nChallenge + "&c=TVHTML5",

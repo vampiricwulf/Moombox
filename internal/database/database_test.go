@@ -1046,8 +1046,13 @@ func TestHasJobBlockingRedetection(t *testing.T) {
 // channel it waits on. Logins carry underscores, which a LIKE pattern would
 // read as wildcards, and one login can be a prefix of another.
 //
-// Mutants: a prefix match on the login (foo matches foo_bar's job), and the
-// terminal-status filter dropped (a finished job is returned).
+// A bare-login or channel-URL row names its channel by URL; a manually added
+// VOD or clip waits on no channel, and the SQL leaves those out before the Go
+// check reads them.
+//
+// Mutants: a prefix match on the login (foo matches foo_bar's job), the
+// terminal-status filter dropped (a finished job is returned), and a SQL
+// filter wide enough to drop a login that holds "videos" or "clip".
 func TestManualTwitchJobs(t *testing.T) {
 	t.Parallel()
 	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
@@ -1066,6 +1071,18 @@ func TestManualTwitchJobs(t *testing.T) {
 	add("tw_manual_foo_bar_1700000000000000001", StatusUpcoming)
 	add("tw_manual_done_1700000000000000002", StatusFinished)
 	add("tw_4242", StatusLive)
+	addManual := func(id, url string) {
+		t.Helper()
+		if _, err := db.AddJob(&Job{ID: id, VideoID: id, URL: url, Platform: "twitch", Status: StatusQueued,
+			ManuallyAdded: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addManual("videosfan", "https://www.twitch.tv/videosfan")
+	addManual("clipsfan", "https://www.twitch.tv/clipsfan")
+	addManual("tw_vod_99", "https://www.twitch.tv/videos/99")
+	addManual("tw_clip_1", "https://www.twitch.tv/clipsfan/clip/Slug")
+	addManual("tw_clip_2", "https://clips.twitch.tv/clipsfan")
 
 	for _, tc := range []struct {
 		login string
@@ -1076,6 +1093,9 @@ func TestManualTwitchJobs(t *testing.T) {
 		{"foo", 0},
 		{"done", 0},
 		{"4242", 0},
+		{"videosfan", 1},
+		{"clipsfan", 1},
+		{"videos", 0},
 	} {
 		got, err := db.ManualTwitchJobs(tc.login)
 		if err != nil {

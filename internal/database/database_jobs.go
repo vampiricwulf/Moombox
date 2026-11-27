@@ -500,20 +500,31 @@ func (db *Database) ManualTwitchJobHoldsStream(streamID string) (bool, error) {
 	return true, nil
 }
 
-// ManualTwitchJobs returns the non-terminal manually added Twitch jobs for
-// login's channel — the `tw_manual_<login>_<ns>` rows the Web add creates when
-// the channel is offline — with ID, Status and StreamStartTime set. Such a row
-// carries no stream ID, so the Twitch monitor's HasActiveJob(streamID) dedupe
-// never matches it; the monitor decides from these whether one has claimed a
-// broadcast (manualJobClaims). The login is everything between the prefix and
-// the last underscore (the add's UnixNano suffix has none), matched in Go
-// because a login's own underscores are LIKE wildcards.
+// ManualTwitchJobs returns the non-terminal manually added Twitch jobs that
+// wait on, or record from, login's channel, with ID, Status and
+// StreamStartTime set: the `tw_manual_<login>_<ns>` rows the Web add creates
+// when the channel is offline, a `moombox add <login>` row (keyed by the bare
+// login), and a broadcast add (`tw_<stream id>`) — re-initialised, it waits
+// for the channel's next broadcast (owner ruling RV-17). A waiting row
+// carries no stream ID for the broadcast it will take, so the Twitch
+// monitor's HasActiveJob(streamID) dedupe never matches it; the monitor
+// decides from these whether one has claimed a broadcast (manualJobClaims).
+// A manually added VOD or clip row names no channel to wait on and is never
+// returned, so a pending one does not hold the channel's live broadcasts.
+// The login is matched in Go (twitchChannelWaitLogin), because a login's own
+// underscores are LIKE wildcards. The SQL leaves out the VOD and clip URLs
+// first, so the queued backlog a pasted listing or the CLI creates is not
+// read and parsed on every poll; it drops only rows twitchChannelWaitLogin
+// would also answer "" for, and that Go check still decides.
 func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, status, stream_start_time FROM jobs WHERE id LIKE 'tw\_manual\_%' ESCAPE '\' AND status NOT IN (?, ?, ?)`,
+		`SELECT id, url, status, stream_start_time FROM jobs
+		 WHERE (id LIKE 'tw\_manual\_%' ESCAPE '\' OR (manually_added = 1 AND platform = 'twitch'
+		        AND url NOT LIKE '%/videos/%' AND url NOT LIKE '%/clip/%' AND url NOT LIKE '%clips.twitch.tv/%'))
+		   AND status NOT IN (?, ?, ?)`,
 		StatusFinished, StatusError, StatusCancelled)
 	if err != nil {
 		return nil, err
@@ -522,29 +533,67 @@ func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 	var out []*Job
 	for rows.Next() {
 		var id, status string
-		var start sql.NullString
-		if err := rows.Scan(&id, &status, &start); err != nil {
+		var url, start sql.NullString
+		if err := rows.Scan(&id, &url, &status, &start); err != nil {
 			return nil, err
 		}
-		rest := strings.TrimPrefix(id, "tw_manual_")
-		if i := strings.LastIndex(rest, "_"); i > 0 && strings.EqualFold(rest[:i], login) {
-			out = append(out, &Job{ID: id, VideoID: id, Status: JobStatus(status), StreamStartTime: start.String})
+		if l := twitchChannelWaitLogin(id, url.String); l != "" && strings.EqualFold(l, login) {
+			out = append(out, &Job{ID: id, VideoID: id, URL: url.String, Status: JobStatus(status), StreamStartTime: start.String})
 		}
 	}
 	return out, rows.Err()
+}
+
+// twitchChannelWaitLogin is the channel a manually added Twitch row waits on
+// for a live broadcast, "" for a row that names none. A
+// `tw_manual_<login>_<ns>` ID names it: everything between the prefix and
+// the last underscore (the add's UnixNano suffix has none). Any other row
+// names it by a channel URL, twitch.tv/<login> with no further path: a VOD
+// (twitch.tv/videos/<id>) or a clip (clips.twitch.tv/<slug>,
+// twitch.tv/<login>/clip/<slug>) waits on no channel.
+//
+// worker.TwitchJobLogin (over extractTwitchLoginFromJob) answers a different
+// question, "which channel does this row belong to", and disagrees on
+// purpose: it gives <login> for a twitch.tv/<login>/clip/<slug> URL and falls
+// back to the channel name, while this gives "" for every VOD and clip row,
+// since those wait on no live broadcast. database cannot import worker; keep
+// the two in step when a Twitch URL shape is added.
+func twitchChannelWaitLogin(id, url string) string {
+	if rest, ok := strings.CutPrefix(id, "tw_manual_"); ok {
+		if i := strings.LastIndex(rest, "_"); i > 0 {
+			return rest[:i]
+		}
+		return ""
+	}
+	if strings.Contains(url, "clips.twitch.tv/") {
+		return ""
+	}
+	_, path, ok := strings.Cut(url, "twitch.tv/")
+	if !ok {
+		return ""
+	}
+	path, _, _ = strings.Cut(path, "?")
+	path, _, _ = strings.Cut(path, "#")
+	path = strings.TrimSuffix(path, "/")
+	if path == "" || strings.Contains(path, "/") || strings.EqualFold(path, "videos") {
+		return ""
+	}
+	return path
 }
 
 // TwitchEndUnconfirmedJobs returns the Twitch jobs sitting in Error with
 // ParkReasonTwitchEndUnconfirmed — a live capture that failed while its
 // broadcast's end was unconfirmed, staging kept — with the fields the Twitch
 // monitor needs to tell whether that broadcast is over: ID, VideoID, URL,
-// ChannelName, StreamStartTime and ManuallyAdded.
+// ChannelName, StreamStartTime, ManuallyAdded and TwitchStreamID (the
+// broadcast a manually added row recorded, which worker.TwitchBroadcastOver
+// compares ahead of the job ID).
 func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added FROM jobs
+		`SELECT id, video_id, url, channel_name, stream_start_time, manually_added, twitch_stream_id FROM jobs
 		 WHERE platform = 'twitch' AND status = ? AND park_reason = ?`,
 		StatusError, ParkReasonTwitchEndUnconfirmed)
 	if err != nil {
@@ -554,13 +603,13 @@ func (db *Database) TwitchEndUnconfirmedJobs() ([]*Job, error) {
 	var out []*Job
 	for rows.Next() {
 		var id string
-		var videoID, url, channelName, start sql.NullString
+		var videoID, url, channelName, start, streamID sql.NullString
 		var manual sql.NullInt64
-		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual); err != nil {
+		if err := rows.Scan(&id, &videoID, &url, &channelName, &start, &manual, &streamID); err != nil {
 			return nil, err
 		}
 		out = append(out, &Job{ID: id, VideoID: videoID.String, URL: url.String, ChannelName: channelName.String,
-			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, Platform: "twitch",
+			StreamStartTime: start.String, ManuallyAdded: manual.Int64 != 0, TwitchStreamID: streamID.String, Platform: "twitch",
 			Status: StatusError, ParkReason: ParkReasonTwitchEndUnconfirmed})
 	}
 	return out, rows.Err()

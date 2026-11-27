@@ -147,7 +147,7 @@ connection down it could not be delivered.
 | `crash_recovered` (Crash Recovered) | *Recovered From Crash* | Moombox crashed and was restarted automatically. Names the cause from the crash output where there is one, and the file that kept it. |
 | `channel_unhealthy` (Channel Unhealthy) | *Channel Not Responding* | A channel failed 20 checks in a row on every monitor watching it — it may be renamed, banned or misconfigured, and its streams are being missed. When the cause is the YouTube feed answering 404, the alert says so: that is common when YouTube is busy and usually clears by itself. |
 | `channel_healthy` (Channel Recovered) | *Channel Responding Again* | That channel answers again. |
-| `sidecar_down` (Sidecar Down) | *BotGuard Sidecar Down* | The BotGuard sidecar has been unhealthy for 60 seconds and could not be restarted. Until it returns, YouTube downloads lose PO tokens and some signature solving. |
+| `sidecar_down` (Sidecar Down) | *BotGuard Sidecar Down* | The BotGuard sidecar has been unhealthy for 60 seconds and could not be restarted. Until it returns, no PO tokens are minted, and signatures and `n` are solved in-process. |
 | `sidecar_restored` (Sidecar Restored) | *BotGuard Sidecar Restored* | The sidecar is healthy again. |
 | `captcha_required` (Captcha Required) | *YouTube Captcha Required*, *YouTube Captcha Cleared* | YouTube answered with a captcha. Sent once per spell, naming the first video refused; solve it in a browser signed in to the same YouTube account (or on the same network if you use no cookies). The *Cleared* message follows when YouTube answers normally again. |
 
@@ -284,9 +284,10 @@ the network is slow:
 - **Order.** Each target delivers in order, one message at a time, so a
   job's notifications never arrive out of order.
 - **Retries.** Each message gets up to 3 attempts, with a 15-second timeout
-  per attempt. Discord's rate limits are respected: Moombox waits when
-  Discord says to, for at most 60 seconds in all for one message. A
-  message Discord asks to hold back longer than that, or without saying
+  per attempt. Discord's rate limits are respected: Moombox waits up to
+  60 seconds when Discord asks it to, and up to 30 seconds before each
+  attempt while Discord has said the webhook's quota is used up. A message
+  Discord asks to hold back longer than 60 seconds, or without saying
   for how long, is dropped. A permanent refusal, such as a deleted
   webhook, is not retried.
 - **Backlog limit.** Each target holds at most 256 waiting messages. If it

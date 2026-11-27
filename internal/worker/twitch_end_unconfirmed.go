@@ -49,7 +49,10 @@ func TwitchJobLogin(job *database.Job) string {
 
 // TwitchBroadcastOver reports whether info — the channel's current state —
 // says the broadcast job was recording is over: the channel is offline (nil or
-// not live), or it is live with a DIFFERENT broadcast. A job whose ID carries
+// not live), or it is live with a DIFFERENT broadcast. A manually added row
+// that names the broadcast it recorded (twitch_stream_id, owner ruling RV-6)
+// is compared by that ID first: a re-initialised row records a later
+// broadcast than its job ID or its first start names. A job whose ID carries
 // the stream ID ("tw_<digits>", the monitor's rows and a Web add of a live
 // channel) is compared by stream ID; any other row by stream_start_time, the
 // worker's cross-restart broadcast identity (sameBroadcastStart). A row that
@@ -59,6 +62,9 @@ func TwitchJobLogin(job *database.Job) string {
 func TwitchBroadcastOver(job *database.Job, info *twitch.TwitchStreamInfo) bool {
 	if info == nil || !info.IsLive {
 		return true
+	}
+	if job.TwitchStreamID != "" {
+		return info.StreamID != "" && info.StreamID != job.TwitchStreamID
 	}
 	if id, ok := strings.CutPrefix(job.ID, "tw_"); ok && id != "" && strings.Trim(id, "0123456789") == "" {
 		return info.StreamID != "" && info.StreamID != id

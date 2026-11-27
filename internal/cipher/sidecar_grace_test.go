@@ -173,3 +173,56 @@ func TestBatchEndsTheOutageItFindsOver(t *testing.T) {
 		}
 	})
 }
+
+// An outage ends whenever the child is seen up, not only when a signature
+// sees it: the supervisor installing a rebuilt half (SetSidecar), or an n
+// answered while the child is up. A second outage after a stretch of n-only
+// traffic then gets its own grace, instead of finding the first outage's
+// clock spent and sending the signature to goja ahead of a child seconds
+// from coming back (r3-solve-order-3).
+//
+// Mutants: SetSidecar not marking the sidecar up (the "installed" case fails
+// at once); N not doing so (the "n" case fails at once).
+func TestAnOutageEndsWhenTheChildIsSeenUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seen func(c *compositeSolver, side *reportingSidecar)
+	}{
+		{"installed", func(c *compositeSolver, side *reportingSidecar) {
+			side.up.Store(true)
+			c.SetSidecar(side)
+		}},
+		{"n", func(c *compositeSolver, side *reportingSidecar) {
+			side.up.Store(true)
+			if _, err := c.N(context.Background(), specPlayer, "abc"); err != nil {
+				t.Errorf("N with the child up: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				side := &reportingSidecar{permutingSidecar: newPermutingSidecar()}
+				c := newCompositeSolverWith(side, &specGoja{specs: map[string][]int{}})
+				ctx := context.Background()
+
+				if _, err := c.Sig(ctx, specPlayer, sigA); !errors.Is(err, ErrSidecarUnavailable) {
+					t.Fatalf("Sig with the child down past the grace = %v, want ErrSidecarUnavailable", err)
+				}
+				tc.seen(c, side)
+				side.up.Store(false)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Errorf("panic: %v", r)
+						}
+					}()
+					time.Sleep(20 * time.Second)
+					side.up.Store(true)
+				}()
+				if _, err := c.Sig(ctx, specPlayer, sigB+"y"); err != nil {
+					t.Errorf("the second outage's signature = %v, want the child's answer within its own grace", err)
+				}
+			})
+		})
+	}
+}

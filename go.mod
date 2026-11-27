@@ -13,7 +13,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/coder/websocket v1.8.15
-	github.com/dop251/goja v0.0.0-20260915173639-b3fa02110dbd
+	github.com/dop251/goja v0.0.0-20261125210501-5e92a7e24d0c
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/mattn/go-isatty v0.0.24
 	github.com/mattn/go-runewidth v0.0.31
@@ -44,7 +44,7 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/dlclark/regexp2/v2 v2.8.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.13.2 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/google/pprof v0.0.0-20261016150608-1facf8f91b50 // indirect

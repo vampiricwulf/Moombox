@@ -1162,15 +1162,15 @@ export class MoomboxApp {
     if (!checkPending && twActive && this.autoCookieReloginRequired?.twitch)
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
     // The BotGuard sidecar is an ALERT, not a status: while it is down,
-    // a signature-ciphered format is resolved only where a learned sig spec
-    // answers it (goja is asked last and fails on current players) and a PO
-    // token mint fails, once the restart grace is spent (no goja fallback). It carries
+    // a signature-ciphered format is resolved by a learned sig spec or, last,
+    // the goja fallback, and a PO token mint fails, once the restart grace is
+    // spent (no goja fallback for a token). It carries
     // no action — the supervisor is already retrying and there is nothing for
     // the operator to click.
     if (this.sidecarHealthy === false)
       warningItems.push({
         label: "PO tokens: sidecar down",
-        title: "The BotGuard sidecar is not running — signature-ciphered formats and PO tokens are unavailable. Moombox is retrying.",
+        title: "The BotGuard sidecar is not running — PO tokens are unavailable, and signatures are left to the in-process goja solver. Moombox is retrying.",
       });
 
     if (warningsEl) {

@@ -20,9 +20,10 @@ name: CI
 #          download, no sidecar build, no FFmpeg.
 #   js     bgutil-sidecar's `npm test` and the frontend suite (`node --test`
 #          in web/tests after its own `npm ci`, so jsdom is present). No Go.
-#          It and the windows shard that runs internal/bgutils/sidecar are
-#          the two jobs that download the real YouTube player the cipher
-#          tests read (fetch-cipher-fixture.sh); everywhere else they skip.
+#          It and the windows shards that run internal/bgutils/sidecar or
+#          internal/cipher are the jobs that download the real YouTube
+#          player the cipher tests read (fetch-cipher-fixture.sh);
+#          everywhere else they skip.
 #   test   the Go suite, `go test -count=1`, in three flavours, each split
 #          by package into shards that run side by side:
 #            linux    go test on ubuntu
@@ -336,7 +337,8 @@ jobs:
         # test's skip into a failure is set only once the download and its
         # pinned checksum pass: a failed download is a warning and the test
         # skips, so a YouTube outage or a retired player URL never turns the
-        # run red. The Go side runs in one test shard (see "Fetch the
+        # run red. The Go side runs in the windows shards that run
+        # internal/bgutils/sidecar or internal/cipher (see "Fetch the
         # real-player cipher fixture" there).
         timeout-minutes: 3
         continue-on-error: true
@@ -533,11 +535,12 @@ jobs:
       - name: Fetch the real-player cipher fixture
         # The Go tests that send a real child a real YouTube player
         # (internal/bgutils/sidecar: the "solve cipher" round trip and the
-        # prepared-player store) read internal/cipher/testdata/
-        # player_cb017549.js, which is YouTube's code and gitignored. They
-        # run with it in one job only: the windows shard whose packages
-        # include internal/bgutils/sidecar, as test-shard.sh says, so moving
-        # the package keeps this step with it. It runs after the embed
+        # prepared-player store) and the gate of the goja fallback's port of
+        # ejs (internal/cipher: TestEjsPortVectors) read
+        # internal/cipher/testdata/player_cb017549.js, which is YouTube's
+        # code and gitignored. They run with it only in the windows shards
+        # whose packages include either package, as test-shard.sh says, so
+        # moving a package keeps this step with it. It runs after the embed
         # blobs are in place because test-shard.sh lists a rest shard with
         # go list ./..., which fails without them. The switch that turns
         # their skip into a failure is set only once the download and its
@@ -552,8 +555,8 @@ jobs:
             echo "::warning title=Cipher fixture::could not list this shard's packages; the real-player cipher tests skip in this run"
             exit 0
           }
-          if ! grep -q '/internal/bgutils/sidecar$' <<<"$pkgs"; then
-            echo "this shard does not run internal/bgutils/sidecar"
+          if ! grep -qE '/internal/(bgutils/sidecar|cipher)$' <<<"$pkgs"; then
+            echo "this shard runs neither internal/bgutils/sidecar nor internal/cipher"
             exit 0
           fi
           if bash .github/scripts/fetch-cipher-fixture.sh; then

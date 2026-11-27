@@ -869,16 +869,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 7b. BotGuard sidecar (Node + JSDOM + bgutils-js subprocess)
 	// =========================================================================
-	// The sidecar produces real PO tokens that pass BotGuard's timing
-	// fingerprint, which the goja-only path can't (see "Why a Sidecar" in
-	// docs/spec/platform-services.md). On any failure we log a warning and
-	// PotProvider falls through to its goja path, which cannot mint a PO
-	// token at all: BotGuard answers the in-process run with the websafe
-	// fallback only, and webpo_client rejects that as a token. Downloads
-	// that need no PO token keep working; PO-token-gated formats, and every
-	// signature-ciphered format (the sidecar's or a learned sig spec's to answer;
-	// goja is asked last and fails on current players), wait for the
-	// supervisor below to bring the sidecar back.
+	// The sidecar produces real PO tokens, which the goja-only path can't:
+	// BotGuard's program aborts under goja's incomplete DOM stand-in and
+	// answers with the websafe fallback only, which webpo_client rejects as
+	// a token (see "Why a Sidecar" in docs/spec/platform-services.md). On a
+	// failure we log a warning; a configured sidecar that is down is not
+	// replaced by the goja path, so PO-token-gated formats wait for the
+	// supervisor below to bring the sidecar back. Downloads that need no PO
+	// token keep working, and signatures go to a learned sig spec and then
+	// to goja's port of ejs, asked last.
 	//
 	// First launch extracts the embedded payload (roughly 115-150 MB,
 	// depending on platform) to %LOCALAPPDATA%/Moombox/sidecar
@@ -934,34 +933,33 @@ func (s *runState) initServices(logLevelOverride string) error {
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()
 		if startErr != nil {
-			log.Warn("BotGuard sidecar failed to start; no PO tokens or signature solving until the supervisor gets it up",
+			log.Warn("BotGuard sidecar failed to start; no PO tokens will be minted until the supervisor gets it up (signatures and n are still solved, by the learned sig specs and the in-process goja solver)",
 				slog.String("error", startErr.Error()))
 			sidecar.PublishHealth(sidecar.Health{Healthy: false, Reason: startErr.Error(), Since: time.Now()})
 			// A first start that never succeeded cannot reach markUnhealthy
 			// (the CAS needs healthy==true), so the supervisor is told by
-			// hand. Same outcome for the operator either way: PO tokens and
-			// sig are unavailable until a child comes up.
+			// hand. Same outcome for the operator either way: no PO tokens
+			// until a child comes up; signatures are still solved, from the
+			// learned sig specs and goja last, and n by goja.
 			sup.Notify("initial start failed: " + startErr.Error())
 		} else {
 			sidecar.PublishHealth(sidecar.Health{Healthy: true, Since: time.Now()})
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
 	} else {
-		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted and signature-ciphered formats are unavailable")
+		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted, and signatures are left to the in-process goja solver")
 	}
 
 	// =========================================================================
 	// 8. Cipher solver
 	// =========================================================================
-	// gojaSolver provides in-process n decryption (and historically sig,
-	// though sig is broken on current YouTube players — see
-	// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
-	// (removed after implementation; read it from git history, e.g.
-	// `git show 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)).
+	// gojaSolver is the in-process sig and n solver, a Go port of ejs run on
+	// goja (owner ruling RV-12), asked last.
 	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
 	// only constructed when the sidecar is healthy. compositeSolver
-	// applies the routing policy (sig: sidecar, then the sig specs; n: sidecar,
-	// then goja; RoutedResolveURL asks goja last for a signature too). PlayerAPI continues to take *GojaResolver directly
+	// applies the routing policy and is the one place that decides it (sig:
+	// sidecar, then the sig specs, then goja; n: sidecar, then goja; owner
+	// rulings RV-11 and RV-12). PlayerAPI continues to take *GojaResolver directly
 	// so its existing GetSolvers/GetSts call sites work unchanged; the
 	// composite is constructed for downstream callers that take the
 	// cipher.Solver interface (currently a placeholder until those
@@ -985,14 +983,17 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Wire the goja resolver for GetSts (signature timestamp lookup). The
 	// composite Solver does sig/n decryption on the worker side
-	// (RoutedCipherSolver below): sig flows through the sidecar's V8 ejs, and
-	// n falls back to goja if the sidecar is unavailable.
+	// (RoutedCipherSolver below): sig and n flow through the sidecar's V8 ejs,
+	// and fall back to goja, last, if the sidecar cannot answer.
 	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
-	// While the sidecar is disabled or down no signature can be solved, and
-	// an extraction ranks the JS-less client (visionos) first, as yt-dlp
-	// asks _DEFAULT_JSLESS_CLIENTS with no JS runtime (audit G10, owner
-	// decision 4). The composite's own health accessor answers it.
-	ytService.PlayerAPI.SetJSChallengeSolvable(cipherSolver.SidecarReady)
+	// While the sidecar is disabled or down the goja port of ejs (and the
+	// learned sig specs) still solve the challenges, so the ranking stays
+	// the healthy one (owner ruling RV-16). Only when no solver can answer
+	// the player — the sidecar down and goja refusing that player — does an
+	// extraction rank the JS-less client (visionos) first, as yt-dlp asks
+	// _DEFAULT_JSLESS_CLIENTS with no JS runtime (audit G10, owner decision
+	// 4). The composite's one predicate answers it.
+	ytService.PlayerAPI.SetJSChallengeSolvable(cipherSolver.ChallengesSolvable)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)

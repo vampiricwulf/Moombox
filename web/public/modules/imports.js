@@ -230,6 +230,10 @@ export class ImportController {
     // With the cap known this path never awaits, so the upload starts in
     // the click's own turn.
     if (this._maxBytes() === null) {
+      // The file this click submitted. One chosen while the status read
+      // runs (dropped, or picked) was never submitted: it stays selected
+      // for its own Import click, which then finds the cap known.
+      const file = this.importFile;
       this._capChecking = true;
       try {
         await this.app.loadStatus?.();
@@ -238,8 +242,14 @@ export class ImportController {
       } finally {
         this._capChecking = false;
       }
-      if (!this.importFile || this.importUploading) return;
-      if (this._refuseOversize(this.importFile)) {
+      if (this.importUploading) return;
+      if (this.importFile !== file) {
+        // setImportFile took the new file unchecked, the cap still unknown
+        // then: check it now, so its own click never sends one over the cap.
+        if (this.importFile && this._refuseOversize(this.importFile)) this.clearImportFile();
+        return;
+      }
+      if (this._refuseOversize(file)) {
         this.clearImportFile();
         return;
       }

@@ -416,9 +416,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		"strategy", strategy.Kind())
 	if videoInfo.JSLess {
 		// yt-dlp's own warning when it extracts without a JS runtime
-		// (_video.py:2994-3000): the extraction ranked visionos first, and
+		// (_video.py:2994-3000); here no solver could answer the player
+		// (owner ruling RV-16): the extraction ranked visionos first, and
 		// the renditions only a JS-solving client serves are not there.
-		jobCtx.Logger.Warn("[Cipher] the cipher sidecar is disabled or not running — YouTube formats were ranked for a download without player JS (visionos first), and some formats may be missing",
+		jobCtx.Logger.Warn("[Cipher] no solver can answer this player's JS challenges (the cipher sidecar is disabled or not running, and the goja fallback refuses the player or there is no player to solve with) — YouTube formats were ranked for a download without player JS (visionos first), and some formats may be missing",
 			"jobID", jobCtx.Job.ID)
 	}
 	deps := &StrategyDeps{

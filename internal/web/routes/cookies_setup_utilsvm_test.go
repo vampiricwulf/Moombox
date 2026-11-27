@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dop251/goja"
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 )
 
 // This file replaces source-text assertions with EXECUTION.
@@ -50,7 +51,7 @@ func utilsVM(t *testing.T) *goja.Runtime {
 	src := readEmbeddedModule(t, "public/modules/utils.js")
 	src = strings.ReplaceAll("\n"+src, "\nexport ", "\n")
 
-	vm := goja.New()
+	vm := mbgoja.NewPlainRuntime()
 	if _, err := vm.RunString(src); err != nil {
 		t.Fatalf("utils.js does not evaluate — the browser would fail the same way: %v", err)
 	}

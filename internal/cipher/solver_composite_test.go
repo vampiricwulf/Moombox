@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -69,40 +70,51 @@ func TestCompositeSig_RoutesToSidecar(t *testing.T) {
 	}
 }
 
-func TestCompositeSig_DoesNotFallBackToGoja(t *testing.T) {
-	side := &staticSolver{sigErr: errors.New("sidecar down")}
-	goja := &staticSolver{sig: map[string]string{"X": "gojaX"}}
-	c := newCompositeSolverWith(side, goja)
+// TestCompositeSigAsksGojaLast (owner ruling RV-12): a signature the
+// sidecar fails, with no spec for it, is goja's to answer. When goja fails
+// too, the sidecar's failure stays the one errors.Is sees, and goja's rides
+// along in the text.
+//
+// Mutants: Sig not asking goja (the first row fails); the error wrapping
+// goja's failure instead (errors.Is fails).
+func TestCompositeSigAsksGojaLast(t *testing.T) {
+	side := &staticSolver{sigErr: fmt.Errorf("%w: ejs solve sig: no solutions", ErrPlayerJSStale)}
+	c := newCompositeSolverWith(side, &staticSolver{sig: map[string]string{"X": "gojaX"}})
+	if got, err := c.Sig(context.Background(), "P1", "X"); err != nil || got != "gojaX" {
+		t.Errorf("sidecar failed: Sig = %q, %v; want goja's answer", got, err)
+	}
 
-	if _, err := c.Sig(context.Background(), "P1", "X"); err == nil {
-		t.Fatalf("expected error when sidecar fails sig; got nil")
+	c = newCompositeSolverWith(side, &staticSolver{sigErr: errors.New("goja: no solutions")})
+	_, err := c.Sig(context.Background(), "P1", "X")
+	if !errors.Is(err, ErrPlayerJSStale) || !strings.Contains(err.Error(), "goja fallback: goja: no solutions") {
+		t.Errorf("both failed: err = %v; want ErrPlayerJSStale with goja's failure in the text", err)
 	}
 }
 
 func TestCompositeN_FallsBackToGojaOnSidecarError(t *testing.T) {
 	side := &staticSolver{nErr: errors.New("sidecar down")}
-	goja := &staticSolver{n: map[string]string{"Y": "gojaY"}}
+	goja := &staticSolver{n: map[string]string{"Y": "Y-by-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
 		t.Fatalf("N: %v", err)
 	}
-	if got != "gojaY" {
+	if got != "Y-by-goja" {
 		t.Errorf("N: got %q, want gojaY (goja fallback)", got)
 	}
 }
 
 func TestCompositeN_PrefersSidecar(t *testing.T) {
-	side := &staticSolver{n: map[string]string{"Y": "sideY"}}
-	goja := &staticSolver{n: map[string]string{"Y": "gojaY"}}
+	side := &staticSolver{n: map[string]string{"Y": "Y-by-sidecar"}}
+	goja := &staticSolver{n: map[string]string{"Y": "Y-by-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
 		t.Fatalf("N: %v", err)
 	}
-	if got != "sideY" {
+	if got != "Y-by-sidecar" {
 		t.Errorf("N: got %q, want sideY (sidecar primary)", got)
 	}
 }
@@ -110,18 +122,18 @@ func TestCompositeN_PrefersSidecar(t *testing.T) {
 func TestCompositeWithoutSidecar_GojaOnly(t *testing.T) {
 	goja := &staticSolver{
 		sig: map[string]string{"X": "gojaX"},
-		n:   map[string]string{"Y": "gojaY"},
+		n:   map[string]string{"Y": "Y-by-goja"},
 	}
 	c := newCompositeSolverWith(nil, goja)
 
-	if _, err := c.Sig(context.Background(), "P1", "X"); err == nil {
-		t.Errorf("expected sig to fail when sidecar absent; got nil")
+	if got, err := c.Sig(context.Background(), "P1", "X"); err != nil || got != "gojaX" {
+		t.Errorf("Sig with no sidecar = %q, %v; want goja's answer", got, err)
 	}
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
 		t.Fatalf("N goja-only: %v", err)
 	}
-	if got != "gojaY" {
+	if got != "Y-by-goja" {
 		t.Errorf("N goja-only: got %q, want gojaY", got)
 	}
 }
@@ -145,14 +157,14 @@ func TestCompositeBatch_SigOnlyRoutesToSidecar(t *testing.T) {
 
 func TestCompositeBatch_NOnlyFallsBackToGojaOnSidecarError(t *testing.T) {
 	side := &staticSolver{nErr: errors.New("sidecar n down")}
-	goja := &staticSolver{n: map[string]string{"A": "gojaA", "B": "gojaB"}}
+	goja := &staticSolver{n: map[string]string{"A": "A-goja", "B": "B-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	_, ns, err := c.Batch(context.Background(), "P1", nil, []string{"A", "B"})
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	if ns["A"] != "gojaA" || ns["B"] != "gojaB" {
+	if ns["A"] != "A-goja" || ns["B"] != "B-goja" {
 		t.Errorf("expected goja fallback values; got %v", ns)
 	}
 }
@@ -160,7 +172,7 @@ func TestCompositeBatch_NOnlyFallsBackToGojaOnSidecarError(t *testing.T) {
 func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
 	side := &staticSolver{
 		sig: map[string]string{"X": "sideX"},
-		n:   map[string]string{"A": "sideA"},
+		n:   map[string]string{"A": "side-n"},
 	}
 	goja := &staticSolver{}
 	c := newCompositeSolverWith(side, goja)
@@ -172,7 +184,7 @@ func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
 	if sigs["X"] != "sideX" {
 		t.Errorf("expected sidecar sig; got %v", sigs)
 	}
-	if ns["A"] != "sideA" {
+	if ns["A"] != "side-n" {
 		t.Errorf("expected sidecar n; got %v", ns)
 	}
 }
@@ -245,7 +257,7 @@ func TestCompositeBatch_MixedSidecarFailsEntireBatch(t *testing.T) {
 		nErr: errors.New("sidecar n down"),
 	}
 	goja := &staticSolver{
-		n: map[string]string{"A": "gojaA", "B": "gojaB"},
+		n: map[string]string{"A": "A-goja", "B": "B-goja"},
 	}
 	c := newCompositeSolverWith(side, goja)
 
@@ -261,7 +273,7 @@ func TestCompositeBatch_MixedSinglesidecarRoundTrip(t *testing.T) {
 	side := &countingBatchSolver{
 		inner: &staticSolver{
 			sig: map[string]string{"X": "sideX"},
-			n:   map[string]string{"A": "sideA"},
+			n:   map[string]string{"A": "side-n"},
 		},
 		onBatch: func() { callCount++ },
 	}
@@ -294,7 +306,8 @@ func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []st
 }
 
 // TestCompositeSetSidecarSwapsTheSigPath pins the seam the BotGuard sidecar
-// supervisor needs. sig is sidecar-ONLY (the routing policy), so a process
+// supervisor needs. Goja is asked for a signature only last (the routing
+// policy; here it cannot answer one), so a process
 // whose sidecar died and came back must be able to install the REBUILT
 // sidecar solver — the old one's per-player "already sent" map describes the
 // dead child's memory. Before this, the sidecar half was captured at
@@ -305,7 +318,7 @@ func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []st
 //   - Sig reading a value snapshotted in the ctor → the first Sig still errors
 //   - SetSidecar(nil) not clearing the slot       → the last Sig returns "S"
 func TestCompositeSetSidecarSwapsTheSigPath(t *testing.T) {
-	goja := &staticSolver{sig: map[string]string{"x": "goja-should-never-serve-sig"}}
+	goja := &staticSolver{sigErr: errors.New("goja: no solutions")}
 	c := NewCompositeSolver(nil, goja)
 
 	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
@@ -321,5 +334,26 @@ func TestCompositeSetSidecarSwapsTheSigPath(t *testing.T) {
 	c.SetSidecar(nil)
 	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {
 		t.Fatalf("Sig after SetSidecar(nil): err = %v, want ErrSidecarUnavailable", err)
+	}
+}
+
+// TestCompositeBatchChecksNAnswers: Batch holds an n answer to checkNResult
+// as N does. The sidecar's exception sentinel (an answer ending with its own
+// challenge) sends the batch's n entries to goja while its signatures stand,
+// and goja's empty answer fails the batch rather than reaching a URL.
+//
+// Mutants: the sidecar's answers returned unchecked (row one gets the
+// sentinel); goja's taken unchecked (row two gets no error).
+func TestCompositeBatchChecksNAnswers(t *testing.T) {
+	side := &staticSolver{sig: map[string]string{"X": "sideX"}, n: map[string]string{"nchal": "boom-nchal"}}
+	c := newCompositeSolverWith(side, &staticSolver{n: map[string]string{"nchal": "solved"}})
+	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"nchal"})
+	if err != nil || sigs["X"] != "sideX" || ns["nchal"] != "solved" {
+		t.Errorf("sidecar n sentinel: Batch = %v, %v, %v; want the sidecar's signature and goja's n", sigs, ns, err)
+	}
+
+	c = newCompositeSolverWith(side, &staticSolver{n: map[string]string{"nchal": ""}})
+	if _, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"nchal"}); err == nil {
+		t.Errorf("goja's empty n: Batch = %v, nil; want an error", ns)
 	}
 }

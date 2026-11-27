@@ -117,9 +117,10 @@ func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
 		monitors bool // the row is not a manually added one
 	}{
 		{"cancelled, not yet deleted", "tw_manual_ch_1", database.StatusCancelled, "900", true, false},
-		// Rows manualJobClaims never reads: a `moombox add` row (the bare
-		// login) and a broadcast add re-initialised onto a later broadcast.
-		{"a moombox add row recording it", "ch", database.StatusDownloading, "900", true, false},
+		// Rows in a status manualJobClaims takes nothing from: a `moombox
+		// add` row (the bare login) and a broadcast add re-initialised onto
+		// a later broadcast, each muxing it.
+		{"a moombox add row muxing it", "ch", database.StatusMuxing, "900", true, false},
 		{"a re-initialised broadcast add muxing it", "tw_800", database.StatusMuxing, "900", true, false},
 		{"errored", "tw_manual_ch_1", database.StatusError, "900", false, false},
 		{"finished", "tw_manual_ch_1", database.StatusFinished, "900", false, false},
@@ -154,6 +155,68 @@ func TestTwitch_ManualJobNamingABroadcastHoldsIt(t *testing.T) {
 			}
 			if !tc.held && !slices.Equal(found, []string{"900"}) {
 				t.Errorf("streams found = %v, want [900]: a %s row naming %s holds nothing", found, tc.status, tc.streamID)
+			}
+		})
+	}
+}
+
+// TestTwitch_EveryWaitingManualRowClaimsTheChannel is owner ruling RV-17:
+// the live monitor stands aside for a channel that any waiting manually
+// added row is watching, as it did for a `tw_manual_` row alone. A
+// `moombox add <login>` row (the bare login) and a broadcast add
+// re-initialised to wait for the next broadcast (`tw_<old stream>`) name no
+// stream for the broadcast they will take, so the monitor created a second
+// job beside them and the broadcast was archived twice. A pending manual VOD
+// or clip waits on no channel and claims nothing, nor does a waiting row of
+// another channel.
+//
+// Mutants: ManualTwitchJobs reading `tw_manual_` IDs only (the bare-login
+// and re-initialised cases find 901); the login read as a URL's first path
+// segment (the clip on the channel claims it); the login match dropped (the
+// other channel's row claims this one).
+func TestTwitch_EveryWaitingManualRowClaimsTheChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name, jobID, url string
+		claims           bool
+	}{
+		{"a dashboard add", "tw_manual_ch_1", "https://www.twitch.tv/ch", true},
+		{"a moombox add row", "ch", "https://www.twitch.tv/ch", true},
+		{"a re-initialised broadcast add", "tw_800", "https://www.twitch.tv/ch", true},
+		{"a pending manual VOD", "tw_v123", "https://www.twitch.tv/videos/123", false},
+		{"a pending manual clip", "tw_c_slug", "https://clips.twitch.tv/slug", false},
+		{"a pending manual clip on the channel", "tw_c_slug2", "https://www.twitch.tv/ch/clip/slug2", false},
+		{"another channel's moombox add row", "other", "https://www.twitch.tv/other", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTestTwitchMonitor(t, func(ctx context.Context, logins []string) ([]*twitch.TwitchStreamInfo, []error, error) {
+				infos := make([]*twitch.TwitchStreamInfo, len(logins))
+				for i, login := range logins {
+					infos[i] = &twitch.TwitchStreamInfo{StreamID: "901", ChannelLogin: login, IsLive: true,
+						Title: "live", StartedAt: "2026-11-26T10:00:00Z"}
+				}
+				return infos, make([]error, len(logins)), nil
+			}, config.ChannelConfig{ID: "ch", Name: "ch", Platform: "twitch"})
+			if _, err := tm.db.AddJob(&database.Job{ID: tc.jobID, VideoID: tc.jobID, URL: tc.url,
+				Platform: "twitch", Status: database.StatusUpcoming, ManuallyAdded: true}); err != nil {
+				t.Fatal(err)
+			}
+			// What the re-initialised row still names: the broadcast it
+			// recorded before.
+			if tc.jobID == "tw_800" {
+				tm.db.UpdateJobFields(tc.jobID, map[string]any{"twitch_stream_id": "800"})
+			}
+
+			var found []string
+			tm.OnStreamFound = func(info *twitch.TwitchStreamInfo, _ *config.ChannelConfig) {
+				found = append(found, info.StreamID)
+			}
+			tm.doCheck(context.Background())
+
+			if tc.claims && len(found) != 0 {
+				t.Errorf("streams found = %v, want none: the waiting %s claims the channel's broadcast", found, tc.name)
+			}
+			if !tc.claims && !slices.Equal(found, []string{"901"}) {
+				t.Errorf("streams found = %v, want [901]: %s claims nothing", found, tc.name)
 			}
 		})
 	}

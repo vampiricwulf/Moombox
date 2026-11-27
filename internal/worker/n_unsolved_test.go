@@ -285,14 +285,12 @@ func TestDashInitializationURLGetsItsNSolved(t *testing.T) {
 // back); cipher's sentinel check dropped (the sentinel row hands back the
 // sentinel URL); the old function restored (the sentinel row again).
 func TestResolveFreshDashURLHandsBackOnlyASolvedURL(t *testing.T) {
-	// A goja fallback that cannot help, so every row is decided by the routed
-	// answer: its player fetch is answered 404 (loopback, never proxied). A
-	// 404 is a definite answer cipher does not retry. A closed port is a
-	// transport failure, which a cold player fetch retries twice with 2 s
-	// between attempts, and that cost each failing row 4 s.
-	var playerGets atomic.Int32
+	// A goja resolver that could not help if it were asked, so every row is
+	// decided by the routed answer. With a routed solver it is not asked at
+	// all: goja is the composite's to ask, last (owner rulings RV-11 and
+	// RV-12). Its player fetch is answered 404 (loopback, never proxied), a
+	// definite answer cipher does not retry, should that ever change.
 	playerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		playerGets.Add(1)
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(playerSrv.Close)
@@ -326,11 +324,6 @@ func TestResolveFreshDashURLHandsBackOnlyASolvedURL(t *testing.T) {
 				t.Errorf("the success line logged = %v, want %v (URL %q)", said, tc.want != "", got)
 			}
 		})
-	}
-	// The two rows the routed solver did not solve fell back to goja, and its
-	// fetch reached the server: the fallback was tried, and could not help.
-	if playerGets.Load() == 0 {
-		t.Error("the goja fallback never asked for the player; the failing rows did not reach it")
 	}
 }
 

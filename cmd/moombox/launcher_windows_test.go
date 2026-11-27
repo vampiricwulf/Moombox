@@ -577,3 +577,66 @@ func TestASecondUpdatesOlderLauncherImageIsNeverTheArtifact(t *testing.T) {
 		t.Errorf("the older ~ survived the start's sweep (stat: %v)", err)
 	}
 }
+
+// RV-10 when the start's rename of the ~ back to .old fails: something holds
+// the ~ without delete sharing (an antivirus scan of the freshly unmapped
+// image). The start warned that the previous binary stays there, yet nothing
+// recorded the ~ as the artifact, so a stop, a quit or an exit 3 before the
+// milestone scheduled its deletion and the only copy of the previous binary
+// went. The launcher now keeps it on its way out while the breadcrumb names
+// that release, and the next start renames it back and arms with it; once the
+// release has reached its milestone the ~ is swept as before.
+//
+// Mutants: cleanupOrphans reporting false on the failed rename (the stop
+// schedules the delete); keepsLauncherImage not reading keptImageTag (the
+// same); keptImageTag kept past the breadcrumb (no delete after the
+// milestone).
+func TestALauncherImageThatCannotBeRenamedBackIsKept(t *testing.T) {
+	exePath := filepath.Join(t.TempDir(), "moombox.exe")
+	writeReleases(t, map[string]string{
+		exePath:                                "N+1",
+		exePath + updater.LauncherImageSuffix:  "N",
+		exePath + updater.PendingVersionSuffix: "v2.0.1",
+	})
+	warnings := captureLauncherWarnings(t)
+	deletes := recordLauncherImageDeletes(t)
+
+	// os.Open shares read and write but not delete, so the rename fails.
+	holder, err := os.Open(exePath + updater.LauncherImageSuffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := cleanupOrphans(exePath, "2.0.1")
+	holder.Close()
+	if !kept {
+		t.Fatalf("cleanupOrphans reported the ~ not kept (warnings %q)", *warnings)
+	}
+	var boot postUpdateBoot
+	boot.keptImageTag = "v2.0.1" // what launchAndSupervise records from it
+	if boot.armInterruptedUpdate(exePath, "2.0.1") {
+		t.Fatal("the start armed without a .old")
+	}
+	if action, _ := boot.judge(false, 1, 5*time.Second, true, 0); action != childPropagate {
+		t.Fatalf("a stop: action = %v, want it propagated", action)
+	}
+	boot.sweepLauncherImage(exePath)
+	if *deletes != 0 {
+		t.Fatal("the launcher scheduled the deletion of the ~, the only copy of the previous binary")
+	}
+
+	// The next start, with nothing holding the ~ any more.
+	if cleanupOrphans(exePath, "2.0.1") {
+		t.Error("the next start reported the ~ kept, want it renamed back")
+	}
+	var next postUpdateBoot
+	if !next.armInterruptedUpdate(exePath, "2.0.1") || !bytesEqualFile(t, exePath+updater.OldSuffix, "N") {
+		t.Error("the next start did not arm with the previous binary at .old")
+	}
+
+	// Past the milestone the record keeps nothing.
+	resolveLandedUpdateBreadcrumb(exePath, "2.0.1", &nopLogger{})
+	boot.sweepLauncherImage(exePath)
+	if *deletes != 1 {
+		t.Errorf("deletes scheduled after the milestone = %d, want 1", *deletes)
+	}
+}

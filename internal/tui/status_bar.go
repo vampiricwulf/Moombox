@@ -144,9 +144,8 @@ type StatusBarModel struct {
 	offline bool
 	// sidecarDown indicates that the BotGuard sidecar is not running. An
 	// alert, not a status: while it is down, a signature-ciphered format is
-	// resolved only where a learned sig spec answers it (the composite
-	// solver asks nothing else; RoutedResolveURL asks goja last, which
-	// fails on current players) and a PO token mint fails, once the restart
+	// resolved by a learned sig spec or, last, the goja fallback (the
+	// composite solver's order) and a PO token mint fails, once the restart
 	// grace is spent.
 	sidecarDown bool
 	// counts is the job tally, recomputed once per SetJobs instead of once

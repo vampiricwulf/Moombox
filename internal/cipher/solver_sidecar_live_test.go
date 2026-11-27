@@ -74,19 +74,16 @@ func TestSidecarSolverLive(t *testing.T) {
 	t.Logf("n: %q -> %q", nIn, gotN)
 }
 
-// TestSidecarSolverGojaParity proves byte-for-byte equality between
-// the goja and EJS-via-sidecar outputs across every player fixture
-// goja can statically handle. The parity claim only applies on
-// fixtures where goja's AST/regex extraction succeeds (sig is
-// extractable + n is extractable); on fixtures where goja can't
-// reach a sig algorithm (e.g. the cb017549-family), we log and
-// skip the comparison since there's no goja output to compare
-// against.
+// TestSidecarSolverGojaParity proves byte-for-byte equality between the
+// goja fallback (the Go port of ejs, preprocessPlayer, run by getFromPrepared)
+// and ejs in the sidecar, on every player fixture in testdata/, for n and for
+// signatures: a plain one, one holding '%' (which the player only takes
+// percent-escaped, as ejs hands it over), and syntheticSigChallenge, the
+// input sig-spec learning sends (owner ruling RV-12). The port is ejs, so a
+// fixture it cannot prepare or solve fails the test; it used to be skipped.
 //
-// One subtest per fixture so a single regression on one player
-// doesn't mask the others.
-//
-// SKIPS unless MOOMBOX_LIVE_CIPHER_TEST=1 because of sidecar
+// One subtest per fixture so a single regression on one player doesn't mask
+// the others. SKIPS unless MOOMBOX_LIVE_CIPHER_TEST=1 because of sidecar
 // startup cost.
 func TestSidecarSolverGojaParity(t *testing.T) {
 	if os.Getenv("MOOMBOX_LIVE_CIPHER_TEST") != "1" {
@@ -120,7 +117,11 @@ func TestSidecarSolverGojaParity(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Stop() })
 
-	sigIn := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	sigIns := []string{
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+		"AOq0QJ8wRAIgX%2Fu7DlT%3D=Zk-HmAf%9cQ_ebd%dRsFtYvQyAiB0eIyc8E9zVbn2xL%0",
+		syntheticSigChallenge(104),
+	}
 	nIn := "abcdefghij_12345"
 
 	for _, fixturePath := range fixtures {
@@ -137,51 +138,42 @@ func TestSidecarSolverGojaParity(t *testing.T) {
 			}
 			playerJS := string(data)
 
-			// --- Goja path ---
-			prepared, err := preprocessPlayerFull(playerJS)
+			prepared, _, err := preprocessPlayer(playerJS)
 			if err != nil {
-				t.Skipf("goja preprocessPlayerFull failed (skip parity for this fixture): %v", err)
+				t.Fatalf("goja preprocessPlayer: %v", err)
 			}
 			gojaSolvers, err := getFromPrepared(prepared)
 			if err != nil {
-				t.Skipf("goja getFromPrepared failed: %v", err)
+				t.Fatalf("goja getFromPrepared: %v", err)
 			}
-			if gojaSolvers.Sig == nil || gojaSolvers.N == nil {
-				t.Skipf("goja could not extract sig or n for this player (HasSig=%v HasN=%v); parity claim doesn't apply",
-					gojaSolvers.Sig != nil, gojaSolvers.N != nil)
-			}
-
-			gojaSig, err := gojaSolvers.Sig(sigIn)
-			if err != nil {
-				t.Skipf("goja sig solve errored: %v", err)
-			}
-			gojaN, err := gojaSolvers.N(nIn)
-			if err != nil {
-				t.Skipf("goja n solve errored: %v", err)
-			}
-			t.Logf("goja sig: %q -> %q", sigIn, gojaSig)
-			t.Logf("goja n:   %q -> %q", nIn, gojaN)
-
-			// --- Sidecar (EJS) path ---
 			src := &fixedPlayerSource{playerID: playerID, js: playerJS}
 			solver := NewSidecarSolver(s, src)
 
-			ejsSig, err := solver.Sig(ctx, playerID, sigIn)
+			gojaN, err := gojaSolvers.DecryptN(nIn)
 			if err != nil {
-				t.Fatalf("ejs sig solve: %v", err)
+				t.Fatalf("goja n: %v", err)
 			}
 			ejsN, err := solver.N(ctx, playerID, nIn)
 			if err != nil {
-				t.Fatalf("ejs n solve: %v", err)
-			}
-			t.Logf("ejs  sig: %q -> %q", sigIn, ejsSig)
-			t.Logf("ejs  n:   %q -> %q", nIn, ejsN)
-
-			if ejsSig != gojaSig {
-				t.Errorf("sig parity mismatch on %s:\n  goja: %q\n  ejs:  %q", playerID, gojaSig, ejsSig)
+				t.Fatalf("ejs n: %v", err)
 			}
 			if ejsN != gojaN {
 				t.Errorf("n parity mismatch on %s:\n  goja: %q\n  ejs:  %q", playerID, gojaN, ejsN)
+			}
+			for _, sigIn := range sigIns {
+				gojaSig, err := gojaSolvers.DecryptSig(sigIn)
+				if err != nil {
+					t.Errorf("goja sig(%q): %v", sigIn, err)
+					continue
+				}
+				ejsSig, err := solver.Sig(ctx, playerID, sigIn)
+				if err != nil {
+					t.Errorf("ejs sig(%q): %v", sigIn, err)
+					continue
+				}
+				if ejsSig != gojaSig {
+					t.Errorf("sig parity mismatch on %s for %q:\n  goja: %q\n  ejs:  %q", playerID, sigIn, gojaSig, ejsSig)
+				}
 			}
 		})
 	}

@@ -2021,7 +2021,9 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		// Stash the monitor's fresh streamInfo for the next job to ask about
 		// this CHANNEL — this row's processTwitchLive, or a manually added job
-		// already parked in waitForTwitchLive on the same channel — so it
+		// that started waiting on the same channel after this poll's claim
+		// check (one already waiting stands the monitor aside, manualJobClaims,
+		// owner ruling RV-17) — so it
 		// doesn't immediately re-query Twitch GQL (which has been observed to
 		// return Stream=nil for ~1s after StreamMetadata reports a stream as
 		// live, manifesting as a false "twitch channel is offline" error).

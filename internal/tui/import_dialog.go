@@ -150,7 +150,10 @@ func (m *ImportDialogModel) SetSize(w, h int) {
 // marked "> " focused again: Enter blurred it to start the import, and a
 // refusal is exactly where the operator is told to change something.
 func (m *ImportDialogModel) SetError(err string) {
-	m.errorMsg = err
+	// The text can carry names the operator did not type (a zip's entry
+	// names in the server's refusal, a file path): drawn with every control
+	// character as a space, whichever caller set it.
+	m.errorMsg = displayText(err)
 	m.step = importStepMeta
 	m.syncToTextInput()
 }

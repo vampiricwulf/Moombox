@@ -220,7 +220,7 @@ var sections = []settingsSection{
 	{
 		name: "BotGuard Sidecar",
 		fields: []fieldDef{
-			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens and signature solving (default: on; when off, no PO tokens are minted and signature-ciphered formats are unavailable) (requires restart)", nil},
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens and signature solving (default: on; when off, no PO tokens are minted, as the in-process DOM stand-in is too incomplete for BotGuard, and signatures are solved in-process) (requires restart)", nil},
 		},
 	},
 	{

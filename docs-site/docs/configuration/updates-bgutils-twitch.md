@@ -158,12 +158,14 @@ two jobs for YouTube:
 - It solves the **signature cipher** of current YouTube players, which some
   formats need before they can be downloaded.
 
-When it is off, only an in-process fallback remains. BotGuard's timing check
-rejects that fallback, so **no PO tokens are minted** and **current players'
-signatures cannot be solved**. Formats that need a PO token or a signature
-become unavailable; formats that need neither keep working (the fallback still
-handles the separate `n` parameter). In practice expect fewer formats, lower
-quality, or failed YouTube downloads. Twitch is not affected.
+When it is off, only an in-process fallback remains. Its stand-in for a
+browser page is too incomplete for BotGuard's challenge (it lacks parts of the
+page the challenge checks), so **no PO tokens are minted**. Signatures and the
+`n` parameter are still solved in-process, by the scrambling patterns learned
+while the sidecar ran and by Moombox's own copy of the sidecar's solver.
+Formats that need a PO token become unavailable; the rest keep working. In
+practice expect fewer formats, lower quality, or failed YouTube downloads.
+Twitch is not affected.
 
 Turn it off only to diagnose a problem with the sidecar itself, or on a host
 where it cannot run. It is supported on Windows x64, Linux x64 and Linux arm64,

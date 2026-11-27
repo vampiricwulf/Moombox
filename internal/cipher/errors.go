@@ -10,13 +10,11 @@ import "errors"
 //
 // Audit cross-cutting C3 sentinel migration follow-on.
 var (
-	// ErrExtractorMismatch signals that a regex-based extractor failed to
-	// locate the expected pattern in player JS. Typically means YouTube
-	// rotated the player and the extractor needs an update. Includes:
-	// "function %q not found", "object %q not found", "array %q not
-	// found", "no n-param or sig candidates found", "could not find
-	// signature function name", "could not find IIFE closing bracket",
-	// etc.
+	// ErrExtractorMismatch signals that the goja fallback's extractor, the
+	// Go port of ejs (preprocessPlayer), could not prepare the player: it
+	// does not parse, it is not in either of the two shapes ejs knows, or no
+	// URL-builder function is found in it. Typically means YouTube changed
+	// the player in a way ejs does not handle yet.
 	ErrExtractorMismatch = errors.New("cipher extractor pattern did not match player JS")
 
 	// ErrPlayerJSFetch signals a network-layer failure fetching the
@@ -41,9 +39,9 @@ var (
 // ErrSigUnavailable indicates the underlying solver could not extract or
 // run a sig algorithm for the requested player. Returned by solvers that
 // support the cipher.Solver interface but cannot fulfil sig specifically
-// (e.g., the legacy goja extractor on a player whose sig is no longer
-// pattern-matchable). Composite solvers may surface this verbatim or
-// substitute a higher-quality alternative.
+// (GojaResolver.Sig, for a compiled player with no sig function; the Go port
+// of ejs prepares one with both or refuses the player). Composite solvers
+// may surface this verbatim or substitute a higher-quality alternative.
 var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")
 
 // ErrPlayerJSStale signals that the sidecar reported it could not solve a
@@ -55,11 +53,11 @@ var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")
 // player's tv body, and only when that fails too does this sentinel reach
 // the caller. It then means the sidecar has nothing left for this player:
 // ejs cannot solve with its main body or its tv body, a break in ejs or a
-// player it does not handle yet. The caller asks goja last
-// (compositeSolver.N and Batch for an n, RoutedResolveURL for a signature),
-// which does not answer current players; when that fails too the sentinel
-// is still the one errors.Is sees, and the worker reads it as a failure
-// every format of the player shares (systemicResolveFailure,
+// player it does not handle yet. The composite asks goja last (owner rulings
+// RV-11 and RV-12), which runs the Go port of the same ejs and so is not
+// likely to solve it either; when that fails too the sentinel is still the
+// one errors.Is sees, and the worker reads it as a failure every format of
+// the player shares (systemicResolveFailure,
 // internal/worker/challenge_free.go), not as one format's.
 var ErrPlayerJSStale = errors.New("cipher: player JS is stale or unsupported")
 

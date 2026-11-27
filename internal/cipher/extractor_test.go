@@ -1,669 +1,296 @@
 package cipher
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
+	"github.com/dop251/goja/parser"
 )
 
-func TestExtractFunctionByName(t *testing.T) {
-	js := `var abc=function(a){a=a.split("");helper.func1(a,3);helper.func2(a);return a.join("")};`
-
-	body, err := extractFunctionByName(js, "abc")
+// TestEjsPortPinMatchesVendoredEjs: the port names the ejs it mirrors, and
+// that must be the ejs the sidecar runs. Bumping the vendored ejs without
+// bringing the port in line (and checking it with TestEjsPortVectors) fails
+// here.
+func TestEjsPortPinMatchesVendoredEjs(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "bgutil-sidecar", "vendor", "ejs", "VERSION"))
 	if err != nil {
-		t.Fatalf("extractFunctionByName: %v", err)
+		t.Fatalf("read the vendored ejs pin: %v", err)
 	}
-	if !strings.Contains(body, "a.split") {
-		t.Errorf("expected body to contain a.split, got %q", body)
-	}
-	if !strings.Contains(body, "a.join") {
-		t.Errorf("expected body to contain a.join, got %q", body)
+	if got := strings.TrimSpace(string(b)); got != ejsPortVersion {
+		t.Errorf("bgutil-sidecar/vendor/ejs/VERSION is %s, the Go port mirrors %s: port the ejs change (internal/cipher/extractor.go), run TestEjsPortVectors, then move ejsPortVersion",
+			got, ejsPortVersion)
 	}
 }
 
-func TestExtractFunctionByName_FuncDecl(t *testing.T) {
-	js := `function myFunc(x){return x*2;}`
-
-	body, err := extractFunctionByName(js, "myFunc")
-	if err != nil {
-		t.Fatalf("extractFunctionByName: %v", err)
-	}
-	if !strings.Contains(body, "return x*2") {
-		t.Errorf("expected body to contain return x*2, got %q", body)
-	}
+// synthPlayer builds a small player in YouTube's second shape
+// (`var _yt_player={};(function(g){var window=this;...})(_yt_player);`)
+// around builders, the statements that define the URL-builder functions.
+//
+// The URL class answers like a real one: its fin method, the first
+// prototype key that is not constructor/set/get/clone, reverses n and adds
+// "_n", and swaps the first and last characters of the signature, which it
+// reads with decodeURIComponent as players do. U takes set and get from
+// Base through a prototype helper (g.inh) that only a kept call runs, and
+// two side-effect statements that throw if they run are in the body: ejs
+// drops them.
+func synthPlayer(builders string) string {
+	return synthPlayerWithPool(splitPool, builders)
 }
 
-func TestExtractObjectByName(t *testing.T) {
-	js := `var helper={swap:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c},reverse:function(a){a.reverse()},splice:function(a,b){a.splice(0,b)}};`
+// splitPool is the string pool real players mostly carry, a split string:
+// "set" at 1, "alr" at 2, "yes" at 3, so the pool numbers extractArray
+// reduces it to are [1, 1^2, 2^3] = [1, 3, 1].
+const splitPool = `var P="x;set;alr;yes".split(";");`
 
-	body, err := extractObjectByName(js, "helper")
-	if err != nil {
-		t.Fatalf("extractObjectByName: %v", err)
-	}
-	if !strings.Contains(body, "swap") {
-		t.Errorf("expected body to contain swap, got %q", body)
-	}
-	if !strings.Contains(body, "reverse") {
-		t.Errorf("expected body to contain reverse, got %q", body)
-	}
-}
-
-func TestExtractSigFunction(t *testing.T) {
-	// Simulated player JS with sig function
-	js := `var Xo={wS:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c},Nv:function(a){a.reverse()},QF:function(a,b){a.splice(0,b)}};var $N=function(a){a=a.split("");Xo.QF(a,1);Xo.wS(a,56);Xo.Nv(a);Xo.QF(a,1);Xo.wS(a,10);Xo.QF(a,2);return a.join("")};c&&d.set(e, encodeURIComponent($N(f)));`
-
-	code, err := extractSigFunction(js)
-	if err != nil {
-		t.Fatalf("extractSigFunction: %v", err)
-	}
-	if !strings.Contains(code, "Xo") {
-		t.Error("expected code to contain helper object Xo")
-	}
-	if !strings.Contains(code, "$N") {
-		t.Error("expected code to contain function $N")
-	}
-	if !strings.Contains(code, "_decipher") {
-		t.Error("expected code to contain _decipher wrapper")
-	}
-}
-
-func TestExtractNFunction(t *testing.T) {
-	// Simulated player JS with n-parameter function
-	js := `var nFunc=function(a){var b=a.split(""),c=[function(d){return d.reverse()},function(d){return d.slice(1)}];c[0](b);c[1](b);return b.join("")};b=a.get("n");if(b){b=nFunc(b);a.set("n",b)};`
-
-	// Add a pattern that our extractor can find
-	js2 := `.get("n"))&&(b=nFunc(b),a.set("n",b));` + js
-
-	code, err := extractNFunction(js2)
-	if err != nil {
-		t.Fatalf("extractNFunction: %v", err)
-	}
-	if !strings.Contains(code, "nFunc") {
-		t.Error("expected code to contain nFunc")
-	}
-	if !strings.Contains(code, "_nTransform") {
-		t.Error("expected code to contain _nTransform wrapper")
-	}
-}
-
-func TestResolveArrayFunction(t *testing.T) {
-	js := `var myArr=[funcA,funcB,funcC];`
-
-	name, err := resolveArrayFunction(js, "myArr", "1")
-	if err != nil {
-		t.Fatalf("resolveArrayFunction: %v", err)
-	}
-	if name != "funcB" {
-		t.Errorf("expected funcB, got %q", name)
-	}
-}
-
-func TestPreprocessPlayer(t *testing.T) {
-	// Minimal mock player JS that has both sig and n patterns
-	playerJS := `
-c&&d.set(e, encodeURIComponent(sigFunc(f)));
-var helperObj={sw:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b%a.length]=c},rv:function(a){a.reverse()},sp:function(a,b){a.splice(0,b)}};
-var sigFunc=function(a){a=a.split("");helperObj.sp(a,2);helperObj.sw(a,5);helperObj.rv(a);return a.join("")};
-.get("n"))&&(b=nTransFunc(b),a.set("n",b));
-var nTransFunc=function(a){var b=a.split("");b.reverse();return b.join("")};
+// synthPlayerWithPool is synthPlayer with pool, the statement that defines
+// the string pool P, in place of splitPool.
+func synthPlayerWithPool(pool, builders string) string {
+	return `var _yt_player={};(function(g){var window=this;
+g.inh=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a};
+var Base=function(){};
+Base.prototype.set=function(k,v){this.p[k]=v;return this};
+Base.prototype.get=function(k){return this.p[k]};
+Base.prototype.clone=function(){return this};
+var U=function(a,b){this.u=a;this.p={};this.raw=b};
+g.inh(U,Base);
+var nx=function(a){return a.split("").reverse().join("")+"_n"};
+var sx=function(a){a=a.split("");var c=a[0];a[0]=a[a.length-1];a[a.length-1]=c;return a.join("")};
+U.prototype.fin=function(){if(this.p.n!=null)this.p.n=nx(this.p.n);if(this.p.s!=null)this.p.s=encodeURIComponent(sx(decodeURIComponent(this.p.s)))};
+document.title.length;
+boom();
+` + pool + `
+` + builders + `
+})(_yt_player);
 `
+}
 
-	code, err := preprocessPlayer(playerJS)
+const (
+	// builderAlr is matched by its d.set("alr","yes") statement.
+	builderAlr = `var B=function(a,b,c){var d=new U(a,!0);d.set("alr","yes");if(c)d.set(b,c);return d};`
+	// builderPoolDirect sets alr through the string pool, at plain indexes.
+	builderPoolDirect = `var B=function(a,b,c){var d=new U(a,!0);d[P[1]](P[2],P[3]);if(c)d.set(b,c);return d};`
+	// builderPoolArgs reaches the pool through a key (4) that a call
+	// elsewhere passes it.
+	builderPoolArgs = `var B=function(k,a,b,c){var d=new U(a,!0);d[P[k^5]](P[k^6],P[k^7]);if(c)d.set(b,c);return d};
+g.use=function(){return B(4,"https://example.com/")};`
+	// builderPoolOp reads its key (13^9 = 4) from a slot nothing calls it
+	// with; ejs sets the slot.
+	builderPoolOp = `var B=function(a,b,c){var k=g.K^9;var d=new U(a,!0);d[P[k^5]](P[k^6],P[k^7]);if(c)d.set(b,c);return d};`
+)
+
+// poolBuilder is a builder that reads its key k (4) from what head
+// computes, ahead of the pool call. params are its leading parameters.
+func poolBuilder(params, head string) string {
+	return `var B=function(` + params + `a,b,c){` + head + `var d=new U(a,!0);d[P[k^5]](P[k^6],P[k^7]);if(c)d.set(b,c);return d};`
+}
+
+// bigArrayPool is the pool as a literal array of more than 500 strings, the
+// other form extractArray reads, with "set", "alr" and "yes" where
+// splitPool has them.
+func bigArrayPool() string {
+	return `var P=["x","set","alr","yes"` + strings.Repeat(`,"z"`, 600) + `];`
+}
+
+// TestPreprocessPlayerRoutes: each of the ways ejs matches the URL-builder
+// function prepares a player that solves n and sig, the signature with a '%'
+// in it included. A signature handed to the player without ejs's
+// encodeURIComponent throws "URI malformed" there. The tcl bodies (the
+// string-pool routes) take branches the two committed fixture players
+// (alr) never reach, and the vector bodies that do are a download CI does
+// not make; each such branch has a row here. The pool-args rows pass two
+// literals of which only one operator gives the key 4 (1^5, 1+3, 9-5), and
+// the pool-op rows read the key through each operator resolveOp knows, set
+// as ejs sets it: g.K%9 from g.K = 4 (9 > 4), g.K+2 from 2, 10-g.K from 6,
+// g.K-3 from 7, g.K&7 and g.K|4 from 4, and g.K itself from 4.
+//
+// Mutants: createSolver not escaping the signature (the '%' rows fail);
+// the prototype-helper call dropped (no fin, so nothing transforms); the
+// side-effect calls kept (boom() throws); any route's match broken (no
+// solver, ErrExtractorMismatch); findArgs or resolveOp computing another key
+// (the pool call sets no alr, so the URL has no s and n is unchanged);
+// findArgs' two-argument branch dropped, or one of its operators (the
+// pool-args rows of two literals); one of resolveOp's operator cases or its
+// plain-member case dropped (that pool-op row); extractArray's literal-array
+// branch dropped (the array-pool row); hasNewWithTrue's `true` arm dropped
+// (the new-with-true row).
+func TestPreprocessPlayerRoutes(t *testing.T) {
+	for _, tc := range []struct{ name, route, src string }{
+		{"alr", "alr", synthPlayer(builderAlr)},
+		{"pool-direct", "pool-direct", synthPlayer(builderPoolDirect)},
+		{"pool-args, the key itself", "pool-args", synthPlayer(builderPoolArgs)},
+		{"pool-args, x^y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x^y;") + `g.use=function(){return B(1,5,"u")};`)},
+		{"pool-args, x+y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x+y;") + `g.use=function(){return B(1,3,"u")};`)},
+		{"pool-args, x-y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x-y;") + `g.use=function(){return B(9,5,"u")};`)},
+		{"pool-op, g.K^9", "pool-op", synthPlayer(builderPoolOp)},
+		{"pool-op, g.K%9", "pool-op", synthPlayer(poolBuilder("", "var k=g.K%9;"))},
+		{"pool-op, g.K+2", "pool-op", synthPlayer(poolBuilder("", "var k=g.K+2;"))},
+		{"pool-op, 10-g.K", "pool-op", synthPlayer(poolBuilder("", "var k=10-g.K;"))},
+		{"pool-op, g.K-3", "pool-op", synthPlayer(poolBuilder("", "var k=g.K-3;"))},
+		{"pool-op, g.K&7", "pool-op", synthPlayer(poolBuilder("", "var k=g.K&7;"))},
+		{"pool-op, g.K|4", "pool-op", synthPlayer(poolBuilder("", "var k=g.K|4;"))},
+		{"pool-op, g.K", "pool-op", synthPlayer(poolBuilder("", "var k=g.K;"))},
+		{"pool as a literal array", "pool-direct", synthPlayerWithPool(bigArrayPool(), builderPoolDirect)},
+		{"new with true", "pool-direct", synthPlayer(strings.Replace(builderPoolDirect, "new U(a,!0)", "new U(a,true)", 1))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, st, err := preprocessPlayer(tc.src)
+			if err != nil {
+				t.Fatalf("preprocessPlayer: %v", err)
+			}
+			if st.routes != tc.route {
+				t.Errorf("matched by %q, want %q", st.routes, tc.route)
+			}
+			solvers, err := getFromPrepared(code)
+			if err != nil {
+				t.Fatalf("getFromPrepared: %v", err)
+			}
+			if got, err := solvers.DecryptN("abc"); err != nil || got != "cba_n" {
+				t.Errorf("n(abc) = %q, %v; want cba_n", got, err)
+			}
+			for in, want := range map[string]string{
+				"ABCDEF":   "FBCDEA",
+				"A%B=C&D%": "%%B=C&DA",
+				"%2":       "2%",
+			} {
+				if got, err := solvers.DecryptSig(in); err != nil || got != want {
+					t.Errorf("sig(%q) = %q, %v; want %q", in, got, err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPreprocessPlayerFindsNoBuilder: a player of the right shape with no
+// URL-builder function, and a player of another shape, are refused with
+// ErrExtractorMismatch rather than prepared into a copy that cannot answer.
+func TestPreprocessPlayerFindsNoBuilder(t *testing.T) {
+	for name, src := range map[string]string{
+		"no builder":    synthPlayer(`var B=function(a){return a};`),
+		"another shape": `var a=1;var b=2;var c=3;`,
+		"unparsable":    `(function(){`,
+	} {
+		if _, _, err := preprocessPlayer(src); !errors.Is(err, ErrExtractorMismatch) {
+			t.Errorf("%s: err = %v, want ErrExtractorMismatch", name, err)
+		}
+	}
+}
+
+// TestPreprocessPlayerSolversMustAgree is ejs multiTry: with two builders
+// that answer differently, there is no answer, and with two that agree there
+// is one.
+func TestPreprocessPlayerSolversMustAgree(t *testing.T) {
+	agree := builderAlr + "\n" + strings.Replace(builderPoolDirect, "var B=", "var B2=", 1)
+	code, st, err := preprocessPlayer(synthPlayer(agree))
 	if err != nil {
 		t.Fatalf("preprocessPlayer: %v", err)
 	}
-
-	// Should contain result assignments. As of test.34 (cipher.md D1/D4),
-	// browser stubs are provided by goja.NewRuntimeForCipher inside
-	// getFromPrepared rather than prepended setupCode, so the absence of
-	// a "XMLHttpRequest" string here is expected.
-	if !strings.Contains(code, "_result.sig") {
-		t.Error("expected _result.sig assignment")
+	if st.solvers != 2 {
+		t.Fatalf("solvers = %d, want 2", st.solvers)
 	}
-	if !strings.Contains(code, "_result.n") {
-		t.Error("expected _result.n assignment")
-	}
-}
-
-func TestFindNArrayCandidates(t *testing.T) {
-	// Simulates the pattern found in current YouTube player.js (main variant)
-	js := `;var eiz;g.sD=class{};eiz=[jVV];g.P2=class{};`
-	names := findNArrayCandidates(js)
-	if len(names) != 1 {
-		t.Fatalf("expected 1 n-param candidate, got %d: %v", len(names), names)
-	}
-	if names[0] != "jVV" {
-		t.Errorf("expected jVV, got %q", names[0])
-	}
-}
-
-func TestFindNArrayCandidates_TVVariant(t *testing.T) {
-	// TV/ES6 variant uses bare assignments without leading semicolons,
-	// and may use "var X=[func];" declarations
-	tests := []struct {
-		name     string
-		js       string
-		expected string
-	}{
-		{"var declaration", "var eiz=[jVV];\nother code", "jVV"},
-		{"bare assignment on newline", "some code\neiz=[jVV];\nother", "jVV"},
-		{"after semicolon", ";eiz=[jVV];", "jVV"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			names := findNArrayCandidates(tt.js)
-			if len(names) == 0 {
-				t.Fatalf("expected at least 1 n-param candidate, got 0")
-			}
-			if names[0] != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, names[0])
-			}
-		})
-	}
-}
-
-func TestFindSigCandidates(t *testing.T) {
-	// Simulates the pattern found in current YouTube player.js
-	js := `Ct=function(k,U,n){k=new g.sD(k,!0);k.set("alr","yes");n&&(n=fw(26,decodeURIComponent(n)),k.set(U,encodeURIComponent(n)));return k};`
-	candidates := findSigCandidates(js)
-	if len(candidates) != 1 {
-		t.Fatalf("expected 1 sig candidate, got %d: %v", len(candidates), candidates)
-	}
-	if candidates[0].funcName != "fw" {
-		t.Errorf("expected fw, got %q", candidates[0].funcName)
-	}
-	if candidates[0].literal != "26" {
-		t.Errorf("expected literal 26, got %q", candidates[0].literal)
-	}
-}
-
-func TestFindURLClassName(t *testing.T) {
-	tests := []struct {
-		name     string
-		js       string
-		expected string
-	}{
-		{"current g.XX", `(new g.sB(Z,!0)).get("n")`, "g.sB"},
-		{"different namespace", `(new h.Foo(Z,!0)).get("n")`, "h.Foo"},
-		{"underscore namespace", `(new _yt.xY(Z,!0)).get("n")`, "_yt.xY"},
-		{"with true keyword", `(new g.sB(Z,true)).get("n")`, "g.sB"},
-		{"bare identifier", `(new UrlBuilder(Z,!0)).get("n")`, "UrlBuilder"},
-		{"not found", `var x = 42;`, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := findURLClassName(tt.js)
-			if result != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestFindAlrTransformChains(t *testing.T) {
-	// Multiple ALR markers — only the last one has the transform pattern nearby.
-	// The first ALR has a decoy N&&(N= pattern, but it's 250+ chars away (outside
-	// the 200-char proximity window). The second ALR has no transform pattern nearby.
-	// The third ALR is the correct sig function with the transform within 15 chars.
-	js := `g.ba=function(Z,k,N){` +
-		`var a=new dv(k);a.get("alr")||a.set("alr","yes");` +
-		strings.Repeat("x", 250) + // spacer pushes decoy outside 200-char proximity
-		`N&&(N=Z.U,a=k.U);return a};` +
-		strings.Repeat("x", 300) + // spacer
-		`this.rV.set("alr","yes");w3R(this.A1,N,Z);` + // no transform pattern nearby
-		strings.Repeat("x", 300) + // spacer
-		`n8=function(Z,k,N){k=k===void 0?"":k;N=N===void 0?"":N;` +
-		`Z=new g.sB(Z,!0);Z.set("alr","yes");` +
-		`N&&(N=JI(49,1919,f1(33,6560,N)),Z.set(k,UE(65,3973,N)));return Z};`
-
-	chains := findAlrTransformChains(js)
-	if len(chains) == 0 {
-		t.Fatal("expected at least one ALR transform chain")
-	}
-
-	// Should find JI(49,1919,f1(33,6560,sig)) from the last ALR marker
-	found := false
-	for _, chain := range chains {
-		if strings.Contains(chain, "JI(49,1919,f1(33,6560,sig))") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected chain containing JI(49,1919,f1(33,6560,sig)), got %v", chains)
-	}
-
-	// Should NOT contain garbage like "Z.U" from the decoy (it's outside proximity)
-	for _, chain := range chains {
-		if chain == "Z.U" {
-			t.Errorf("false match: got garbage chain %q from decoy ALR marker", chain)
-		}
-	}
-
-	// Exactly one chain should be found (the correct one)
-	if len(chains) != 1 {
-		t.Errorf("expected exactly 1 chain, got %d: %v", len(chains), chains)
-	}
-}
-
-func TestFindAlrTransformChains_NotFound(t *testing.T) {
-	js := `var foo=function(a){return a+1};`
-	chains := findAlrTransformChains(js)
-	if len(chains) != 0 {
-		t.Errorf("expected no chains, got %v", chains)
-	}
-}
-
-func TestFindAlrTransformChains_SingleQuote(t *testing.T) {
-	// Single-quote variant of the ALR marker
-	js := `eg=function(r,p,I){r=new g.pQ(r,!0);r.set('alr','yes');` +
-		`I&&(I=fQ(84,4692,fQ(16,4852,I)),r.set(p,RD(10,4164,I)));return r};`
-	chains := findAlrTransformChains(js)
-	if len(chains) == 0 {
-		t.Fatal("expected chain from single-quote ALR marker")
-	}
-	if !strings.Contains(chains[0], "fQ(84,4692,fQ(16,4852,sig))") {
-		t.Errorf("expected fQ(84,4692,fQ(16,4852,sig)), got %q", chains[0])
-	}
-}
-
-func TestPreprocessPlayerFull(t *testing.T) {
-	// Minimal mock that simulates the IIFE structure of YouTube player.js
-	playerJS := `var _yt_player={};(function(g){var window=this;'use strict';var A="split;join;reverse".split(";");var TZ={Zm:function(k,U){var n=k[0];k[0]=k[U%k.length];k[U%k.length]=n},EF:function(k){k.reverse()},Pi:function(k,U){k.splice(0,U)}};var fw=function(k,U){if((k>>1&3)==1){var w=U.split("");TZ.Zm(w,3);TZ.EF(w);TZ.Pi(w,1);return w.join("")}return U};var Ct=function(k,U,n){n&&(n=fw(26,decodeURIComponent(n)));return n};var jVV=function(k){return k+"_n_transformed"};var eiz;eiz=[jVV];})(_yt_player);`
-
-	code, err := preprocessPlayerFull(playerJS)
-	if err != nil {
-		t.Fatalf("preprocessPlayerFull: %v", err)
-	}
-
-	// Should contain setup code
-	if !strings.Contains(code, "_multiTry") {
-		t.Error("expected _multiTry helper in output")
-	}
-
-	// Should contain the full player code
-	if !strings.Contains(code, "_yt_player") {
-		t.Error("expected _yt_player in output")
-	}
-
-	// Should NOT contain "var window=this;"
-	if strings.Contains(code, "var window=this;") {
-		t.Error("var window=this; should have been stripped")
-	}
-
-	// Should contain solver bindings
-	if !strings.Contains(code, "_result.n") {
-		t.Error("expected _result.n binding")
-	}
-	if !strings.Contains(code, "_result.sig") {
-		t.Error("expected _result.sig binding")
-	}
-
-	// Try executing the preprocessed code
 	solvers, err := getFromPrepared(code)
 	if err != nil {
 		t.Fatalf("getFromPrepared: %v", err)
 	}
-	if solvers.N == nil {
-		t.Fatal("expected N solver")
-	}
-	if solvers.Sig == nil {
-		t.Fatal("expected Sig solver")
+	if got, err := solvers.DecryptN("abc"); err != nil || got != "cba_n" {
+		t.Errorf("two agreeing builders: n(abc) = %q, %v; want cba_n", got, err)
 	}
 
-	// Test N function
-	nResult, err := solvers.N("test123")
+	// B2 builds a URL whose n the class leaves alone.
+	disagree := builderAlr + "\n" + `var B2=function(a,b,c){var d=new U(a,!0);d.set("alr","yes");d.fin=function(){};if(c)d.set(b,c);return d};`
+	code, _, err = preprocessPlayer(synthPlayer(disagree))
 	if err != nil {
-		t.Fatalf("N solver: %v", err)
+		t.Fatalf("preprocessPlayer: %v", err)
 	}
-	if nResult != "test123_n_transformed" {
-		t.Errorf("N: expected 'test123_n_transformed', got %q", nResult)
+	solvers, err = getFromPrepared(code)
+	if err != nil {
+		t.Fatalf("getFromPrepared: %v", err)
+	}
+	if got, err := solvers.DecryptN("abc"); err == nil || !strings.Contains(err.Error(), "invalid solutions") {
+		t.Errorf("two disagreeing builders: n(abc) = %q, %v; want an invalid-solutions error", got, err)
 	}
 }
 
-func TestPreprocessPlayerFull_WindowStripping(t *testing.T) {
-	// Whitespace variation in "var window=this;"
-	playerJS := `var _yt_player={};(function(g){ var  window = this ;'use strict';var jVV=function(k){return k+"_done"};var eiz;eiz=[jVV];})(_yt_player);`
-	code, err := preprocessPlayerFull(playerJS)
-	if err != nil {
-		t.Fatalf("preprocessPlayerFull: %v", err)
-	}
-	if strings.Contains(code, "var  window = this ;") {
-		t.Error("whitespace-variant 'var window=this;' should have been stripped")
-	}
-}
-
-func TestMultiTryRejectsIdentity(t *testing.T) {
-	// _multiTry should reject candidates that return the input unchanged
-	code := fullPlayerSetupCode + `
-_result.sig = _multiTry([
-  function(x) { return x; },
-  function(x) { return x + "_transformed"; }
-]);
-`
+// TestGetFromPreparedRunsTheSetupGlobals: the prepared copy runs in a bare
+// runtime, and ejs's setup gives the player the globals it reads at load
+// time: window and self are the global object, and location is YouTube's.
+func TestGetFromPreparedRunsTheSetupGlobals(t *testing.T) {
+	code := ejsSetup + `
+_result.n = function() {
+  return [window === globalThis, self === globalThis, self.location.origin, window.location.protocol, typeof document, typeof XMLHttpRequest].join(",");
+};`
 	solvers, err := getFromPrepared(code)
 	if err != nil {
 		t.Fatalf("getFromPrepared: %v", err)
 	}
-	if solvers.Sig == nil {
-		t.Fatal("expected non-nil sig solver")
-	}
-	result, err := solvers.Sig("testinput")
-	if err != nil {
-		t.Fatalf("sig solver: %v", err)
-	}
-	if result == "testinput" {
-		t.Error("_multiTry should reject identity function, but got input back unchanged")
-	}
-	if result != "testinput_transformed" {
-		t.Errorf("expected 'testinput_transformed', got %q", result)
+	got, err := solvers.DecryptN("")
+	if want := "true,true,https://www.youtube.com,https:,object,object"; err != nil || got != want {
+		t.Errorf("globals = %q, %v; want %q", got, err, want)
 	}
 }
 
-func TestPreprocessPlayerFullAlrSig(t *testing.T) {
-	// Tests the newer YouTube player pattern where the sig decipher is in
-	// the URL builder function identified by set("alr","yes").
-	// No standalone n-param function exists — N solver should be nil.
-	playerJS := `var _yt_player={};(function(g){` +
-		// OF is the sig decipher dispatcher
-		`var OF=function(k,m,v){if(k===24){var w=v.split("");w.reverse();w.splice(0,2);return w.join("")}return v};` +
-		// XF is encode/decode dispatcher
-		`var XF=function(k,m,v){if(k===82){return decodeURIComponent(v)}if(k===2){return encodeURIComponent(v)}return v};` +
-		// eg is the URL builder with set("alr","yes") marker
-		`var eg=function(r,p,I){r={};r.set=function(a,b){};r.set("alr","yes");I&&(I=OF(24,6183,XF(82,6137,I)),r.set(p,XF(2,8431,I)));return r};` +
-		`})(_yt_player);`
-
-	code, err := preprocessPlayerFull(playerJS)
-	if err != nil {
-		t.Fatalf("preprocessPlayerFull: %v", err)
-	}
-
-	// Should contain sig binding from ALR transform chain
-	if !strings.Contains(code, "_result.sig") {
-		t.Error("expected _result.sig binding")
-	}
-
-	// Execute and test
-	solvers, err := getFromPrepared(code)
+// TestSolverAnswerNullIsNoAnswer: ejs's solver answers null when the URL it
+// built has no value for the challenge. That is an error, not the text
+// "null" in a URL.
+func TestSolverAnswerNullIsNoAnswer(t *testing.T) {
+	solvers, err := getFromPrepared(`_result.n = function(){ return null }; _result.sig = function(){ return undefined };`)
 	if err != nil {
 		t.Fatalf("getFromPrepared: %v", err)
 	}
-
-	// N should be nil (no standalone n-param function in this player)
-	if solvers.N != nil {
-		t.Error("expected N solver to be nil for new player format")
+	if got, err := solvers.DecryptN("x"); err == nil {
+		t.Errorf("n answered null: got %q, want an error", got)
 	}
-
-	// Sig should work — OF(24,6183,...) reverses and splices
-	if solvers.Sig == nil {
-		t.Fatal("expected Sig solver")
-	}
-	// OF(24,6183,sig): reverse + splice(0,2)
-	// Input "ABCDEF" → reverse "FEDCBA" → splice(0,2) "DCBA"
-	sigResult, err := solvers.Sig("ABCDEF")
-	if err != nil {
-		t.Fatalf("Sig solver: %v", err)
-	}
-	if sigResult != "DCBA" {
-		t.Errorf("Sig: expected 'DCBA', got %q", sigResult)
+	if got, err := solvers.DecryptSig("x"); err == nil {
+		t.Errorf("sig answered undefined: got %q, want an error", got)
 	}
 }
 
-func TestPreprocessPlayerFullRealPlayer(t *testing.T) {
-	// Test with real cached player.js if available
-	// This test is skipped in CI (no cache), but validates the full pipeline locally
-	cacheDir := ""
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home dir")
-	}
-	cacheDir = filepath.Join(home, ".cache", "yt-cipher", "player_cache")
-
-	entries, err := os.ReadDir(cacheDir)
-	if err != nil || len(entries) == 0 {
-		t.Skip("no cached player.js files found")
-	}
-
-	// Use the most recent .js file
-	var newest os.DirEntry
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".js") {
-			if newest == nil {
-				newest = e
-			} else {
-				ni, _ := newest.Info()
-				ei, _ := e.Info()
-				if ei != nil && ni != nil && ei.ModTime().After(ni.ModTime()) {
-					newest = e
-				}
-			}
-		}
-	}
-	if newest == nil {
-		t.Skip("no .js files in player cache")
-	}
-
-	data, err := os.ReadFile(filepath.Join(cacheDir, newest.Name()))
-	if err != nil {
-		t.Fatalf("read player.js: %v", err)
-	}
-
-	playerJS := string(data)
-	t.Logf("Testing with player.js: %s (%d bytes)", newest.Name(), len(data))
-
-	// Log candidate finding results (informational — newer players may not
-	// have old-style candidates, relying on ALR chain + URL builder instead)
-	nFuncs := findNArrayCandidates(playerJS)
-	t.Logf("N-param array candidates: %d %v", len(nFuncs), nFuncs)
-
-	sigCands := findSigCandidates(playerJS)
-	t.Logf("Sig old candidates: %d %v", len(sigCands), sigCands)
-
-	alrChains := findAlrTransformChains(playerJS)
-	t.Logf("ALR sig chains found: %d", len(alrChains))
-
-	// At least one sig strategy must work
-	if len(sigCands) == 0 && len(alrChains) == 0 {
-		t.Error("expected at least one sig strategy (old candidates or ALR chain)")
-	}
-
-	// Test full preprocessing
-	code, err := preprocessPlayerFull(playerJS)
-	if err != nil {
-		t.Fatalf("preprocessPlayerFull: %v", err)
-	}
-	t.Logf("Preprocessed code length: %d bytes", len(code))
-
-	// Test execution in Goja
-	solvers, err := getFromPrepared(code)
-	if err != nil {
-		t.Fatalf("getFromPrepared: %v", err)
-	}
-
-	if solvers.Sig != nil {
-		t.Log("Sig solver: OK")
-		// Test with a dummy signature (won't produce meaningful output but shouldn't crash)
-		result, err := solvers.Sig("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+// TestWalkVisitsInESTreeOrder: findArgs takes the first matching call in the
+// order ejs walks the AST, meriyah's ESTree key order. A for statement's test
+// comes before its update there (goja's fields have Update first), and a
+// do-while's body before its test (goja's have Test first). Each loop below
+// holds two calls that both give the key 4 (1^5 and 2^6), so the order
+// decides the args.
+//
+// Mutant: walkNodes without its ForStatement or DoWhileStatement case (the
+// field order picks 2, 6).
+func TestWalkVisitsInESTreeOrder(t *testing.T) {
+	for _, src := range []string{
+		"for (B(9, 9); B(1, 5); B(2, 6)) {}",
+		"do { B(1, 5) } while (B(2, 6));",
+	} {
+		prog, err := parser.ParseFile(nil, "", src, 0)
 		if err != nil {
-			t.Logf("Sig solver call (expected to work): %v", err)
-		} else {
-			t.Logf("Sig result: %q", result)
+			t.Fatalf("parse %q: %v", src, err)
 		}
-	} else {
-		t.Error("Sig solver is nil")
-	}
-
-	if solvers.N != nil {
-		t.Log("N solver: OK")
-		result, err := solvers.N("abc123def456")
-		if err != nil {
-			t.Logf("N solver call (may fail with dummy input): %v", err)
-		} else {
-			t.Logf("N result: %q", result)
+		if got := findArgs(prog.Body, "B", 4); strings.Join(got, ",") != "1,5" {
+			t.Errorf("findArgs over %q = %v, want [1 5]", src, got)
 		}
-	} else {
-		t.Log("N solver is nil (may be expected for newer players using URL builder)")
 	}
 }
 
-func TestPreprocessPlayer74edf1a3(t *testing.T) {
-	data, err := os.ReadFile("testdata/player_74edf1a3.js")
-	if err != nil {
-		t.Skip("player_74edf1a3.js not available")
-	}
-
-	playerJS := string(data)
-	t.Logf("Player size: %d bytes", len(data))
-
-	// Check candidate finding
-	nFuncs := findNArrayCandidates(playerJS)
-	t.Logf("N-param array candidates: %d %v", len(nFuncs), nFuncs)
-
-	sigCands := findSigCandidates(playerJS)
-	t.Logf("Sig old candidates: %d %v", len(sigCands), sigCands)
-
-	alrChains := findAlrTransformChains(playerJS)
-	t.Logf("ALR sig chains found: %d", len(alrChains))
-	for i, chain := range alrChains {
-		t.Logf("  ALR chain %d (len=%d): %s", i, len(chain), chain)
-	}
-
-	// The ALR chain must be substantive (not garbage like "Z.U")
-	if len(alrChains) > 0 {
-		for _, chain := range alrChains {
-			if len(chain) < 10 {
-				t.Errorf("ALR chain too short (likely false match): %q", chain)
-			}
+// TestJSNumber: the numbers the port writes into the solver are printed as
+// JavaScript prints them.
+func TestJSNumber(t *testing.T) {
+	for f, want := range map[float64]string{
+		0: "0", -4: "-4", 13: "13", 1.5: "1.5", 1e21: "1e+21", 1e-7: "1e-7", 123456789012: "123456789012",
+	} {
+		if got := jsNumber(f); got != want {
+			t.Errorf("jsNumber(%v) = %q, want %q", f, got, want)
 		}
-	}
-
-	// URL class detection
-	urlClass := findURLClassName(playerJS)
-	t.Logf("URL class: %q", urlClass)
-	if urlClass == "" {
-		t.Error("expected URL class to be detected (e.g., g.sB)")
-	}
-
-	// Full preprocessing
-	code, err := preprocessPlayerFull(playerJS)
-	if err != nil {
-		t.Fatalf("preprocessPlayerFull: %v", err)
-	}
-	t.Logf("Preprocessed code: %d bytes", len(code))
-
-	// Execute in Goja
-	solvers, err := getFromPrepared(code)
-	if err != nil {
-		t.Fatalf("getFromPrepared: %v", err)
-	}
-
-	// N solver must work and transform the input
-	if solvers.N == nil {
-		t.Fatal("N solver is nil — this causes 403 on all DASH segments")
-	}
-	nResult, err := solvers.N("abc123def456")
-	if err != nil {
-		t.Fatalf("N solver error: %v", err)
-	}
-	t.Logf("N result: %q (input was abc123def456)", nResult)
-	if nResult == "abc123def456" {
-		t.Error("N solver returned input unchanged — not actually transforming")
-	}
-	if nResult == "" {
-		t.Error("N solver returned empty string")
-	}
-
-	// Sig solver must work and transform the input
-	if solvers.Sig == nil {
-		t.Fatal("Sig solver is nil — this causes 403 on streams requiring signature decryption")
-	}
-	sigInput := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	sigResult, err := solvers.Sig(sigInput)
-	if err != nil {
-		t.Fatalf("Sig solver error: %v", err)
-	}
-	t.Logf("Sig result: %q (input len=%d, output len=%d)", sigResult, len(sigInput), len(sigResult))
-	if sigResult == sigInput {
-		t.Error("Sig solver returned input unchanged — not actually transforming")
-	}
-	if sigResult == "" {
-		t.Error("Sig solver returned empty string")
 	}
 }
 
-func TestSetupCodeGlobalUnification(t *testing.T) {
-	// Verifies that window, self, and globalThis all reference the same object
-	// and that self.location.origin works — the scenario that motivated ejs commit
-	// 68448fa ("Expose window global as self").
-	//
-	// YouTube players (e.g., player_74edf1a3.js line 1201) access
-	// self.location.protocol, so these globals must be unified.
-	//
-	// As of test.34 the unification is done by goja.NewRuntimeForCipher (audit
-	// cipher.md D1/D4); legacy setupCode + fullPlayerSetupCode no longer carry
-	// these stubs. The test exercises the constructor directly so future drift
-	// surfaces here rather than during a real cipher compile.
-
-	vm, err := mbgoja.NewRuntimeForCipher("")
-	if err != nil {
-		t.Fatalf("NewRuntimeForCipher: %v", err)
-	}
-
-	// window === globalThis
-	v, err := vm.RunString("window === globalThis")
-	if err != nil {
-		t.Fatalf("window === globalThis: %v", err)
-	}
-	if !v.ToBoolean() {
-		t.Error("window !== globalThis — must be the same object")
-	}
-
-	// self === globalThis
-	v, err = vm.RunString("self === globalThis")
-	if err != nil {
-		t.Fatalf("self === globalThis: %v", err)
-	}
-	if !v.ToBoolean() {
-		t.Error("self !== globalThis — must be the same object")
-	}
-
-	// window === self (transitive, but verify explicitly)
-	v, err = vm.RunString("window === self")
-	if err != nil {
-		t.Fatalf("window === self: %v", err)
-	}
-	if !v.ToBoolean() {
-		t.Error("window !== self — must be the same object")
-	}
-
-	// self.location.origin — the access pattern YouTube players use
-	v, err = vm.RunString("self.location.origin")
-	if err != nil {
-		t.Fatalf("self.location.origin: %v", err)
-	}
-	if v.String() != "https://www.youtube.com" {
-		t.Errorf("self.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
-	}
-
-	// window.location.origin
-	v, err = vm.RunString("window.location.origin")
-	if err != nil {
-		t.Fatalf("window.location.origin: %v", err)
-	}
-	if v.String() != "https://www.youtube.com" {
-		t.Errorf("window.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
-	}
-
-	// self.location.protocol — accessed by real player code
-	v, err = vm.RunString("self.location.protocol")
-	if err != nil {
-		t.Fatalf("self.location.protocol: %v", err)
-	}
-	if v.String() != "https:" {
-		t.Errorf("self.location.protocol = %q, want %q", v.String(), "https:")
+// TestToInt32 is ECMAScript ToInt32 on the values ^ sees.
+func TestToInt32(t *testing.T) {
+	for f, want := range map[float64]int32{
+		5: 5, -1: -1, 4294967296: 0, 4294967297: 1, 2147483648: -2147483648, 3.9: 3, -3.9: -3,
+	} {
+		if got := toInt32(f); got != want {
+			t.Errorf("toInt32(%v) = %d, want %d", f, got, want)
+		}
 	}
 }
 

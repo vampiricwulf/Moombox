@@ -43,18 +43,16 @@ func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureReques
 	return resp, nil
 }
 
-// RoutedResolveURL applies sig and n-param decryption to a stream URL, routing
-// through the composite Solver first (the sidecar on the player's main body,
-// then on its tv body; the sig spec for a signature). The goja resolver is
-// asked last, and for each challenge on its own (owner ruling RV-11): for the
-// signature once the routed solver has failed it (gojaSig), and for the n
-// through solveN. A signature goja had to answer used to hand the whole URL
-// to gojaResolver.ResolveURL, which then solved the n with goja as well,
-// without the sidecar having been asked for it.
+// RoutedResolveURL applies sig and n-param decryption to a stream URL
+// through the routed Solver, the composite, which alone decides the order its
+// solvers are asked in (owner rulings RV-11 and RV-12): the sidecar on the
+// player's main body, then on its tv body, the sig spec for a signature, and
+// goja last. The signature is the routed solver's alone: this function used
+// to ask the goja resolver for it itself once the routed solver had failed,
+// a second place deciding the order. The n goes through solveN, which
+// likewise asks the routed solver alone.
 //
-// This is the worker-side equivalent of PlayerAPI.decryptN:
-// it keeps the worker's URL-resolution call sites routing through the sidecar
-// on cb017549-family players where the goja extractor cannot produce a sig.
+// This is the worker-side equivalent of PlayerAPI.decryptN.
 //
 // Pass a nil routedSolver to skip the routed path and use gojaResolver directly
 // (matches prior behaviour on startup before the sidecar is healthy).
@@ -79,29 +77,11 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	result := req.StreamURL
 	playerID := PlayerIDFromURL(req.PlayerURL)
 
-	// --- Sig decryption (routed solver first; goja last, for the sig alone) ---
+	// --- Sig decryption (the routed solver, goja last within it) ---
 	if req.EncryptedSignature != "" {
 		decryptedSig, err := routedSolver.Sig(ctx, playerID, req.EncryptedSignature)
 		if err != nil {
-			// Sig via routed solver failed: goja, the last one asked, for the
-			// signature alone. The n below still goes to the routed solver
-			// first.
-			if gojaResolver == nil {
-				return nil, fmt.Errorf("cipher: routed sig failed and no goja fallback: %w", err)
-			}
-			if w, ok := routedSolver.(gojaFallNoter); ok {
-				w.noteGojaFall(ctx, playerID, "sig", err)
-			}
-			var gojaErr error
-			decryptedSig, gojaErr = gojaSig(ctx, gojaResolver, req.PlayerURL, req.EncryptedSignature)
-			if gojaErr != nil {
-				// Both paths failed. On its own the goja error reads the same
-				// whether the sidecar is down, the player is stale or ejs
-				// found no solution ("no sig solver available for player
-				// …"), so the routed cause rides along — and stays the one
-				// errors.Is sees (ErrPlayerJSStale, ErrSidecarUnavailable).
-				return nil, fmt.Errorf("cipher: routed sig: %w (goja fallback: %v)", err, gojaErr)
-			}
+			return nil, fmt.Errorf("cipher: routed sig: %w", err)
 		}
 		sigKey := req.SignatureKey
 		if sigKey == "" {
@@ -114,7 +94,7 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 		result = result + sep + url.QueryEscape(sigKey) + "=" + url.QueryEscape(decryptedSig)
 	}
 
-	// --- N-param decryption (sidecar-primary; goja fallback) ---
+	// --- N-param decryption (the routed solver, goja last within it) ---
 	rawQuery := ""
 	if q := strings.Index(result, "?"); q >= 0 {
 		rawQuery = result[q+1:]
@@ -148,85 +128,55 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	return &ResolveURLResponse{URL: result}, nil
 }
 
-// gojaSig answers one signature with the goja resolver's own compile of
-// playerURL, as GojaResolver.ResolveURL does for the signature of a URL it is
-// handed whole, and fails as it does: a player goja extracts no sig function
-// from (every current one) is an error, never the signature unchanged.
-func gojaSig(ctx context.Context, gojaResolver *GojaResolver, playerURL, encryptedSig string) (string, error) {
-	solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		return "", fmt.Errorf("get solvers: %w", err)
-	}
-	if !solvers.HasSig() {
-		return "", fmt.Errorf("decrypt signature: no sig solver available for player %s", PlayerIDFromURL(playerURL))
-	}
-	out, err := solvers.DecryptSig(encryptedSig)
-	if err != nil {
-		return "", fmt.Errorf("decrypt signature: %w", err)
-	}
-	return out, nil
-}
-
-// solveN answers one n challenge for RoutedResolveURL and RoutedDecryptNInURL:
-// the routed solver first, then the goja resolver's own compile of playerURL,
-// the next tried whenever one fails or answers with what checkNResult says is
-// no answer. yt-dlp's director moves to its next provider on an invalid
-// response the same way and records nothing for it (jsc/_director.py:105-124,
-// 6224a3898). Before, a routed answer was installed whatever it was, and the
-// goja one too.
+// solveN answers one n challenge for RoutedResolveURL and RoutedDecryptNInURL.
+// With a routed solver, the composite, that solver alone is asked: it decides
+// the order (the sidecar, then goja, last) and rejects an answer that
+// checkNResult says is no answer, moving on to goja as yt-dlp's director
+// moves to its next provider (owner rulings RV-11 and RV-12). This function
+// used to ask the goja resolver again itself once the routed solver had
+// failed, so goja could be asked twice for one challenge. The goja resolver
+// is asked here only when there is no routed solver.
 //
-// The error names every path that failed: a dead sidecar, a stale player and
-// ejs's "no solutions" otherwise read alike. The routed cause stays the
-// wrapped one (ErrPlayerJSStale, ErrSidecarUnavailable). The callers wrap it
-// in ErrNUnsolved.
+// The routed answer is still checked here, for a routed solver that is not
+// the composite. The routed cause stays the wrapped one (ErrPlayerJSStale,
+// ErrSidecarUnavailable). The callers wrap the error in ErrNUnsolved.
 func solveN(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, playerURL, playerID, challenge string) (string, error) {
-	var routedErr, gojaErr error
 	if routedSolver != nil {
 		dec, err := routedSolver.N(ctx, playerID, challenge)
 		if err == nil {
 			err = checkNResult(challenge, dec)
 		}
-		if err == nil {
-			return dec, nil
+		if err != nil {
+			slog.Debug("cipher: routed n-param decryption failed",
+				"player", playerID, "err", err)
+			return "", fmt.Errorf("routed n: %w", err)
 		}
-		routedErr = err
-		slog.Debug("cipher: routed n-param decryption failed, trying goja",
-			"player", playerID, "err", err)
+		return dec, nil
 	}
-	if gojaResolver != nil {
-		solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
-		switch {
-		case err != nil:
-			gojaErr = err
-		case !solvers.HasN():
-			gojaErr = fmt.Errorf("n unavailable for player %s", playerID)
-		default:
-			dec, err := solvers.DecryptN(challenge)
-			if err == nil {
-				err = checkNResult(challenge, dec)
-			}
-			if err == nil {
-				return dec, nil
-			}
-			gojaErr = err
-		}
-	}
-	switch {
-	case routedErr != nil && gojaErr != nil:
-		return "", fmt.Errorf("routed n: %w (goja fallback: %v)", routedErr, gojaErr)
-	case routedErr != nil:
-		return "", fmt.Errorf("routed n: %w (no goja fallback)", routedErr)
-	case gojaErr != nil:
-		return "", fmt.Errorf("goja n: %w", gojaErr)
-	default:
+	if gojaResolver == nil {
 		return "", errors.New("no solver to ask")
 	}
+	solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
+	if err != nil {
+		return "", fmt.Errorf("goja n: %w", err)
+	}
+	if !solvers.HasN() {
+		return "", fmt.Errorf("goja n: n unavailable for player %s", playerID)
+	}
+	dec, err := solvers.DecryptN(challenge)
+	if err == nil {
+		err = gojaResolver.noteNAnswer(playerURL, challenge, dec)
+	}
+	if err != nil {
+		return "", fmt.Errorf("goja n: %w", err)
+	}
+	return dec, nil
 }
 
 // RoutedDecryptNInURL solves the n challenge of rawURL in both forms a
 // googlevideo URL carries one, the path's /n/<value>/ (at least 10
-// characters) and the query's n=, through solveN (the composite Solver
-// first, the goja resolver after it), and returns the URL with each answer in
+// characters) and the query's n=, through solveN (the composite Solver, goja
+// last within it; the goja resolver only with no composite), and returns the URL with each answer in
 // its challenge's place. A URL that carries no n comes back unchanged with a
 // nil error, whatever the player and solvers.
 //

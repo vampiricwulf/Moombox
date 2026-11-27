@@ -441,8 +441,8 @@ Lower [`downloader.segment_workers`](../configuration/downloader.md#downloaderse
 
 The TUI's status bar shows **SIDECAR DOWN** (or **POT**) in red, and a
 *BotGuard Sidecar Down* notification arrives after a minute: *The BotGuard
-sidecar has been unhealthy for over 60 s — PO-token minting and
-signature-ciphered formats are unavailable until it returns*. Moombox keeps
+sidecar has been unhealthy for over 60 s — PO-token minting is unavailable,
+and signatures are left to the in-process goja solver, until it returns*. Moombox keeps
 restarting it and keeps recording on formats that need no token, so some
 qualities may be missing. *BotGuard Sidecar Restored* follows when it is back.
 

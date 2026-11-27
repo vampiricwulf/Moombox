@@ -52,7 +52,9 @@
     the broadcast, so a stream found an hour late still produces a complete
     recording. A broadcast that has been running for about five days or more
     is recorded from the live edge instead, because YouTube no longer serves
-    its start; so is one whose player challenges cannot be solved (for
+    its start; so is one whose player challenges cannot be solved (a new
+    YouTube player version no solver understands yet), or whose from-start
+    formats need a PO token none can be minted for (for
     example while the BotGuard sidecar is down). The job's log says why. On Twitch a live capture starts when the monitor sees the channel go
     live (every 15 seconds by default); to also keep the channel's past
     broadcasts, turn on

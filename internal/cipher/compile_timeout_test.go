@@ -200,7 +200,7 @@ func TestRefusalListIsBounded(t *testing.T) {
 	s := &GojaResolver{}
 
 	for i := 0; i <= maxTimedOutPlayers; i++ {
-		s.refuse(string(rune('a' + i)))
+		s.refuse(string(rune('a'+i)), mbgoja.ErrExecutionTimeout)
 		clock = clock.Add(time.Second)
 	}
 	if got := len(s.timedOut); got != maxTimedOutPlayers {
@@ -216,5 +216,116 @@ func TestRefusalListIsBounded(t *testing.T) {
 	clock = clock.Add(compileRefusal)
 	if !s.refusedUntil("b").IsZero() {
 		t.Error("a refusal past compileRefusal still holds")
+	}
+}
+
+// A player whose body the port cannot prepare (ErrExtractorMismatch) is
+// refused for compileRefusal, like one whose compile timed out: every later
+// signature or n used to fetch and parse it again (about 0.1 s each) while
+// holding the compile slot. The refusal still wraps
+// ErrExtractorMismatch, and a changed body under the player's URL (the
+// sidecar's fetch, PlayerJS) ends it.
+//
+// Mutants: no refusal (the second call fetches and prepares again, gets goes
+// to 2); the refusal not wrapping the mismatch (errors.Is fails); a changed
+// body not ending it (gets stays at 2 after the third call).
+func TestGetSolversRefusesAPlayerThePortCannotPrepare(t *testing.T) {
+	const playerID = "dddd4444"
+	playerURL := playerURLForID(playerID)
+	var gets atomic.Int32
+	var body atomic.Value
+	body.Store("")
+	origClient, origNow := playerHTTPClient, resolverNow
+	playerHTTPClient = httpxtest.NewClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		if b := body.Load().(string); b != "" {
+			_, _ = w.Write([]byte(b))
+			return
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	clock := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	resolverNow = func() time.Time { return clock }
+	t.Cleanup(func() { playerHTTPClient, resolverNow = origClient, origNow })
+
+	s, err := NewGojaResolver(t.TempDir(), &testLogger{})
+	if err != nil {
+		t.Fatalf("NewGojaResolver: %v", err)
+	}
+	if err := s.playerCache.Put(playerURL, "var player = 1;"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	for i := 1; i <= 2; i++ {
+		if _, err := s.Sig(context.Background(), playerID, "AAAA"); !errors.Is(err, ErrExtractorMismatch) {
+			t.Fatalf("Sig %d = %v, want ErrExtractorMismatch", i, err)
+		}
+	}
+	if got := gets.Load(); got != 1 {
+		t.Fatalf("CDN requests after two signatures = %d, want 1: the second was to be refused", got)
+	}
+
+	body.Store("var player = 2; var other = 3;")
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("PlayerJS: %v", err)
+	}
+	if !s.refusedUntil(CacheKey(playerURL)).IsZero() {
+		t.Error("the refusal outlived a changed body")
+	}
+	_, _ = s.Sig(context.Background(), playerID, "AAAA")
+	if got := gets.Load(); got != 3 {
+		t.Errorf("CDN requests after the body changed = %d, want 3: the player was to be tried again", got)
+	}
+}
+
+// A refused player stays refused through a cold refetch of the same body.
+// InvalidateSolver and RemovePlayerJS (a job's 403, the sidecar's stale-JS
+// recovery) empty the disk cache, so the sidecar's next PlayerJS is a cold
+// fetch that reports the body changed; that alone must not lift the
+// refusal (R3-9), or a timed-out compile is run again for the full bound.
+// A body that then replaces the cached one still ends it.
+//
+// Mutants: PlayerJS unrefusing on Changed (the refusal ends after the cold
+// fetch); Replaced set on a cold fetch (the same); Replaced never set (the
+// refusal outlives the real change).
+func TestRefusalOutlivesAColdRefetchOfTheSameBody(t *testing.T) {
+	const playerID = "eeee5555"
+	playerURL := playerURLForID(playerID)
+	var body atomic.Value
+	body.Store("var player = 1;")
+	origClient, origNow := playerHTTPClient, resolverNow
+	playerHTTPClient = httpxtest.NewClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body.Load().(string)))
+	}))
+	clock := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	resolverNow = func() time.Time { return clock }
+	t.Cleanup(func() { playerHTTPClient, resolverNow = origClient, origNow })
+
+	s, err := NewGojaResolver(t.TempDir(), &testLogger{})
+	if err != nil {
+		t.Fatalf("NewGojaResolver: %v", err)
+	}
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("first PlayerJS: %v", err)
+	}
+	key := CacheKey(playerURL)
+	s.refuse(key, mbgoja.ErrExecutionTimeout)
+
+	if err := s.RemovePlayerJS(playerID); err != nil {
+		t.Fatalf("RemovePlayerJS: %v", err)
+	}
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("PlayerJS after the remove: %v", err)
+	}
+	if s.refusedUntil(key).IsZero() {
+		t.Fatal("a cold refetch of the same body ended the refusal")
+	}
+
+	body.Store("var player = 2; var other = 3;")
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("PlayerJS of the new body: %v", err)
+	}
+	if !s.refusedUntil(key).IsZero() {
+		t.Error("the refusal outlived a body that replaced the cached one")
 	}
 }

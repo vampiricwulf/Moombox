@@ -76,6 +76,13 @@ if [ -z "${GOTMPDIR:-}" ] && command -v cygpath >/dev/null 2>&1; then
 fi
 export NO_COLOR=1
 
+# A live-test run (live-tests.sh) a hard kill ended leaves private cookie
+# copies in .superpowers/live-tmp until something sweeps them; this does, and
+# never touches a run still going.
+if [ -f .github/scripts/live-tests.sh ]; then
+	bash .github/scripts/live-tests.sh --sweep || true
+fi
+
 # only_numbered_dirs <dir>: everything in it is a directory named with three
 # or more digits, as t.TempDir numbers them. An empty directory passes.
 only_numbered_dirs() {

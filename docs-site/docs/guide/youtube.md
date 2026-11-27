@@ -401,7 +401,10 @@ While it is down:
 - a *BotGuard Sidecar Down* notification is sent (event **Sidecar Down**,
   which pings your mention by default), and *BotGuard Sidecar Restored* when
   it is back (event **Sidecar Restored**, no ping);
-- no new PO tokens can be minted, and new signatures cannot be solved.
+- no new PO tokens can be minted, and signatures are solved in-process
+  (the scrambling patterns learned while the sidecar ran first, then
+  Moombox's own copy of the sidecar's solver), after a minute's wait for the
+  sidecar to come back.
 
 Moombox does not stop recording. It works around the missing pieces: a VOD
 switches to a copy that needs neither a token nor the player JavaScript,
@@ -413,13 +416,15 @@ qualities may be missing until the sidecar is back.
 ### Turning the sidecar off (the goja fallback)
 
 Setting **Enable sidecar** off (dashboard Settings → **BotGuard**;
-needs a restart) leaves only an in-process fallback. It cannot pass
-BotGuard's timing check, so **it mints no PO tokens at all**, and it cannot
-solve the signatures of current YouTube players (only the scrambling patterns
-learned while the sidecar was running still work). Expect fewer formats,
-recordings that start at the live edge more often, and a startup warning
-(*BotGuard sidecar disabled in config; no PO tokens will be minted and
-signature-ciphered formats are unavailable*). Turn it off only to diagnose a
+needs a restart) leaves only an in-process fallback. Its stand-in for a
+browser page is too incomplete for BotGuard's challenge, so **it mints no PO
+tokens at all**. Signatures and
+the `n` parameter are still solved in-process: first by the scrambling
+patterns learned while the sidecar was running, then by Moombox's own copy of
+the solver the sidecar runs. Expect fewer formats, recordings that start at
+the live edge more often, and a startup warning (*BotGuard sidecar disabled
+in config; no PO tokens will be minted, and signatures are left to the
+in-process goja solver*). Turn it off only to diagnose a
 problem with the sidecar itself.
 
 ## Signature and n-parameter challenges
@@ -434,27 +439,33 @@ the challenges:
 
 - **Signatures** are solved by the sidecar. The first signature of each
   length a player produces also teaches Moombox that player's scrambling
-  pattern, which it keeps on disk and can reuse while the sidecar is down.
+  pattern, which it keeps on disk and can reuse while the sidecar is down;
+  the in-process solver answers the rest, last.
 - **`n` challenges** are solved by the sidecar, with an in-process solver as
   a last resort.
 
+While the sidecar is off or down, Moombox picks formats as usual as long as
+the in-process solver can answer the player. Only for a player it cannot
+answer either does it prefer the formats that need no player JavaScript, and
+the job log then warns that *some formats may be missing*.
+
 YouTube publishes each player version as several files. Moombox solves with
 the main one. If the sidecar cannot solve with it, it tries the TV file of
-the same version, and only after that the in-process solver, whose answers
-YouTube often refuses for current players. Each step is logged once per
-player version, as a warning:
+the same version, and only after that the in-process solver, Moombox's own
+copy of the same solver, which rarely succeeds where the sidecar failed on
+both files. Each step is logged once per player version, as a warning:
 
 - *the sidecar cannot solve with this player's main variant; its tv variant
   solves, and is used for this player from now on*: nothing to do, downloads
   carry on.
 - *the sidecar could not solve for this player; goja, the last solver asked,
-  is tried, and its answers may be refused*: expect failed or lower-quality
-  downloads until a Moombox update brings a solver for that player version.
+  is tried*: expect failed or lower-quality downloads until a Moombox update
+  brings a solver for that player version.
 
 A URL whose `n` no solver can answer is never sent. When the challenges
-cannot be solved at all — the sidecar off or down for over a minute, a new
-player version the solver does not understand yet, or the player script
-cannot be downloaded — Moombox drops every format that needs them and uses
+cannot be solved at all — a new player version neither the sidecar nor the
+in-process solver understands yet, or the player script cannot be
+downloaded — Moombox drops every format that needs them and uses
 the ones that do not (log line *the player's JS challenges cannot be solved
 — dropping every format that needs them*). For a live capture that means the
 formats that need no player JavaScript, recorded from the start, or failing

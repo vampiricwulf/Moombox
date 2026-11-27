@@ -32,7 +32,7 @@ func waitQueued(t *testing.T, tm *TimerManager, n int) {
 // --- SetTimeout tests ---
 
 func TestSetTimeoutEnqueuesCallback(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -73,7 +73,7 @@ func TestSetTimeoutEnqueuesCallback(t *testing.T) {
 }
 
 func TestSetTimeoutReturnsUniqueIDs(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -90,7 +90,7 @@ func TestSetTimeoutReturnsUniqueIDs(t *testing.T) {
 }
 
 func TestSetTimeoutNegativeDelay(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -115,7 +115,7 @@ func TestSetTimeoutNegativeDelay(t *testing.T) {
 // --- ClearTimer tests ---
 
 func TestClearTimerPreventsCallback(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -141,7 +141,7 @@ func TestClearTimerPreventsCallback(t *testing.T) {
 }
 
 func TestClearTimerNonExistentID(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -152,7 +152,7 @@ func TestClearTimerNonExistentID(t *testing.T) {
 // --- CancelAll tests ---
 
 func TestCancelAllStopsAllTimers(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 
 	var count atomic.Int32
@@ -187,7 +187,7 @@ func TestCancelAllStopsAllTimers(t *testing.T) {
 }
 
 func TestCancelAllPreventsNewTimers(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 
 	var fired atomic.Int32
@@ -210,7 +210,7 @@ func TestCancelAllPreventsNewTimers(t *testing.T) {
 }
 
 func TestCancelAllClearsPendingCallbacks(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 
 	var count atomic.Int32
@@ -243,7 +243,7 @@ func TestCancelAllClearsPendingCallbacks(t *testing.T) {
 // --- SetInterval tests ---
 
 func TestSetIntervalEnqueuesCallbacks(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -273,7 +273,7 @@ func TestSetIntervalEnqueuesCallbacks(t *testing.T) {
 }
 
 func TestSetIntervalClearedByID(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -309,7 +309,7 @@ func TestSetIntervalClearedByID(t *testing.T) {
 
 func TestSetIntervalZeroDelay(t *testing.T) {
 	// Verify that 0ms delay is clamped to 1ms (not a tight loop)
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -341,7 +341,7 @@ func TestSetIntervalZeroDelay(t *testing.T) {
 // --- ActiveCount tests ---
 
 func TestActiveCountTracking(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -378,7 +378,7 @@ func TestActiveCountTracking(t *testing.T) {
 // --- DrainCallbacks error handling ---
 
 func TestDrainCallbacksReportsErrors(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 	defer tm.CancelAll()
 
@@ -404,7 +404,7 @@ func TestDrainCallbacksReportsErrors(t *testing.T) {
 // --- Concurrency safety ---
 
 func TestTimerConcurrentCreateAndCancel(t *testing.T) {
-	vm := gojalib.New()
+	vm := NewPlainRuntime()
 	tm := NewTimerManager(vm)
 
 	fn := func(call gojalib.FunctionCall) gojalib.Value {
