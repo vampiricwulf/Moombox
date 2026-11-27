@@ -738,7 +738,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	// broadcast would record under the old job's metadata. stream_start_time
 	// is the stable cross-restart identity — it is written once per job
 	// (guarded by `job.StreamStartTime == ""` below) for monitor-created and
-	// manually-added jobs alike. The minute of tolerance absorbs any API
+	// manually-added jobs alike, and replaced only when a manually added row
+	// that holds no capture (a re-initialised one) takes a later broadcast,
+	// in the write that claims Live. The minute of tolerance absorbs any API
 	// formatting jitter; distinct broadcasts differ by far more. The captured
 	// data stays recoverable via the Mux action, and the monitor picks the new
 	// broadcast up as its own job.
@@ -818,6 +820,15 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	if job.ManuallyAdded && streamInfo.StreamID != "" {
 		start["twitch_stream_id"] = streamInfo.StreamID
 	}
+	// The same row takes the later broadcast's start too: it is the identity
+	// the restart guard above, the outage path (sameTwitchBroadcast) and the
+	// end-unconfirmed mux (TwitchBroadcastOver) read, and a re-initialised
+	// row kept the start of the broadcast it recorded before. Only a row that
+	// holds no capture: one that does belongs to its own broadcast, and the
+	// guard above has already refused a different one.
+	if job.ManuallyAdded && !holdsCapture && streamInfo.StartedAt != "" && job.StreamStartTime != streamInfo.StartedAt {
+		start["stream_start_time"] = streamInfo.StartedAt
+	}
 	variant, outcome := sp.startTwitchVariant(variants, job, start)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
@@ -829,6 +840,9 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 	if id, ok := start["twitch_stream_id"].(string); ok {
 		job.TwitchStreamID = id
+	}
+	if st, ok := start["stream_start_time"].(string); ok {
+		job.StreamStartTime = st
 	}
 
 	sp.logger.Info("twitch live stream ready",

@@ -67,6 +67,8 @@ func TestTwitchBroadcastOver(t *testing.T) {
 		{"manual, same start", &database.Job{ID: "tw_manual_x_1", StreamStartTime: "2026-10-08T12:00:00Z"}, live("9", "2026-10-08T12:00:30Z"), false},
 		{"manual, another start", &database.Job{ID: "tw_manual_x_1", StreamStartTime: "2026-10-08T12:00:00Z"}, live("9", "2026-10-08T15:00:00Z"), true},
 		{"manual, start unknown", &database.Job{ID: "tw_manual_x_1"}, live("9", "2026-10-08T15:00:00Z"), false},
+		{"re-initialised broadcast add, its broadcast", &database.Job{ID: "tw_800", TwitchStreamID: "900"}, live("900", ""), false},
+		{"re-initialised broadcast add, another", &database.Job{ID: "tw_800", TwitchStreamID: "900"}, live("901", ""), true},
 	} {
 		if got := TwitchBroadcastOver(tc.job, tc.info); got != tc.want {
 			t.Errorf("%s: TwitchBroadcastOver = %v, want %v", tc.name, got, tc.want)
