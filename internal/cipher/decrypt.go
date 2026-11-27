@@ -165,7 +165,7 @@ func solveN(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver
 	}
 	dec, err := solvers.DecryptN(challenge)
 	if err == nil {
-		err = checkNResult(challenge, dec)
+		err = gojaResolver.noteNAnswer(playerURL, challenge, dec)
 	}
 	if err != nil {
 		return "", fmt.Errorf("goja n: %w", err)

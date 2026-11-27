@@ -125,20 +125,27 @@ func TestChallengesSolvableSeesARefusalGojaMadeItself(t *testing.T) {
 // whose n function answers with no answer (checkNResult: the exception
 // sentinel) does not work, so after that answer the predicate reads it
 // unsolvable with the sidecar down (owner ruling RV-16), through every form
-// of the player's URL, while the compiled copy stays cached and still runs,
-// and a player that answers well is never refused.
+// of the player's URL, while the compiled copy stays cached and still runs.
+// The mark is the predicate's alone (GetSolvers does not refuse the player),
+// a later good n ends it, ResolveURL's own goja n marks too, and a player
+// that answers well is never marked.
 //
-// Mutant: GojaResolver.N no longer refusing on a no-answer (the predicate
-// stays true after the failed solve).
+// Mutants: noteNAnswer not marking (the predicate stays true after the failed
+// solve); the mark written to the refusal list GetSolvers reads (refusedErr
+// non-nil); a good n not clearing it; ResolveURL keeping its bare
+// checkNResult (the ResolveURL row).
 func TestChallengesSolvableSeesGojaAnsweringNoN(t *testing.T) {
 	const bad, good = "ffff6666", "abcd7777"
 	g, err := NewGojaResolver(t.TempDir(), &testLogger{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs := 0
+	runs, broken := 0, true
 	g.cacheSolvers(CacheKey(playerURLForID(bad)), &Solvers{N: func(in string) (string, error) {
 		runs++
+		if !broken {
+			return "fine", nil
+		}
 		return "enhanced_except_x_" + in, nil
 	}})
 	g.cacheSolvers(CacheKey(playerURLForID(good)), &Solvers{N: func(in string) (string, error) {
@@ -172,6 +179,34 @@ func TestChallengesSolvableSeesGojaAnsweringNoN(t *testing.T) {
 		}
 	}
 	if _, err := c.N(ctx, bad, "mmmm"); err == nil || runs != 2 {
-		t.Errorf("the cached copy of the refused player: err %v, runs %d; want an error from a second run", err, runs)
+		t.Errorf("the cached copy of the marked player: err %v, runs %d; want an error from a second run", err, runs)
+	}
+	// The mark is ChallengesSolvable's alone: GetSolvers still compiles the
+	// player after a per-job 403 drops its copy, for its signatures.
+	if err := g.refusedErr(CacheKey(playerURLForID(bad)), bad); err != nil {
+		t.Errorf("GetSolvers refuses a player goja answered no n for: %v", err)
+	}
+	// A later good n ends the mark.
+	broken = false
+	if _, err := c.N(ctx, bad, "kkkk"); err != nil {
+		t.Fatalf("N once the player answers: %v", err)
+	}
+	if !c.ChallengesSolvable(forms[0]) {
+		t.Error("after a good n: ChallengesSolvable = false, want true")
+	}
+
+	// ResolveURL runs goja's n itself, and marks the same way.
+	const viaURL = "1234abcd"
+	g.cacheSolvers(CacheKey(playerURLForID(viaURL)), &Solvers{N: func(in string) (string, error) {
+		return "enhanced_except_y_" + in, nil
+	}})
+	if _, err := g.ResolveURL(ctx, ResolveURLRequest{
+		StreamURL: "https://rr1---sn-x.googlevideo.com/videoplayback?itag=18&n=qqqqqqqq",
+		PlayerURL: playerURLForID(viaURL),
+	}); !errors.Is(err, ErrNUnsolved) {
+		t.Fatalf("ResolveURL on a player whose n answers the sentinel: %v, want ErrNUnsolved", err)
+	}
+	if c.ChallengesSolvable(playerURLForID(viaURL)) {
+		t.Error("after ResolveURL got no n answer: ChallengesSolvable = true, want false")
 	}
 }

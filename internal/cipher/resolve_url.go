@@ -97,7 +97,7 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 		}
 		decryptedN, err := solvers.DecryptN(nParam)
 		if err == nil {
-			err = checkNResult(nParam, decryptedN)
+			err = s.noteNAnswer(req.PlayerURL, nParam, decryptedN)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w (player %s): decrypt n-parameter: %w", ErrNUnsolved, playerID, err)

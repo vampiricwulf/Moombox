@@ -38,7 +38,11 @@ type GojaResolver struct {
 	// maxTimedOutPlayers entries.
 	timedOutMu sync.Mutex
 	timedOut   map[string]refusal
-	logger     interface {
+	// noNAnswer maps the CacheKey of a player whose prepared copy answered an
+	// n with no answer (noteNAnswer) to when that mark ends. Under timedOutMu,
+	// held to maxTimedOutPlayers entries; read by refuses only.
+	noNAnswer map[string]time.Time
+	logger    interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -126,7 +130,14 @@ func (s *GojaResolver) refusalOf(key string) refusal {
 // refuses reports whether the player at playerURL is on the refusal list now
 // (the composite's ChallengesSolvable, owner ruling RV-16).
 func (s *GojaResolver) refuses(playerURL string) bool {
-	return !s.refusedUntil(CacheKey(playerURL)).IsZero()
+	key := CacheKey(playerURL)
+	if !s.refusedUntil(key).IsZero() {
+		return true
+	}
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	until, ok := s.noNAnswer[key]
+	return ok && resolverNow().Before(until)
 }
 
 // unrefuse ends the player's refusal:a fetch found its body changed, so the
@@ -138,6 +149,7 @@ func (s *GojaResolver) unrefuse(key string) {
 	s.timedOutMu.Lock()
 	defer s.timedOutMu.Unlock()
 	delete(s.timedOut, key)
+	delete(s.noNAnswer, key)
 }
 
 // refuse records that the player under key failed with cause: its compile
@@ -177,11 +189,6 @@ func (s *GojaResolver) refusedErr(key, playerID string) error {
 	until := r.until.Format(time.RFC3339)
 	if errors.Is(r.cause, ErrExtractorMismatch) {
 		s.logger.Debug("cipher: the goja port could not prepare this player lately; not preparing it again yet",
-			"playerID", playerID, "until", until)
-		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
-	}
-	if errors.Is(r.cause, errGojaNoNAnswer) {
-		s.logger.Debug("cipher: the goja port's n answer for this player was no answer lately; not preparing it again yet",
 			"playerID", playerID, "until", until)
 		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
 	}
@@ -587,32 +594,58 @@ func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (stri
 	}
 	out, err := solvers.DecryptN(encryptedN)
 	if err == nil {
-		if cerr := checkNResult(encryptedN, out); cerr != nil {
-			// The prepared copy ran and handed back no answer (the
-			// exception sentinel, or nothing): the player's body decides
-			// that, so goja does not work for this player, and the refusal
-			// list says so to ChallengesSolvable (owner ruling RV-16). The
-			// compiled copy stays cached, so a later ask still runs it;
-			// the answer itself is returned as it was, for the caller's
-			// own checkNResult. A run that errored (CipherTimeout, a
-			// panic and ErrSolverDead) says nothing certain about the
-			// player and refuses nothing.
-			key := CacheKey(playerURLForID(playerID))
-			first := s.refusedUntil(key).IsZero()
-			s.refuse(key, fmt.Errorf("%w: %v", errGojaNoNAnswer, cerr))
-			if !first {
-				return out, err
-			}
-			s.logger.Warn("cipher: the goja port's n answer for this player is no answer; treating its challenges as unsolvable for a while",
-				"playerID", playerID, "refusedFor", compileRefusal, "error", cerr.Error())
-		}
+		s.noteNAnswer(playerURLForID(playerID), encryptedN, out)
 	}
 	return out, err
 }
 
-// errGojaNoNAnswer is the cause of a refusal for a player whose prepared copy
-// answered an n challenge with no answer (checkNResult).
-var errGojaNoNAnswer = errors.New("cipher: the goja port's n answer for this player is no answer")
+// noteNAnswer holds the prepared copy's n answer to checkNResult, and when it
+// is no answer (the exception sentinel, or nothing) marks the player as one
+// goja does not work for, for compileRefusal (owner ruling RV-16): the mark
+// is read by refuses, so ChallengesSolvable, and by nothing else. GetSolvers
+// never reads it, so goja still compiles and asks the player — its
+// signatures may well work, and so may another challenge's n — and a later
+// good n ends the mark. Every place a goja n is run calls it (N, solveN's
+// goja branch, ResolveURL); a run that errored (CipherTimeout, a panic,
+// ErrSolverDead) says nothing certain about the player and marks nothing.
+// It returns checkNResult's verdict.
+func (s *GojaResolver) noteNAnswer(playerURL, challenge, out string) error {
+	key := CacheKey(playerURL)
+	cerr := checkNResult(challenge, out)
+	s.timedOutMu.Lock()
+	if cerr == nil {
+		delete(s.noNAnswer, key)
+		s.timedOutMu.Unlock()
+		return nil
+	}
+	now := resolverNow()
+	until, marked := s.noNAnswer[key]
+	first := !marked || !now.Before(until)
+	if s.noNAnswer == nil {
+		s.noNAnswer = make(map[string]time.Time)
+	}
+	for k, u := range s.noNAnswer {
+		if !now.Before(u) {
+			delete(s.noNAnswer, k)
+		}
+	}
+	if _, ok := s.noNAnswer[key]; !ok && len(s.noNAnswer) >= maxTimedOutPlayers {
+		var oldest string
+		for k, u := range s.noNAnswer {
+			if oldest == "" || u.Before(s.noNAnswer[oldest]) {
+				oldest = k
+			}
+		}
+		delete(s.noNAnswer, oldest)
+	}
+	s.noNAnswer[key] = now.Add(compileRefusal)
+	s.timedOutMu.Unlock()
+	if first {
+		s.logger.Warn("cipher: the goja port's n answer for this player is no answer; while the sidecar is down its challenges count as unsolvable for a while",
+			"playerID", PlayerIDFromURL(playerURL), "for", compileRefusal, "error", cerr.Error())
+	}
+	return cerr
+}
 
 // Batch satisfies cipher.Solver. Goja has no round-trip overhead so
 // the implementation is a straight loop. ErrSigUnavailable on a sig
