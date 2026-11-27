@@ -22,7 +22,9 @@ import (
 var domRealJS string
 
 // RegisterDOMShim registers minimal DOM stubs on a Goja runtime.
-// This provides just enough browser-like environment for BotGuard and cipher functions.
+// This provides just enough browser-like environment for BotGuard. The
+// cipher does not use it: the goja fallback's port of ejs runs the player in
+// a bare runtime with ejs's own setup globals (internal/cipher, getFromPrepared).
 func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	if userAgent == "" {
 		userAgent = constants.UserAgents.Web

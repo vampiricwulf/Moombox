@@ -1660,7 +1660,7 @@ The one failure that is remembered is a compile that ran out of `compileTimeout`
 
 ### Purpose
 
-BotGuard and the cipher solver both execute YouTube's JavaScript in Goja, a pure-Go JavaScript engine. This JavaScript was written for browsers and expects DOM APIs, encoding APIs, and timer APIs. The shim package provides minimal stubs sufficient for execution without a full browser.
+BotGuard and the cipher solver both execute YouTube's JavaScript in Goja, a pure-Go JavaScript engine. The BotGuard program was written for browsers and expects DOM APIs, encoding APIs, and timer APIs; the shim package provides minimal stubs sufficient for execution without a full browser. The cipher uses none of them: the goja fallback's port of ejs runs the player in a bare runtime with ejs's own setup globals (owner ruling RV-12; Cipher Solver, Compilation Pipeline).
 
 ### Components
 
@@ -1862,7 +1862,7 @@ The epoch also holds across the live→replay flip inside ONE live/upcoming run 
 - `internal/youtube/` -- Service facade, PlayerAPI (strategy + parsing), Auth, WatchPage, Browse, FormatSelector, Types (13 files, ~6,960 lines).
 - `internal/twitch/` -- Service, API, Auth, HLS, Chat (IRC + recording), VodChat, Emotes, PlaybackToken, LivenessProbe, Delays, Types (13 files, ~7,470 lines).
 - `internal/bgutils/` -- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter, Types (6 files, ~2,180 lines; the sidecar manager is the `sidecar/` subpackage, 7 files, ~2,100 lines).
-- `internal/cipher/` -- Solver, PlayerCache, Extractor, STS, Decrypt, ResolveURL, sidecar routing, Types (13 files, ~3,190 lines).
+- `internal/cipher/` -- Solver, PlayerCache, Extractor (the Go port of ejs), STS, Decrypt, ResolveURL, sidecar routing and the composite solver, Types (14 files, ~5,110 lines).
 - `internal/goja/` -- Runtime, DOMShim, Encoding, Timer (5 files, ~1,510 lines).
 - `internal/chat/` -- Downloader, API, Types (3 files, ~3,410 lines).
 - `internal/constants/constants.go` -- All API keys, URLs, client configs, timeouts, limits.
@@ -2127,14 +2127,25 @@ The tests that pin the behaviour above, by the section they pin. Each bullet nam
 - Renewal before expiry: `TestProactiveRefreshRenewsBeforeTheURLExpires`, `TestStartRunsTheProactiveRefresh`
 - Renewal before expiry: `TestManifestlessLiveDownloadersRenewBeforeExpiry`, `internal/worker/live_url_renewal_test.go`
 
+**Solve Order**
+
+- “For a signature and for an n the order is the same…”, goja last: `TestCompositeSigAsksGojaLast`, `TestRoutedResolveURLAsksGojaOncePerSignature`, `TestSigWaitsOutTheGraceBeforeGoja`, `TestBatchWaitsOutTheGraceBeforeGoja`, `TestBatchSignaturesFallToGojaLast`, `TestGojaIsNotAskedOnceTheCallerHasGivenUp`, `internal/cipher/solver_composite_goja_test.go`
+
 **Disk Cache (`PlayerCache`)**
 
 - Key: `TestPlayerCacheVariantsDoNotOverwriteEachOther`
+- Prepared copy: `TestPlayerCachePreprocessedFilePath`, `TestRegexExtractorCopyIsNeverRun`, `internal/cipher/player_cache_preprocessed_test.go`
 
 **Signature Specs (`<key>.sigspec.json`)**
 
 - “The challenge goes through `sidecarSolver.probeSigs`, never through the stale-JS…”: `TestAFailedSyntheticChallengeIsAskedOncePerSidecar`, `TestTheSyntheticChallengeNeverRunsTheStaleJSRecovery`
+- “A signature goja answered teaches the spec the same way…”: `TestGojaAnswerLearnsTheSigSpec`, `TestGojaLearningLeavesTheSidecarFree`
 - “While the sidecar is absent, or fails for any…”: `TestASigSpecAnswersSignaturesWhileTheSidecarIsDown`, `TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown`, `TestASigSpecThatDoesNotReproduceTheSidecarIsNotKept`, `TestInvalidatingAPlayerDropsItsSigSpecs`, `TestASigSpecPastTheTTLIsNotAnswered`, `TestConcurrentFirstSignaturesLearnTheSpecOnce`, `internal/cipher/sig_spec_test.go`
+
+**Compilation Pipeline**
+
+- Prepare: `TestEjsPortVectors`, `TestEjsVectorsAreWellFormed`, `internal/cipher/ejs_vectors_test.go`; `TestEjsPortPinMatchesVendoredEjs`, `TestPreprocessPlayerRoutes`, `TestPreprocessPlayerFindsNoBuilder`, `TestPreprocessPlayerSolversMustAgree`, `internal/cipher/extractor_test.go`; `TestSidecarSolverGojaParity` (live, `MOOMBOX_LIVE_CIPHER_TEST=1`)
+- Compile: `TestGetFromPreparedRunsTheSetupGlobals`, `TestSolverAnswerNullIsNoAnswer`
 
 **STS Extraction**
 

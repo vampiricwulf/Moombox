@@ -14,7 +14,8 @@ import (
 // requested but no sidecar solver can answer it: none is configured
 // (`[bgutils] use_sidecar = false`, or a first start that never came up), or
 // the one installed reports its child down — crashed, or between a crash and
-// the supervisor's restart (SidecarReady). Distinguishes from
+// the supervisor's restart (SidecarReady) — and neither a sig spec nor goja,
+// asked last, answered it either; goja's failure is then in the error's text. Distinguishes from
 // ErrSigUnavailable (player-specific extraction failure) so callers /
 // tests can tell "no sig solver running" from "this player can't be sig'd."
 //
@@ -23,7 +24,7 @@ import (
 // failure. It is the worker's systemic signal (audit G10): every format whose
 // URL needs a signature fails alike while it holds, so the VOD and live
 // strategies drop to formats that need no player JS rather than re-select
-// one itag at a time.
+// one itag at a time. A signature goja answers is no failure at all.
 var ErrSidecarUnavailable = errors.New("cipher: sidecar solver unavailable")
 
 // SidecarSwappable is the composite solver's own interface: a Solver whose
@@ -133,16 +134,17 @@ type compositeSolver struct {
 }
 
 // sidecarReadyGrace is how long an installed sidecar half may report its
-// child down before a signature it cannot answer fails with
-// ErrSidecarUnavailable (owner decision PR-R3): a request meeting a down
-// child within it waits for the child to come back. The supervisor restarts
+// child down before a signature it cannot answer goes to goja, last, and
+// fails with ErrSidecarUnavailable when goja cannot answer it either (owner
+// decision PR-R3, ruling RV-12): a request meeting a down child within it
+// waits for the child to come back. The supervisor restarts
 // a crashed child in seconds, and ErrSidecarUnavailable is systemic to the
 // worker (systemicResolveFailure): it drops every format needing the player
 // JS for the run's setup, and a live capture switches path, for good. A
 // several-streams-at-once BotGuard burst that restarts the child no longer
 // commits every capture it meets to the fallback path. Measured from the
 // outage's start, not per request: once the child has been down this long,
-// every request fails at once, as before. A variable so a test can shorten
+// every request goes to goja at once. A variable so a test can shorten
 // it; production never writes it.
 var sidecarReadyGrace = 60 * time.Second
 
@@ -233,7 +235,8 @@ func (c *compositeSolver) sidecar() Solver {
 // installed and reports its child up. It is false for the whole of an outage
 // — `[bgutils] use_sidecar = false`, a first start that failed, a crash until
 // the supervisor's restart installs the rebuilt solver (SetSidecar) — which
-// is when no signature can be solved and n has only the goja fallback. The
+// is when signatures have only the sig specs and the goja fallback, and n
+// only the goja fallback. The
 // extraction reads it to rank the JS-less client first, yt-dlp's
 // _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
 // youtube.PlayerAPI's SetJSChallengeSolvable, wired in cmd/moombox.

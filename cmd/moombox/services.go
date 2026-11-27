@@ -986,11 +986,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Wire the goja resolver for GetSts (signature timestamp lookup). The
 	// composite Solver does sig/n decryption on the worker side
-	// (RoutedCipherSolver below): sig flows through the sidecar's V8 ejs, and
-	// n falls back to goja if the sidecar is unavailable.
+	// (RoutedCipherSolver below): sig and n flow through the sidecar's V8 ejs,
+	// and fall back to goja, last, if the sidecar cannot answer.
 	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
-	// While the sidecar is disabled or down no signature can be solved, and
-	// an extraction ranks the JS-less client (visionos) first, as yt-dlp
+	// While the sidecar is disabled or down only the goja fallback (and the
+	// learned sig specs) can solve the challenges, and an extraction ranks
+	// the JS-less client (visionos) first, as yt-dlp
 	// asks _DEFAULT_JSLESS_CLIENTS with no JS runtime (audit G10, owner
 	// decision 4). The composite's own health accessor answers it.
 	ytService.PlayerAPI.SetJSChallengeSolvable(cipherSolver.SidecarReady)

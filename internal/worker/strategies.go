@@ -26,10 +26,10 @@ type StrategyDeps struct {
 	CipherSolver *cipher.GojaResolver
 
 	// RoutedCipherSolver is the composite cipher.Solver (sidecar
-	// primary, goja fallback).  DASH and HLS strategies call this for
-	// sig and n-param decryption so the work flows through the V8 ejs
-	// path on cb017549-family players.  nil falls back to CipherSolver
-	// directly (pre-sidecar behaviour).
+	// primary, goja last), the one place that decides the solve order.
+	// Every strategy calls it for sig and n-param decryption; a signature
+	// is asked of it alone (cipher.RoutedResolveURL). nil falls back to
+	// CipherSolver directly (pre-sidecar behaviour).
 	RoutedCipherSolver cipher.Solver
 
 	// PotProvider mints PO tokens for GVS (Google Video Server) requests.
