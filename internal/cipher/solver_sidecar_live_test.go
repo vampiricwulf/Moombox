@@ -212,3 +212,77 @@ func (l *liveLogger) Debug(msg string, args ...any) { l.t.Logf("[DEBUG] "+msg+" 
 func (l *liveLogger) Info(msg string, args ...any)  { l.t.Logf("[INFO ] "+msg+" %v", args) }
 func (l *liveLogger) Warn(msg string, args ...any)  { l.t.Logf("[WARN ] "+msg+" %v", args) }
 func (l *liveLogger) Error(msg string, args ...any) { l.t.Logf("[ERROR] "+msg+" %v", args) }
+
+// tvFixtureSource serves a main body ejs cannot prepare and, as the tv body,
+// a real player.
+type tvFixtureSource struct {
+	fixedPlayerSource
+	tvJS string
+}
+
+func (f *tvFixtureSource) TVPlayerJS(_ context.Context, playerID string) (string, error) {
+	if playerID != f.playerID {
+		return "", os.ErrNotExist
+	}
+	return f.tvJS, nil
+}
+
+// TestSidecarSolverLiveTVRetry runs the main-then-tv retry (owner ruling
+// RV-11) against a real sidecar: the main body is one ejs throws on while
+// preparing it, the tv body is the cb017549 fixture. The solve must be
+// answered, with the answer the fixture gives as a main body, and the
+// sidecar's store must hold the prepared copy under the "<id>-tv" key and
+// none under the bare id. That is what shows the real sidecar takes the
+// suffixed key and keeps the two bodies apart with no change on its side.
+// SKIPS unless MOOMBOX_LIVE_CIPHER_TEST=1.
+func TestSidecarSolverLiveTVRetry(t *testing.T) {
+	if os.Getenv("MOOMBOX_LIVE_CIPHER_TEST") != "1" {
+		t.Skip("set MOOMBOX_LIVE_CIPHER_TEST=1 to run the live cipher solver test")
+	}
+	if len(bgembed.EmbeddedNode) == 0 || len(bgembed.SidecarTarGz) == 0 {
+		t.Skip("sidecar embed blobs missing; run `go run ./tools/fetch-node` and `node bgutil-sidecar/build.mjs` first")
+	}
+	playerJS, err := os.ReadFile(filepath.Join("testdata", "player_cb017549.js"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	cacheDir := t.TempDir()
+	s := sidecar.New(sidecar.Config{
+		CacheDir:       cacheDir,
+		StartupTimeout: 30 * time.Second,
+		RequestTimeout: 30 * time.Second,
+		Logger:         &liveLogger{t: t},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("sidecar Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	const nIn = "abcdefghij_12345"
+	want, err := NewSidecarSolver(s, &fixedPlayerSource{playerID: "aaaaaaaa", js: string(playerJS)}).N(ctx, "aaaaaaaa", nIn)
+	if err != nil {
+		t.Fatalf("control N on the fixture as a main body: %v", err)
+	}
+
+	src := &tvFixtureSource{
+		fixedPlayerSource: fixedPlayerSource{playerID: "cb017549", js: "var notAPlayer = 1;"},
+		tvJS:              string(playerJS),
+	}
+	solver := newSidecarSolverWith(s, src)
+	got, err := solver.N(ctx, "cb017549", nIn)
+	if err != nil {
+		t.Fatalf("N with a main body ejs cannot prepare: %v", err)
+	}
+	if got != want {
+		t.Errorf("N from the tv body = %q, want %q, the fixture's own answer", got, want)
+	}
+	if !solver.mem.usesTV("cb017549") {
+		t.Errorf("the player is not remembered as a tv one")
+	}
+	stored, err := filepath.Glob(filepath.Join(cacheDir, "players", "cb017549*"))
+	if err != nil || len(stored) != 1 || !strings.HasPrefix(filepath.Base(stored[0]), "cb017549-tv.") {
+		t.Errorf("prepared copies of the player in the sidecar's store = %v (%v), want one, under the cb017549-tv key", stored, err)
+	}
+}
