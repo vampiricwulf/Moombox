@@ -62,9 +62,12 @@
 # tests print goes through the helper's redactor (tools/live-tests/redact.go
 # says what it masks) before it reaches the console or the log in
 # .superpowers/live-logs. The run directory is removed on exit, failure,
-# Ctrl+C and TERM, after the test processes are ended by their exact PIDs;
-# a directory a hard kill left is removed by the next run, or by --sweep
-# (local-gate.sh and new-worktree.sh call it), once its run is gone or past
+# Ctrl+C and TERM, after the test processes are ended by their exact PIDs.
+# When the runner's own bash is ended with no chance to trap, or partway
+# through its cleanup (taskkill /F, SIGKILL, a signal and then a hard kill),
+# a watchdog it started does the same once it sees the runner gone. A
+# directory a kill of the whole tree left is removed by the next run, or by
+# --sweep (local-gate.sh and new-worktree.sh call it), once its run is gone or past
 # its deadline. The run ends with a second, independent reading of its own
 # log (the self-check), which must find 0; a log it finds anything in is
 # redacted again in place, and deleted if that does not clear it. A log a
@@ -75,7 +78,11 @@
 # MOOMBOX_LIVE_STATE_DIR (instead of the main checkout's .superpowers),
 # MOOMBOX_LIVE_SETTINGS (the settings file), MOOMBOX_LIVE_GO_TEST (the go
 # command the tests run under), MOOMBOX_LIVE_TWITCH_PICK (the channel the
-# Twitch pick returns, instead of asking Twitch).
+# Twitch pick returns, instead of asking Twitch), MOOMBOX_LIVE_TRACE (a file
+# the runner appends its trap, kill and watchdog steps to) and
+# MOOMBOX_LIVE_KILL_PAUSE (seconds the cleanup pauses after ending the first
+# process of its list, so a test can hard-kill it there); both honoured only
+# with MOOMBOX_LIVE_STATE_DIR set.
 set -uo pipefail
 
 usage() {
@@ -302,8 +309,34 @@ echo "$$ $deadline" >"$lock/owner"
 
 # ---- the private run directory and its trap -------------------------------
 run_dir=$(mktemp -d "$state/live-tmp/run.XXXXXX") || exit 1
-echo "$$ $deadline" >"$run_dir/owner"
+owner_line="$$ $deadline"
+echo "$owner_line" >"$run_dir/owner"
 bg_pid=""
+watch_pid=""
+
+# trace <text>: one line in the runner's trace (a test hook: the runner's
+# tests print it when they fail). Never a cookie value or a path to one.
+trace_file=""
+[ "$hooks" = 1 ] && trace_file=${MOOMBOX_LIVE_TRACE:-}
+kill_pause=""
+[ "$hooks" = 1 ] && kill_pause=${MOOMBOX_LIVE_KILL_PAUSE:-}
+trace() {
+	[ -n "$trace_file" ] && printf '%s\n' "$*" >>"$trace_file" 2>/dev/null
+	return 0
+}
+trace "runner pid=$$ winpid=$(cat "/proc/$$/winpid" 2>/dev/null || echo -) bash=$BASH_VERSION $(uname -sr 2>/dev/null)"
+
+# taskkill, by its full path when PATH lacks it; empty when there is none.
+taskkill_cmd=""
+if [ "$on_windows" = 1 ]; then
+	taskkill_cmd=$(command -v taskkill 2>/dev/null)
+	if [ -z "$taskkill_cmd" ]; then
+		for c in "${SYSTEMROOT:-${SystemRoot:-C:/Windows}}/System32/taskkill.exe" /c/Windows/System32/taskkill.exe; do
+			[ -f "$c" ] && { taskkill_cmd=$c; break; }
+		done
+	fi
+	trace "taskkill=${taskkill_cmd:-none}"
+fi
 
 # kill_tree <pid>: end a background job and everything it started, by exact
 # PIDs (never by image name). Native Windows programs do not see bash's
@@ -316,47 +349,126 @@ descendants() {
 	done
 }
 kill_tree() {
-	local p w all
+	local p all list=""
 	# Every pid is found before any is killed (a killed parent's children
 	# are re-parented and could no longer be found), then they are killed
 	# parents first, so no step of the job runs on after its child dies.
+	# The list goes to $run_dir/kill-pids first: a runner ended partway
+	# through this leaves the watchdog the rest of it, the job's root
+	# perhaps already dead.
 	all="$1 $(descendants "$1")"
 	for p in $all; do
+		list+="$p $(cat "/proc/$p/winpid" 2>/dev/null)"$'\n'
+	done
+	[ -n "${run_dir:-}" ] && [ -d "$run_dir" ] && printf '%s' "$list" >"$run_dir/kill-pids" 2>/dev/null
+	trace "kill_tree $1: pids" $all
+	end_listed "$list"
+}
+# end_listed <lines of "pid winpid">: ends each listed process that is still
+# alive, in order. One a taskkill /T of its parent already ended is skipped.
+end_listed() {
+	local p w o rc
+	local now
+	while read -r p w; do
+		[ -n "$p" ] && kill -0 "$p" 2>/dev/null || continue
+		# The Windows pid as it is now (an exec since the listing changes it),
+		# else the listed one.
+		now=$(cat "/proc/$p/winpid" 2>/dev/null) && [ -n "$now" ] && w=$now
 		# A native Windows program (go.exe, the test binary, node) ends with
-		# its own Windows children only through taskkill /T.
-		if [ -r "/proc/$p/winpid" ]; then
-			w=$(cat "/proc/$p/winpid" 2>/dev/null)
-			[ -n "$w" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' taskkill /T /F /PID "$w" >/dev/null 2>&1
+		# its own Windows children only through taskkill /T. The arguments
+		# are kept from MSYS path conversion (/T is not a path). Without
+		# taskkill, the runtime's own kill ends that one Windows process.
+		if [ -n "$w" ] && [ -n "$taskkill_cmd" ]; then
+			o=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$taskkill_cmd" /T /F /PID "$w" 2>&1)
+			rc=$?
+			trace "taskkill /T /F /PID $w (pid $p): exit $rc: $(printf '%s' "$o" | tr '\r\n' '  ')"
+		elif [ -n "$w" ] && [ -x /usr/bin/kill ]; then
+			/usr/bin/kill -f -W -KILL "$w" >/dev/null 2>&1
+			trace "kill -f -W -KILL $w (pid $p): exit $?"
 		fi
 		kill -KILL "$p" 2>/dev/null
+		if [ -n "$kill_pause" ]; then
+			trace "kill paused"
+			sleep "$kill_pause" </dev/null >/dev/null 2>&1
+			kill_pause=""
+		fi
+	done <<<"$1"
+}
+
+# remove_run_dir: retried, since a process just ended may still hold a file.
+remove_run_dir() {
+	[ -n "${run_dir:-}" ] && [ -e "$run_dir" ] || return 0
+	for _ in 1 2 3 4 5; do
+		rm -rf "$run_dir" 2>/dev/null
+		[ -e "$run_dir" ] || return 0
+		sleep 1
 	done
+	return 1
 }
 
 cleanup() {
 	local rc=$?
 	trap - EXIT INT TERM HUP
+	trace "cleanup rc=$rc job=${bg_pid:-none}"
 	if [ -n "$bg_pid" ] && kill -0 "$bg_pid" 2>/dev/null; then
 		kill_tree "$bg_pid"
 		wait "$bg_pid" 2>/dev/null
 	fi
-	if [ -n "${run_dir:-}" ] && [ -e "$run_dir" ]; then
-		for _ in 1 2 3 4 5; do
-			rm -rf "$run_dir" 2>/dev/null
-			[ -e "$run_dir" ] || break
-			sleep 1
-		done
-		if [ -e "$run_dir" ]; then
-			echo "live-tests: LEFTOVER: could not remove $run_dir (a process still holds it); delete it by hand" >&2
-			rc=1
-		fi
+	if ! remove_run_dir; then
+		echo "live-tests: LEFTOVER: could not remove $run_dir (a process still holds it); delete it by hand" >&2
+		rc=1
 	fi
 	rm -rf "$lock"
+	trace "cleanup done"
+	# The watchdog is ended last: a runner killed during cleanup (a signal
+	# and then a hard kill, as a CI cancel or docker stop does) leaves it to
+	# finish the job. It acts only once the runner is gone, so the two never
+	# run at once.
+	if [ -n "$watch_pid" ]; then
+		kill -KILL "$watch_pid" 2>/dev/null
+		wait "$watch_pid" 2>/dev/null
+	fi
 	exit "$rc"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'trace "trap INT"; exit 130' INT
+trap 'trace "trap TERM"; exit 143' TERM
+trap 'trace "trap HUP"; exit 129' HUP
+
+# The watchdog: a runner ended with no chance to run its trap (taskkill /F
+# of its bash, SIGKILL, a Windows runtime that ends a process instead of
+# signalling it) would leave its test running and its cookie copy on disk
+# until the next run's sweep. While the runner lives the watchdog only
+# polls; once it is gone, the watchdog ends what a cleanup cut short had
+# listed and the current job's tree, removes the run directory and removes
+# the lock if it is still this run's. Its stdio is /dev/null (it holds no
+# caller's pipe open) and its cwd is /. cleanup ends it last, once nothing
+# is left to do, so it never acts on a run that ended normally.
+watchdog() {
+	local job="" listed=""
+	kill_pause=""
+	trap - EXIT TERM HUP
+	cd / 2>/dev/null
+	# Gone: no such pid, a zombie (Linux: its parent has not reaped it), or
+	# past the run's deadline.
+	while kill -0 "$1" 2>/dev/null && [ "$(date +%s)" -le "$deadline" ]; do
+		case $(cat "/proc/$1/stat" 2>/dev/null) in *") Z "*) break ;; esac
+		sleep 1
+	done
+	trace "watchdog: runner gone (or past its deadline)"
+	read -r job <"$run_dir/job" 2>/dev/null
+	listed=$(cat "$run_dir/kill-pids" 2>/dev/null)
+	if [ -n "$listed" ]; then
+		trace "watchdog: ending what cleanup listed"
+		end_listed "$listed"
+	fi
+	[ -n "$job" ] && kill_tree "$job"
+	remove_run_dir || trace "watchdog: could not remove the run directory"
+	[ "$(cat "$lock/owner" 2>/dev/null)" = "$owner_line" ] && rm -rf "$lock"
+	trace "watchdog: done"
+}
+watchdog "$$" </dev/null >/dev/null 2>&1 &
+watch_pid=$!
 
 if ! private_dir "$run_dir" || ! private_dir "$state/live-logs"; then
 	echo "live-tests: cannot make $run_dir and the log directory private to this user; stopping before any copy" >&2
@@ -517,7 +629,9 @@ run_pkg() {
 
 	echo "### live-tests begin group=$group pkg=$pkg" | tee -a "$log"
 	# In the background, so Ctrl+C and TERM reach the trap at once rather
-	# than when go test ends; the exit codes come back through a file.
+	# than when go test ends (bash runs a trap only between commands, and
+	# the wait builtin is one it interrupts); the exit codes come back
+	# through a file, and the job's pid goes to one the watchdog reads.
 	rm -f "$run_dir/status"
 	{
 		(cd "$dir" && env "${envs[@]}" "$go_test" test -count=1 -v -timeout "$timeout" -run "$pattern" "./$pkg" </dev/null) 2>&1 |
@@ -525,8 +639,11 @@ run_pkg() {
 		echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$run_dir/status"
 	} </dev/null &
 	bg_pid=$!
+	echo "$bg_pid" >"$run_dir/job"
+	trace "job $group $pkg: pid $bg_pid"
 	wait "$bg_pid"
 	bg_pid=""
+	: >"$run_dir/job"
 	read -r rc rrc <"$run_dir/status" 2>/dev/null || { rc=1 rrc=1; }
 	echo "### live-tests end group=$group pkg=$pkg exit=$rc" | tee -a "$log"
 	if [ "$rrc" != 0 ]; then
