@@ -42,8 +42,9 @@ type PlayerSource interface {
 //
 // A player is asked on its main body first and, when ejs cannot solve with
 // that, on its tv body (solve; owner ruling RV-11). The sent record and the
-// first-send gates are keyed by the sidecar's player key
-// (sidecarPlayerKey), so the two bodies of one player have one each.
+// first-send gates are keyed by the sidecar's player key — the player id for
+// the main body, tvPlayerKey for the tv one — so the two bodies of one player
+// have one each.
 type sidecarSolver struct {
 	client sidecarClient
 	src    PlayerSource
@@ -155,7 +156,7 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 	}
 	if s.mem.setTV(playerID) {
 		slog.Warn("cipher: ejs cannot solve with this player's main variant; its tv variant solves, and is used for this player from now on",
-			"playerID", playerID, "from", string(variantMain), "to", string(variantTV), "err", err)
+			"playerID", playerID, "from", "main", "to", "tv", "err", err)
 	}
 	return tvRes, nil
 }
@@ -179,7 +180,7 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 	if dead := s.mem.tvDead(playerID); dead != nil {
 		return sidecar.SolveCipherResult{}, dead
 	}
-	key := sidecarPlayerKey(playerID, variantTV)
+	key := tvPlayerKey(playerID)
 	res, err := s.ask(ctx, key, "", false, sigs, ns)
 	if !errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		return res, err
@@ -429,8 +430,8 @@ func (s *sidecarSolver) callOnce(ctx context.Context, playerID string, includeJS
 	return res, err
 }
 
-// ask is one SolveCipher round-trip under a sidecar player key
-// (sidecarPlayerKey), with js attached when it is not "".
+// ask is one SolveCipher round-trip under a sidecar player key (the player id,
+// or tvPlayerKey), with js attached when it is not "".
 func (s *sidecarSolver) ask(ctx context.Context, key, js string, forceReload bool, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	return s.client.SolveCipher(ctx, sidecar.SolveCipherRequest{
 		PlayerID:      key,

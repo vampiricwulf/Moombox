@@ -5,33 +5,18 @@ import (
 	"time"
 )
 
-// playerVariant names which body of a player the sidecar is asked to solve
-// with (owner ruling RV-11): the main one first, the tv one when ejs cannot
-// solve with main. Goja comes after both, and only ever reads main.
-type playerVariant string
-
-const (
-	variantMain playerVariant = "main"
-	variantTV   playerVariant = "tv"
-)
-
 // tvKeySuffix is what the tv body's player key carries behind the player id
 // in a sidecar request: "<id>-tv". The sidecar keys its loaded players, its
 // prepared-player store and its idle eviction by that key alone, so the two
 // bodies of one player never stand in for each other there. The suffixed key
 // exists only in sidecar requests and in sidecarSolver's sent record: it is
 // never handed to a PlayerSource, to CacheKey or to the sig spec store, which
-// all know a player by its id.
+// all know a player by its id. The main body's key is the player id itself.
 const tvKeySuffix = "-tv"
 
-// sidecarPlayerKey is the player key a sidecar request for this variant of
-// the player carries.
-func sidecarPlayerKey(playerID string, v playerVariant) string {
-	if v == variantTV {
-		return playerID + tvKeySuffix
-	}
-	return playerID
-}
+// tvPlayerKey is the player key a sidecar request for the player's tv body
+// carries.
+func tvPlayerKey(playerID string) string { return playerID + tvKeySuffix }
 
 // playerMemorySize bounds playerMemory. Only a player the sidecar failed on
 // gets a record, and YouTube serves a handful of players at a time, so the
