@@ -650,3 +650,70 @@ func TestBurstOfTVSolvesFetchesTheBodyOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestBurstOfFirstSolvesLeavesMainWithOneWarn: three first solves of a player
+// ejs cannot prepare on main arrive together, the usual shape when a
+// manifest's formats resolve at once. All three have read "not a tv player"
+// before any of them finds out otherwise, and all three end on the tv body.
+// The Warn that the player left main for tv is still logged once.
+//
+// Mutant: the Warn logged by every solve that reached tv through main,
+// whatever setTV answered.
+func TestBurstOfFirstSolvesLeavesMainWithOneWarn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := captureSlog(t)
+		sc := newLockedSidecar()
+		sc.hold = func(sidecar.SolveCipherRequest) bool { return true }
+		tvLoaded := false
+		sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			if req.PlayerID != "P1-tv" {
+				return sidecar.SolveCipherResult{}, errMainPreprocess
+			}
+			if req.PlayerJS != "" {
+				tvLoaded = true
+			}
+			if !tvLoaded {
+				return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+			}
+			return ejsAnswers(req)
+		}
+		side := newSidecarSolverWith(sc, &lockedSource{})
+		for _, err := range solveNTogether(side, sc, 3) {
+			if err != nil {
+				t.Errorf("solve = %v, want the tv body's answer", err)
+			}
+		}
+		warns := warnLines(logs.String())
+		if len(warns) != 1 || !strings.Contains(warns[0], "from=main") || !strings.Contains(warns[0], "to=tv") {
+			t.Errorf("Warn lines = %q, want one for leaving main for tv", warns)
+		}
+	})
+}
+
+// TestTVPlayerThatStopsSolvingIsStale: a player remembered as a tv one whose
+// tv body no longer answers. Main is known not to work, so that is all the
+// sidecar has, and the solve ends in ErrPlayerJSStale — the sentinel the
+// worker reads as "every format of this player is affected" (the
+// challenge-free re-extraction), not as one format's fault. Main is not asked.
+//
+// Mutant: the tv failure returned without the sentinel.
+func TestTVPlayerThatStopsSolvingIsStale(t *testing.T) {
+	sc := &fakeSidecar{respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+		if len(req.SigChallenges) > 0 {
+			return sidecar.SolveCipherResult{}, errors.New("sidecar: ejs solve sig: no solutions")
+		}
+		return sidecar.SolveCipherResult{}, errors.New("sidecar: ejs solve n: no solutions")
+	}}
+	side := newSidecarSolverWith(sc, &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"}, tvJS: "tv-js"})
+	side.mem.setTV("P1")
+	ctx := context.Background()
+	if _, err := side.N(ctx, "P1", "n1"); !errors.Is(err, ErrPlayerJSStale) {
+		t.Errorf("N = %v, want ErrPlayerJSStale", err)
+	}
+	if _, err := side.Sig(ctx, "P1", "s1"); !errors.Is(err, ErrPlayerJSStale) {
+		t.Errorf("Sig = %v, want ErrPlayerJSStale", err)
+	}
+	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1-tv P1-tv" {
+		t.Errorf("sidecar calls = %v, want two plain asks of the tv key", shapes)
+	}
+}
