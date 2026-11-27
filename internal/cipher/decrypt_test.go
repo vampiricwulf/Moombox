@@ -169,7 +169,8 @@ func TestRoutedResolveURL_SigFailureKeepsTheRoutedCauseWhenGojaFailsToo(t *testi
 // unavailable for player X" for every failure alike. The routed cause is
 // logged at Debug as it happens and carried into the error the URL now fails
 // with (ErrNUnsolved, which replaced that Warn), with the goja outcome (or
-// its absence) beside it, and stays the one errors.Is matches.
+// its absence) beside it, and stays the one errors.Is matches. Goja is asked
+// inside the composite (owner rulings RV-11 and RV-12), which names it.
 //
 // Mutants this kills:
 //   - the routed error dropped again   → "routed n: " / "no solutions" missing
@@ -178,10 +179,11 @@ func TestRoutedResolveURL_SigFailureKeepsTheRoutedCauseWhenGojaFailsToo(t *testi
 //   - %v on the routed error           → errors.Is(ErrPlayerJSStale) fails
 func TestRoutedDecryptNInURL_ErrorNamesEveryFailedPath(t *testing.T) {
 	logs := captureSlog(t)
-	routed := &staticSolver{nErr: fmt.Errorf("%w: ejs solve n: no solutions", ErrPlayerJSStale)}
+	side := &staticSolver{nErr: fmt.Errorf("%w: ejs solve n: no solutions", ErrPlayerJSStale)}
+	routed := newCompositeSolverWith(side, &staticSolver{nErr: errors.New("goja: no n either")})
 	const raw = "https://example.com/videoplayback?n=abc123"
 
-	out, err := RoutedDecryptNInURL(context.Background(), routed, newFailingGojaResolver(t), unreachablePlayerURL, raw)
+	out, err := RoutedDecryptNInURL(context.Background(), routed, nil, unreachablePlayerURL, raw)
 	if out != "" || !errors.Is(err, ErrNUnsolved) || !errors.Is(err, ErrPlayerJSStale) {
 		t.Fatalf("RoutedDecryptNInURL = %q, %v; want \"\" and an error matching ErrNUnsolved and the routed ErrPlayerJSStale", out, err)
 	}
@@ -194,7 +196,7 @@ func TestRoutedDecryptNInURL_ErrorNamesEveryFailedPath(t *testing.T) {
 		}
 	}
 
-	out, err = RoutedDecryptNInURL(context.Background(), routed, nil, unreachablePlayerURL, raw)
+	out, err = RoutedDecryptNInURL(context.Background(), newCompositeSolverWith(side, nil), nil, unreachablePlayerURL, raw)
 	if out != "" || !errors.Is(err, ErrNUnsolved) {
 		t.Fatalf("RoutedDecryptNInURL without goja = %q, %v; want \"\" and ErrNUnsolved", out, err)
 	}

@@ -93,28 +93,28 @@ func TestCompositeSigAsksGojaLast(t *testing.T) {
 
 func TestCompositeN_FallsBackToGojaOnSidecarError(t *testing.T) {
 	side := &staticSolver{nErr: errors.New("sidecar down")}
-	goja := &staticSolver{n: map[string]string{"Y": "gojaY"}}
+	goja := &staticSolver{n: map[string]string{"Y": "Y-by-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
 		t.Fatalf("N: %v", err)
 	}
-	if got != "gojaY" {
+	if got != "Y-by-goja" {
 		t.Errorf("N: got %q, want gojaY (goja fallback)", got)
 	}
 }
 
 func TestCompositeN_PrefersSidecar(t *testing.T) {
-	side := &staticSolver{n: map[string]string{"Y": "sideY"}}
-	goja := &staticSolver{n: map[string]string{"Y": "gojaY"}}
+	side := &staticSolver{n: map[string]string{"Y": "Y-by-sidecar"}}
+	goja := &staticSolver{n: map[string]string{"Y": "Y-by-goja"}}
 	c := newCompositeSolverWith(side, goja)
 
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
 		t.Fatalf("N: %v", err)
 	}
-	if got != "sideY" {
+	if got != "Y-by-sidecar" {
 		t.Errorf("N: got %q, want sideY (sidecar primary)", got)
 	}
 }
@@ -122,7 +122,7 @@ func TestCompositeN_PrefersSidecar(t *testing.T) {
 func TestCompositeWithoutSidecar_GojaOnly(t *testing.T) {
 	goja := &staticSolver{
 		sig: map[string]string{"X": "gojaX"},
-		n:   map[string]string{"Y": "gojaY"},
+		n:   map[string]string{"Y": "Y-by-goja"},
 	}
 	c := newCompositeSolverWith(nil, goja)
 
@@ -133,7 +133,7 @@ func TestCompositeWithoutSidecar_GojaOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("N goja-only: %v", err)
 	}
-	if got != "gojaY" {
+	if got != "Y-by-goja" {
 		t.Errorf("N goja-only: got %q, want gojaY", got)
 	}
 }

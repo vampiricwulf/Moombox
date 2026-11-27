@@ -379,22 +379,47 @@ func (c *compositeSolver) sidecarSig(ctx context.Context, playerID, encryptedSig
 
 // N asks the sidecar, which asks ejs on the player's main body and then on
 // its tv body, and goja only after that has failed (owner ruling RV-11).
-// With no sidecar half installed goja is all there is.
+// With no sidecar half installed goja is all there is. An answer that
+// checkNResult says is no answer (empty, or ending with its own challenge:
+// the exception sentinel) counts as that solver failing: the sidecar's goes
+// on to goja, as yt-dlp's director moves to its next provider on an invalid
+// response (jsc/_director.py:105-124, 6224a3898), and goja's fails the
+// solve. solveN used to do this check and then ask goja a second time
+// itself, a second place deciding the order.
+//
+// The error names every solver that failed, the sidecar's cause the one
+// errors.Is sees (ErrPlayerJSStale, ErrSidecarUnavailable).
 func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
+	var sideErr error
 	if sc := c.sidecar(); sc != nil {
 		out, err := sc.N(ctx, playerID, encryptedN)
 		if err == nil {
+			err = checkNResult(encryptedN, out)
+		}
+		if err == nil {
 			return out, nil
 		}
-		// fall through to goja
-		if c.goja != nil {
-			c.noteGojaFall(ctx, playerID, "n", err)
+		if c.goja == nil {
+			return "", fmt.Errorf("%w (no goja fallback)", err)
 		}
+		sideErr = err
+		c.noteGojaFall(ctx, playerID, "n", err)
 	}
 	if c.goja == nil {
 		return "", errors.New("cipher: no solver available for n")
 	}
-	return c.goja.N(ctx, playerID, encryptedN)
+	out, err := c.goja.N(ctx, playerID, encryptedN)
+	if err == nil {
+		err = checkNResult(encryptedN, out)
+	}
+	switch {
+	case err == nil:
+		return out, nil
+	case sideErr != nil:
+		return "", fmt.Errorf("%w (goja fallback: %v)", sideErr, err)
+	default:
+		return "", err
+	}
 }
 
 // noteGojaFall logs, once per player, that a solve the sidecar failed (err)

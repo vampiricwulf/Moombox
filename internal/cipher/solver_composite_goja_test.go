@@ -64,6 +64,64 @@ func TestRoutedResolveURLAsksGojaOncePerSignature(t *testing.T) {
 	}
 }
 
+// TestRoutedNAsksGojaOncePerChallenge: an n goes to the routed solver alone,
+// which asks goja itself, last. A challenge the sidecar fails costs goja one
+// ask at both entry points, whether goja answers or not; it used to cost two
+// when goja failed or answered with no answer, once in the composite and once
+// in solveN's own compile. A sidecar answer that is no answer (the exception
+// sentinel) goes on to goja inside the composite, once.
+//
+// Mutants: solveN asking the goja resolver again after a routed failure (two
+// asks in the failing rows); the composite not checking the sidecar's answer
+// (the sentinel row installs it, goja never asked); the composite not
+// checking goja's (the sentinel-from-goja row resolves).
+func TestRoutedNAsksGojaOncePerChallenge(t *testing.T) {
+	stale := fmt.Errorf("%w: ejs solve n: no solutions", ErrPlayerJSStale)
+	sentinel := "enhanced_except_AAAAAAAA_" + nChallenge
+	for _, tc := range []struct {
+		name    string
+		side    *staticSolver
+		goja    func(string) (string, error)
+		wantErr bool
+	}{
+		{"the sidecar fails, goja answers", &staticSolver{nErr: stale}, func(string) (string, error) { return nAnswer, nil }, false},
+		{"the sidecar fails, goja fails", &staticSolver{nErr: stale}, func(string) (string, error) { return "", errors.New("goja: no solutions") }, true},
+		{"the sidecar fails, goja answers with the sentinel", &staticSolver{nErr: stale}, func(string) (string, error) { return sentinel, nil }, true},
+		{"the sidecar answers with the sentinel, goja answers", &staticSolver{n: map[string]string{nChallenge: sentinel}}, func(string) (string, error) { return nAnswer, nil }, false},
+	} {
+		for _, entry := range []struct {
+			name string
+			call func(Solver, *GojaResolver) (string, error)
+		}{
+			{"RoutedDecryptNInURL", func(r Solver, g *GojaResolver) (string, error) {
+				return RoutedDecryptNInURL(context.Background(), r, g, nTestPlayerURL, "https://example.com/videoplayback?n="+nChallenge)
+			}},
+			{"RoutedResolveURL", func(r Solver, g *GojaResolver) (string, error) {
+				res, err := RoutedResolveURL(context.Background(), r, g, ResolveURLRequest{PlayerURL: nTestPlayerURL, StreamURL: "https://example.com/videoplayback?n=" + nChallenge})
+				if res == nil {
+					return "", err
+				}
+				return res.URL, err
+			}},
+		} {
+			var asked atomic.Int32
+			g := gojaWithN(t, func(s string) (string, error) {
+				asked.Add(1)
+				return tc.goja(s)
+			})
+			got, err := entry.call(newCompositeSolverWith(tc.side, g), g)
+			switch {
+			case asked.Load() != 1:
+				t.Errorf("%s, %s: goja asked %d times, want once", tc.name, entry.name, asked.Load())
+			case tc.wantErr && !errors.Is(err, ErrNUnsolved):
+				t.Errorf("%s, %s = %q, %v; want ErrNUnsolved", tc.name, entry.name, got, err)
+			case !tc.wantErr && (err != nil || got != "https://example.com/videoplayback?n="+nAnswer):
+				t.Errorf("%s, %s = %q, %v; want goja's answer in place", tc.name, entry.name, got, err)
+			}
+		}
+	}
+}
+
 // TestSigWaitsOutTheGraceBeforeGoja: a signature that meets an installed
 // sidecar down, with no spec for it, waits out the readiness grace for the
 // child (PR-R3) and goes to goja only once the grace is spent: goja is never

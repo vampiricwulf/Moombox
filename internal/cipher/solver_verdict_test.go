@@ -116,11 +116,11 @@ func TestOneBadChallengeDoesNotSilenceThePlayer(t *testing.T) {
 		return res, nil
 	}
 	src := &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"}, tvJS: "tv-js"}
-	goja := &countingGoja{staticSolver: staticSolver{n: map[string]string{"bad": "goja-bad"}}}
+	goja := &countingGoja{staticSolver: staticSolver{n: map[string]string{"bad": "bad-by-goja"}}}
 	c := newCompositeSolverWith(newSidecarSolverWith(sc, src), goja)
 	ctx := context.Background()
 
-	if got, err := c.N(ctx, "P1", "bad"); err != nil || got != "goja-bad" {
+	if got, err := c.N(ctx, "P1", "bad"); err != nil || got != "bad-by-goja" {
 		t.Fatalf("N(bad) = %q, %v; want goja's answer", got, err)
 	}
 	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1+js P1+js+force P1-tv P1-tv+js" || src.removals != 1 {
@@ -131,7 +131,7 @@ func TestOneBadChallengeDoesNotSilenceThePlayer(t *testing.T) {
 	if got, err := c.N(ctx, "P1", "good"); err != nil || got != "ejs(good)" {
 		t.Errorf("N(good) = %q, %v; want the sidecar's answer", got, err)
 	}
-	if got, err := c.N(ctx, "P1", "bad"); err != nil || got != "goja-bad" {
+	if got, err := c.N(ctx, "P1", "bad"); err != nil || got != "bad-by-goja" {
 		t.Errorf("second N(bad) = %q, %v; want goja's answer", got, err)
 	}
 	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1 P1 P1-tv" || src.removals != 1 || src.tvFetches != 1 {
