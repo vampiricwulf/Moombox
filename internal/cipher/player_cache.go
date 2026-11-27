@@ -205,14 +205,28 @@ func (pc *PlayerCache) FilePath(playerURL string) string {
 	return filepath.Join(pc.cacheDir, key+".js")
 }
 
-// FilePathPreprocessed returns the disk path for the preprocessed
-// (sig/n binding-injected) form of a player. Audit reports/cipher.md
-// Q4 — second tier disk cache that skips the 200-500 ms extraction +
-// preprocessing pass on solver-LRU eviction. Same key + TTL as the
-// raw cache so both age out together.
+// FilePathPreprocessed returns the disk path for the prepared form of a
+// player (preprocessPlayer's output). Audit reports/cipher.md Q4 — second
+// tier disk cache that skips the parse and match on solver-LRU eviction.
+// Same key + TTL as the raw cache so both age out together.
+//
+// The name carries the ejs commit the port mirrors (ejsPortVersion), so a
+// port of another ejs never runs a copy this one prepared. The regex
+// extractor before the port (owner ruling RV-12) wrote <key>.preprocessed.js
+// (legacyPreprocessedPath): never written now, and never read, so an older
+// binary run again over this cache directory finds its own format there.
 func (pc *PlayerCache) FilePathPreprocessed(playerURL string) string {
 	key := CacheKey(playerURL)
-	return filepath.Join(pc.cacheDir, key+".preprocessed.js")
+	return filepath.Join(pc.cacheDir, key+".prepared-ejs-"+ejsPortVersion[:7]+".js")
+}
+
+// legacyPreprocessedPath is where the regex extractor kept its prepared
+// copy. It is removed with the player's other files (Remove, and a Fetch
+// that brings a changed body), so an older binary run again over this
+// directory cannot compile a copy of a body that has since changed; the
+// periodic Evict ages it out otherwise.
+func (pc *PlayerCache) legacyPreprocessedPath(playerURL string) string {
+	return filepath.Join(pc.cacheDir, CacheKey(playerURL)+".preprocessed.js")
 }
 
 // FilePathMeta returns the path of the meta.json sidecar that records
@@ -420,7 +434,7 @@ type FetchResult struct {
 // practice and the reactive-invalidation path (cipher.ErrPlayerJSStale,
 // see solver_sidecar.go) catches whatever slips through.
 //
-// The returned Changed=true also implies that <key>.preprocessed.js has
+// The returned Changed=true also implies that the prepared copy has
 // been removed — the cache layer owns its own invalidation so callers
 // don't have to know.
 //
@@ -595,6 +609,7 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 		}
 		pc.writeMeta(playerURL, newMeta)
 		_ = os.Remove(pc.FilePathPreprocessed(playerURL))
+		_ = os.Remove(pc.legacyPreprocessedPath(playerURL))
 		pc.specMu.Lock()
 		_ = os.Remove(pc.FilePathSigSpec(playerURL))
 		pc.specMu.Unlock()
@@ -721,6 +736,7 @@ func (pc *PlayerCache) Remove(playerURL string) {
 	for _, path := range []string{
 		pc.FilePath(playerURL),
 		pc.FilePathPreprocessed(playerURL),
+		pc.legacyPreprocessedPath(playerURL),
 		pc.FilePathMeta(playerURL),
 		pc.FilePathSigSpec(playerURL),
 	} {

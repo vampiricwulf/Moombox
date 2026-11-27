@@ -10,13 +10,11 @@ import "errors"
 //
 // Audit cross-cutting C3 sentinel migration follow-on.
 var (
-	// ErrExtractorMismatch signals that a regex-based extractor failed to
-	// locate the expected pattern in player JS. Typically means YouTube
-	// rotated the player and the extractor needs an update. Includes:
-	// "function %q not found", "object %q not found", "array %q not
-	// found", "no n-param or sig candidates found", "could not find
-	// signature function name", "could not find IIFE closing bracket",
-	// etc.
+	// ErrExtractorMismatch signals that the goja fallback's extractor, the
+	// Go port of ejs (preprocessPlayer), could not prepare the player: it
+	// does not parse, it is not in either of the two shapes ejs knows, or no
+	// URL-builder function is found in it. Typically means YouTube changed
+	// the player in a way ejs does not handle yet.
 	ErrExtractorMismatch = errors.New("cipher extractor pattern did not match player JS")
 
 	// ErrPlayerJSFetch signals a network-layer failure fetching the

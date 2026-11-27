@@ -1,0 +1,904 @@
+{
+ "variants": {
+  "main": "player_ias.vflset/en_US/base.js",
+  "tcc": "player_ias_tcc.vflset/en_US/base.js",
+  "tce": "player_ias_tce.vflset/en_US/base.js",
+  "es6": "player_es6.vflset/en_US/base.js",
+  "tv": "tv-player-ias.vflset/tv-player-ias.js",
+  "tv_es6": "tv-player-es6.vflset/tv-player-es6.js",
+  "phone": "player-plasma-ias-phone-en_US.vflset/base.js",
+  "es6_tcc": "player_es6_tcc.vflset/en_US/base.js",
+  "es6_tce": "player_es6_tce.vflset/en_US/base.js",
+  "tv_tcc": "tv-player-ias-tcc.vflset/tv-player-ias-tcc.js",
+  "tv_tce": "tv-player-ias-tce.vflset/tv-player-ias-tce.js",
+  "tv_es6_tcc": "tv-player-es6-tcc.vflset/tv-player-es6-tcc.js",
+  "tv_es6_tce": "tv-player-es6-tce.vflset/tv-player-es6-tce.js",
+  "phone_tcc": "player-plasma-ias-phone-tcc-en_US.vflset/base.js",
+  "phone_tce": "player-plasma-ias-phone-tce-en_US.vflset/base.js",
+  "plasma_es6": "player-plasma-es6-en_US.vflset/base.js",
+  "plasma_es6_tcc": "player-plasma-es6-tcc-en_US.vflset/base.js",
+  "plasma_es6_tce": "player-plasma-es6-tce-en_US.vflset/base.js",
+  "embed": "player_embed.vflset/en_US/base.js",
+  "embed_tcc": "player_embed_tcc.vflset/en_US/base.js",
+  "embed_tce": "player_embed_tce.vflset/en_US/base.js",
+  "embed_es6": "player_embed_es6.vflset/en_US/base.js",
+  "embed_es6_tcc": "player_embed_es6_tcc.vflset/en_US/base.js",
+  "embed_es6_tce": "player_embed_es6_tce.vflset/en_US/base.js",
+  "house": "house_brand_player.vflset/en_US/base.js",
+  "house_es6": "house_brand_player_es6.vflset/en_US/base.js",
+  "tcl": "player_ias_tcl.vflset/en_US/base.js",
+  "es6_tcl": "player_es6_tcl.vflset/en_US/base.js",
+  "tv_tcl": "tv-player-ias-tcl.vflset/tv-player-ias-tcl.js",
+  "tv_es6_tcl": "tv-player-es6-tcl.vflset/tv-player-es6-tcl.js",
+  "phone_tcl": "player-plasma-ias-phone-tcl-en_US.vflset/base.js",
+  "plasma_es6_tcl": "player-plasma-es6-tcl-en_US.vflset/base.js",
+  "embed_tcl": "player_embed_tcl.vflset/en_US/base.js",
+  "embed_es6_tcl": "player_embed_es6_tcl.vflset/en_US/base.js"
+ },
+ "tests": [
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "74edf1a3",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "IlLiA21ny7gqA2m4p37",
+     "want": "9nRTxrbM1f0yHg"
+    },
+    {
+     "in": "eabGFpsUKuWHXGh6FR4",
+     "want": "izmYqDEY6kl7Sg"
+    },
+    {
+     "in": "eabGF/ps%UK=uWHXGh6FR4",
+     "want": "LACmqlhaBpiPlgE-a"
+    }
+   ],
+   "sig": [
+    {
+     "in": "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz",
+     "want": "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hzMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzl"
+    },
+    {
+     "in": "\u0000\u0001\u0002%\u0003\u0004\u0005\u0006\u0007\b\t\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019 !\"#$%&'()0123456789@ABCDEFGHI",
+     "want": "\u0000\u0001\u0002%\u0003\u0004\u0005\u0006\u0007\b\t\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019 !\"#$%&'()0123456789@ABIDEFGHC"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "901741ab",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "BQoJvGBkC2nj1ZZLK-",
+     "want": "UMPovvBZRh-sjb"
+    }
+   ],
+   "sig": [
+    {
+     "in": "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz",
+     "want": "wgwCHlydB9Hg7PMegXoVzaoAXXB8woPSNZqRUC3Pe7vAEiApVSCMlhwmt5ON-8MB=5RPyyzdAM9MPM-kPfjgTxEK0IAhIgRwE0jiEJA"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "e7573094",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "IlLiA21ny7gqA2m4p37",
+     "want": "3KuQ3235dojTSjo4"
+    }
+   ],
+   "sig": [
+    {
+     "in": "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz",
+     "want": "yEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyNPRt=BM8-XO5tm5hlMCSVNAiEAvpeP3CURqZJSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=g"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "9fcf08e8",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "4JRSxxN0E_fLVnxmd",
+     "want": "xhAoMP8xPcR5wg"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "jihgfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876543210/.-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\u0003\t\b\u0007\u0006\u0005\u0004\n"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "21cd2156",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "16EF3jx-Mr_TLuGH",
+     "want": "OQJDc7IrlWCkfg"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCD\u0000FGHIJKjMNOPQRSTUVWXYZ[\\]^_`abcdefghiL"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "76ad2fe8",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "V8pdMGD0Sz_M0DRT",
+     "want": "rBnTGCWGFpwByA"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "Ffedcba`_^gj[ZYXWVUTSRQPONMLKJIHG,EDCBA@?>=<;:98\u00136543210/.-]+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\f\u0012\u0011\u0010\u000f\u000e\r\u0000\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u00017"
+    }
+   ]
+  },
+  {
+   "source": "ejs 6f8587b tests.ts",
+   "player": "631d3938",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "tv",
+    "tv_es6",
+    "phone",
+    "es6_tcc",
+    "es6_tce"
+   ],
+   "n": [
+    {
+     "in": "KBx1qz7jMhxELa8c",
+     "want": "ttPvh7WIptsgSw"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdef",
+     "want": "\u0019\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0000\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abc"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "f9c6b6bd",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "FGCrdHZnN1fPu"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0018\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017A\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@\u0003BCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghi"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "f9c6b6bd",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "n9FE0-b7eQQa"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "gfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876543210/.-,+*)('&%$#\"!\u0000\u001e\u0003\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0004\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0012"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "907ce1cd",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "9KH_qoCyDcUT2aK"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "Oihgfedcba`_^]\\[ZYXWVUTSRQPjNMLKJIHGFEDCB<@+>=?;:9876543210/.-,\u0017*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0000\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u0001A"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "907ce1cd",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "8svLYpjykqNt5"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "ihgfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876543210/.-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u0003\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u001b"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "53caf627",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "mW_Q-CZfTbyuZ"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f\u0000!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVjXYZ[\\]^_`abcdefghiW"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "53caf627",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "QIlguLyfPrrzq"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdejg"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "6b3d0364",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "4bdGvS77-SAZ"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "jihgfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?\u0001=<;:\u0000876543210/.-,+>)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u00189\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002*"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "6b3d0364",
+   "variants": [
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "LNjVf8daKwDLu"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "hgfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876543210/.-,+\u0003)('i%$#\"! \u001f\u001e\u001d\u001c\u0006\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "5ba500a8",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "f-UPS3JuT"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0004\u0001\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;\u0005=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "5ba500a8",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "W7GTTJYisaaWV"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "@\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'\u0003)*+,-./01234j6789:;<=>?(ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefg"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "3dc75896",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "v_oVscQWHRIALGie"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "fedcbh`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:987\u0000543210/.-,+*j('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u00016"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "3dc75896",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "F-0vGfHt8DJ"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u001f\u0003%\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u0004 !\"#$\u0002&'()*+,-./012345678\u0000:g<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdef;"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "28c28ac0",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "Lh0g5nDTae8J_d6"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "hgfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876\u000043210/.-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u00015"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "28c28ac0",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "v3AtBn99yZFtq"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "*fedcba`g^]i[ZYXWVUTSRQPONMLKJI>GFEDCBA@?j=<;:9876543210/.-,+_)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "b485e332",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "3zbfWwYE4asG8"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\u001d\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c:\u001e\u001f !\"#$%&'\u0000)*+,-./0123456789(;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "b485e332",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "vSwisZogGk3ro4"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "#\u000e\u0004\u0005\u0006\u0007\u0003\t\n\u000b\f\r\u0002\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"\b$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefg"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "92eef845",
+   "variants": [
+    "main",
+    "tcc",
+    "tce",
+    "es6",
+    "es6_tcc",
+    "es6_tce",
+    "tv",
+    "tv_tcc",
+    "tv_tce",
+    "tv_es6",
+    "tv_es6_tcc",
+    "tv_es6_tce",
+    "phone",
+    "phone_tcc",
+    "phone_tce",
+    "plasma_es6",
+    "plasma_es6_tcc",
+    "plasma_es6_tce",
+    "embed",
+    "embed_tcc",
+    "embed_tce",
+    "embed_es6",
+    "embed_es6_tcc",
+    "embed_es6_tce",
+    "house",
+    "house_es6"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "3tU2ya-IJqhNt"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "]edcba`_^D\\[ZYXWVUTSRQPONMLKJIHGFEfCBA@?>=<;:98765\u00003210/i-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u00014"
+    }
+   ]
+  },
+  {
+   "source": "ejs c47fb1b tests.ts",
+   "player": "92eef845",
+   "variants": [
+    "tcl",
+    "es6_tcl",
+    "tv_tcl",
+    "tv_es6_tcl",
+    "phone_tcl",
+    "plasma_es6_tcl",
+    "embed_tcl",
+    "embed_es6_tcl"
+   ],
+   "n": [
+    {
+     "in": "rYKKd90cGmViBQaX",
+     "want": "Tk5OqnIAYVzPJeT"
+    }
+   ],
+   "sig": [
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghij",
+     "want": "ihgfedcba`_^]\\[ZYXWjUTSRQPONMLKJIHGFEDC<A@?>=V;:9876543210/.-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0017\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u000b\n\t\b\u0007\u0006\u0005\u0004\u0003"
+    }
+   ]
+  },
+  {
+   "source": "sidecar ejs c47fb1b on testdata/player_cb017549.js (no upstream pairs for this player)",
+   "player": "cb017549",
+   "variants": [
+    "main"
+   ],
+   "n": [
+    {
+     "in": "abcdefghij_12345",
+     "want": "DdIQSAqCz-DGHq"
+    },
+    {
+     "in": "IlLiA21ny7gqA2m4p37",
+     "want": "7S2XOnWZx_OXkLEVE"
+    },
+    {
+     "in": "eabGF/ps%UK=uWHXGh6FR4",
+     "want": "xCGVlN7M4b_vNfGA0hwU"
+    }
+   ],
+   "sig": [
+    {
+     "in": "NJAJEij0EwRgIhAI0KExTgjfPk-MPM9MAdzyyPRt=BM8-XO5tm5hlMCSVpAiEAv7eP3CURqZNSPow8BXXAoazVoXgeMP7gH9BdylHCwgw=gwzz",
+     "want": "zzwg=wgwCHlydB9Hg7PMegXoVzaoAXXB8woPSNZqRUC3Pe7vAEiApVSCMlh5mt5OX-8MB=tRPyyzdAM9MPM-kPNjgTxEK0IAhIfRwE0jiEJAJg"
+    },
+    {
+     "in": "AOq0QJ8wRAIgX%2Fu7DlT%3D=Zk-HmAf%9cQ_ebd%dRsFtYvQyAiB0eIyc8E9zVbn2xL%0",
+     "want": "0%Lx2nbVz9E8cyIe0BiAyQvYtFsRd%dbe_Qc9%fAmH-kZ=A3%TlD7uF2%XDIARw8JQ0qOg"
+    },
+    {
+     "in": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefg",
+     "want": "gfedcba`_^]\\[ZYXWVUTSRQPONMLKJIHGFEDCBA@?>=<;:9876543210/.-,+*)('&%$#\"! \u001f\u001e\u001d\u001c\u001b\u001a\u0019\u0018\u0000\u0016\u0015\u0014\u0013\u0012\u0011\u0010\u000f\u000e\r\f\u0017\n\t\b\u0007\u0006\u0005\u0004\u0003\u0002\u0001\u000b"
+    }
+   ]
+  }
+ ]
+}

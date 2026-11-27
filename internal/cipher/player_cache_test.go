@@ -208,6 +208,11 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 	if err := pc.PutPreprocessed(fs.URL(), "preprocessed-from-old-js"); err != nil {
 		t.Fatalf("PutPreprocessed: %v", err)
 	}
+	// And the regex extractor's copy, which an older binary would read
+	// (owner ruling RV-12), likewise.
+	if err := os.WriteFile(pc.legacyPreprocessedPath(fs.URL()), []byte("regex copy of the old JS"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// And a sig spec learned from the old JS (audit G49), likewise.
 	if err := pc.PutSigSpec(fs.URL(), 3, []int{2, 0, 1}); err != nil {
 		t.Fatalf("PutSigSpec: %v", err)
@@ -229,7 +234,10 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 
 	// Preprocessed must be gone.
 	if _, err := os.Stat(pc.FilePathPreprocessed(fs.URL())); !os.IsNotExist(err) {
-		t.Errorf("preprocessed.js should be removed on rotation, stat err = %v", err)
+		t.Errorf("the prepared copy should be removed on rotation, stat err = %v", err)
+	}
+	if _, err := os.Stat(pc.legacyPreprocessedPath(fs.URL())); !os.IsNotExist(err) {
+		t.Errorf("the regex extractor's copy should be removed on rotation, stat err = %v", err)
 	}
 	if _, ok := pc.GetSigSpec(fs.URL(), 3); ok {
 		t.Errorf("the sig spec should be removed on rotation")

@@ -40,13 +40,6 @@ func TestEveryRuntimeConstructorBoundsRecursion(t *testing.T) {
 			t.Cleanup(tm.CancelAll)
 			return vm
 		},
-		"NewRuntimeForCipher": func(t *testing.T) *goja.Runtime {
-			vm, err := NewRuntimeForCipher("")
-			if err != nil {
-				t.Fatalf("NewRuntimeForCipher: %v", err)
-			}
-			return vm
-		},
 	}
 	run := func(src string) func(vm *goja.Runtime) error {
 		return func(vm *goja.Runtime) error {

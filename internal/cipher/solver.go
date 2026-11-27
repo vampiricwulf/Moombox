@@ -268,7 +268,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 		// wrap with a different verb to avoid "fetch player JS: fetch player JS: ..."
 		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
 	}
-	// Fetch already removed the preprocessed.js sidecar on changed=true; we
+	// Fetch already removed the prepared copy on changed=true; we
 	// only need to drop in-memory solverData here. compileSolver is normally
 	// called when solverData has no entry, so this is mostly defensive against
 	// future call sites and against the path where Fetch coincidentally
@@ -280,35 +280,9 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 		return nil, err
 	}
 
-	// Log extraction strategy results for debugging
-	urlClassName := findURLClassName(playerJS)
-	nArrayCands := findNArrayCandidates(playerJS)
-	sigOldCands := findSigCandidates(playerJS)
-	alrSigChains := findAlrTransformChains(playerJS)
-
-	s.logger.Debug("cipher: extraction results", "playerID", playerID, "size", len(playerJS),
-		"urlClassName", urlClassName,
-		"nArrayCandidates", len(nArrayCands),
-		"sigOldCandidates", len(sigOldCands),
-		"alrSigChains", len(alrSigChains))
-
-	if urlClassName == "" && len(nArrayCands) == 0 {
-		s.logger.Warn("cipher: no n-param strategy succeeded (URL class + array candidates)",
-			"playerID", playerID)
-	}
-	if len(sigOldCands) == 0 && len(alrSigChains) == 0 {
-		s.logger.Debug("cipher: no sig strategy succeeded (ALR chains + old candidates)",
-			"playerID", playerID)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	// Second-tier cache: skip the 200-500ms extraction + preprocessing
-	// pass when the .preprocessed.js sidecar is on disk. Only the slow
-	// path runs preprocessPlayerWithBranch + writes the sidecar back.
-	// Audit reports/cipher.md Q4.
+	// Second-tier cache: skip the parse and match (about 0.1 s) when the
+	// prepared copy is on disk. Only the slow path runs preprocessPlayer
+	// and writes the copy back. Audit reports/cipher.md Q4.
 	preprocessed, ppErr := s.playerCache.GetPreprocessed(playerURL)
 	if ppErr != nil {
 		s.logger.Debug("cipher: preprocessed cache read failed", "playerID", playerID, "err", ppErr)
@@ -316,12 +290,14 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	if preprocessed != "" {
 		s.logger.Debug("cipher: preprocessed cache hit", "playerID", playerID)
 	} else {
-		var branch string
-		preprocessed, branch, err = preprocessPlayerWithBranch(playerJS)
+		var st prepareStats
+		preprocessed, st, err = preprocessPlayer(playerJS)
 		if err != nil {
 			return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
 		}
-		s.logger.Debug("cipher: extraction branch", "playerID", playerID, "branch", branch)
+		s.logger.Debug("cipher: player prepared", "playerID", playerID, "size", len(playerJS),
+			"solvers", st.solvers, "routes", st.routes, "stringPool", st.pool,
+			"kept", st.kept, "dropped", st.dropped)
 		if putErr := s.playerCache.PutPreprocessed(playerURL, preprocessed); putErr != nil {
 			s.logger.Debug("cipher: preprocessed cache write failed", "playerID", playerID, "err", putErr)
 		}
@@ -421,8 +397,12 @@ func containsKey(order []string, key string) bool {
 // swaps it to act at exactly that point (cancel the caller).
 var compileStarting = func() {}
 
-// getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
-// The code is expected to set _result.sig and _result.n when invoked with a _result object.
+// getFromPrepared is ejs getFromPrepared: it runs a prepared player
+// (preprocessPlayer) as the body of function(_result){...}, as ejs runs it
+// with Function("_result", code), and takes the sig and n functions it leaves
+// on _result. The runtime is a bare one (mbgoja.NewPlainRuntime, with the
+// call-stack bound): the prepared copy carries ejs setup.ts, the only globals
+// the player needs to load, and no DOM shim is registered.
 //
 // goja.RunString and vm.NewObject can panic on certain malformed inputs (stack
 // overflows in deep recursion, some parser states). Without recovery the
@@ -442,13 +422,7 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 		}
 	}()
 
-	// internal/goja's runtime registers real TextEncoder/TextDecoder and the
-	// shared DOM shim. Empty UA → internal/goja defaults to Chrome 131. Audit
-	// reports/goja.md C4 + cipher.md D1/D4.
-	vm, vmErr := mbgoja.NewRuntimeForCipher("")
-	if vmErr != nil {
-		return nil, fmt.Errorf("init cipher VM: %w", vmErr)
-	}
+	vm := mbgoja.NewPlainRuntime()
 
 	// Create result container
 	resultObj := vm.NewObject()
@@ -456,8 +430,9 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 		return nil, err
 	}
 
-	// Execute the preprocessed code
-	_, err = mbgoja.RunStringWithTimeout(context.Background(), vm, code, compileTimeout)
+	// Run the prepared code. The newline before the close keeps a trailing
+	// line comment in the player from swallowing it.
+	_, err = mbgoja.RunStringWithTimeout(context.Background(), vm, "(function(_result){"+code+"\n})(_result)", compileTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("run preprocessed code: %w", err)
 	}
@@ -678,6 +653,11 @@ func callWithTimeout(vm *gojavm.Runtime, label string, fn func() (gojavm.Value, 
 	v, err := mbgoja.CallWithTimeout(vm, callTimeout, "cipher "+label, fn)
 	if err != nil {
 		return "", fmt.Errorf("%s decrypt: %w", label, err)
+	}
+	// ejs answers null when the URL it built holds no answer; String() would
+	// make that the text "null" and put it in a URL.
+	if v == nil || gojavm.IsUndefined(v) || gojavm.IsNull(v) {
+		return "", fmt.Errorf("%s decrypt: the solver gave no answer", label)
 	}
 	return v.String(), nil
 }

@@ -71,33 +71,6 @@ func NewRuntimeWithShims(ctx context.Context, userAgent string) (*goja.Runtime, 
 	return vm, tm, nil
 }
 
-// NewRuntimeForCipher creates a Goja runtime suitable for running YouTube
-// player.js inside a cipher solver. Compared to NewRuntimeWithShims:
-//   - Registers encoding (real TextEncoder/TextDecoder, btoa, atob).
-//     The cipher previously hand-stubbed TextEncoder to return Uint8Array(0),
-//     which would silently miscompute any signature touching TextEncoder
-//     (audit reports/goja.md API6 + cipher.md D1/D4).
-//   - Registers DOM shim (document, navigator, location, screen, performance,
-//     storage, XMLHttpRequest, crypto.{getRandomValues,subtle,randomUUID},
-//     plus AbortController / ReadableStream / CustomEvent / CSS / Intl).
-//   - Does NOT register timers — cipher uses vm.Interrupt() externally for
-//     timeout enforcement; setTimeout in player.js init paths becomes a
-//     ReferenceError but those paths aren't hit during sig/n extraction.
-//
-// Audit reports/goja.md C4 + reports/cipher.md D1/D4.
-func NewRuntimeForCipher(userAgent string) (*goja.Runtime, error) {
-	vm := NewRuntime()
-
-	if err := RegisterEncoding(vm); err != nil {
-		return nil, fmt.Errorf("register encoding: %w", err)
-	}
-	if err := RegisterDOMShim(vm, userAgent); err != nil {
-		return nil, fmt.Errorf("register DOM shim: %w", err)
-	}
-
-	return vm, nil
-}
-
 // ErrExecutionTimeout is what RunStringWithTimeout's error wraps when the
 // bound ran out, so a caller can tell a timeout from a script error or a
 // cancelled context with errors.Is. The message is unchanged:

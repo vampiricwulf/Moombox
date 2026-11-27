@@ -3,6 +3,7 @@ package cipher
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,8 +132,9 @@ func TestPlayerCacheRemoveCleansBothFiles(t *testing.T) {
 	}
 }
 
-// TestPlayerCachePreprocessedFilePath exercises the path derivation —
-// must end in .preprocessed.js sibling to the raw .js (same key).
+// TestPlayerCachePreprocessedFilePath: the prepared copy sits beside the raw
+// .js under the same key, and its name carries the ejs commit the port
+// mirrors, so a port of another ejs never runs a copy this one prepared.
 func TestPlayerCachePreprocessedFilePath(t *testing.T) {
 	dir := t.TempDir()
 	pc, err := NewPlayerCache(dir, nopPlayerCacheLogger{})
@@ -146,11 +148,43 @@ func TestPlayerCachePreprocessedFilePath(t *testing.T) {
 	if filepath.Dir(rawPath) != filepath.Dir(prePath) {
 		t.Errorf("raw + preprocessed should live in the same dir: raw=%q pre=%q", rawPath, prePath)
 	}
-	rawKey := filepath.Base(rawPath)
-	preKey := filepath.Base(prePath)
-	rawNoExt := rawKey[:len(rawKey)-len(".js")]
-	preNoExt := preKey[:len(preKey)-len(".preprocessed.js")]
-	if rawNoExt != preNoExt {
-		t.Errorf("raw + preprocessed should share key: raw=%q pre=%q", rawNoExt, preNoExt)
+	rawNoExt := strings.TrimSuffix(filepath.Base(rawPath), ".js")
+	if want := rawNoExt + ".prepared-ejs-" + ejsPortVersion[:7] + ".js"; filepath.Base(prePath) != want {
+		t.Errorf("prepared copy is %q, want %q", filepath.Base(prePath), want)
+	}
+}
+
+// TestRegexExtractorCopyIsNeverRun (owner ruling RV-12): the copy the regex
+// extractor prepared, <key>.preprocessed.js, is in another format, so the
+// port never reads it, and it never writes there, which keeps that file an
+// older binary's own if one runs over this directory again. A changed body
+// and Remove drop it with the player's other files, so that older binary
+// cannot compile a copy of a body that has since changed.
+//
+// Mutants: GetPreprocessed or FilePathPreprocessed back on the old name (the
+// regex copy is served); the rotation or Remove leaving the old file.
+func TestRegexExtractorCopyIsNeverRun(t *testing.T) {
+	dir := t.TempDir()
+	pc, err := NewPlayerCache(dir, nopPlayerCacheLogger{})
+	if err != nil {
+		t.Fatalf("NewPlayerCache: %v", err)
+	}
+	url := "https://www.youtube.com/s/player/abcdef12/player_ias.vflset/en_US/base.js"
+	legacy := pc.legacyPreprocessedPath(url)
+	if err := os.WriteFile(legacy, []byte("regex extractor output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := pc.GetPreprocessed(url); err != nil || got != "" {
+		t.Errorf("GetPreprocessed with only the regex copy on disk = %q, %v; want a miss", got, err)
+	}
+	if err := pc.PutPreprocessed(url, "port output"); err != nil {
+		t.Fatalf("PutPreprocessed: %v", err)
+	}
+	if b, _ := os.ReadFile(legacy); string(b) != "regex extractor output" {
+		t.Errorf("the regex copy was overwritten: %q", b)
+	}
+	pc.Remove(url)
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("Remove left the regex copy: stat err = %v", err)
 	}
 }
