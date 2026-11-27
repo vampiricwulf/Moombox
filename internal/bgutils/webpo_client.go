@@ -162,7 +162,7 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 	if itData.WebsafeFallbackToken != "" {
 		return nil, &BGError{
 			Code:    ErrIntegrity,
-			Message: "GenerateIT returned no integrity token (only the websafe fallback): the in-process BotGuard run cannot pass the timing check — expected while the sidecar is unavailable",
+			Message: "GenerateIT returned no integrity token (only the websafe fallback): the in-process BotGuard run aborts under its DOM stand-in (no iframe.contentWindow, randomised DOM probes) — expected while the sidecar is unavailable",
 		}
 	}
 	return nil, &BGError{Code: ErrIntegrity, Message: "no integrity token or fallback token available"}

@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -118,8 +119,15 @@ func TestLiveCurrentPlayerSolves(t *testing.T) {
 	g, err := goja.DecryptSignature(ctx, cipher.SignatureRequest{EncryptedSignature: sigIn, NParam: nIn, PlayerURL: playerURL})
 	switch {
 	case err != nil:
-		t.Logf("goja cannot solve today's player (the sidecar is the primary): %.200v", err)
+		// Since RV-12 goja runs a port of the same ejs solver, so a player the
+		// sidecar answers and goja does not is a port that has fallen behind.
+		t.Errorf("goja cannot solve today's player although the sidecar can (extractor mismatch=%t): %.200v",
+			errors.Is(err, cipher.ErrExtractorMismatch), err)
 	default:
+		if (g.DecryptedSignature == "") != (gotSig == "") || (g.DecryptedNSig == "") != (gotN == "") {
+			t.Errorf("goja and the sidecar did not answer the same challenges: goja sig %t n %t, sidecar sig %t n %t",
+				g.DecryptedSignature != "", g.DecryptedNSig != "", gotSig != "", gotN != "")
+		}
 		if g.DecryptedSignature != "" && gotSig != "" && g.DecryptedSignature != gotSig {
 			t.Error("goja and the sidecar disagree on the signature of today's player")
 		}
