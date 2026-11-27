@@ -95,7 +95,7 @@ func TestPlayerCachePreprocessedMissingReturnsEmpty(t *testing.T) {
 }
 
 // TestPlayerCacheRemoveCleansBothFiles — Remove drops the raw .js AND
-// the .preprocessed.js sidecar. Without this, an explicit invalidation
+// the prepared copy. Without this, an explicit invalidation
 // (cipher solver flagged broken at runtime) would leave a stale
 // preprocessed sidecar that the next compile picks up.
 func TestPlayerCacheRemoveCleansBothFiles(t *testing.T) {
