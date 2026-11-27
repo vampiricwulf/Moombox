@@ -223,12 +223,17 @@ func (c *compositeSolver) sharePlayerMemory(sidecar Solver) {
 // while other goroutines are solving.
 // The synthetic challenges the previous sidecar failed are asked again of
 // the new one. What is remembered about players (which are solved with the
-// tv body) carries over to it.
+// tv body) carries over to it. A half installed up ends the outage the
+// readiness grace is measured over, so the next outage gets its own grace
+// even when no signature saw the child up in between.
 func (c *compositeSolver) SetSidecar(sidecar Solver) {
 	c.sharePlayerMemory(sidecar)
 	c.mu.Lock()
 	c.sidecarSolver = sidecar
 	c.mu.Unlock()
+	if sidecar != nil && solverReady(sidecar) {
+		c.markSidecarUp()
+	}
 	c.specMu.Lock()
 	clear(c.failed)
 	c.specMu.Unlock()
@@ -436,6 +441,11 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 	var sideErr error
 	if sc := c.sidecar(); sc != nil {
 		out, err := sc.N(ctx, playerID, encryptedN)
+		// A child seen up ends the outage the signatures' readiness grace
+		// is measured over, whether or not a signature asked meanwhile.
+		if solverReady(sc) {
+			c.markSidecarUp()
+		}
 		if err == nil {
 			err = checkNResult(encryptedN, out)
 		}
