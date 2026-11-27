@@ -9,9 +9,38 @@ import (
 	"github.com/dop251/goja"
 )
 
+// MaxCallStackSize is the deepest JavaScript call stack any goja runtime in
+// Moombox may reach (owner ruling RV-13). goja's own default is effectively
+// unbounded: an endless recursion in a fetched player or BotGuard program grew
+// to depth 985,087 and 306 MB in 5 s before anything stopped it. Past this depth
+// goja aborts the run with a *goja.StackOverflowError.
+//
+// JavaScript try/catch does not see that abort: the whole run ends, unlike V8,
+// which throws a catchable RangeError. A script that probes its own recursion
+// depth is therefore aborted instead of answered.
+//
+// Measured on Windows x64, goja 5e92a7e2 (2026-11-26): the three testdata
+// players compile and solve sig and n with a limit of 20 and fail at 15, so
+// the cipher needs fewer than 20 frames. The BotGuard program could not be
+// measured (its live test fails for another reason), hence the wide headroom.
+// At this limit an endless recursion aborts in about 3 ms having allocated
+// about 9 MB; recursing through a native call (Array.prototype.forEach) stops
+// at depth 5,000, since each round costs two frames, in about 25 ms and 22 MB.
+const MaxCallStackSize = 10000
+
+// NewPlainRuntime creates a bare goja runtime that has the call-stack bound
+// and nothing else. Every goja runtime in the tree is made here, test helpers
+// included (TestEveryGojaRuntimeIsMadeByNewPlainRuntime holds that), so none
+// can run without the bound.
+func NewPlainRuntime() *goja.Runtime {
+	vm := goja.New()
+	vm.SetMaxCallStackSize(MaxCallStackSize)
+	return vm
+}
+
 // NewRuntime creates a new Goja runtime with common setup (encoding, timers, etc.).
 func NewRuntime() *goja.Runtime {
-	vm := goja.New()
+	vm := NewPlainRuntime()
 	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
 	return vm
 }

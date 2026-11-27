@@ -445,6 +445,7 @@ Cipher solving runs YouTube's `player.js` in a Goja VM, and the goja-fallback Bo
 - **TextEncoder/TextDecoder** — UTF-8 encoding/decoding.
 - **Timers** — `setTimeout`/`setInterval` implemented via goroutines. The timer goroutine fires into a channel that the VM polls during execution.
 - **Navigator** — `navigator.userAgent` matching Chrome's UA string.
+- **Call-stack bound** — every goja runtime in the tree, test helpers included, is made by `NewPlainRuntime`, which caps the call depth at `MaxCallStackSize` (10,000; owner ruling RV-13). An endless recursion in a fetched script is aborted in milliseconds instead of growing the heap until the compile bound ends it. JavaScript `try/catch` does not see the abort: the whole run ends.
 
 The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It's API-complete enough that BotGuard's fingerprint probes pass, but the goja interpreter still completes BotGuard's snapshot in ~552 µs vs Chrome's 50–200 ms — real V8 timing characteristics aren't reachable without a real V8, which is why the production path is the Node sidecar. The shim is retained because cipher player.js execution does not have BotGuard's timing fingerprint problem.
 

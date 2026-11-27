@@ -1630,7 +1630,7 @@ The `compileSolver` method executes this pipeline:
 
 3. **Compile**: Execute the preprocessed code in a fresh Goja VM:
    - A `_result` object is created in the VM.
-   - The preprocessed code is executed, populating `_result.sig` and `_result.n` with JavaScript functions. The run is bounded by `compileTimeout` (120 s) alone, through `mbgoja.RunStringWithTimeout`; an interrupt stops a JS-level loop, not a hang inside a native Go call.
+   - The preprocessed code is executed, populating `_result.sig` and `_result.n` with JavaScript functions. The run is bounded in time by `compileTimeout` (120 s) alone, through `mbgoja.RunStringWithTimeout`; an interrupt stops a JS-level loop, not a hang inside a native Go call. Its call depth is bounded by the runtime's call-stack limit (§ Goja Runtime Shims, Call-stack bound).
    - These are wrapped in Go closures with panic recovery.
 
 ### STS Extraction
@@ -1698,6 +1698,10 @@ Inline JavaScript implementing UTF-8 multi-byte encoding:
 - **CancelAll**: Stops all timers, closes the global `done` channel (unblocking all interval goroutines), and marks the manager as stopped so no new timers can be created.
 
 The factory function `NewRuntimeWithShims(userAgent)` creates a fully configured Goja runtime with all three shim layers.
+
+#### Call-stack bound (`runtime.go`)
+
+Every goja runtime in the tree is made by `NewPlainRuntime`, which calls `SetMaxCallStackSize(MaxCallStackSize)` (10,000 frames, owner ruling RV-13); `NewRuntime`, `NewRuntimeWithShims`, `NewRuntimeForCipher` and the test helpers that evaluate the dashboard's modules all build on it, and `TestEveryGojaRuntimeIsMadeByNewPlainRuntime` fails on any other call of `goja.New`. goja's own default is effectively unbounded: an endless recursion grew to depth 985,087 and 306 MB in 5 s before anything stopped it. With the bound it aborts with a `*goja.StackOverflowError` in about 3 ms and 9 MB (recursing through a native call such as `forEach`, which costs two frames a round, at depth 5,000 in about 25 ms and 22 MB; Windows x64, measured 2026-11-26). The three testdata players need fewer than 20 frames to compile and solve; the BotGuard program could not be measured, hence the headroom. JavaScript `try/catch` does not see the abort, unlike V8's catchable `RangeError`: the whole run ends, so a script that probes its own recursion depth is aborted instead of answered. In the cipher the abort is an ordinary error from the compile or the solve call, not a panic, so it neither poisons the cached solver nor counts as a timeout.
 
 ---
 
