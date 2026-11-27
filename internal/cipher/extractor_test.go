@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dop251/goja/parser"
 )
 
 // TestEjsPortPinMatchesVendoredEjs: the port names the ejs it mirrors, and
@@ -194,6 +196,30 @@ func TestSolverAnswerNullIsNoAnswer(t *testing.T) {
 	}
 	if got, err := solvers.DecryptSig("x"); err == nil {
 		t.Errorf("sig answered undefined: got %q, want an error", got)
+	}
+}
+
+// TestWalkVisitsInESTreeOrder: findArgs takes the first matching call in the
+// order ejs walks the AST, meriyah's ESTree key order. A for statement's test
+// comes before its update there (goja's fields have Update first), and a
+// do-while's body before its test (goja's have Test first). Each loop below
+// holds two calls that both give the key 4 (1^5 and 2^6), so the order
+// decides the args.
+//
+// Mutant: walkNodes without its ForStatement or DoWhileStatement case (the
+// field order picks 2, 6).
+func TestWalkVisitsInESTreeOrder(t *testing.T) {
+	for _, src := range []string{
+		"for (B(9, 9); B(1, 5); B(2, 6)) {}",
+		"do { B(1, 5) } while (B(2, 6));",
+	} {
+		prog, err := parser.ParseFile(nil, "", src, 0)
+		if err != nil {
+			t.Fatalf("parse %q: %v", src, err)
+		}
+		if got := findArgs(prog.Body, "B", 4); strings.Join(got, ",") != "1,5" {
+			t.Errorf("findArgs over %q = %v, want [1 5]", src, got)
+		}
 	}
 }
 

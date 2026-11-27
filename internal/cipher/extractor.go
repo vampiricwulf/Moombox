@@ -346,9 +346,14 @@ func isPrototypeMember(e ast.Expression) bool {
 // --- the AST walk ---
 
 // walkNodes visits n and every node below it, parents first, children in
-// field order (which is source order), as ejs's Object.values walks do. fn
-// returning false stops the whole walk. A function's DeclarationList, which
-// repeats bindings already in its body, is not visited.
+// the order ejs's Object.values walks visit them: the key order of meriyah's
+// ESTree nodes. That is goja's field order for every node but two, which
+// are visited in ESTree's order here: a for statement's init, test, update,
+// body (goja's fields put Update ahead of Test) and a do-while's body, test
+// (goja's put Test first). findXorValue and findArgs take the first match,
+// so the order decides which call answers. fn returning false stops the
+// whole walk. A function's DeclarationList, which repeats bindings already
+// in its body, is not visited.
 func walkNodes(n ast.Node, fn func(ast.Node) bool) bool {
 	if n == nil {
 		return true
@@ -359,6 +364,13 @@ func walkNodes(n ast.Node, fn func(ast.Node) bool) bool {
 	}
 	if !fn(n) {
 		return false
+	}
+	switch x := n.(type) {
+	case *ast.ForStatement:
+		return walkNodes(x.Initializer, fn) && walkNodes(x.Test, fn) &&
+			walkNodes(x.Update, fn) && walkNodes(x.Body, fn)
+	case *ast.DoWhileStatement:
+		return walkNodes(x.Body, fn) && walkNodes(x.Test, fn)
 	}
 	return walkStruct(rv, fn)
 }
