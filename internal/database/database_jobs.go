@@ -512,14 +512,18 @@ func (db *Database) ManualTwitchJobHoldsStream(streamID string) (bool, error) {
 // A manually added VOD or clip row names no channel to wait on and is never
 // returned, so a pending one does not hold the channel's live broadcasts.
 // The login is matched in Go (twitchChannelWaitLogin), because a login's own
-// underscores are LIKE wildcards.
+// underscores are LIKE wildcards. The SQL leaves out the VOD and clip URLs
+// first, so the queued backlog a pasted listing or the CLI creates is not
+// read and parsed on every poll; it drops only rows twitchChannelWaitLogin
+// would also answer "" for, and that Go check still decides.
 func (db *Database) ManualTwitchJobs(login string) ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, url, status, stream_start_time FROM jobs
-		 WHERE (id LIKE 'tw\_manual\_%' ESCAPE '\' OR (manually_added = 1 AND platform = 'twitch'))
+		 WHERE (id LIKE 'tw\_manual\_%' ESCAPE '\' OR (manually_added = 1 AND platform = 'twitch'
+		        AND url NOT LIKE '%/videos/%' AND url NOT LIKE '%/clip/%' AND url NOT LIKE '%clips.twitch.tv/%'))
 		   AND status NOT IN (?, ?, ?)`,
 		StatusFinished, StatusError, StatusCancelled)
 	if err != nil {
