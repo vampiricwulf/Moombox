@@ -238,12 +238,13 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 		cookies  bool
 		cwd      string
 		want     []string
+		channel  string // the live channel the internal/twitch run must get
 	}{
 		{name: "pass", args: []string{"youtube-auth"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree,
 			want: []string{"PASS  internal/youtube", "RESULT: PASS"}},
 		{name: "fail", args: []string{"youtube-auth"}, mode: "fail", wantFail: true, calls: 1, cookies: true, cwd: ownTree,
 			want: []string{"FAIL  internal/youtube", "RESULT: FAIL"}},
-		{name: "two packages", args: []string{"cookies"}, mode: "pass", calls: 2, cookies: true, cwd: ownTree,
+		{name: "two packages", args: []string{"cookies"}, mode: "pass", calls: 2, cookies: true, cwd: ownTree, channel: "somechannel",
 			want: []string{"PASS  internal/youtube", "PASS  internal/twitch"}},
 		{name: "no cookies", args: []string{"--no-cookies", "youtube-auth"}, mode: "pass", calls: 1, cwd: ownTree,
 			want: []string{"Cookie source: none (cookie tests skip)"}},
@@ -253,7 +254,7 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			want: []string{"SKIP", "no video"}},
 		{name: "cipher without its fixture", args: []string{"--worktree", "{tree}", "cipher"}, mode: "pass", calls: 0,
 			want: []string{"SKIP", "no player fixture"}},
-		{name: "twitch picks a live channel", args: []string{"twitch"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree,
+		{name: "twitch picks a live channel", args: []string{"twitch"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree, channel: "somechannel",
 			want: []string{"Twitch channel: somechannel"}},
 	}
 	for _, tc := range cases {
@@ -310,8 +311,8 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 				if !strings.Contains(strings.ToLower(c["tmp"]), "live-tmp") {
 					t.Errorf("a test's TMP is outside the run directory: %s", c["tmp"])
 				}
-				if tc.name == "twitch picks a live channel" && c["channel"] != "somechannel" {
-					t.Errorf("the Twitch channel tests got channel %q", c["channel"])
+				if tc.channel != "" && c["pkg"] == "internal/twitch" && c["channel"] != tc.channel {
+					t.Errorf("the Twitch channel tests got channel %q, want %q", c["channel"], tc.channel)
 				}
 				want := ""
 				if tc.cookies {

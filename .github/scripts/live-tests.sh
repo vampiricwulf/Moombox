@@ -16,7 +16,8 @@
 #                 token of a channel live now (picked from Twitch's top streams
 #                 unless one is set); the offline-channel probe needs
 #                 MOOMBOX_LIVE_TWITCH_OFFLINE_CHANNEL
-#   cookies       every test that reads the cookie file (YouTube and Twitch)
+#   cookies       every test that reads the cookie file (YouTube and Twitch;
+#                 the Twitch channel is picked as for twitch)
 #   bgutils       the sidecar's live PO-token mints and its death fallback
 #   cipher        the sidecar cipher solver against the player fixtures, and
 #                 today's player (main and tv bodies) against sidecar and goja
@@ -531,11 +532,11 @@ run_pkg() {
 	fi
 }
 
-# The Twitch channel tests need a channel that is live now: asked of Twitch
-# when none is set (an anonymous query; the login is not a secret).
+# The Twitch channel tests (in twitch and cookies) need a channel that is
+# live now: asked of Twitch when none is set (an anonymous query; the login is not a secret).
 needs_twitch_channel=0
 for g in "${groups[@]}"; do
-	case $g in twitch) needs_twitch_channel=1 ;; esac
+	case $g in twitch | cookies) needs_twitch_channel=1 ;; esac
 done
 if [ "$needs_twitch_channel" = 1 ] && [ -z "$twitch_channel" ]; then
 	if [ "$hooks" = 1 ] && [ -n "${MOOMBOX_LIVE_TWITCH_PICK:-}" ]; then
