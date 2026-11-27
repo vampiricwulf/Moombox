@@ -63,7 +63,7 @@ Source lines exclude `_test.go` files; the test-file count is listed separately.
 | web/ | ~4,700 | 9 | 28 | chi router, WebSocket, auth, middleware, embed, folder-open composer |
 | chat/ | ~4,280 | 4 | 29 | YouTube live chat downloader (polling + batching) |
 | utils/ | ~4,190 | 28 | 32 | HTTP helpers, formatters, YouTube URL parsing, JSON, DACL, resolution cap, canonical paths |
-| cipher/ | ~5,130 | 15 | 29 | YouTube signature cipher: sidecar-routed + goja fallback (a Go port of ejs) |
+| cipher/ | ~5,110 | 14 | 29 | YouTube signature cipher: sidecar-routed + goja fallback (a Go port of ejs) |
 | config/ | ~3,440 | 9 | 29 | TOML config, FlexDuration, channel terms, migrations |
 | bgutils/ | ~2,350 | 6 | 12 | PO token: PotProvider, Challenge, BotGuard, WebPoMinter (goja path) |
 | bgutils/sidecar/ | ~2,320 | 7 | 16 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
