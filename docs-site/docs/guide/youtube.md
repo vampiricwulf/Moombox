@@ -436,7 +436,20 @@ the challenges:
   length a player produces also teaches Moombox that player's scrambling
   pattern, which it keeps on disk and can reuse while the sidecar is down.
 - **`n` challenges** are solved by the sidecar, with an in-process solver as
-  a fallback.
+  a last resort.
+
+YouTube publishes each player version as several files. Moombox solves with
+the main one. If the sidecar cannot solve with it, it tries the TV file of
+the same version, and only after that the in-process solver, whose answers
+YouTube often refuses for current players. Each step is logged once per
+player version, as a warning:
+
+- *ejs cannot solve with this player's main variant; its tv variant solves,
+  and is used for this player from now on*: nothing to do, downloads carry
+  on.
+- *the sidecar could not solve for this player; goja, the last solver asked,
+  is tried, and its answers may be refused*: expect failed or lower-quality
+  downloads until a Moombox update brings a solver for that player version.
 
 A URL whose `n` no solver can answer is never sent. When the challenges
 cannot be solved at all — the sidecar off or down for over a minute, a new
