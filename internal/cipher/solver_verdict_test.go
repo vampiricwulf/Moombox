@@ -775,6 +775,53 @@ func TestTVPlayerThatStopsSolvingIsStale(t *testing.T) {
 	}
 }
 
+// halfDown is a sidecar half that answers and says its child is not up.
+type halfDown struct{ staticSolver }
+
+func (*halfDown) ready() bool { return false }
+
+// TestGojaFallNotThePlayersSpendsNoWarn: three falls to goja that carry the
+// main body's ErrPlayerJSStale and still say nothing final about the player,
+// because the solve never got to ask tv, or tv was cut short. None of them
+// logs the Warn, and none spends the player's one line: the next fall that
+// is the player's own still logs it.
+//
+// Mutants: each of the three conditions dropped from noteGojaFall (a Warn in
+// that row's first solve).
+func TestGojaFallNotThePlayersSpendsNoWarn(t *testing.T) {
+	stale := fmt.Errorf("%w: ejs preprocess: broke", ErrPlayerJSStale)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		half Solver
+		ctx  context.Context
+	}{
+		{"the caller's context ended", &staticSolver{nErr: stale}, cancelled},
+		{"the child died under the request and is back", &staticSolver{nErr: fmt.Errorf("%w: the sidecar is not running: %w", ErrSidecarUnavailable, stale)}, context.Background()},
+		{"the child is down", &halfDown{staticSolver{nErr: stale}}, context.Background()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlog(t)
+			goja := &staticSolver{n: map[string]string{"n1": "goja-n"}}
+			c := newCompositeSolverWith(tc.half, goja)
+			if got, err := c.N(tc.ctx, "P1", "n1"); err != nil || got != "goja-n" {
+				t.Fatalf("N = %q, %v; want goja's answer", got, err)
+			}
+			if warns := warnLines(logs.String()); len(warns) != 0 {
+				t.Fatalf("Warn lines = %q, want none", warns)
+			}
+			c.SetSidecar(&staticSolver{nErr: stale})
+			if _, err := c.N(context.Background(), "P1", "n1"); err != nil {
+				t.Fatalf("N on the failure that is the player's: %v", err)
+			}
+			if warns := warnLines(logs.String()); len(warns) != 1 {
+				t.Errorf("Warn lines after the player's own failure = %q, want one", warns)
+			}
+		})
+	}
+}
+
 // TestGojaFallFromBatchWarnsOnce: a Batch whose n entries go to goja is a
 // fall like N's, and the two share the player's one Warn.
 //

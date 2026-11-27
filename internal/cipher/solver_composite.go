@@ -357,7 +357,7 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 		}
 		// fall through to goja
 		if c.goja != nil {
-			c.noteGojaFall(playerID, "n", err)
+			c.noteGojaFall(ctx, playerID, "n", err)
 		}
 	}
 	if c.goja == nil {
@@ -370,7 +370,7 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 // to ask goja for what it failed (RoutedResolveURL, for a signature).
 // compositeSolver is the one that has it.
 type gojaFallNoter interface {
-	noteGojaFall(playerID, op string, err error)
+	noteGojaFall(ctx context.Context, playerID, op string, err error)
 }
 
 // noteGojaFall logs, once per player, that a solve the sidecar failed (err)
@@ -379,18 +379,26 @@ type gojaFallNoter interface {
 // there; the line carries what the sidecar failed with, the main body's
 // failure and the tv body's.
 //
-// The Warn is kept for a failure that is the player's own (playerFailure):
-// ejs cannot solve with it on either body, or its file is not to be had. A
-// timeout, a fetch that failed in transit, or a sidecar that is down or not
-// installed (ErrSidecarUnavailable, which the supervisor logs for itself)
-// says nothing about the player and does not spend its one line: a player
-// that timed out once and breaks for real later is still announced.
-func (c *compositeSolver) noteGojaFall(playerID, op string, err error) {
+// The Warn is kept for a solve the sidecar was there for and that failed on
+// the player itself (playerFailure): ejs cannot solve with it on either body,
+// or its file is not to be had. Nothing else spends the player's one line, so
+// a player that timed out once and breaks for real later is still announced:
+//
+//   - a timeout or a fetch that failed in transit says nothing about the
+//     player (a Debug line);
+//   - the caller's own context ended: the solve stopped where it was, the
+//     main body's failure in hand and the tv body never asked;
+//   - the sidecar is down or not installed, or its child died under the
+//     request (not ready now, or ErrSidecarUnavailable in the error of a
+//     child that is already back): the tv ask may be what the death cut
+//     short, and the supervisor logs the outage for itself.
+func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string, err error) {
+	if !solverReady(c.sidecar()) || errors.Is(err, ErrSidecarUnavailable) || ctx.Err() != nil {
+		return
+	}
 	if !playerFailure(err) {
-		if c.sidecar() != nil {
-			slog.Debug("cipher: the sidecar failed a solve; goja, the last solver asked, is tried",
-				"playerID", playerID, "challenge", op, "err", err)
-		}
+		slog.Debug("cipher: the sidecar failed a solve; goja, the last solver asked, is tried",
+			"playerID", playerID, "challenge", op, "err", err)
 		return
 	}
 	if !c.players.firstGojaFall(playerID) {
@@ -479,7 +487,7 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			}
 		}
 		if len(ns) > 0 && c.goja != nil {
-			c.noteGojaFall(playerID, "n", err)
+			c.noteGojaFall(ctx, playerID, "n", err)
 		}
 	} else if len(sigs) > 0 {
 		// No sidecar configured but sig requested: the specs or nothing.
