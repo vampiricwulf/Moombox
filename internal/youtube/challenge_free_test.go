@@ -290,11 +290,12 @@ func TestJSLessIsDecidedOnTheExtractionsPlayer(t *testing.T) {
 		authed     bool
 		player     string
 		wantJSLess bool
+		wantSource string
 	}{
-		{"public, the refused player", false, refused, true},
-		{"public, another player", false, other, false},
-		{"signed in, the refused player", true, refused, true},
-		{"signed in, another player", true, other, false},
+		{"public, the refused player", false, refused, true, "visionos"},
+		{"public, another player", false, other, false, "tv_public"},
+		{"signed in, the refused player", true, refused, true, "visionos"},
+		{"signed in, another player", true, other, false, "tv_auth"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orig := fetchWatchPage
@@ -317,6 +318,13 @@ func TestJSLessIsDecidedOnTheExtractionsPlayer(t *testing.T) {
 			info, err := extract(context.Background(), "test1234567")
 			if info == nil || err != nil {
 				t.Fatalf("GetVideoInfo = %+v, %v", info, err)
+			}
+			// The signatureCipher tv copy is ranked, not passed over, while the
+			// player can be solved; visionos's wins only for the refused one.
+			for _, f := range info.Formats {
+				if (f.Itag == 299 || f.Itag == 140) && f.Source != tc.wantSource {
+					t.Errorf("itag %d from %s, want %s", f.Itag, f.Source, tc.wantSource)
+				}
 			}
 			if info.JSLess != tc.wantJSLess {
 				t.Errorf("JSLess = %v, want %v", info.JSLess, tc.wantJSLess)
