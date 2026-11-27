@@ -167,10 +167,17 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 // (TVPlayerSource, never PlayerCache) and sent, one send per player at a
 // time. There is no stale-JS recovery here: the body sent is the one just
 // fetched, and nothing of it is cached on the Go side to evict.
+//
+// A tv body that cannot be used at all — ejs threw while preparing it, or
+// the fetch was answered that there is none — is not fetched and sent again
+// within staleVerdictWindow: the solve gets that failure back at once.
 func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	tvSrc, ok := s.src.(TVPlayerSource)
 	if !ok {
 		return sidecar.SolveCipherResult{}, fmt.Errorf("cipher: no tv player source for %s", playerID)
+	}
+	if dead := s.mem.tvDead(playerID); dead != nil {
+		return sidecar.SolveCipherResult{}, dead
 	}
 	key := sidecarPlayerKey(playerID, variantTV)
 	res, err := s.ask(ctx, key, "", false, sigs, ns)
@@ -182,6 +189,10 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 		return sidecar.SolveCipherResult{}, err
 	}
 	defer release()
+	if dead := s.mem.tvDead(playerID); dead != nil {
+		// Another solve found the body unusable while this one waited.
+		return sidecar.SolveCipherResult{}, dead
+	}
 	if s.playerSent(key) {
 		// Another solve sent the body while this one waited for the gate.
 		res, err = s.ask(ctx, key, "", false, sigs, ns)
@@ -192,9 +203,19 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 	}
 	js, err := tvSrc.TVPlayerJS(ctx, playerID)
 	if err != nil {
-		return sidecar.SolveCipherResult{}, fmt.Errorf("tv player JS for %s: %w", playerID, err)
+		err = fmt.Errorf("tv player JS for %s: %w", playerID, err)
+		// A definite answer (a 404: this player has no tv file) says the
+		// same on every solve; a transport failure or a struggling CDN is
+		// asked again by the next one.
+		if ctx.Err() == nil && !retryablePlayerFetch(err) {
+			s.mem.setTVDead(playerID, err)
+		}
+		return sidecar.SolveCipherResult{}, err
 	}
 	res, err = s.ask(ctx, key, js, false, sigs, ns)
+	if isPreprocessError(err) {
+		s.mem.setTVDead(playerID, err)
+	}
 	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		// As solveMain: %v, so this no longer reads as a miss to retry.
 		return res, fmt.Errorf("sidecar: tv player not loaded after it was sent: %v", err)
@@ -227,13 +248,39 @@ func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns [
 //
 // Both paths are bounded to one retry; the goal is reactive recovery,
 // not infinite-loop tolerance for genuinely-broken cipher state.
+//
+// The stale-JS recovery runs once per player within staleVerdictWindow, not
+// once per solve (owner ruling RV-11): a player ejs cannot solve with used to
+// be evicted, refetched (about 3 MB) and prepared twice over by the sidecar
+// on every solve. Within the window of the last recovery:
+//
+//   - a main body ejs threw on while preparing it is not asked at all — that
+//     failure is the body's, whatever the challenge — and the solve gets the
+//     recovery's ErrPlayerJSStale back at once;
+//   - otherwise the sidecar is asked as usual, without the JS first (it
+//     holds the body the recovery sent), and a stale-JS error ends in
+//     ErrPlayerJSStale with nothing evicted. The ask is still made because
+//     "no solutions" can be one challenge's failure (a `tcl` page's n on
+//     the main function): the player's other solves must keep being
+//     answered.
+//
+// The recovery is one at a time per player (the first-send gate), and a solve
+// that waited for another's asks once more before deciding anything.
 func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
-	includeJS := !s.playerSent(playerID)
+	if dead := s.mem.mainDead(playerID); dead != nil {
+		return sidecar.SolveCipherResult{}, dead
+	}
+	recoveries, held := s.mem.recoveryState(playerID)
+	// Within the window the sidecar holds what the recovery sent, marked as
+	// sent or not (a failed solve marks nothing): ask without the JS, and
+	// ErrPlayerNotLoaded below sends it if the sidecar has lost it.
+	includeJS := !held && !s.playerSent(playerID)
+	var release func()
 	if includeJS {
 		// One first send per player; the solves that waited on it find the
 		// player sent and go without the JS.
-		release, err := s.claimFirstSend(ctx, playerID)
-		if err != nil {
+		var err error
+		if release, err = s.claimFirstSend(ctx, playerID); err != nil {
 			return sidecar.SolveCipherResult{}, err
 		}
 		defer release()
@@ -254,10 +301,39 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 			// re-try with JS.
 			return result, fmt.Errorf("sidecar: player not loaded after retry-with-JS: %v", err)
 		}
-		return result, err
+		// A stale-JS failure of the body just sent is handled below like any
+		// other. It used to be returned as it came, which kept it from the
+		// recovery and, now, from the tv body.
 	}
 
 	if isStaleJSError(err) {
+		if release == nil {
+			var gateErr error
+			if release, gateErr = s.claimFirstSend(ctx, playerID); gateErr != nil {
+				return sidecar.SolveCipherResult{}, gateErr
+			}
+			defer release()
+		}
+		finished, held := s.mem.recoveryState(playerID)
+		if finished != recoveries {
+			// Another solve ran the recovery while this one waited for the
+			// gate: ask what it left before deciding anything.
+			if dead := s.mem.mainDead(playerID); dead != nil {
+				return sidecar.SolveCipherResult{}, dead
+			}
+			result, err = s.callOnce(ctx, playerID, false, false, sigs, ns)
+			if !isStaleJSError(err) {
+				return result, err
+			}
+		}
+		if held {
+			// The recovery already ran within the window: nothing is
+			// evicted again.
+			return result, fmt.Errorf("%w: %v", ErrPlayerJSStale, err)
+		}
+		s.mem.noteEviction(playerID)
+		defer s.mem.recoveryDone(playerID)
+
 		// Evict every cache layer for this player. Best-effort; even if
 		// RemovePlayerJS fails partially (e.g., Windows file lock from a
 		// concurrent reader), the retry below sends fresh JS with
@@ -278,7 +354,11 @@ func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns
 			// genuinely can't handle this player. Surface as a permanent
 			// stale-JS failure so the goja fallback path can decide
 			// whether to attempt its own extraction.
-			return retry, fmt.Errorf("%w: %v", ErrPlayerJSStale, retryErr)
+			stale := fmt.Errorf("%w: %v", ErrPlayerJSStale, retryErr)
+			if isPreprocessError(retryErr) {
+				s.mem.setMainDead(playerID, stale)
+			}
+			return retry, stale
 		}
 		return retry, retryErr
 	}
@@ -312,6 +392,13 @@ func isStaleJSError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isPreprocessError reports whether err is ejs failing while it prepares a
+// player body (the sidecar's loadPlayer label, one of isStaleJSError's): a
+// failure of the body itself, the same for every challenge.
+func isPreprocessError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ejs preprocess")
 }
 
 // callOnce issues a single SolveCipher round-trip. includeJS attaches

@@ -183,11 +183,13 @@ func TestMainFailsTVSolves(t *testing.T) {
 // TestMainAndTVFailGojaIsLast: ejs throws on both bodies. n is answered by
 // goja, asked once and only after the sidecar has been asked on main and on
 // tv; a signature fails with ErrPlayerJSStale, naming the tv failure too.
+// One Warn in all: the fall to goja. Leaving main for a tv body that did not
+// solve is not announced.
 //
 // Mutants: goja asked before the tv body; the tv failure dropping the
-// ErrPlayerJSStale sentinel.
+// ErrPlayerJSStale sentinel; the tv Warn made before tv has solved.
 func TestMainAndTVFailGojaIsLast(t *testing.T) {
-	captureSlog(t)
+	logs := captureSlog(t)
 	sc := newVariantSidecar()
 	sc.tvErr = errors.New("sidecar: ejs preprocess: tv broke too")
 	src := &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"}, tvJS: "tv-js"}
@@ -213,6 +215,39 @@ func TestMainAndTVFailGojaIsLast(t *testing.T) {
 	if !errors.Is(err, ErrPlayerJSStale) || !strings.Contains(err.Error(), "tv broke too") ||
 		!strings.Contains(err.Error(), "addOnDisposeCallback") {
 		t.Errorf("Sig error = %v, want ErrPlayerJSStale naming the main and the tv failure", err)
+	}
+	if warns := warnLines(logs.String()); len(warns) != 1 || !strings.Contains(warns[0], "goja") {
+		t.Errorf("Warn lines = %q, want the one for the fall to goja", warns)
+	}
+}
+
+// TestLostPlayerThatCannotBePreparedGoesToTV: the sidecar has lost a player
+// Go believes it sent (a restart, an eviction), and ejs throws preparing the
+// body when it is sent again. That failure used to be returned as it came,
+// short of the stale-JS recovery; it now runs the recovery and then the tv
+// body, like the same failure on a first send.
+//
+// Mutant: the re-send's failure returned without the recovery (goja answers).
+func TestLostPlayerThatCannotBePreparedGoesToTV(t *testing.T) {
+	captureSlog(t)
+	sc := newVariantSidecar()
+	inner := sc.respond
+	sc.respond = func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+		if req.PlayerID == "P1" && req.PlayerJS == "" {
+			return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+		}
+		return inner(req)
+	}
+	src := &tvFakeSource{fakePlayerSource: &fakePlayerSource{playerID: "P1", js: "main-js"}, tvJS: "tv-js"}
+	side := newSidecarSolverWith(sc, src)
+	side.markPlayerSent("P1")
+
+	got, err := side.N(context.Background(), "P1", "n1")
+	if err != nil || got != "tv-n(n1)" {
+		t.Fatalf("N = %q, %v; want the tv body's answer", got, err)
+	}
+	if shapes := callShapes(sc.calls); strings.Join(shapes, " ") != "P1 P1+js P1+js+force P1-tv P1-tv+js" {
+		t.Errorf("sidecar calls = %v, want the plain ask, the re-send, the recovery and tv", shapes)
 	}
 }
 

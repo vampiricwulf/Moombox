@@ -346,6 +346,9 @@ func (c *compositeSolver) Sig(ctx context.Context, playerID, encryptedSig string
 	return out, nil
 }
 
+// N asks the sidecar, which asks ejs on the player's main body and then on
+// its tv body, and goja only after that has failed (owner ruling RV-11).
+// With no sidecar half installed goja is all there is.
 func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
 	if sc := c.sidecar(); sc != nil {
 		out, err := sc.N(ctx, playerID, encryptedN)
@@ -353,11 +356,42 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 			return out, nil
 		}
 		// fall through to goja
+		if c.goja != nil {
+			c.noteGojaFall(ctx, playerID, "n", err)
+		}
 	}
 	if c.goja == nil {
 		return "", errors.New("cipher: no solver available for n")
 	}
 	return c.goja.N(ctx, playerID, encryptedN)
+}
+
+// gojaFallNoter is the routed solver's way to be told that a caller is about
+// to ask goja for what it failed (RoutedResolveURL, for a signature).
+// compositeSolver is the one that has it.
+type gojaFallNoter interface {
+	noteGojaFall(ctx context.Context, playerID, op string, err error)
+}
+
+// noteGojaFall logs, once per player, that a solve the sidecar was asked and
+// failed (err) goes to goja, the last solver asked. Goja's answers are not
+// to be relied on for current players, so the operator is told the first
+// time a player gets there; the line carries what the sidecar failed with,
+// the main body's failure and the tv body's.
+//
+// Nothing is logged when the sidecar was not there to ask — none installed,
+// or its child down, which the supervisor logs for itself — or when the
+// caller's own context ended.
+func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string, err error) {
+	sc := c.sidecar()
+	if sc == nil || !solverReady(sc) || errors.Is(err, ErrSidecarUnavailable) || ctx.Err() != nil {
+		return
+	}
+	if !c.players.firstGojaFall(playerID) {
+		return
+	}
+	slog.Warn("cipher: the sidecar could not solve for this player; goja, the last solver asked, is tried, and its answers may be refused",
+		"playerID", playerID, "challenge", op, "err", err)
 }
 
 // Batch combines sig and n decryption into a single solver call where
@@ -437,6 +471,9 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			if sigResults, ok = c.sigsFromSpecs(playerID, sigs); !ok {
 				return nil, nil, sidecarDown(sc, err)
 			}
+		}
+		if len(ns) > 0 && c.goja != nil {
+			c.noteGojaFall(ctx, playerID, "n", err)
 		}
 	} else if len(sigs) > 0 {
 		// No sidecar configured but sig requested: the specs or nothing.
@@ -633,3 +670,4 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 // swappable variant the BotGuard sidecar supervisor installs restarts through.
 var _ Solver = (*compositeSolver)(nil)
 var _ SidecarSwappable = (*compositeSolver)(nil)
+var _ gojaFallNoter = (*compositeSolver)(nil)
