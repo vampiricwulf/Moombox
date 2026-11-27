@@ -368,8 +368,12 @@ kill_tree() {
 # alive, in order. One a taskkill /T of its parent already ended is skipped.
 end_listed() {
 	local p w o rc
+	local now
 	while read -r p w; do
 		[ -n "$p" ] && kill -0 "$p" 2>/dev/null || continue
+		# The Windows pid as it is now (an exec since the listing changes it),
+		# else the listed one.
+		now=$(cat "/proc/$p/winpid" 2>/dev/null) && [ -n "$now" ] && w=$now
 		# A native Windows program (go.exe, the test binary, node) ends with
 		# its own Windows children only through taskkill /T. The arguments
 		# are kept from MSYS path conversion (/T is not a path). Without
