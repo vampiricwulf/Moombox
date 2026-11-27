@@ -28,10 +28,10 @@ Moombox vendors two upstream JS libraries into the BotGuard sidecar:
 | **yt-dlp/ejs** | `bgutil-sidecar/vendor/ejs/` | Source files copied in (Unlicense, public-domain) | `bgutil-sidecar/vendor/ejs/VERSION` (commit SHA) |
 | **bgutils-js** | `bgutil-sidecar/node_modules/bgutils-js` | npm dep | `bgutil-sidecar/package.json` (exact version) |
 
-The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) implementation in v2.6.16+. The Go-side `internal/cipher/` and `internal/bgutils/` packages are the **fallback** when the sidecar is disabled or down — they reimplement the same algorithms in goja.
+The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) implementation in v2.6.16+. The Go-side `internal/cipher/` and `internal/bgutils/` packages are the **fallback** when the sidecar is disabled or down — they reimplement the same algorithms in goja. `internal/cipher/extractor.go` is a Go port of the vendored ejs solver itself (owner ruling RV-12), pinned by `ejsPortVersion`.
 
 **Dual-update obligation:** When upstream ships a fix:
-- **ejs fix** → re-vendor `bgutil-sidecar/vendor/ejs/` to the new commit, bump `VERSION`, run `node build.mjs` to regenerate the bundle. Consider porting the equivalent change to `internal/cipher/` if the goja fallback path needs it (goja is the last solver asked, for an n and a signature alike, after the sidecar on the main and the tv variant; it fails on current players).
+- **ejs fix** → re-vendor `bgutil-sidecar/vendor/ejs/` to the new commit, bump `VERSION`, run `node build.mjs` to regenerate the bundle, **and port the same change into `internal/cipher/extractor.go`** (a standing cost the owner accepted, RV-12): move `ejsPortVersion` to the new pin, add upstream's new test pairs to `internal/cipher/ejs_vectors.json`, and pass `TestEjsPortVectors`. Goja is the last solver asked, for an n and a signature alike, after the sidecar on the main and the tv variant, the sig spec and the sidecar's readiness grace (`compositeSolver`, the one place that decides the order).
 - **bgutils-js fix** → bump pin in `bgutil-sidecar/package.json`, run `npm install`, run `node build.mjs`. Consider porting to `internal/bgutils/botguard.go` and friends.
 - **yt-dlp fix** → port to `internal/youtube/` or `internal/twitch/`. No sidecar mirror.
 
@@ -58,9 +58,9 @@ yt-dlp paths are under `yt_dlp/` in the upstream repo. The YouTube extractor is 
 ### ejs → Moombox
 | ejs Component | Sidecar File | Fallback (Goja) | What It Covers |
 |---------------|-------------|----------------|----------------|
-| Cipher algorithm | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/extractor.go` | Regex extraction of solver candidates from player.js |
-| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/solver.go` | Compiles full player.js in Goja VM, 10-slot LRU cache (`solverCacheSize`) |
-| Transform functions | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/decrypt.go` | Decrypts signature and n-parameter |
+| `preprocessPlayer`, `modifyPlayer`, `getSolutions`, `multiTry` (`solvers.ts`), `extract` and the pool matchers (`nsig.ts`), `setupNodes` (`setup.ts`) | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/extractor.go` | The Go port: each function named after the ejs one it mirrors, on goja's parser and AST |
+| `getFromPrepared` | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `internal/cipher/solver.go` | Runs the prepared player in a bare goja runtime, 10-slot LRU cache (`solverCacheSize`) |
+| Upstream test pairs (`src/yt/solver/test/tests.ts`) | — | `internal/cipher/ejs_vectors.json`, `TestEjsPortVectors` | The port's gate; bodies from `.github/scripts/fetch-ejs-vector-players.sh` |
 
 The sidecar runs ejs in V8 (Node.js). The `internal/cipher/` goja implementation is the fallback path when `use_sidecar = false` or the sidecar process is down. Vendored source pinned to commit SHA in `bgutil-sidecar/vendor/ejs/VERSION`.
 
@@ -102,7 +102,7 @@ Focus on: `yt_dlp/extractor/youtube/` (a package: `_video.py`, `_base.py`, `pot/
 ### Step 3: Triage ejs Changes
 Focus on cipher algorithm changes, n-challenge solver updates, new transform functions.
 
-**How cipher works:** Regex patterns extract solver function candidates from player.js → full player.js is compiled into a Goja VM → solver functions are called to decrypt signatures and n-parameters. The "fallback" is alternative regex patterns for different player.js variants (TV/ES6), not a separate solving strategy.
+**How cipher works:** ejs parses the player, drops the side-effect statements, finds the URL-builder function by AST shape and appends `_result.n` / `_result.sig`; the prepared player is then run and its two functions called. The sidecar runs ejs itself in V8; the goja fallback runs the Go port of the same steps (`internal/cipher/extractor.go`), so an ejs change is a change to both.
 
 ### Step 4: Triage BgUtils Changes
 Focus on BotGuard script/protocol, PO token generation, challenge format, integrity token requirements.
@@ -148,8 +148,7 @@ Commit the ledger in the same commit as the port when there is one, or in a `doc
 - Ignoring BgUtils when yt-dlp auth changes — PO token flow may have changed too
 - Translating Python regex directly — Go `regexp` doesn't support lookahead/lookbehind
 - Not testing with both authenticated and unauthenticated flows after porting auth changes
-- Treating cipher as "regex fallback" — it's regex extraction + full player.js compilation, not two separate strategies
-- Updating only the sidecar's vendored copy without considering the goja fallback path (or vice versa)
+- Re-vendoring ejs without porting the change to `internal/cipher/extractor.go` and moving `ejsPortVersion` (`TestEjsPortPinMatchesVendoredEjs` fails), or moving the pin without running `TestEjsPortVectors` over fetched bodies
 - Forgetting to bump `bgutil-sidecar/vendor/ejs/VERSION` after re-vendoring ejs source files
 
 ## Vendored-Source Update Procedures
@@ -182,14 +181,19 @@ diff <(cd references/ejs && cat package.json) <(cat bgutil-sidecar/package.json)
 # 5. Rebuild the sidecar:
 cd bgutil-sidecar && node build.mjs
 
-# 6. Run the cipher test suite:
-cd D:/Git/Moombox && go test -count=1 ./internal/cipher/...
-MOOMBOX_LIVE_CIPHER_TEST=1 go test -count=1 -timeout 180s -run "TestSidecarSolver" ./internal/cipher/...
+# 6. Port the same change into the Go port (internal/cipher/extractor.go),
+#    move ejsPortVersion to the new VERSION, and add upstream's new test
+#    pairs to internal/cipher/ejs_vectors.json (a node script can import
+#    tests.ts directly and write the JSON; sig pairs are hex in tests.ts).
 
-# 7. If the goja fallback path (internal/cipher/extractor*.go) needs a
-#    parallel change, port it. The sidecar parity test
-#    (TestSidecarSolverGojaParity) catches output divergence on any
-#    fixture goja can statically handle.
+# 7. Run the cipher test suite and the port's gate over the vector bodies:
+cd D:/Git/Moombox && go test -count=1 ./internal/cipher/...
+bash .github/scripts/fetch-ejs-vector-players.sh main tv es6 tcl   # or no args for all, ~800 MB
+go test -count=1 -timeout 30m -v -run TestEjsPortVectors ./internal/cipher/
+MOOMBOX_LIVE_CIPHER_TEST=1 go test -count=1 -timeout 180s -run "TestSidecarSolver" ./internal/cipher/...
+#    TestSidecarSolverGojaParity compares the port with the sidecar's ejs on
+#    every testdata fixture, for n and for signatures ('%' and the synthetic
+#    sig-spec challenge included).
 ```
 
 ### Updating bgutils-js

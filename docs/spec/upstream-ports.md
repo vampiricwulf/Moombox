@@ -7,8 +7,9 @@ Where the last upstream review left off, so the next one (a local session, a sch
 ## Last review
 
 - **Date:** 2026-11-26
-- **Last port:** `c431eab` — fix(cipher,youtube): ejs re-vendored for the players its pin threw on; a `tcl` page's STS and media are not used ← ejs `40b7a7d` (#81), `1c493d6` (#77), `3b6be39` (#60); yt-dlp `b2e6bb0dd` (#18126), `f31e4c27a` (#18129)
-- **Ported into:** `bgutil-sidecar/vendor/ejs/` (the VERSION file and the solver sources), `bgutil-sidecar/package.json` (meriyah), `bgutil-sidecar/src/cipher.js` (`withEjsGlobalsRestored`); `internal/youtube/player_api_strategy.go` (`mainVariantSTS`, `dropOtherVariantMedia`, `extractSTS`)
+- **Last port:** `ee2944dc` — feat(cipher): the goja fallback runs a Go port of the ejs solver ← ejs `c47fb1b` (`src/yt/solver/solvers.ts`, `nsig.ts`, `setup.ts`, the vendored pin), owner ruling RV-12
+- **Ported into:** `internal/cipher/extractor.go` (`preprocessPlayer` and the functions it names after ejs's, `ejsPortVersion`), `internal/cipher/solver.go` (`getFromPrepared`), `internal/cipher/ejs_vectors.json` (upstream's test pairs)
+- **The port is a second copy of ejs.** Every ejs bump that touches `src/yt/solver/` or `src/utils.ts` needs the same change in `internal/cipher/extractor.go`, then `ejsPortVersion` moved to the new pin (`TestEjsPortPinMatchesVendoredEjs` fails until it is) and upstream's new test pairs added to `ejs_vectors.json`; the gate is `TestEjsPortVectors` over the bodies `.github/scripts/fetch-ejs-vector-players.sh` fetches (owner ruling RV-12).
 
 ## Upstream repos — last reviewed commit
 
@@ -40,6 +41,7 @@ These are what actually ships. A repo's *Last reviewed* SHA can be ahead of its 
 | ejs | `c47fb1b54215afa4f6a3d557ad65bb724022f6ba` | the VERSION file in `bgutil-sidecar/vendor/ejs/` |
 | bgutils-js | `^4.0.3` | `bgutil-sidecar/package.json` |
 | meriyah / astring | `7.4.2` / `1.9.0` (lockstep with ejs's own `package.json`) | `bgutil-sidecar/package.json` |
+| Go port of ejs (the goja fallback's extractor) | `c47fb1b54215afa4f6a3d557ad65bb724022f6ba` | `ejsPortVersion` in `internal/cipher/extractor.go`; must equal the ejs pin |
 
 ## Open upstream items
 
@@ -60,6 +62,7 @@ Newest first. One row per Moombox commit that ports upstream work.
 
 | Date | Moombox commit | Upstream | Summary |
 |---|---|---|---|
+| 2026-11-26 | `ee2944dc` | ejs `c47fb1b`: `modifyPlayer`, `findPrototypeHelpers`, `getSolutions`, `multiTry` (`solvers.ts`), `extract`, `extractArray`, `matchPoolSolver`, `findXorValue`, `findArgs`, `resolveOp`, `createSolver` (`nsig.ts`), `setupNodes` (`setup.ts`); the test pairs of `src/yt/solver/test/tests.ts` at `c47fb1b` and `6f8587b` | The goja fallback's regex extractor is replaced by a Go port of ejs on goja's own parser, its output cut from the player's text and run in a bare runtime with ejs's setup globals; the signature goes in percent-escaped as ejs hands it. It equals the sidecar on all 368 upstream-vector bodies fetched (`tcl` included, upstream's two failing variants left out as upstream leaves them). Signatures now fall through to it last (`compositeSolver.Sig`, `Batch`; owner ruling RV-12) |
 | 2026-11-26 | `c431eab` | ejs `40b7a7d` (#81, prototype helpers kept by `modifyPlayer`), `1c493d6` (#77, `tcl` variants: `extractArray`, the pool solver, `window.location` in `setupNodes`), `3b6be39` (#60, meriyah 6.1.4 → 7.4.2); yt-dlp `b2e6bb0dd` (#18126, `int(str(sts)[:5])` in `_extract_signature_timestamp`) and `f31e4c27a` (#18129, `player_response` always in `_skipped_webpage_data`) | The vendored ejs moves from `6f8587bb` to `c47fb1b`: the old pin threw `a.addOnDisposeCallback is not a function` on the main variant of the players from `05a4ffc0` on (`b485e332` live on the day), leaving every sidecar solve to fail. The sidecar hides the JSDOM window from each ejs call, since the new `setupNodes` assigns `window.location` and JSDOM took that for a navigation of BotGuard's page. A page ytcfg's STS is cut to its first five digits, the main variant's (`mainVariantSTS`), and a watch page stating a longer one has its own player response's formats and manifests left out (`dropOtherVariantMedia`): narrower than upstream, which skips that response for every page |
 | 2026-11-25 | `02529ea5` | yt-dlp `6a6d97b2c` (#12777: `_extract_continuation_ep_data`, `extractor/youtube/_base.py`, reads `continuationEndpoint.commandExecutorCommand.commands[].continuationCommand.token`) | A tab page's token is read from the commandExecutorCommand wrapper when the direct path is empty (`continuationEndpointToken`, `internal/youtube/browse.go`), so the uploads-playlist fallback pages on; an unreadable continuation item is named in a Warn and ends the tab as before (owner ruling R3-4). The button and `continuationItemViewModel` variants are not read: no capture shows them on a surface Moombox pages. The wrapped shape is upstream's, not a capture |
 | 2026-11-25 | `d68f01ac` | yt-dlp `extractor/youtube/_tab.py` (`_extract_video`: `upcomingEventData.startTime`, the `LIVE` overlay style, `BADGE_STYLE_TYPE_LIVE_NOW`; `_extract_lockup_view_model`: a `thumbnailBadgeViewModel` text of "upcoming", `THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE`) | A listing item carries one bool for an explicit live or upcoming marker (`itemMarked`, `internal/youtube/channel_membership.go`), read from those structural fields, so the backfill's parser-failure arm passes a tab of only live or upcoming streams (owner ruling R3-3). Beyond upstream: an `UPCOMING` overlay style and the `LIVE` icon name count too |
@@ -189,6 +192,6 @@ Replace this section on each review. It is the reason the SHAs above moved past 
   - `f66c9c725` (#18092, live adaptive formats not made `dashy`) — a yt-dlp format-type option Moombox has no counterpart of.
   - `da452a569` (#17937, `remove_dot_segments`, `normalize_url` for `file:`), `1507b2693` (#17857, `find_xpath_attr`) — generic utilities; nothing here normalises a URL through them.
   - `696c0673e` (cleanup), `6f73a8d16` (release 2026.11.23), `28b379d66`, `4adbf698d` (docs), and the other extractors (`3b737b81c`, `4b91f5d70`, `a38fc9a11`, `0107be441`, `bd9f2b877`, `79a40f7ba`, `38a5fb16d`, `91361cca6`, `49b0a3fc7`, `01c58db00`).
-- ejs `d48c6303..c47fb1b`, besides the three re-vendored: `181a67b` (dev dependencies), `bb1090e`, `6b6f7b4`, `e19cf40`, `c47fb1b` (CI, Python packaging). The goja fallback (`internal/cipher/`) needed no change: it compiles the whole player and its answers match on the live players.
+- ejs `d48c6303..c47fb1b`, besides the three re-vendored: `181a67b` (dev dependencies), `bb1090e`, `6b6f7b4`, `e19cf40`, `c47fb1b` (CI, Python packaging). The goja fallback (`internal/cipher/`) needed no change: it compiles the whole player and its answers match on the live players. (Its regex extractor was replaced the same day by a Go port of this ejs, `ee2944dc`.)
 - BgUtils, bgutil-ytdlp-pot-provider, moonarchive, chatterino7, moombox Python: nothing new; every HEAD is still the *Last reviewed* SHA above.
 - Open items: `c7fb478d2` is unchanged upstream; R2-Y1 stands.
