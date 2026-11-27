@@ -140,7 +140,7 @@ func runCopy(args []string, out io.Writer) error {
 		usage()
 	}
 	src, dst := args[0], args[1]
-	in, err := os.OpenFile(src, os.O_RDONLY, 0)
+	in, err := openSourceShared(src)
 	if err != nil {
 		return errors.New("cannot open the cookie source (path only: " + src + ")")
 	}

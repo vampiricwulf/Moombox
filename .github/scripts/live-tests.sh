@@ -177,7 +177,9 @@ if [ -f "$settings" ]; then
 		esac
 	done <"$settings"
 fi
-if [ -z "$cookie_source" ] && [ -f D:/Moombox/cookies.txt ]; then
+# The default source applies to a real run only: under the test hooks
+# (MOOMBOX_LIVE_STATE_DIR) the owner's file can never be picked up.
+if [ -z "$cookie_source" ] && [ -z "${MOOMBOX_LIVE_STATE_DIR:-}" ] && [ -f D:/Moombox/cookies.txt ]; then
 	cookie_source=D:/Moombox/cookies.txt
 fi
 [ "$use_cookies" = 1 ] || cookie_source=""
@@ -285,8 +287,11 @@ run_pkg() {
 		copy_n=$((copy_n + 1))
 		work=$run_dir/work-$copy_n.txt
 		"$helper" copy "$(native "$pristine")" "$(native "$work")" >/dev/null || return 1
-		[ "$rows_youtube" -gt 0 ] && envs+=(MOOMBOX_LIVE_YT_COOKIES="$(native "$work")")
-		[ "$rows_twitch" -gt 0 ] && envs+=(MOOMBOX_LIVE_TWITCH_COOKIES="$(native "$work")")
+		# pot-accept takes its copy through its own switch only (below).
+		if [ "$group" != pot-accept ]; then
+			[ "$rows_youtube" -gt 0 ] && envs+=(MOOMBOX_LIVE_YT_COOKIES="$(native "$work")")
+			[ "$rows_twitch" -gt 0 ] && envs+=(MOOMBOX_LIVE_TWITCH_COOKIES="$(native "$work")")
+		fi
 	fi
 	[ -n "$expect_premium" ] && envs+=(MOOMBOX_LIVE_YT_EXPECT_PREMIUM="$expect_premium")
 	[ -n "$twitch_channel" ] && envs+=(MOOMBOX_LIVE_TWITCH_CHANNEL="$twitch_channel")
@@ -299,8 +304,10 @@ run_pkg() {
 		[ -n "$pot_player_pot" ] && envs+=(MOOMBOX_POT_ACCEPT_PLAYER_POT="$pot_player_pot")
 	fi
 
-	local redact=(--cookies "$(native "${pristine:-}")")
-	if [ -z "$pristine" ]; then
+	local redact
+	if [ -n "$pristine" ]; then
+		redact=(--cookies "$(native "$pristine")")
+	else
 		# No cookie file: still mask the session shapes. An empty file is
 		# readable, so the redactor starts.
 		: >"$run_dir/empty.txt"
@@ -309,7 +316,7 @@ run_pkg() {
 	[ -n "$work" ] && redact+=(--cookies "$(native "$work")")
 
 	echo "### live-tests begin group=$group pkg=$pkg" | tee -a "$log"
-	(cd "$dir" && env "${envs[@]}" "$go_test" test -count=1 -v -timeout "$timeout" -run "$pattern" "./$pkg") 2>&1 |
+	(cd "$dir" && env "${envs[@]}" "$go_test" test -count=1 -v -timeout "$timeout" -run "$pattern" "./$pkg" </dev/null) 2>&1 |
 		"$helper" redact "${redact[@]}" | tee -a "$log"
 	rc=${PIPESTATUS[0]} rrc=${PIPESTATUS[1]}
 	echo "### live-tests end group=$group pkg=$pkg exit=$rc" | tee -a "$log"
@@ -325,7 +332,10 @@ if [ "$probe" = 1 ]; then
 	while IFS=$'\t' read -r p t; do run_pkg probe "$self_root" "$p" "$t"; done < <(group_entries probe)
 fi
 for g in "${groups[@]}"; do
-	[ "$g" = pot-accept ] && [ -z "$video" ] && echo "live-tests: pot-accept needs --video or MOOMBOX_POT_ACCEPT_VIDEO" | tee -a "$log"
+	if [ "$g" = pot-accept ] && [ -z "$video" ]; then
+		echo "### live-tests skip group=pot-accept reason=no video: pass --video or set MOOMBOX_POT_ACCEPT_VIDEO" | tee -a "$log"
+		continue
+	fi
 	while IFS=$'\t' read -r p t; do run_pkg "$g" "$tree" "$p" "$t"; done < <(group_entries "$g")
 done
 

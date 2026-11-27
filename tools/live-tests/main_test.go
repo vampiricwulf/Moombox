@@ -123,10 +123,12 @@ func bashPath(t *testing.T) string {
 }
 
 const fakeGo = `#!/usr/bin/env bash
-# Stands in for "go test": records the cookie path it was given, prints the
-# file (a test that leaks), rewrites it with a renewed value and prints that.
-p=${MOOMBOX_LIVE_YT_COOKIES:-}
-echo "$p" >>"$FAKE_RECORD"
+# Stands in for "go test": records where it ran and what it was given, prints
+# the cookie copy it got (a test that leaks), rewrites it with a renewed value
+# and prints that, and reads its stdin (which must be empty).
+p=${MOOMBOX_LIVE_YT_COOKIES:-${MOOMBOX_POT_ACCEPT_COOKIES:-}}
+stdin=$(head -c 200 || true)
+echo "call cwd=$(basename "$PWD") yt=${MOOMBOX_LIVE_YT_COOKIES:--} pot=${MOOMBOX_POT_ACCEPT_COOKIES:--} video=${MOOMBOX_POT_ACCEPT_VIDEO:--} stdin=${#stdin}" >>"$FAKE_RECORD"
 echo "=== RUN   TestFake"
 if [ -n "$p" ]; then
 	while IFS= read -r l; do echo "    fake_test.go:1: $l"; done <"$p"
@@ -139,18 +141,65 @@ fi
 echo "--- PASS: TestFake (0.00s)"; echo PASS
 `
 
+// fakeCall is one run of the stand-in go, as it recorded it.
+type fakeCall map[string]string
+
+func readCalls(record string) []fakeCall {
+	data, _ := os.ReadFile(record)
+	var calls []fakeCall
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if !strings.HasPrefix(line, "call ") {
+			continue
+		}
+		c := fakeCall{}
+		for _, kv := range strings.Fields(line)[1:] {
+			k, v, _ := strings.Cut(kv, "=")
+			c[k] = v
+		}
+		calls = append(calls, c)
+	}
+	return calls
+}
+
 // TestRunnerKeepsTheSourceAndRemovesItsCopies drives the real script with a
 // stand-in go command against a made-up cookie file: the source is never
-// written, every copy is gone when the run ends (a failing test included),
-// and neither the console nor the saved log holds a cookie value.
+// written, a test is only ever handed a copy, every copy is gone when the run
+// ends (a failing test included), and neither the console nor the saved log
+// holds a cookie value. It also runs the paths the owner's run does not: a
+// two-package group, no cookies, and pot-accept in another tree, with and
+// without a video.
 func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 	bash := bashPath(t)
 	script, err := filepath.Abs(filepath.Join("..", "..", ".github", "scripts", "live-tests.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"pass", "fail"} {
-		t.Run(mode, func(t *testing.T) {
+	ownTree := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(script))))
+	cases := []struct {
+		name     string
+		args     []string // "{tree}" is replaced by the other tree's path
+		mode     string
+		wantFail bool
+		calls    int
+		cookieOn string // the variable that carries the copy; "" for none
+		cwd      string
+		want     []string
+	}{
+		{name: "pass", args: []string{"youtube-auth"}, mode: "pass", calls: 1, cookieOn: "yt", cwd: ownTree,
+			want: []string{"PASS  internal/youtube", "RESULT: PASS"}},
+		{name: "fail", args: []string{"youtube-auth"}, mode: "fail", wantFail: true, calls: 1, cookieOn: "yt", cwd: ownTree,
+			want: []string{"FAIL  internal/youtube", "RESULT: FAIL"}},
+		{name: "two packages", args: []string{"cookies"}, mode: "pass", calls: 2, cookieOn: "yt", cwd: ownTree,
+			want: []string{"PASS  internal/youtube", "PASS  internal/twitch"}},
+		{name: "no cookies", args: []string{"--no-cookies", "youtube-auth"}, mode: "pass", calls: 1, cwd: ownTree,
+			want: []string{"Cookie source: none (cookie tests skip)"}},
+		{name: "pot-accept in another tree", args: []string{"--worktree", "{tree}", "--video", "aqz-KE-bpKQ", "pot-accept"},
+			mode: "pass", calls: 1, cookieOn: "pot", cwd: "othertree", want: []string{"PASS  internal/bgutils"}},
+		{name: "pot-accept without a video", args: []string{"pot-accept"}, mode: "pass", calls: 0,
+			want: []string{"SKIP", "no video"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			srcDir := filepath.Join(dir, "src")
 			os.Mkdir(srcDir, 0o700)
@@ -160,6 +209,8 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			before, _ := os.ReadFile(source)
 			beforeSum := sha256.Sum256(before)
 
+			other := filepath.Join(dir, "othertree")
+			os.Mkdir(other, 0o700)
 			state := filepath.Join(dir, "state")
 			settings := filepath.Join(dir, "live-tests.env")
 			os.WriteFile(settings, []byte("# test\nMOOMBOX_LIVE_COOKIE_SOURCE="+filepath.ToSlash(source)+"\nUNKNOWN_KEY=x\n"), 0o600)
@@ -167,22 +218,31 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			os.WriteFile(fake, []byte(fakeGo), 0o755)
 			record := filepath.Join(dir, "record.txt")
 
-			cmd := exec.Command(bash, filepath.ToSlash(script), "--no-probe", "youtube-auth")
+			args := []string{filepath.ToSlash(script), "--no-probe"}
+			for _, a := range tc.args {
+				args = append(args, strings.ReplaceAll(a, "{tree}", filepath.ToSlash(other)))
+			}
+			cmd := exec.Command(bash, args...)
 			cmd.Env = append(os.Environ(),
 				"MOOMBOX_LIVE_STATE_DIR="+filepath.ToSlash(state),
 				"MOOMBOX_LIVE_SETTINGS="+filepath.ToSlash(settings),
 				"MOOMBOX_LIVE_GO_TEST="+filepath.ToSlash(fake),
 				"FAKE_RECORD="+filepath.ToSlash(record),
 				"FAKE_RENEWED="+fakeRenewed,
-				"FAKE_MODE="+mode,
+				"FAKE_MODE="+tc.mode,
 			)
 			out, err := cmd.CombinedOutput()
 			console := string(out)
-			if mode == "fail" && err == nil {
-				t.Errorf("the run passed over a failing test:\n%s", console)
+			if tc.wantFail != (err != nil) {
+				t.Errorf("run error = %v, want failure %v:\n%s", err, tc.wantFail, console)
 			}
-			if mode == "pass" && err != nil {
-				t.Errorf("the run failed: %v\n%s", err, console)
+			for _, w := range tc.want {
+				if !strings.Contains(console, w) {
+					t.Errorf("console lacks %q:\n%s", w, console)
+				}
+			}
+			if strings.Contains(console, "cygpath") {
+				t.Errorf("a tool complained on the console:\n%s", console)
 			}
 
 			after, _ := os.ReadFile(source)
@@ -190,17 +250,35 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			if sha256.Sum256(after) != beforeSum || !st.ModTime().Equal(past) {
 				t.Error("the cookie source was written")
 			}
-			rec, _ := os.ReadFile(record)
-			copies := strings.Fields(string(rec))
-			if len(copies) == 0 {
-				t.Fatalf("the stand-in go was never given a cookie copy:\n%s", console)
+
+			calls := readCalls(record)
+			if len(calls) != tc.calls {
+				t.Fatalf("the stand-in go ran %d times, want %d:\n%s", len(calls), tc.calls, console)
 			}
-			for _, c := range copies {
-				if c == filepath.ToSlash(source) {
-					t.Error("a test was handed the source itself, not a copy")
+			for _, c := range calls {
+				if c["stdin"] != "0" {
+					t.Errorf("a test inherited %s bytes of stdin; it must get none", c["stdin"])
 				}
-				if _, err := os.Stat(c); !os.IsNotExist(err) {
-					t.Errorf("the copy %s survived the run", c)
+				if c["cwd"] != tc.cwd {
+					t.Errorf("a test ran in %q, want %q", c["cwd"], tc.cwd)
+				}
+				for _, k := range []string{"yt", "pot"} {
+					got := c[k]
+					if k != tc.cookieOn {
+						if got != "-" {
+							t.Errorf("%s carried a cookie path it should not: %s", k, got)
+						}
+						continue
+					}
+					if got == "-" || got == filepath.ToSlash(source) {
+						t.Errorf("%s = %q, want a private copy", k, got)
+					}
+					if _, err := os.Stat(got); !os.IsNotExist(err) {
+						t.Errorf("the copy %s survived the run", got)
+					}
+				}
+				if tc.cookieOn == "pot" && c["video"] != "aqz-KE-bpKQ" {
+					t.Errorf("pot-accept video = %q", c["video"])
 				}
 			}
 			if left, _ := filepath.Glob(filepath.Join(state, "live-tmp", "*")); len(left) != 0 {
@@ -216,18 +294,13 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 					t.Errorf("a cookie value reached the console or the log")
 				}
 			}
-			if !strings.Contains(string(logText), mask) {
-				t.Error("the log holds no mask: the stand-in's leak never went through the redactor")
-			}
-			if !strings.Contains(console, "Self-check: 0 cookie values") {
-				t.Errorf("no clean self-check line:\n%s", console)
-			}
-			want := "PASS  internal/youtube"
-			if mode == "fail" {
-				want = "FAIL  internal/youtube"
-			}
-			if !strings.Contains(console, want) {
-				t.Errorf("summary lacks %q:\n%s", want, console)
+			if tc.cookieOn != "" {
+				if !strings.Contains(string(logText), mask) {
+					t.Error("the log holds no mask: the stand-in's leak never went through the redactor")
+				}
+				if !strings.Contains(console, "Self-check: 0 cookie values") {
+					t.Errorf("no clean self-check line:\n%s", console)
+				}
 			}
 		})
 	}

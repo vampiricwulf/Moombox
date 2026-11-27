@@ -19,6 +19,8 @@ var (
 	verdictRe = regexp.MustCompile(`^\s*--- (PASS|FAIL|SKIP): (\S+) \(([0-9.]+s)\)`)
 	logRe     = regexp.MustCompile(`^\s+\S+_test\.go:\d+: (.*)$`)
 	sessionRe = regexp.MustCompile(`LIVE-SESSION youtube=(\S+) premium=(\S+)`)
+	// A group the runner did not start, and why.
+	groupSkip = regexp.MustCompile(`^### live-tests skip group=(\S+) reason=(.*)$`)
 )
 
 type testVerdict struct {
@@ -59,6 +61,9 @@ func summarize(r io.Reader) ([]testVerdict, []pkgRun, [2]string) {
 				cur.exit = m[3]
 			}
 			cur = nil
+		case groupSkip.MatchString(line):
+			m := groupSkip.FindStringSubmatch(line)
+			verdicts = append(verdicts, testVerdict{group: m[1], pkg: "(group " + m[1] + ")", name: "-", verdict: "SKIP", elapsed: "0s", reason: m[2]})
 		case runRe.MatchString(line):
 			current = runRe.FindStringSubmatch(line)[1]
 		case verdictRe.MatchString(line):
