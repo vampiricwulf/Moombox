@@ -672,8 +672,12 @@ func renewGvsCredentials(
 		}
 	}
 
-	job.Logger.Info("[POT] credential refresh", "jobID", job.Job.ID, "tag", tag,
-		"newURL", baseURL != "", "newToken", poToken != "")
+	summary := []any{"jobID", job.Job.ID, "tag", tag, "newURL", baseURL != "", "newToken", poToken != ""}
+	if poToken != "" {
+		// poToken is set only by the bypassing re-mint above, under binding.
+		summary = append(summary, "itBytes", itBytesAttr(poToken, binding))
+	}
+	job.Logger.Info("[POT] credential refresh", summary...)
 	return baseURL, poToken
 }
 
@@ -913,4 +917,16 @@ func logGvsTokenSkipped(job *JobContext, source string, args ...any) {
 	}
 	job.Logger.Info("[POT] GVS token skipped",
 		append([]any{"jobID", job.Job.ID, "source", label, "reason", reason}, args...)...)
+}
+
+// itBytesAttr is the itBytes value of a "[POT]" log line that reports a
+// minted token: the byte length of the integrity token tok was minted from
+// (bgutils.ITBytes), given the binding it was minted under, or "unknown"
+// when tok cannot be read. Field data only (owner ruling RV-18): nothing
+// reads it, and the line never carries the token or the binding.
+func itBytesAttr(tok, binding string) any {
+	if n, ok := bgutils.ITBytes(tok, binding); ok {
+		return n
+	}
+	return "unknown"
 }

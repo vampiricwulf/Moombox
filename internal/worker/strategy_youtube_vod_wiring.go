@@ -527,7 +527,7 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 			return keep()
 		}
 		job.Logger.Info("[POT] VOD URL refresh: the re-extraction's visitor session moved — re-minted the token for it",
-			"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "tokenLength", len(tok))
+			"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "tokenLength", len(tok), "itBytes", itBytesAttr(tok, fresh.GvsBinding))
 		poToken, pairBinding = tok, fresh.GvsBinding
 	}
 	if !waitForFreshPlayback(ctx, job, fresh, f, tag) {
@@ -539,8 +539,13 @@ func refreshVodURL(ctx context.Context, job *JobContext, playerURL string, st *v
 	if pairBinding != binding {
 		st.binding, st.bindingGuessed = pairBinding, fresh.GvsBindingGuessed
 	}
-	job.Logger.Info("[POT] VOD URL refresh", "jobID", job.Job.ID, "tag", tag,
-		"itag", f.Itag, "source", f.Source, "newToken", poToken != "", "step", step)
+	summary := []any{"jobID", job.Job.ID, "tag", tag, "itag", f.Itag, "source", f.Source, "newToken", poToken != "", "step", step}
+	if poToken != "" {
+		// Only a bypassing re-mint in this refresh sets poToken: the one under
+		// binding above, or the one under the moved session (pairBinding).
+		summary = append(summary, "itBytes", itBytesAttr(poToken, pairBinding))
+	}
+	job.Logger.Info("[POT] VOD URL refresh", summary...)
 	return resolved, poToken
 }
 

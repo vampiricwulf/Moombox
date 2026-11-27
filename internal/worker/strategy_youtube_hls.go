@@ -124,7 +124,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			hlsPoToken = poToken
 			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(poToken), "source", hlsSource)
+				"binding", bindingKind, "tokenLength", len(poToken), "itBytes", itBytesAttr(poToken, bindingValue), "source", hlsSource)
 		}
 	}
 

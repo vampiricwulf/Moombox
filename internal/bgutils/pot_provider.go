@@ -508,6 +508,10 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 			minter, hasMinter = nil, false
 		}
 	}
+	// Whether this mint goes to the sidecar, for the mint line below: a cached
+	// minter is a goja one, and generateAndMint takes the sidecar when one
+	// is attached.
+	viaSidecar := !hasMinter && pp.sidecar != nil
 
 	pp.mu.Unlock()
 	if expired != nil {
@@ -537,6 +541,9 @@ func (pp *PotProvider) generatePoTokenChallenge(ctx context.Context, contentBind
 
 	if err != nil {
 		pp.generateErrors.Add(1)
+	}
+	if err == nil && session != nil {
+		pp.logMint(session, bypassCache, viaSidecar)
 	}
 
 	// Store result on the entry so all waiters can read it, then signal
@@ -929,6 +936,7 @@ func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, c
 		res, err := sc.GenerateGvsPoToken(ctx, contentBinding, challenge)
 		if err == nil {
 			pp.sidecarMintsHit.Add(1)
+			pp.logMint(&SessionData{PoToken: res.PoToken, ContentBinding: contentBinding}, true, true)
 			return GvsMint{PoToken: res.PoToken, MinterSource: res.MinterSource, MinterFresh: res.MinterFresh, ViaSidecar: true}, nil
 		}
 		pp.sidecarMintsErr.Add(1)
@@ -948,6 +956,7 @@ func (pp *PotProvider) GenerateGvsPoToken(ctx context.Context, contentBinding, c
 		pp.generateErrors.Add(1)
 		return GvsMint{}, err
 	}
+	pp.logMint(session, true, false)
 	return GvsMint{PoToken: session.PoToken, MinterSource: "goja-fallback", MinterFresh: true}, nil
 }
 
@@ -1116,4 +1125,20 @@ func randomAlphaNum(n int) string {
 		buf[i] = alphaNum[int(b)%len(alphaNum)]
 	}
 	return string(buf)
+}
+
+// logMint is the one line every minted PO token gets — a player (content-
+// bound) token, a GVS token minted through this path, a cache-bypassing
+// refresh re-mint — on the sidecar or the goja path; a session-cache hit is
+// no mint and gets none. itBytes is the integrity token's length (ITBytes),
+// field data only (owner ruling RV-18): a longer-than-usual value was seen
+// with refused tokens in research, and nothing acts on it. Lengths only:
+// never the token or the binding.
+func (pp *PotProvider) logMint(session *SessionData, bypassCache, viaSidecar bool) {
+	itBytes := any("unknown")
+	if n, ok := ITBytes(session.PoToken, session.ContentBinding); ok {
+		itBytes = n
+	}
+	pp.logger.Info("[POT] mint", "tokenLength", len(session.PoToken), "itBytes", itBytes,
+		"bypassCache", bypassCache, "sidecar", viaSidecar)
 }

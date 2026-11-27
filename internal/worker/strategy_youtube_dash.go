@@ -177,7 +177,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			dashPoToken = poToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(poToken), "source", dashSource)
+				"binding", bindingKind, "tokenLength", len(poToken), "itBytes", itBytesAttr(poToken, bindingValue), "source", dashSource)
 		case mandatory:
 			job.Logger.Warn("[POT] missing_pot: no GVS token — skipping the web-family DASH manifest",
 				"jobID", job.Job.ID, "binding", bindingKind, "source", dashSource, "err", err)
