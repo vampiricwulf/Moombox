@@ -15,8 +15,8 @@ import (
 //
 // Counterpart to internal/bgutils/botguard_live_test.go's
 // TestBotGuardLiveFingerprint, but covering the sidecar path that
-// (Option 2 confirmed) the goja-only path can't satisfy because of
-// BotGuard's timing fingerprint check.
+// the goja-only path can't satisfy: BotGuard's program aborts under its
+// incomplete DOM stand-in ("Why a Sidecar", docs/spec/platform-services.md).
 //
 // PASS = sidecar produced a real PO token (non-empty, plausibly
 // websafe-base64 encoded). FAIL = sidecar declined or errored out.

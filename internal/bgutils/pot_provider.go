@@ -39,8 +39,8 @@ func isContextErr(err error) bool {
 // errSidecarDown answers a mint while the configured sidecar is down and is
 // not coming back in time: its first start never succeeded, or it has been
 // down for sidecarMintGrace of the outage (awaitSidecar). There is no goja
-// fallback in sidecar mode: BotGuard's timing check rejects the
-// in-process path, so it mints no PO token in practice, and running it cost
+// fallback in sidecar mode: BotGuard's program aborts under the in-process
+// path's incomplete DOM stand-in, so it mints no PO token in practice, and running it cost
 // every request during an outage seconds to minutes of doomed work and three
 // Google round trips, serialised behind one lock.
 var errSidecarDown = errors.New("BotGuard sidecar unavailable — no PO token until it is back up")
@@ -682,8 +682,8 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 }
 
 func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool, challenge string) (*SessionData, error) {
-	// Sidecar path: a real Node + V8 + JSDOM subprocess that passes
-	// BotGuard's timing fingerprint and returns real integrity tokens.
+	// Sidecar path: a real Node + V8 + JSDOM subprocess whose DOM
+	// BotGuard's probes accept, so it returns real integrity tokens.
 	// Bypasses the goja minterCache entirely (the sidecar maintains its
 	// own internal minter cache, ~6h TTL). A sidecar that is attached but
 	// down past the mint grace (awaitSidecar), or a sidecar mint that fails,

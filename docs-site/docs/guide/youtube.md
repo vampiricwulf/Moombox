@@ -416,8 +416,9 @@ qualities may be missing until the sidecar is back.
 ### Turning the sidecar off (the goja fallback)
 
 Setting **Enable sidecar** off (dashboard Settings → **BotGuard**;
-needs a restart) leaves only an in-process fallback. It cannot pass
-BotGuard's timing check, so **it mints no PO tokens at all**. Signatures and
+needs a restart) leaves only an in-process fallback. Its stand-in for a
+browser page is too incomplete for BotGuard's challenge, so **it mints no PO
+tokens at all**. Signatures and
 the `n` parameter are still solved in-process: first by the scrambling
 patterns learned while the sidecar was running, then by Moombox's own copy of
 the solver the sidecar runs. Expect fewer formats, recordings that start at

@@ -14,9 +14,9 @@ import (
 // Event, CustomEvent, etc.). Loaded after the legacy hand-stub block so
 // the constructs declared inside override the flat-object stubs while
 // keeping the same global names. "Why a Sidecar" in
-// docs/spec/platform-services.md records what this build-out reached
-// (API parity) and why it stopped there (the timing gap sits below the
-// API surface).
+// docs/spec/platform-services.md records what this build-out reached (the
+// common DOM surface) and what BotGuard still finds missing (no
+// iframe.contentWindow, randomised DOM probes); it is not a timing gap.
 //
 //go:embed js/dom-real.js
 var domRealJS string

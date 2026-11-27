@@ -19,8 +19,9 @@ import (
 // PASS = real integrity token (non-empty IntegrityToken, BotGuard accepted
 // our environment). FAIL = websafe-only fallback (BotGuard declined).
 //
-// It is EXPECTED TO FAIL today: BotGuard's timing check rejects the goja
-// path, which is why the sidecar is the default. It has its own knob, not
+// It is EXPECTED TO FAIL today: BotGuard's program aborts under the goja
+// path's incomplete DOM stand-in (no iframe.contentWindow, randomised DOM
+// probes), which is why the sidecar is the default. It has its own knob, not
 // MOOMBOX_LIVE_BG_TEST, so the sidecar's live checks under that one can be
 // all green and a red line there always means something; run this one when
 // porting BotGuard protocol changes into the goja fallback. TestMain keeps

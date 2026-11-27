@@ -82,7 +82,7 @@ CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local
 
 A new worktree has none of the blobs (they are gitignored). Copy them from the main checkout's `internal/bgutils/embed/` first — every test then works and nothing is downloaded; `.github/scripts/new-worktree.sh` does this. Where there is no checkout to copy from, `bash .github/scripts/embed-standins.sh` writes an empty file for each missing blob (the script CI's lint job runs): enough for `go build`, `go vet` and tests that never start the sidecar, but `internal/bgutils/embed`'s own tests fail on them, and a binary built over them has an empty sidecar that fails only when it runs. Never build a binary to run from a tree that holds stand-ins.
 
-To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`: only the goja path remains, which BotGuard's timing check rejects, so no PO tokens are minted and current players' signatures cannot be solved. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
+To run without the sidecar, set `[bgutils] use_sidecar = false` in `config.toml`: only the goja path remains, whose DOM stand-in is too incomplete for BotGuard's program (no `iframe.contentWindow`, and randomised DOM probes it answers wrongly), so no PO tokens are minted; signatures and n are still solved, by the learned sig specs and goja's port of ejs. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
 
 ### Windows resource embedding
 
