@@ -3,6 +3,7 @@ package cipher
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -149,7 +150,7 @@ func TestPlayerCachePreprocessedFilePath(t *testing.T) {
 		t.Errorf("raw + preprocessed should live in the same dir: raw=%q pre=%q", rawPath, prePath)
 	}
 	rawNoExt := strings.TrimSuffix(filepath.Base(rawPath), ".js")
-	if want := rawNoExt + ".prepared-ejs-" + ejsPortVersion[:7] + ".js"; filepath.Base(prePath) != want {
+	if want := rawNoExt + ".prepared-ejs-" + ejsPortVersion[:7] + "-r" + strconv.Itoa(ejsPortRevision) + ".js"; filepath.Base(prePath) != want {
 		t.Errorf("prepared copy is %q, want %q", filepath.Base(prePath), want)
 	}
 }
@@ -162,7 +163,8 @@ func TestPlayerCachePreprocessedFilePath(t *testing.T) {
 // cannot compile a copy of a body that has since changed.
 //
 // Mutants: GetPreprocessed or FilePathPreprocessed back on the old name (the
-// regex copy is served); the rotation or Remove leaving the old file.
+// regex copy is served); the rotation or Remove leaving the old file, or
+// leaving a copy another port wrote under another pin or revision.
 func TestRegexExtractorCopyIsNeverRun(t *testing.T) {
 	dir := t.TempDir()
 	pc, err := NewPlayerCache(dir, nopPlayerCacheLogger{})
@@ -183,8 +185,14 @@ func TestRegexExtractorCopyIsNeverRun(t *testing.T) {
 	if b, _ := os.ReadFile(legacy); string(b) != "regex extractor output" {
 		t.Errorf("the regex copy was overwritten: %q", b)
 	}
+	other := filepath.Join(pc.cacheDir, CacheKey(url)+".prepared-ejs-0123456-r3.js")
+	if err := os.WriteFile(other, []byte("another port's output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pc.Remove(url)
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Errorf("Remove left the regex copy: stat err = %v", err)
+	for _, p := range []string{legacy, other, pc.FilePathPreprocessed(url)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("Remove left %s: stat err = %v", filepath.Base(p), err)
+		}
 	}
 }

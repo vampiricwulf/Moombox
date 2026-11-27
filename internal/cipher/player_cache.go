@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -210,14 +211,30 @@ func (pc *PlayerCache) FilePath(playerURL string) string {
 // tier disk cache that skips the parse and match on solver-LRU eviction.
 // Same key + TTL as the raw cache so both age out together.
 //
-// The name carries the ejs commit the port mirrors (ejsPortVersion), so a
-// port of another ejs never runs a copy this one prepared. The regex
+// The name carries the ejs commit the port mirrors (ejsPortVersion) and the
+// port's own revision (ejsPortRevision), so a port of another ejs, or a fixed
+// port of the same one, never runs a copy this one prepared. The regex
 // extractor before the port (owner ruling RV-12) wrote <key>.preprocessed.js
 // (legacyPreprocessedPath): never written now, and never read, so an older
 // binary run again over this cache directory finds its own format there.
 func (pc *PlayerCache) FilePathPreprocessed(playerURL string) string {
 	key := CacheKey(playerURL)
-	return filepath.Join(pc.cacheDir, key+".prepared-ejs-"+ejsPortVersion[:7]+".js")
+	return filepath.Join(pc.cacheDir, key+preparedCopyInfix+ejsPortVersion[:7]+"-r"+strconv.Itoa(ejsPortRevision)+".js")
+}
+
+// preparedCopyInfix is what every prepared copy's name holds after the key,
+// whichever port wrote it.
+const preparedCopyInfix = ".prepared-ejs-"
+
+// preparedCopies lists every prepared copy of playerURL on disk: this
+// port's, those an earlier or later port wrote (another ejsPortVersion or
+// ejsPortRevision), and the regex extractor's (legacyPreprocessedPath). A
+// changed body and Remove drop them all, so no binary run again over this
+// directory compiles a copy of a body that has since changed. The key is
+// hex, so it holds nothing a glob reads as a pattern.
+func (pc *PlayerCache) preparedCopies(playerURL string) []string {
+	matches, _ := filepath.Glob(filepath.Join(pc.cacheDir, CacheKey(playerURL)+preparedCopyInfix+"*.js"))
+	return append(matches, pc.legacyPreprocessedPath(playerURL))
 }
 
 // legacyPreprocessedPath is where the regex extractor kept its prepared
@@ -608,8 +625,9 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 			pc.logger.Warn("cipher: failed to cache player JS to disk", "err", err)
 		}
 		pc.writeMeta(playerURL, newMeta)
-		_ = os.Remove(pc.FilePathPreprocessed(playerURL))
-		_ = os.Remove(pc.legacyPreprocessedPath(playerURL))
+		for _, path := range pc.preparedCopies(playerURL) {
+			_ = os.Remove(path)
+		}
 		pc.specMu.Lock()
 		_ = os.Remove(pc.FilePathSigSpec(playerURL))
 		pc.specMu.Unlock()
@@ -733,13 +751,11 @@ func (pc *PlayerCache) Remove(playerURL string) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	for _, path := range []string{
+	for _, path := range append([]string{
 		pc.FilePath(playerURL),
-		pc.FilePathPreprocessed(playerURL),
-		pc.legacyPreprocessedPath(playerURL),
 		pc.FilePathMeta(playerURL),
 		pc.FilePathSigSpec(playerURL),
-	} {
+	}, pc.preparedCopies(playerURL)...) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			if pc.logger != nil {
 				pc.logger.Debug("cipher: failed to remove cached player", "path", path, "err", err)

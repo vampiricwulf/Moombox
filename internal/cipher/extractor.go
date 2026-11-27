@@ -13,7 +13,9 @@ package cipher
 //
 // Every function below names the ejs function it ports. A change to the
 // vendored ejs needs the matching change here, gated by the vector test, and
-// a new ejsPortVersion (TestEjsPortPinMatchesVendoredEjs).
+// a new ejsPortVersion (TestEjsPortPinMatchesVendoredEjs). Any other change
+// to what preprocessPlayer outputs, a fix to the port with the pin where it
+// is, bumps ejsPortRevision.
 
 import (
 	"fmt"
@@ -34,6 +36,12 @@ import (
 // also names the prepared copies on disk (PlayerCache.FilePathPreprocessed),
 // so a port of a new ejs never runs a copy the old one prepared.
 const ejsPortVersion = "c47fb1b54215afa4f6a3d557ad65bb724022f6ba"
+
+// ejsPortRevision counts the changes to preprocessPlayer's output made with
+// ejsPortVersion where it is (a fix to the port alone). It names the prepared
+// copies on disk beside the pin, so a fixed port never runs a copy the one
+// before it prepared. Bump it with any such change; a new pin may reset it.
+const ejsPortRevision = 1
 
 // ejsSetup is ejs's setup.ts, verbatim: the globals the player expects at
 // load time, given in a bare runtime (getFromPrepared) with no DOM shim.

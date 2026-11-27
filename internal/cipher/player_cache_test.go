@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -213,6 +214,18 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 	if err := os.WriteFile(pc.legacyPreprocessedPath(fs.URL()), []byte("regex copy of the old JS"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// And the copies other ports wrote, under another pin or revision
+	// (ejsPortVersion, ejsPortRevision), likewise: an older binary run again
+	// over this directory would compile its own.
+	otherPorts := []string{
+		filepath.Join(pc.cacheDir, CacheKey(fs.URL())+".prepared-ejs-0123456.js"),
+		filepath.Join(pc.cacheDir, CacheKey(fs.URL())+".prepared-ejs-"+ejsPortVersion[:7]+"-r0.js"),
+	}
+	for _, p := range otherPorts {
+		if err := os.WriteFile(p, []byte("another port's copy of the old JS"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// And a sig spec learned from the old JS (audit G49), likewise.
 	if err := pc.PutSigSpec(fs.URL(), 3, []int{2, 0, 1}); err != nil {
 		t.Fatalf("PutSigSpec: %v", err)
@@ -238,6 +251,11 @@ func TestFetch_200_DifferentSize_RotatesCache(t *testing.T) {
 	}
 	if _, err := os.Stat(pc.legacyPreprocessedPath(fs.URL())); !os.IsNotExist(err) {
 		t.Errorf("the regex extractor's copy should be removed on rotation, stat err = %v", err)
+	}
+	for _, p := range otherPorts {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("another port's copy %s should be removed on rotation, stat err = %v", filepath.Base(p), err)
+		}
 	}
 	if _, ok := pc.GetSigSpec(fs.URL(), 3); ok {
 		t.Errorf("the sig spec should be removed on rotation")
