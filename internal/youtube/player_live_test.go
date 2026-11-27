@@ -52,8 +52,12 @@ func liveSolvers(t *testing.T, ctx context.Context) (*sidecar.Sidecar, *cipher.G
 // production path (main body first, the tv body when ejs cannot solve with
 // it; owner ruling RV-11). It fails when the production path gives no real
 // answer: the day YouTube ships a player neither body of which ejs can
-// prepare. Goja's answer on the same player is compared where goja can solve
-// it; where it cannot, that is logged, not failed (goja is the fallback).
+// prepare. Goja, which since RV-12 runs a port of the same ejs and reads the
+// main body only, is checked against the sidecar's answer on the main body:
+// when the sidecar solves the main body and goja does not (the port has
+// fallen behind), or both answer and disagree, the test fails. When ejs
+// itself cannot solve the main body (the RV-11 case, answered through the tv
+// body), goja is not expected to either, and its failure is only logged.
 //
 // Enable with MOOMBOX_LIVE_YT_TEST=1 (network; the sidecar embed blobs).
 func TestLiveCurrentPlayerSolves(t *testing.T) {
@@ -88,6 +92,9 @@ func TestLiveCurrentPlayerSolves(t *testing.T) {
 	t.Logf("bodies: main %d bytes, tv %d bytes", len(mainJS), len(tvJS))
 
 	solved := 0
+	// The sidecar's answers on the main body: what goja, which reads only
+	// the main body, is compared with.
+	mainSolved, mainSig, mainN := false, "", ""
 	for _, b := range []struct{ name, key, js string }{{"main", id + "-live-main", mainJS}, {"tv", id + "-live-tv", tvJS}} {
 		res, err := sc.SolveCipher(ctx, sidecar.SolveCipherRequest{
 			PlayerID: b.key, PlayerJS: b.js, SigChallenges: []string{sigIn}, NChallenges: []string{nIn},
@@ -101,6 +108,9 @@ func TestLiveCurrentPlayerSolves(t *testing.T) {
 		t.Logf("%s body: sig changed %t, n changed %t", b.name, sig != "" && sig != sigIn, n != "" && n != nIn)
 		if ok {
 			solved++
+			if b.name == "main" {
+				mainSolved, mainSig, mainN = true, sig, n
+			}
 		}
 	}
 	if solved == 0 {
@@ -118,21 +128,31 @@ func TestLiveCurrentPlayerSolves(t *testing.T) {
 
 	g, err := goja.DecryptSignature(ctx, cipher.SignatureRequest{EncryptedSignature: sigIn, NParam: nIn, PlayerURL: playerURL})
 	switch {
+	case !mainSolved && err != nil:
+		// ejs could not solve the main body, and goja reads only that body:
+		// the production path answers through the tv body (RV-11), goja
+		// being the last fallback.
+		t.Logf("goja cannot solve the main body either, as ejs could not (extractor mismatch=%t): %.200v",
+			errors.Is(err, cipher.ErrExtractorMismatch), err)
+	case !mainSolved:
+		t.Logf("goja answered the main body ejs could not solve: sig answered %t, n answered %t; no sidecar answer on it to compare",
+			g.DecryptedSignature != "", g.DecryptedNSig != "")
 	case err != nil:
-		// Since RV-12 goja runs a port of the same ejs solver, so a player the
-		// sidecar answers and goja does not is a port that has fallen behind.
-		t.Errorf("goja cannot solve today's player although the sidecar can (extractor mismatch=%t): %.200v",
+		// Since RV-12 goja runs a port of the same ejs solver, so a main body
+		// the sidecar answers and goja does not is a port that has fallen
+		// behind.
+		t.Errorf("goja cannot solve the main body of today's player although the sidecar can (extractor mismatch=%t): %.200v",
 			errors.Is(err, cipher.ErrExtractorMismatch), err)
 	default:
-		if (g.DecryptedSignature == "") != (gotSig == "") || (g.DecryptedNSig == "") != (gotN == "") {
-			t.Errorf("goja and the sidecar did not answer the same challenges: goja sig %t n %t, sidecar sig %t n %t",
-				g.DecryptedSignature != "", g.DecryptedNSig != "", gotSig != "", gotN != "")
+		if g.DecryptedSignature == "" || g.DecryptedNSig == "" {
+			t.Errorf("goja did not answer every challenge the sidecar answered on the main body: goja sig %t n %t",
+				g.DecryptedSignature != "", g.DecryptedNSig != "")
 		}
-		if g.DecryptedSignature != "" && gotSig != "" && g.DecryptedSignature != gotSig {
-			t.Error("goja and the sidecar disagree on the signature of today's player")
+		if g.DecryptedSignature != "" && g.DecryptedSignature != mainSig {
+			t.Error("goja and the sidecar disagree on the signature of today's player's main body")
 		}
-		if g.DecryptedNSig != "" && gotN != "" && g.DecryptedNSig != gotN {
-			t.Error("goja and the sidecar disagree on the n of today's player")
+		if g.DecryptedNSig != "" && g.DecryptedNSig != mainN {
+			t.Error("goja and the sidecar disagree on the n of today's player's main body")
 		}
 		t.Logf("goja: sig answered %t, n answered %t; parity checked where both answered",
 			g.DecryptedSignature != "", g.DecryptedNSig != "")
