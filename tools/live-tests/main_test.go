@@ -255,7 +255,7 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 			want: []string{"SKIP", "no video"}},
 		{name: "cipher without its fixture", args: []string{"--worktree", "{tree}", "cipher"}, mode: "pass", calls: 1, cookies: true,
 			cwd: "othertree", onlyPkg: "internal/youtube",
-			want: []string{"SKIP", "no player fixture"}},
+			want: []string{"SKIP", "no player fixture", "PASS  internal/youtube"}},
 		{name: "twitch picks a live channel", args: []string{"twitch"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree, channel: "somechannel",
 			want: []string{"Twitch channel: somechannel"}},
 	}
