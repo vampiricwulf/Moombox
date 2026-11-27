@@ -290,6 +290,46 @@ func TestBatchWaitsOutTheGraceBeforeGoja(t *testing.T) {
 	})
 }
 
+// dyingSidecar is a reportingSidecar whose child dies under the first Batch
+// it is asked and is back after backIn.
+type dyingSidecar struct {
+	*reportingSidecar
+	backIn time.Duration
+	died   atomic.Bool
+}
+
+func (d *dyingSidecar) Batch(ctx context.Context, p string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	if !d.died.Swap(true) {
+		d.up.Store(false)
+		time.AfterFunc(d.backIn, func() { d.up.Store(true) })
+		return nil, nil, errors.New("sidecar: stdout EOF")
+	}
+	return d.reportingSidecar.Batch(ctx, p, sigs, ns)
+}
+
+// TestBatchAsksAChildThatDiedUnderItOnceMore: a mixed batch whose child dies
+// under it, with no spec for its signature, waits within the readiness grace
+// for the child (PR-R3) and asks it once more, as Sig does, and goja is not
+// asked. It used to go to goja at once, ahead of a sidecar that came back.
+//
+// Mutant: Batch's failure arm going to goja without awaitSidecar (goja's
+// answers, at once).
+func TestBatchAsksAChildThatDiedUnderItOnceMore(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		side := &dyingSidecar{reportingSidecar: &reportingSidecar{permutingSidecar: newPermutingSidecar()}, backIn: 5 * time.Second}
+		side.up.Store(true)
+		goja := &gojaCountingSigs{staticSolver: staticSolver{sig: map[string]string{sigA: "goja-A"}, n: map[string]string{"N1": "goja-N1"}}}
+		c := newCompositeSolverWith(side, goja)
+		sr, nr, err := c.Batch(context.Background(), specPlayer, []string{sigA}, []string{"N1"})
+		if err != nil || sr[sigA] != scramble(sigA) || nr["N1"] != "n-N1" {
+			t.Fatalf("Batch over a child that died and came back = %v, %v, %v; want the sidecar's answers", sr, nr, err)
+		}
+		if n := goja.asked.Load(); n != 0 {
+			t.Errorf("goja was asked %d times while the child was coming back, want none", n)
+		}
+	})
+}
+
 // gojaCountingSigs is a goja half that counts the signatures it is asked.
 type gojaCountingSigs struct {
 	staticSolver

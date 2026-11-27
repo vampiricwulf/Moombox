@@ -518,8 +518,10 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			return sr, nr, nil
 		}
 		// Sidecar failed: the signatures from the specs if they answer
-		// every one, goja below otherwise; typed as Sig types it, when the
-		// child is down. n falls back to goja per-element.
+		// every one; a child that died under the batch asked once more
+		// within the readiness grace, as Sig asks it (PR-R3); goja below
+		// otherwise. Typed as Sig types it, when the child is down. n falls
+		// back to goja per-element.
 		if !sigsAnswered {
 			if ctx.Err() != nil {
 				return nil, nil, err
@@ -527,6 +529,18 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			if res, ok := c.sigsFromSpecs(playerID, sigs); ok {
 				sigResults, sigsAnswered = res, true
 			} else {
+				if !solverReady(sc) {
+					if up := c.awaitSidecar(ctx); up != nil {
+						if sr, nr, rerr := up.Batch(ctx, playerID, sigs, ns); rerr == nil {
+							solved := make(map[string]string, len(sigs))
+							for _, sig := range sigs {
+								solved[sig] = sr[sig]
+							}
+							c.learnSigSpecs(ctx, up, playerID, solved)
+							return sr, nr, nil
+						}
+					}
+				}
 				sigErr = sidecarDown(sc, err)
 			}
 		}
