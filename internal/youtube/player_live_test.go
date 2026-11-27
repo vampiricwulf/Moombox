@@ -154,7 +154,7 @@ func TestLiveCurrentPlayerSolves(t *testing.T) {
 		if g.DecryptedNSig != "" && g.DecryptedNSig != mainN {
 			t.Error("goja and the sidecar disagree on the n of today's player's main body")
 		}
-		t.Logf("goja: sig answered %t, n answered %t; parity checked where both answered",
+		t.Logf("goja: sig answered %t, n answered %t; both checked against the sidecar's main-body answers",
 			g.DecryptedSignature != "", g.DecryptedNSig != "")
 	}
 }
