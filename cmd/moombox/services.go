@@ -947,7 +947,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
 		}
 	} else {
-		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted and signature-ciphered formats are unavailable")
+		log.Warn("BotGuard sidecar disabled in config; no PO tokens will be minted, and signatures are left to the in-process goja solver")
 	}
 
 	// =========================================================================

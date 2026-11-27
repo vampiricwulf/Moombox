@@ -1170,7 +1170,7 @@ export class MoomboxApp {
     if (this.sidecarHealthy === false)
       warningItems.push({
         label: "PO tokens: sidecar down",
-        title: "The BotGuard sidecar is not running — signature-ciphered formats and PO tokens are unavailable. Moombox is retrying.",
+        title: "The BotGuard sidecar is not running — PO tokens are unavailable, and signatures are left to the in-process goja solver. Moombox is retrying.",
       });
 
     if (warningsEl) {

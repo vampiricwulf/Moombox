@@ -127,7 +127,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 			return
 		case reason := <-s.notices:
 			s.cfg.Logger.Error(
-				"BotGuard sidecar died — PO tokens and signature-ciphered formats are unavailable until it restarts",
+				"BotGuard sidecar died — PO tokens are unavailable, and signatures are left to the in-process goja solver, until it restarts",
 				"reason", reason)
 			PublishHealth(Health{
 				Healthy:  false,

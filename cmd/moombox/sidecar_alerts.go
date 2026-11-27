@@ -184,7 +184,7 @@ func (a *sidecarAlerts) fireDown(epoch uint64) {
 	a.notify.Send("BotGuard Sidecar Down",
 		// Seconds, spelled out: time.Duration prints a 60-second window as
 		// "1m0s", which is the right value in the wrong words for a sentence.
-		fmt.Sprintf("The BotGuard sidecar has been unhealthy for over %d s — PO-token minting and signature-ciphered formats are unavailable until it returns",
+		fmt.Sprintf("The BotGuard sidecar has been unhealthy for over %d s — PO-token minting is unavailable, and signatures are left to the in-process goja solver, until it returns",
 			int(sidecarDownDebounce.Seconds())),
 		notifications.TypeError,
 		[]notifications.Field{
