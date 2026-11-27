@@ -112,7 +112,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 5. **CookieJar** — Netscape cookie file parsing, in-memory cookie store
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
-8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
+8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only path when the sidecar is disabled (non-functional: no PO token is minted; RV-18). Triple in-process cache (session, minter, inflight).
 9. **CipherSolver** — YouTube signature/n-parameter decryption, 10-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
 11. **TrimService** — FFmpeg-based clip extraction from finished recordings; ahead of the worker, which runs every job's post-download trim through it; a running trim is stopped by its job's deletion and by the operator's Stop (`StopTrim`, from the dashboard's running-trim row and the TUI trim dialog's `S`), neither of which sends `trim_error`
@@ -447,7 +447,7 @@ Cipher solving runs YouTube's `player.js` in a bare Goja VM, with only the globa
 - **Navigator** — `navigator.userAgent` matching Chrome's UA string.
 - **Call-stack bound** — every goja runtime in the tree, test helpers included, is made by `NewPlainRuntime`, which caps the call depth at `MaxCallStackSize` (10,000; owner ruling RV-13). An endless recursion in a fetched script is aborted in milliseconds instead of growing the heap until the compile bound ends it. JavaScript `try/catch` does not see the abort: the whole run ends.
 
-The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It covers the common DOM surface but not all of what BotGuard probes: it has no `iframe.contentWindow`, and each challenge reads a few DOM properties drawn at random from a pool, most of which it answers wrongly. BotGuard's program therefore aborts under it and no integrity token is issued, which is why the production path is the Node sidecar (JSDOM). It is not a timing check: V8 running the same shim fails the same way (platform-services.md § Why a Sidecar). The shim is used by the goja BotGuard path only, which owner ruling RV-14 leaves as it is until the owner has run an acceptance test; the cipher runs in a bare runtime.
+The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It covers the common DOM surface but not all of what BotGuard probes: it has no `iframe.contentWindow`, and each challenge reads a few DOM properties drawn at random from a pool, most of which it answers wrongly. BotGuard's program therefore aborts under it and no integrity token is issued, which is why the production path is the Node sidecar (JSDOM). It is not a timing check: V8 running the same shim fails the same way (platform-services.md § Why a Sidecar). The shim is used by the goja BotGuard path only, which is non-functional (honoured 0 of about 60 times in the 2026-11-26/27 research) and which owner rulings RV-14 and RV-18 keep as it is, pending a decision; the cipher runs in a bare runtime.
 
 ### BotGuard / PO Tokens
 

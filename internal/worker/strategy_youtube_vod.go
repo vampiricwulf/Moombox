@@ -114,10 +114,12 @@ type vodDegrades struct {
 	mint *vodMint
 }
 
-// vodMint is one GVS mint's answer, and whether the binding it was asked
-// under was distrusted as a guess (youtube.VideoInfo.GvsBindingGuessed).
+// vodMint is one GVS mint's answer, the binding it was minted under (the
+// mint line's itBytes reads it), and whether that binding was distrusted
+// as a guess (youtube.VideoInfo.GvsBindingGuessed).
 type vodMint struct {
 	guessed bool
+	binding string
 	tok     string
 	err     error
 }
@@ -131,7 +133,7 @@ type vodMint struct {
 func (st *vodDegrades) gvsToken(ctx context.Context, p *bgutils.PotProvider, info *youtube.VideoInfo, binding string) (string, error) {
 	if st.mint == nil || st.mint.guessed != info.GvsBindingGuessed {
 		tok, err := strategyGvsToken(ctx, p, info, binding, false)
-		st.mint = &vodMint{guessed: info.GvsBindingGuessed, tok: tok, err: err}
+		st.mint = &vodMint{guessed: info.GvsBindingGuessed, binding: binding, tok: tok, err: err}
 	}
 	return st.mint.tok, st.mint.err
 }
@@ -396,7 +398,7 @@ func downloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 				audioSource = result.AudioFormat.Source
 			}
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(tok),
+				"binding", bindingKind, "tokenLength", len(tok), "itBytes", itBytesAttr(tok, st.mint.binding),
 				"videoSource", videoSource, "audioSource", audioSource)
 		}
 	}

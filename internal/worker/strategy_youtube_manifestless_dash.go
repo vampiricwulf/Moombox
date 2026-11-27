@@ -287,7 +287,7 @@ func DownloadManifestlessDash(
 		case err == nil:
 			pot = poToken
 			job.Logger.Info("[POT] GVS mint", "jobID", job.Job.ID,
-				"binding", bindingKind, "tokenLength", len(poToken),
+				"binding", bindingKind, "tokenLength", len(poToken), "itBytes", itBytesAttr(poToken, bindingValue),
 				"videoSource", videoSource, "audioSource", audioSource)
 		case !mandatory:
 			job.Logger.Warn("[POT] no GVS token — the web-family streams ride bare: Premium makes their token recommended, not required",
@@ -303,7 +303,7 @@ func DownloadManifestlessDash(
 				if gErr == nil {
 					pot = guessed
 					job.Logger.Warn("[POT] missing_pot: a chosen stream has no token-free copy — the token minted under the guessed binding rides the web-family streams",
-						"jobID", job.Job.ID, "binding", bindingKind, "tokenLength", len(guessed),
+						"jobID", job.Job.ID, "binding", bindingKind, "tokenLength", len(guessed), "itBytes", itBytesAttr(guessed, bindingValue),
 						"videoSource", videoSource, "audioSource", audioSource, "err", degErr)
 					break
 				}
