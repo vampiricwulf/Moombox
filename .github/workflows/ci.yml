@@ -20,9 +20,10 @@ name: CI
 #          download, no sidecar build, no FFmpeg.
 #   js     bgutil-sidecar's `npm test` and the frontend suite (`node --test`
 #          in web/tests after its own `npm ci`, so jsdom is present). No Go.
-#          It and the windows shard that runs internal/bgutils/sidecar are
-#          the two jobs that download the real YouTube player the cipher
-#          tests read (fetch-cipher-fixture.sh); everywhere else they skip.
+#          It and the windows shards that run internal/bgutils/sidecar or
+#          internal/cipher are the jobs that download the real YouTube
+#          player the cipher tests read (fetch-cipher-fixture.sh);
+#          everywhere else they skip.
 #   test   the Go suite, `go test -count=1`, in three flavours, each split
 #          by package into shards that run side by side:
 #            linux    go test on ubuntu
@@ -533,11 +534,12 @@ jobs:
       - name: Fetch the real-player cipher fixture
         # The Go tests that send a real child a real YouTube player
         # (internal/bgutils/sidecar: the "solve cipher" round trip and the
-        # prepared-player store) read internal/cipher/testdata/
-        # player_cb017549.js, which is YouTube's code and gitignored. They
-        # run with it in one job only: the windows shard whose packages
-        # include internal/bgutils/sidecar, as test-shard.sh says, so moving
-        # the package keeps this step with it. It runs after the embed
+        # prepared-player store) and the gate of the goja fallback's port of
+        # ejs (internal/cipher: TestEjsPortVectors) read
+        # internal/cipher/testdata/player_cb017549.js, which is YouTube's
+        # code and gitignored. They run with it only in the windows shards
+        # whose packages include either package, as test-shard.sh says, so
+        # moving a package keeps this step with it. It runs after the embed
         # blobs are in place because test-shard.sh lists a rest shard with
         # go list ./..., which fails without them. The switch that turns
         # their skip into a failure is set only once the download and its
@@ -552,8 +554,94 @@ jobs:
             echo "::warning title=Cipher fixture::could not list this shard's packages; the real-player cipher tests skip in this run"
             exit 0
           }
-          if ! grep -q '/internal/bgutils/sidecar$' <<<"$pkgs"; then
-            echo "this shard does not run internal/bgutils/sidecar"
+          if ! grep -qE '/internal/(bgutils/sidecar|cipher)
+            exit 0
+          fi
+          if bash .github/scripts/fetch-cipher-fixture.sh; then
+            echo "MOOMBOX_REQUIRE_CIPHER_FIXTURE=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning title=Cipher fixture::could not fetch the pinned YouTube player; the real-player cipher tests skip in this run"
+          fi
+
+      - name: go test
+        id: gotest
+        # -timeout is go test's limit for one test binary: past it, the
+        # binary dumps every goroutine and fails, which is what names a
+        # deadlocked test (one that hangs only under the race detector's
+        # scheduling, say). It counts from that binary's start, not the
+        # step's, and leaves four minutes under this step's timeout for the
+        # compiling and queueing ahead of a binary's start: room to spare on
+        # a warm cache, so the dump lands before the step is cut off unless
+        # a cold one holds a binary back longer than that. It is still more
+        # than twice the slowest binary's run on any runner
+        # (internal/worker on windows, 205 s at worst). Under
+        # -race, a test that budgets allocations or fits its probe inside
+        # one wall-clock second either widens its gate or skips (each such
+        # package's raceEnabled constant): the detector's instrumentation is
+        # not the code it budgets, and the linux flavour still runs it.
+        timeout-minutes: 11
+        run: |
+          pkgs=$(bash .github/scripts/test-shard.sh "$FLAVOUR/$SHARD")
+          echo "::group::$FLAVOUR/$SHARD: $(grep -c . <<<"$pkgs") package(s)"
+          echo "$pkgs"
+          echo "::endgroup::"
+          flags=(-count=1 -timeout=7m)
+          if [ "$FLAVOUR" = race ]; then flags+=(-race); fi
+          # shellcheck disable=SC2086 # one import path per line, no spaces
+          go test "${flags[@]}" $pkgs
+
+      # Each flavour's rest shard saves the Go cache all of its shards
+      # restore. Its own tests compile every third-party package the
+      # flavour's other shards need but a handful of small ones, and the
+      # module's own packages in the cache go stale with the next commit
+      # anyway (the key moves with go.sum, not with the code), so nothing
+      # compiles extra for the cache. It saves only when go test ran, pass
+      # or fail: a job that failed in setup compiled next to nothing, and
+      # that cache would be the exact hit of every later run until go.sum
+      # or Go moves.
+      - name: Trim the Go cache before saving it (${{ matrix.flavour }})
+        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.gotest.outcome == 'success' || steps.gotest.outcome == 'failure') }}
+        timeout-minutes: 5
+        continue-on-error: true
+        run: bash .github/scripts/go-cache-trim.sh now
+
+      - name: Save the Go caches (${{ matrix.flavour }})
+        if: ${{ !cancelled() && matrix.shard == 'rest' && github.ref == 'refs/heads/main' && steps.go-cache.outputs.cache-hit != 'true' && (steps.gotest.outcome == 'success' || steps.gotest.outcome == 'failure') }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            ${{ steps.cache-dirs.outputs.gocache }}
+            ${{ steps.cache-dirs.outputs.gomodcache }}/cache/download
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      # The Node binaries and the npm cache are per runner OS, shared by the
+      # flavours there: linux's rest saves them on ubuntu (race only
+      # restores), windows's rest on windows — each only after the step
+      # that fills it succeeded, so a failed download is never saved.
+      - name: Save the embedded Node binary cache
+        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.fetch-node.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: |
+            internal/bgutils/embed/node-windows-amd64.gz
+            internal/bgutils/embed/node-linux-amd64.gz
+            internal/bgutils/embed/node-linux-arm64.gz
+          key: ${{ steps.cache-node.outputs.cache-primary-key }}
+
+      - name: Save the npm cache
+        if: ${{ !cancelled() && matrix.shard == 'rest' && matrix.flavour != 'race' && steps.npm-cache.outputs.cache-hit != 'true' && steps.sidecar.outcome == 'success' }}
+        uses: actions/cache/save@v6
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ${{ steps.cache-dirs.outputs.npm }}
+          key: ${{ steps.npm-cache.outputs.cache-primary-key }}
+ <<<"$pkgs"; then
+            echo "this shard runs neither internal/bgutils/sidecar nor internal/cipher"
             exit 0
           fi
           if bash .github/scripts/fetch-cipher-fixture.sh; then
