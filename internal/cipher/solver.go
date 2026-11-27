@@ -180,6 +180,11 @@ func (s *GojaResolver) refusedErr(key, playerID string) error {
 			"playerID", playerID, "until", until)
 		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
 	}
+	if errors.Is(r.cause, errGojaNoNAnswer) {
+		s.logger.Debug("cipher: the goja port's n answer for this player was no answer lately; not preparing it again yet",
+			"playerID", playerID, "until", until)
+		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
+	}
 	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until)
 }
 
@@ -580,8 +585,34 @@ func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (stri
 	if !solvers.HasN() {
 		return "", fmt.Errorf("cipher: n unavailable for player %s", playerID)
 	}
-	return solvers.DecryptN(encryptedN)
+	out, err := solvers.DecryptN(encryptedN)
+	if err == nil {
+		if cerr := checkNResult(encryptedN, out); cerr != nil {
+			// The prepared copy ran and handed back no answer (the
+			// exception sentinel, or nothing): the player's body decides
+			// that, so goja does not work for this player, and the refusal
+			// list says so to ChallengesSolvable (owner ruling RV-16). The
+			// compiled copy stays cached, so a later ask still runs it;
+			// the answer itself is returned as it was, for the caller's
+			// own checkNResult. A run that errored (CipherTimeout, a
+			// panic and ErrSolverDead) says nothing certain about the
+			// player and refuses nothing.
+			key := CacheKey(playerURLForID(playerID))
+			first := s.refusedUntil(key).IsZero()
+			s.refuse(key, fmt.Errorf("%w: %v", errGojaNoNAnswer, cerr))
+			if !first {
+				return out, err
+			}
+			s.logger.Warn("cipher: the goja port's n answer for this player is no answer; treating its challenges as unsolvable for a while",
+				"playerID", playerID, "refusedFor", compileRefusal, "error", cerr.Error())
+		}
+	}
+	return out, err
 }
+
+// errGojaNoNAnswer is the cause of a refusal for a player whose prepared copy
+// answered an n challenge with no answer (checkNResult).
+var errGojaNoNAnswer = errors.New("cipher: the goja port's n answer for this player is no answer")
 
 // Batch satisfies cipher.Solver. Goja has no round-trip overhead so
 // the implementation is a straight loop. ErrSigUnavailable on a sig

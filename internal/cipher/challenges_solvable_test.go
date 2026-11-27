@@ -57,7 +57,8 @@ func TestChallengesSolvable(t *testing.T) {
 		{"sidecar down, goja that has not refused the player", NewCompositeSolver(NewSidecarSolver(down, src), g), other, true},
 		{"no sidecar, goja refusing the player", NewCompositeSolver(nil, g), refused, false},
 		{"sidecar down, goja refusing the player", NewCompositeSolver(NewSidecarSolver(down, src), g), refused, false},
-		{"no sidecar, goja, no player named", NewCompositeSolver(nil, g), "", true},
+		{"no sidecar, goja, no player named", NewCompositeSolver(nil, g), "", false},
+		{"sidecar up, no player named", NewCompositeSolver(NewSidecarSolver(up, src), g), "", true},
 		{"no sidecar, no goja", NewCompositeSolver(nil, nil), other, false},
 		{"sidecar down, no goja", NewCompositeSolver(NewSidecarSolver(down, src), nil), other, false},
 	} {
@@ -117,5 +118,60 @@ func TestChallengesSolvableSeesARefusalGojaMadeItself(t *testing.T) {
 		if c.ChallengesSolvable(u) {
 			t.Errorf("after goja refused the player: ChallengesSolvable(%s) = true, want false", u)
 		}
+	}
+}
+
+// TestChallengesSolvableSeesGojaAnsweringNoN: a player goja prepares but
+// whose n function answers with no answer (checkNResult: the exception
+// sentinel) does not work, so after that answer the predicate reads it
+// unsolvable with the sidecar down (owner ruling RV-16), through every form
+// of the player's URL, while the compiled copy stays cached and still runs,
+// and a player that answers well is never refused.
+//
+// Mutant: GojaResolver.N no longer refusing on a no-answer (the predicate
+// stays true after the failed solve).
+func TestChallengesSolvableSeesGojaAnsweringNoN(t *testing.T) {
+	const bad, good = "ffff6666", "abcd7777"
+	g, err := NewGojaResolver(t.TempDir(), &testLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	g.cacheSolvers(CacheKey(playerURLForID(bad)), &Solvers{N: func(in string) (string, error) {
+		runs++
+		return "enhanced_except_x_" + in, nil
+	}})
+	g.cacheSolvers(CacheKey(playerURLForID(good)), &Solvers{N: func(in string) (string, error) {
+		return "solved", nil
+	}})
+	c := NewCompositeSolver(nil, g)
+	ctx := context.Background()
+
+	if out, err := c.N(ctx, good, "nnnn"); err != nil || out != "solved" {
+		t.Fatalf("N on the good player = %q, %v", out, err)
+	}
+	if !c.ChallengesSolvable(playerURLForID(good)) {
+		t.Error("a player goja answered well: ChallengesSolvable = false, want true")
+	}
+
+	forms := []string{
+		"/s/player/" + bad + "/player_ias.vflset/en_US/base.js",
+		"https://www.youtube.com/s/player/" + bad + "/tv-player-ias.vflset/tv-player-ias.js",
+	}
+	for _, u := range forms {
+		if !c.ChallengesSolvable(u) {
+			t.Fatalf("before any solve: ChallengesSolvable(%s) = false, want true", u)
+		}
+	}
+	if _, err := c.N(ctx, bad, "nnnn"); err == nil {
+		t.Fatal("N on a player whose n answers the exception sentinel answered")
+	}
+	for _, u := range forms {
+		if c.ChallengesSolvable(u) {
+			t.Errorf("after goja answered no n: ChallengesSolvable(%s) = true, want false", u)
+		}
+	}
+	if _, err := c.N(ctx, bad, "mmmm"); err == nil || runs != 2 {
+		t.Errorf("the cached copy of the refused player: err %v, runs %d; want an error from a second run", err, runs)
 	}
 }

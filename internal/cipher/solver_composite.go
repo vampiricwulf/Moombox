@@ -263,11 +263,14 @@ func (c *compositeSolver) SidecarReady() bool {
 // prepare, or whose compile ran out of time, within the last ten minutes).
 // It says nothing about the order the solvers are asked in.
 //
-// An empty playerURL names no player, so no refusal is known: the answer is
-// then whether any solver is there at all. A player goja has not been asked
-// about yet is taken as solvable; a failure on it surfaces through the solve
-// itself (ErrSidecarUnavailable, ErrNUnsolved), which the worker's
-// challenge-free fallback acts on, and refuses the player for later asks.
+// An empty playerURL names no player, and goja solves nothing without one:
+// with the sidecar down the answer is then false, as it was before RV-16. A
+// player goja has not been asked about yet is taken as solvable; a failure
+// on it surfaces through the solve itself (ErrSidecarUnavailable,
+// ErrNUnsolved), which the worker's challenge-free fallback acts on, and
+// refuses the player for later asks: a body the port could not prepare, a
+// compile that ran out of time, or an n answer that is no answer
+// (checkNResult).
 //
 // The extraction reads it to rank the JS-less client first when it is false,
 // yt-dlp's _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
@@ -278,11 +281,11 @@ func (c *compositeSolver) ChallengesSolvable(playerURL string) bool {
 	if c.SidecarReady() {
 		return true
 	}
-	if c.goja == nil {
+	if c.goja == nil || playerURL == "" {
 		return false
 	}
 	r, ok := c.goja.(playerRefuser)
-	return !ok || playerURL == "" || !r.refuses(playerURL)
+	return !ok || !r.refuses(playerURL)
 }
 
 // awaitSidecar waits, within the readiness grace (sidecarReadyGrace) of the
