@@ -1162,8 +1162,9 @@ export class MoomboxApp {
     if (!checkPending && twActive && this.autoCookieReloginRequired?.twitch)
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
     // The BotGuard sidecar is an ALERT, not a status: while it is down,
-    // signature-ciphered formats cannot be resolved at all (sig has no
-    // fallback) and a PO token mint fails at once (no goja fallback). It carries
+    // a signature-ciphered format is resolved only where a learned sig spec
+    // answers it (goja is asked last and fails on current players) and a PO
+    // token mint fails, once the restart grace is spent (no goja fallback). It carries
     // no action — the supervisor is already retrying and there is nothing for
     // the operator to click.
     if (this.sidecarHealthy === false)

@@ -51,9 +51,8 @@ type SupervisorConfig struct {
 // solver answers a signature from the sidecar or a learned sig spec only;
 // RoutedResolveURL asks goja last, which fails on current players) and PO
 // tokens fell to the goja path, which rejects the websafe-only response.
-// Restarting is the fix;
-// the health snapshot beside it is what makes the outage visible while it
-// lasts.
+// Restarting is the fix; the health snapshot beside it is what makes the
+// outage visible while it lasts.
 type Supervisor struct {
 	cfg      SupervisorConfig
 	notices  chan string
