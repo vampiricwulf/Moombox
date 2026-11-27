@@ -439,9 +439,15 @@ the challenges:
 
 - **Signatures** are solved by the sidecar. The first signature of each
   length a player produces also teaches Moombox that player's scrambling
-  pattern, which it keeps on disk and can reuse while the sidecar is down.
+  pattern, which it keeps on disk and can reuse while the sidecar is down;
+  the in-process solver answers the rest, last.
 - **`n` challenges** are solved by the sidecar, with an in-process solver as
   a last resort.
+
+While the sidecar is off or down, Moombox picks formats as usual as long as
+the in-process solver can answer the player. Only for a player it cannot
+answer either does it prefer the formats that need no player JavaScript, and
+the job log then warns that *some formats may be missing*.
 
 YouTube publishes each player version as several files. Moombox solves with
 the main one. If the sidecar cannot solve with it, it tries the TV file of
