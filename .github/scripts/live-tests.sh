@@ -419,8 +419,13 @@ watchdog() {
 	local job=""
 	trap - EXIT TERM HUP
 	cd / 2>/dev/null
-	while kill -0 "$1" 2>/dev/null; do sleep 1; done
-	trace "watchdog: runner gone"
+	# Gone: no such pid, a zombie (Linux: its parent has not reaped it), or
+	# past the run's deadline.
+	while kill -0 "$1" 2>/dev/null && [ "$(date +%s)" -le "$deadline" ]; do
+		case $(cat "/proc/$1/stat" 2>/dev/null) in *") Z "*) break ;; esac
+		sleep 1
+	done
+	trace "watchdog: runner gone (or past its deadline)"
 	read -r job <"$run_dir/job" 2>/dev/null
 	if [ -n "$job" ] && kill -0 "$job" 2>/dev/null; then kill_tree "$job"; fi
 	remove_run_dir || trace "watchdog: could not remove the run directory"
@@ -603,6 +608,7 @@ run_pkg() {
 	trace "job $group $pkg: pid $bg_pid"
 	wait "$bg_pid"
 	bg_pid=""
+	: >"$run_dir/job"
 	read -r rc rrc <"$run_dir/status" 2>/dev/null || { rc=1 rrc=1; }
 	echo "### live-tests end group=$group pkg=$pkg exit=$rc" | tee -a "$log"
 	if [ "$rrc" != 0 ]; then

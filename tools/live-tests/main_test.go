@@ -107,11 +107,15 @@ func TestRedactFailsClosedWithoutItsCookieFile(t *testing.T) {
 // these paths); PATH's elsewhere. The bash's own directories are put first on
 // PATH by bashEnv, as a Git Bash window has them, so the runner finds ps,
 // awk, mktemp and cygpath however go test was started. It logs which bash it
-// picked and its runtime, so a failure names them.
+// picked and its runtime, so a failure names them. On CI a missing bash
+// fails the test: there a skip would pass the runner's tests unrun.
 func bashPath(t *testing.T) string {
 	t.Helper()
 	bashOnce.Do(findBash)
 	if bashFound == "" {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatalf("on CI and %s", bashSkip)
+		}
 		t.Skip(bashSkip)
 	}
 	logBash(t, bashFound)
