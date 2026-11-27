@@ -359,10 +359,11 @@ type Job struct {
 	// and a row added while live that was re-initialised records a later
 	// broadcast under the first one's ID. The worker writes it as the capture
 	// starts (StreamProcessor.processTwitchLive) and overwrites it when
-	// the row records a later broadcast; a Reinitialize leaves it. Its one
-	// reader is the operator's Delete (DeleteJobLeavingHistory), which leaves
-	// the history row "tw_<this>" so the deleted broadcast is not archived
-	// again. "" (NULL) for every other job, for a manual job that has not
+	// the row records a later broadcast; a Reinitialize leaves it. It has two
+	// readers. The operator's Delete (DeleteJobLeavingHistory) leaves the
+	// history row "tw_<this>" so the deleted broadcast is not archived again.
+	// The live monitor stands aside for the broadcast while the row is active
+	// or Cancelled (ManualTwitchJobHoldsStream, owner ruling RV-8). "" (NULL) for every other job, for a manual job that has not
 	// recorded a broadcast, and for a row whose capture last started before v29
 	// (a row still recording at the upgrade is re-enqueued at boot and gets it
 	// at the restart's live start).

@@ -234,7 +234,7 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stderr := captureStderr(t, func() { preserveUpdateRollback(exePath, backup, exitCodeStartupError) })
+	stderr := captureStderr(t, func() { preserveUpdateRollback(exePath, backup, "", exitCodeStartupError) })
 
 	if _, err := os.Stat(exePath + ".update-failed"); !os.IsNotExist(err) {
 		t.Errorf("a startup error must write no .update-failed marker (stat err: %v) — the next boot "+
@@ -254,7 +254,7 @@ func TestStartupErrorPreservesWithoutAFailedUpdateMarker(t *testing.T) {
 	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	preserveUpdateRollback(exePath, backup, 1)
+	preserveUpdateRollback(exePath, backup, "", 1)
 	got, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("exit 1 must still write the marker: %v", err)

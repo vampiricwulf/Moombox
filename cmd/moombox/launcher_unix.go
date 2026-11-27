@@ -11,8 +11,10 @@ import (
 // cleanupOrphans is a no-op on Linux. Linux can delete a running
 // binary directly (file deletion removes the directory entry while
 // keeping the inode alive for any process holding it open), so the
-// child's CleanupOldBinary handles everything.
-func cleanupOrphans(exePath string) {}
+// child's CleanupOldBinary handles everything. The previous binary of an
+// update stays at .old here, so there is no `~` to keep for a boot that never
+// reached its milestone either (the Windows half of owner ruling RV-10).
+func cleanupOrphans(exePath, runningVersion string) {}
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
 // Linux needs no rename dance (the child's post-milestone

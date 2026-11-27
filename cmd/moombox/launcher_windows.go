@@ -136,17 +136,57 @@ var launcherWarnf = func(format string, args ...any) {
 // not stand forever: the boot of a LATER update that landed deletes it
 // (clearSupersededFailureMarker), after which `~` is just the image that
 // update replaced and this sweep takes it again.
-func cleanupOrphans(exePath string) {
+//
+// AND except after an update whose first boot never reached its started
+// milestone (owner ruling RV-10): the boot exited 3, or was stopped or quit
+// before it. The restart that applied the update renamed the previous binary
+// to ~ (handleUpdateRestart), the launcher that ran from it left it on its way
+// out (postUpdateBoot.keepsLauncherImage), and the breadcrumb still names the
+// release at the plain name, which is runningVersion: this launcher's own.
+// The ~ is then that update's rollback artifact, and it is renamed back to
+// .old, where armInterruptedUpdate finds it and arms this start's first child
+// as the update's first boot, exactly as for an update applied and never
+// booted. The rollback so stays armed, start after start, until the release
+// reaches its milestone, which resolves the breadcrumb and then sweeps .old.
+// A failed-update marker stops this rename only while it still speaks for the
+// ~ (failureMarkerHoldsLauncherImage): an .update-broken marker, or an
+// .update-failed one this update's own failed launch wrote. The marker of an
+// EARLIER failed update, which stands until a later update has started
+// properly, does not: the first update after a failed one is then kept and
+// armed like any other. Such a marker still keeps the ~ from being removed.
+// A .old already there is the artifact itself (the second update of one
+// launcher lifetime, whose rename to ~ failed): the ~ beside it is one
+// version older and is removed as before. The breadcrumb can be trusted for
+// this because the milestone removes it before it sweeps .old
+// (resolveLandedUpdateBreadcrumb). A ~ that cannot be renamed is left where
+// it is.
+func cleanupOrphans(exePath, runningVersion string) {
+	image := exePath + updater.LauncherImageSuffix
+	if pendingUpdateTag(exePath) == "v"+runningVersion && !failureMarkerHoldsLauncherImage(exePath) {
+		oldPath := exePath + updater.OldSuffix
+		if _, err := os.Stat(oldPath); err != nil {
+			if _, err := os.Stat(image); err == nil {
+				if err := os.Rename(image, oldPath); err != nil {
+					launcherWarnf("warning: could not rename %s back to %s (%v) — the previous binary stays there, and this start is not armed to roll back to it\n",
+						image, oldPath, err)
+				}
+				return
+			}
+		}
+	}
 	if len(updater.FailureMarkers(exePath)) > 0 {
 		return
 	}
-	os.Remove(exePath + updater.LauncherImageSuffix)
+	os.Remove(image)
 }
 
 // handleUpdateRestart runs after the child exits with exitCodeRestart.
 // On Windows the launcher cannot delete its own running binary, so we
 // rename the just-superseded .old to ~ to free the .old name for the
-// next update. The ~ file is then deferred-cleaned on launcher exit.
+// next update. The ~ file is then deferred-cleaned on launcher exit, unless
+// it is still the rollback artifact of a release that has not reached its
+// started milestone (postUpdateBoot.keepsLauncherImage, owner ruling RV-10),
+// in which case the next start renames it back to .old (cleanupOrphans).
 //
 // Returns that update's rollback artifact — the file the binary it replaced
 // now survives as — or "" when no .old existed: config-change restarts never

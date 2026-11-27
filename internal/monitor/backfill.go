@@ -117,6 +117,19 @@ type parserArmState struct {
 	withMembership bool
 }
 
+// asksFailingTab reports whether a scan asked with that membership
+// eligibility would fetch a tab the arm stopped in the last scan. The videos
+// and streams tabs are part of every scan; the membership tab only of one
+// asked with it (scanChannel).
+func (st *parserArmState) asksFailingTab(withMembership bool) bool {
+	for tab := range st.fails {
+		if tab != "membership" || withMembership {
+			return true
+		}
+	}
+	return false
+}
+
 // TabPageFetchFunc fetches ONE page of a channel tab ("videos", "streams",
 // "membership"): continuation "" requests page 1. Wired to
 // youtube.Service.FetchChannelTabPage via an adapter closure in cmd/moombox;
@@ -626,8 +639,13 @@ func (bw *BackfillWorker) Sweep(channels []ChannelRef, force bool) {
 			// newly eligible is another scan, whose other tabs can write
 			// rows while the failing one still fails, so the wait ends and
 			// the count starts over, as it does for a scan in flight
-			// (above). The same scan again, or a narrower one, waits.
-			if st.windowDays >= ref.WindowDays && (st.withMembership || !ref.WithMembership) {
+			// (above). The same scan again, or a narrower one, waits, with
+			// one exception: a request that no longer includes any tab the
+			// arm stopped (membership turned off or no longer eligible,
+			// and membership the only failing tab) would not fetch the
+			// failing page at all, so its wait ends too (owner ruling RV-9).
+			if st.windowDays >= ref.WindowDays && (st.withMembership || !ref.WithMembership) &&
+				st.asksFailingTab(ref.WithMembership) {
 				continue
 			}
 			delete(bw.parserArm, ref.ChID)

@@ -216,10 +216,11 @@ type JobContext struct {
 	// FinalizeMuxFailed is set by the finalize's own FFmpeg runs that swallow
 	// their failure: the recovery of unrecorded parts (muxUnrecordedSegments),
 	// the copy of a set-aside recording (muxStagedAsides) and the same-format
-	// part merge (mergeSameFormatParts). None of them fails the job. A split
-	// finalize reads it once, before its finishing mark: with the worker
-	// stopping, the failure is the shutdown's and the row stays Muxing for the
-	// next start (errFinalizeCutShortByShutdown, owner ruling RV-1).
+	// part merge (mergeSameFormatParts). None of them fails the job. The
+	// finalize reads it once (a split one before its finishing mark, a
+	// single-file one before its main mux): with the worker stopping, the
+	// failure is the shutdown's and the row stays Muxing for the next start
+	// (errFinalizeCutShortByShutdown, owner rulings RV-1 and RV-7).
 	FinalizeMuxFailed bool
 	// Refinalize marks a finalize of the recording the job's archive already
 	// holds: MuxJob's, which re-muxes the staging the archive was (or was to
@@ -1614,11 +1615,11 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			// cancelled and might Mux or Resume, and skipped the
 			// cancellation's own handling.
 			//
-			// errFinalizeCutShortByShutdown: a split finalize whose own mux
-			// work failed while the worker was stopping. Stop can be entered
+			// errFinalizeCutShortByShutdown: a finalize whose own mux work
+			// failed while the worker was stopping. Stop can be entered
 			// with this run's context still live, and the row is left as it
 			// is (Muxing) for the next start's re-mux, never written Error
-			// (owner ruling RV-1).
+			// (owner rulings RV-1 and RV-7).
 			if ctx.Err() != nil || errors.Is(dlErr, ErrCancelled) || errors.Is(dlErr, errFinalizeCutShortByShutdown) {
 				w.handleCancellation(job)
 				if archive, gone := finishedRowGone(dlErr); gone {

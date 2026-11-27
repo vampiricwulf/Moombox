@@ -400,3 +400,72 @@ func TestRunHandsTheRollbackToTheAnnouncementAndTheBreadcrumb(t *testing.T) {
 		t.Error("recordVersionChange never calls announcesVersionChange")
 	}
 }
+
+// The milestone resolves the breadcrumb of an update that landed before it
+// sweeps the previous binary (owner ruling RV-10): the Windows launcher reads
+// "the breadcrumb names the running version" as "this release's milestone has
+// swept nothing", and renames a ~ image back to .old on that. Swept first, a
+// process killed between the two steps left the breadcrumb beside a ~ that
+// can be two versions back. A breadcrumb naming another release is a
+// rollback's, and stays for resolveUpdateBreadcrumb, which marks the release
+// skipped from it.
+//
+// Mutants: resolveLandedUpdateBreadcrumb without its version test (the
+// rollback's breadcrumb is removed before anything reads it); run() calling
+// it after CleanupOldBinary, or not at all.
+func TestTheMilestoneResolvesALandedBreadcrumbBeforeItsSweep(t *testing.T) {
+	for _, tc := range []struct {
+		name, tag string
+		wantGone  bool
+	}{
+		{"the update landed", "v9.9.9", true},
+		{"a rollback's breadcrumb", "v9.9.10", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exePath := filepath.Join(t.TempDir(), "moombox.exe")
+			pendingPath := exePath + updater.PendingVersionSuffix
+			if err := os.WriteFile(pendingPath, []byte(tc.tag), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			resolveLandedUpdateBreadcrumb(exePath, "9.9.9", &nopLogger{})
+			if _, err := os.Stat(pendingPath); os.IsNotExist(err) != tc.wantGone {
+				t.Errorf("breadcrumb %s: gone = %v, want %v", tc.tag, os.IsNotExist(err), tc.wantGone)
+			}
+		})
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolveAt, sweepAt token.Pos
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "run" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				if fun.Name == "resolveLandedUpdateBreadcrumb" {
+					resolveAt = call.Pos()
+				}
+			case *ast.SelectorExpr:
+				if fun.Sel.Name == "CleanupOldBinary" {
+					sweepAt = call.Pos()
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if resolveAt == token.NoPos || sweepAt == token.NoPos || resolveAt > sweepAt {
+		t.Errorf("run() resolves the landed breadcrumb at %s and sweeps at %s, want the breadcrumb resolved first",
+			fset.Position(resolveAt), fset.Position(sweepAt))
+	}
+}

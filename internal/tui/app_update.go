@@ -748,7 +748,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Warn {
 				sev = severityWarning
 			}
-			a.setWrappedFeedback("Imported: "+displayText(msg.Title)+" — "+msg.Note, sev)
+			a.setWrappedFeedback("Imported: "+displayText(msg.Title)+" — "+displayText(msg.Note), sev)
 		} else {
 			a.setFeedback("Imported: " + displayText(msg.Title))
 		}

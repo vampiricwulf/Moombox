@@ -618,8 +618,8 @@ func asideOutputPath(outputDir, filenameBase, stamp string, used map[string]bool
 // RECOGNISED MEDIA; an aside-only dir is not offered the Mux action at all,
 // because HasSegmentFiles (discoverStagingMedia) does not know the suffix.
 // Either way it never fails the job, whose own recording muxed fine. A copy
-// that returned an error is reported in JobContext.FinalizeMuxFailed, which a
-// split finalize reads during a shutdown (errFinalizeCutShortByShutdown).
+// that returned an error is reported in JobContext.FinalizeMuxFailed, which
+// the finalize reads during a shutdown (errFinalizeCutShortByShutdown).
 //
 // Returns the sibling outputs it wrote, oldest recording first. Finalize
 // ignores them (its own chat, thumbnail and description handling is about the
@@ -664,12 +664,12 @@ func (o *DownloadOrchestrator) muxStagedAsides(ctx context.Context, jobCtx *JobC
 					"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 				continue
 			}
-			// Reported to a split finalize, which reads it only while the
-			// worker is stopping (RV-1).
+			// Reported to the finalize, which reads it only while the
+			// worker is stopping (RV-1, RV-7).
 			jobCtx.FinalizeMuxFailed = true
 			// An FFmpeg the shutdown signalled is not a failed copy (R3-8).
 			o.muxFailed("could not mux a set-aside recording; it stays in staging and the dir is kept for a later Mux action",
-				"the set-aside recording stays in staging for a later Mux action",
+				"the set-aside recording stays in staging: a finalize left Muxing copies it again at the next start, otherwise a later Mux or Recover action does",
 				"aside", strings.Join(g.files, " | "), "err", err, "jobID", jobCtx.Job.ID)
 			continue
 		}
@@ -1130,6 +1130,14 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// which this function has already returned into by here — exactly one call
 	// per finalize.
 	o.muxStagedAsides(ctx, jobCtx, outputDir, filenameBase)
+	// A set-aside copy the shutdown killed: the main mux below is a new
+	// FFmpeg that can outlive the signal and finish inside the stop's wait,
+	// and the row would read Finished with the aside still in staging, which
+	// no later start muxes. Nothing is written yet, so the row stays Muxing
+	// and the next start runs the copy and the mux again (owner ruling RV-7).
+	if jobCtx.FinalizeMuxFailed && o.stopping() {
+		return errFinalizeCutShortByShutdown
+	}
 
 	videoPath := result.VideoPath
 	audioPath := result.AudioPath
@@ -1466,12 +1474,14 @@ func (o *DownloadOrchestrator) keepIncompleteTailProgress(jobID string, updates 
 	delete(updates, "percent")
 }
 
-// errFinalizeCutShortByShutdown is what a split finalize returns, with nothing
-// written, when one of its own FFmpeg runs failed while the worker was
-// stopping (JobContext.FinalizeMuxFailed, DownloadWorker.shuttingDown). Every
-// caller leaves the row as it is, Muxing, for the next start's re-mux: MuxJob
-// by its shuttingDown branch, processJob beside its cancellation (owner
-// ruling RV-1).
+// errFinalizeCutShortByShutdown is what a finalize returns, with nothing
+// written, when one of its own FFmpeg runs that never fail the job failed
+// while the worker was stopping (JobContext.FinalizeMuxFailed,
+// DownloadWorker.shuttingDown): a split finalize before its finishing mark,
+// a single-file one after its set-aside copies and before its main mux.
+// Every caller leaves the row as it is, Muxing, for the next start's re-mux:
+// MuxJob by its shuttingDown branch, processJob beside its cancellation
+// (owner rulings RV-1 and RV-7).
 var errFinalizeCutShortByShutdown = errors.New("the finalize was cut short by the shutdown")
 
 // finalizeMultiSegmentJob handles the finalization path for jobs with quality-split segments.

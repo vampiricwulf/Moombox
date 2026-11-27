@@ -348,3 +348,66 @@ func TestAQueueRunsSplitFinalizeCutShortByShutdownStaysMuxing(t *testing.T) {
 		}
 	}
 }
+
+// The single-file shape of the same event (owner ruling RV-7). A job with no
+// part rows copies its set-aside recordings and then muxes its recording. A
+// copy the shutdown killed was only logged, and the main mux is a new FFmpeg
+// that can finish inside the stop's ten-second wait: the row read Finished
+// with the set-aside recording still in staging, which no later start muxes.
+// With the worker stopping the row now stays Muxing with nothing written,
+// and the next start runs the copy and the mux again. On a running worker
+// the same failed copy still finishes the job, as before.
+//
+// Mutant: the errFinalizeCutShortByShutdown return dropped from
+// muxAndFinalize's single-file arm (the stopping case reads Finished).
+func TestASingleFileFinalizeCutShortByShutdownStaysMuxing(t *testing.T) {
+	ffmpegPath, _ := requireFFmpegTools(t)
+	for _, tc := range []struct {
+		name       string
+		stopping   bool
+		wantStatus database.JobStatus
+	}{
+		{"a set-aside recording's copy fails while stopping", true, database.StatusMuxing},
+		{"a set-aside recording's copy fails on a running worker", false, database.StatusFinished},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, db := testWorkerSetup(t)
+			w.orchestrator.SetFfmpegPath(ffmpegPath)
+			staging, outputDir := muxFixtureJob(t, w, db, "j-single")
+			media := filepath.Join(staging, "video.mp4")
+			writeMuxFixture(t, ffmpegPath, media, 2)
+			// A staged thumbnail, so the finalize that finishes fetches none.
+			if err := os.WriteFile(filepath.Join(staging, "thumbnail.jpg"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			aside := filepath.Join(staging, "video.mp4"+engine.StagedRestartSuffix+"1700000000")
+			if err := os.WriteFile(aside, []byte("not a recording"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stopping {
+				w.stopBegun.Store(true)
+			}
+
+			if err := w.restartMux("j-single"); err != nil {
+				t.Fatalf("MuxJob: %v", err)
+			}
+			w.wg.Wait()
+
+			row, _ := db.GetJob("j-single")
+			if row == nil || row.Status != tc.wantStatus || row.Error != "" {
+				t.Fatalf("row = %v (error %q), want %s with no error", statusOf(row), errorOf(row), tc.wantStatus)
+			}
+			if _, err := os.Stat(aside); err != nil {
+				t.Errorf("the set-aside recording was removed from staging: %v", err)
+			}
+			if tc.wantStatus == database.StatusMuxing {
+				if _, err := os.Stat(media); err != nil {
+					t.Errorf("staging was reclaimed under a row left Muxing: %v", err)
+				}
+				if mp4s, _ := filepath.Glob(filepath.Join(outputDir, "*.mp4")); len(mp4s) != 0 {
+					t.Errorf("the finalize wrote %v before leaving the row Muxing, want nothing written", mp4s)
+				}
+			}
+		})
+	}
+}
