@@ -203,3 +203,30 @@ func TestImportNoteIsDrawnWithoutControlCharacters(t *testing.T) {
 		t.Errorf("feedback %q carries a control character at byte %d", a.feedback.msg, i)
 	}
 }
+
+// The import's refusal names the zip's entries too (the zip holds more than
+// one recording: <names>), and the import dialog drew it raw, in the normal
+// and the bare form alike: an entry name carrying an OSC 8 hyperlink or a
+// style reached the screen. SetError now stores it with every control
+// character as a space, for every caller.
+//
+// Mutant: SetError storing err as it came (the hyperlink's escape reaches
+// the bare form; the normal form is checked too).
+func TestImportRefusalIsDrawnWithoutControlCharacters(t *testing.T) {
+	a := NewApp()
+	a.width, a.height = 80, 30
+	msg := importAnsweredWith(t, a, http.StatusBadRequest,
+		`{"error":"the zip holds more than one recording: \u001b]8;;https://example.invalid\u001b\u005ca.mp4\u001b]8;;\u001b\u005c, b.mp4"}`)
+	a.importDlg.Open(t.TempDir())
+	a.Update(msg)
+	for _, size := range [][2]int{{80, 30}, {40, 10}} {
+		a.importDlg.SetSize(size[0], size[1])
+		view := a.importDlg.View()
+		if !strings.Contains(view, "a.mp4") {
+			t.Fatalf("%dx%d: the dialog does not show the refusal:\n%s", size[0], size[1], view)
+		}
+		if strings.Contains(view, "\x1b]") || strings.Contains(view, "\x1b\\") {
+			t.Errorf("%dx%d: the refusal's escape sequence reached the dialog: %q", size[0], size[1], view)
+		}
+	}
+}
