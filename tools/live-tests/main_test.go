@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,15 +126,23 @@ func bashPath(t *testing.T) string {
 const fakeGo = `#!/usr/bin/env bash
 # Stands in for "go test": records where it ran and what it was given, prints
 # the cookie copy it got (a test that leaks), rewrites it with a renewed value
-# and prints that, and reads its stdin (which must be empty).
-p=${MOOMBOX_LIVE_YT_COOKIES:-${MOOMBOX_POT_ACCEPT_COOKIES:-}}
+# and prints that, and reads its stdin (which must be empty). FAKE_MODE=sleep
+# sleeps instead, writing FAKE_RECORD.late if it is ever allowed to finish.
+pkg=${!#}
+p=${MOOMBOX_LIVE_YT_COOKIES:-${MOOMBOX_LIVE_TWITCH_COOKIES:-${MOOMBOX_POT_ACCEPT_COOKIES:-}}}
 stdin=$(head -c 200 || true)
-echo "call cwd=$(basename "$PWD") yt=${MOOMBOX_LIVE_YT_COOKIES:--} pot=${MOOMBOX_POT_ACCEPT_COOKIES:--} video=${MOOMBOX_POT_ACCEPT_VIDEO:--} stdin=${#stdin}" >>"$FAKE_RECORD"
+echo "call pkg=${pkg#./} cwd=$(basename "$PWD") yt=${MOOMBOX_LIVE_YT_COOKIES:--} twitch=${MOOMBOX_LIVE_TWITCH_COOKIES:--} pot=${MOOMBOX_POT_ACCEPT_COOKIES:--} video=${MOOMBOX_POT_ACCEPT_VIDEO:--} private=${MOOMBOX_LIVE_COOKIES_PRIVATE:--} godebug=${GODEBUG:--} tmp=${TMP:--} channel=${MOOMBOX_LIVE_TWITCH_CHANNEL:--} stdin=${#stdin}" >>"$FAKE_RECORD"
 echo "=== RUN   TestFake"
+if [ "$FAKE_MODE" = sleep ]; then
+	echo "    fake_test.go:1: sleeping"
+	sleep 60
+	echo late >"$FAKE_RECORD.late"
+fi
 if [ -n "$p" ]; then
 	while IFS= read -r l; do echo "    fake_test.go:1: $l"; done <"$p"
 	printf '.youtube.com\tTRUE\t/\tTRUE\t1999999999\tSIDCC\t%s\n' "$FAKE_RENEWED" >>"$p"
 	echo "    fake_test.go:2: renewed $FAKE_RENEWED"
+	echo "    fake_test.go:3: \"set-cookie\" = \"__Secure-3PSIDCC=QuotedRenewalNotInTheFile77; Path=/\""
 fi
 if [ "$FAKE_MODE" = fail ]; then
 	echo "--- FAIL: TestFake (0.00s)"; echo FAIL; exit 1
@@ -161,76 +170,106 @@ func readCalls(record string) []fakeCall {
 	return calls
 }
 
-// TestRunnerKeepsTheSourceAndRemovesItsCopies drives the real script with a
-// stand-in go command against a made-up cookie file: the source is never
-// written, a test is only ever handed a copy, every copy is gone when the run
-// ends (a failing test included), and neither the console nor the saved log
-// holds a cookie value. It also runs the paths the owner's run does not: a
-// two-package group, no cookies, and pot-accept in another tree, with and
-// without a video.
-func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
-	bash := bashPath(t)
+// runnerEnv is one made-up setup for the real script: a cookie source, a
+// state directory, a settings file and the stand-in go.
+type runnerEnv struct {
+	dir, script, source, state, record, other string
+	env                                       []string
+}
+
+func newRunnerEnv(t *testing.T, mode string) *runnerEnv {
+	t.Helper()
 	script, err := filepath.Abs(filepath.Join("..", "..", ".github", "scripts", "live-tests.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownTree := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(script))))
+	r := &runnerEnv{dir: t.TempDir(), script: filepath.ToSlash(script)}
+	srcDir := filepath.Join(r.dir, "src")
+	os.Mkdir(srcDir, 0o700)
+	r.source = fakeCookieFile(t, srcDir)
+	r.other = filepath.Join(r.dir, "othertree")
+	os.Mkdir(r.other, 0o700)
+	r.state = filepath.Join(r.dir, "state")
+	settings := filepath.Join(r.dir, "live-tests.env")
+	os.WriteFile(settings, []byte("# test\nMOOMBOX_LIVE_COOKIE_SOURCE="+filepath.ToSlash(r.source)+"\nUNKNOWN_KEY=x\n"), 0o600)
+	fake := filepath.Join(r.dir, "fakego")
+	os.WriteFile(fake, []byte(fakeGo), 0o755)
+	r.record = filepath.Join(r.dir, "record.txt")
+	r.env = append(os.Environ(),
+		"MOOMBOX_LIVE_STATE_DIR="+filepath.ToSlash(r.state),
+		"MOOMBOX_LIVE_SETTINGS="+filepath.ToSlash(settings),
+		"MOOMBOX_LIVE_GO_TEST="+filepath.ToSlash(fake),
+		"MOOMBOX_LIVE_TWITCH_PICK=somechannel",
+		"FAKE_RECORD="+filepath.ToSlash(r.record),
+		"FAKE_RENEWED="+fakeRenewed,
+		"FAKE_MODE="+mode,
+		"GODEBUG=http2debug=2",
+	)
+	return r
+}
+
+func (r *runnerEnv) leftovers() []string {
+	left, _ := filepath.Glob(filepath.Join(r.state, "live-tmp", "*"))
+	return left
+}
+
+// TestRunnerKeepsTheSourceAndRemovesItsCopies drives the real script with a
+// stand-in go command against a made-up cookie file: the source is never
+// written, a test is only ever handed a copy, and only the package that reads
+// that platform's cookies gets one, every copy is gone when the run ends (a
+// failing test included), and neither the console nor the saved log holds a
+// cookie value. It also runs the paths the owner's run does not: a
+// two-package group, no cookies, and pot-accept in another tree, with and
+// without a video.
+func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
+	bash := bashPath(t)
+	abs, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownTree := filepath.Base(abs)
+	cookieVar := map[string]string{"internal/youtube": "yt", "internal/twitch": "twitch", "internal/bgutils": "pot"}
 	cases := []struct {
 		name     string
 		args     []string // "{tree}" is replaced by the other tree's path
 		mode     string
 		wantFail bool
 		calls    int
-		cookieOn string // the variable that carries the copy; "" for none
+		cookies  bool
 		cwd      string
 		want     []string
 	}{
-		{name: "pass", args: []string{"youtube-auth"}, mode: "pass", calls: 1, cookieOn: "yt", cwd: ownTree,
+		{name: "pass", args: []string{"youtube-auth"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree,
 			want: []string{"PASS  internal/youtube", "RESULT: PASS"}},
-		{name: "fail", args: []string{"youtube-auth"}, mode: "fail", wantFail: true, calls: 1, cookieOn: "yt", cwd: ownTree,
+		{name: "fail", args: []string{"youtube-auth"}, mode: "fail", wantFail: true, calls: 1, cookies: true, cwd: ownTree,
 			want: []string{"FAIL  internal/youtube", "RESULT: FAIL"}},
-		{name: "two packages", args: []string{"cookies"}, mode: "pass", calls: 2, cookieOn: "yt", cwd: ownTree,
+		{name: "two packages", args: []string{"cookies"}, mode: "pass", calls: 2, cookies: true, cwd: ownTree,
 			want: []string{"PASS  internal/youtube", "PASS  internal/twitch"}},
 		{name: "no cookies", args: []string{"--no-cookies", "youtube-auth"}, mode: "pass", calls: 1, cwd: ownTree,
 			want: []string{"Cookie source: none (cookie tests skip)"}},
 		{name: "pot-accept in another tree", args: []string{"--worktree", "{tree}", "--video", "aqz-KE-bpKQ", "pot-accept"},
-			mode: "pass", calls: 1, cookieOn: "pot", cwd: "othertree", want: []string{"PASS  internal/bgutils"}},
+			mode: "pass", calls: 1, cookies: true, cwd: "othertree", want: []string{"PASS  internal/bgutils"}},
 		{name: "pot-accept without a video", args: []string{"pot-accept"}, mode: "pass", calls: 0,
 			want: []string{"SKIP", "no video"}},
+		{name: "cipher without its fixture", args: []string{"--worktree", "{tree}", "cipher"}, mode: "pass", calls: 0,
+			want: []string{"SKIP", "no player fixture"}},
+		{name: "twitch picks a live channel", args: []string{"twitch"}, mode: "pass", calls: 1, cookies: true, cwd: ownTree,
+			want: []string{"Twitch channel: somechannel"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			srcDir := filepath.Join(dir, "src")
-			os.Mkdir(srcDir, 0o700)
-			source := fakeCookieFile(t, srcDir)
+			r := newRunnerEnv(t, tc.mode)
 			past := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-			os.Chtimes(source, past, past)
-			before, _ := os.ReadFile(source)
+			os.Chtimes(r.source, past, past)
+			before, _ := os.ReadFile(r.source)
 			beforeSum := sha256.Sum256(before)
 
-			other := filepath.Join(dir, "othertree")
-			os.Mkdir(other, 0o700)
-			state := filepath.Join(dir, "state")
-			settings := filepath.Join(dir, "live-tests.env")
-			os.WriteFile(settings, []byte("# test\nMOOMBOX_LIVE_COOKIE_SOURCE="+filepath.ToSlash(source)+"\nUNKNOWN_KEY=x\n"), 0o600)
-			fake := filepath.Join(dir, "fakego")
-			os.WriteFile(fake, []byte(fakeGo), 0o755)
-			record := filepath.Join(dir, "record.txt")
-
-			args := []string{filepath.ToSlash(script), "--no-probe"}
+			args := []string{r.script, "--no-probe"}
 			for _, a := range tc.args {
-				args = append(args, strings.ReplaceAll(a, "{tree}", filepath.ToSlash(other)))
+				args = append(args, strings.ReplaceAll(a, "{tree}", filepath.ToSlash(r.other)))
 			}
 			cmd := exec.Command(bash, args...)
-			cmd.Env = append(os.Environ(),
-				"MOOMBOX_LIVE_STATE_DIR="+filepath.ToSlash(state),
-				"MOOMBOX_LIVE_SETTINGS="+filepath.ToSlash(settings),
-				"MOOMBOX_LIVE_GO_TEST="+filepath.ToSlash(fake),
-				"FAKE_RECORD="+filepath.ToSlash(record),
-				"FAKE_RENEWED="+fakeRenewed,
-				"FAKE_MODE="+tc.mode,
-			)
+			cmd.Env = r.env
 			out, err := cmd.CombinedOutput()
 			console := string(out)
 			if tc.wantFail != (err != nil) {
@@ -245,13 +284,13 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 				t.Errorf("a tool complained on the console:\n%s", console)
 			}
 
-			after, _ := os.ReadFile(source)
-			st, _ := os.Stat(source)
+			after, _ := os.ReadFile(r.source)
+			st, _ := os.Stat(r.source)
 			if sha256.Sum256(after) != beforeSum || !st.ModTime().Equal(past) {
 				t.Error("the cookie source was written")
 			}
 
-			calls := readCalls(record)
+			calls := readCalls(r.record)
 			if len(calls) != tc.calls {
 				t.Fatalf("the stand-in go ran %d times, want %d:\n%s", len(calls), tc.calls, console)
 			}
@@ -262,47 +301,168 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 				if c["cwd"] != tc.cwd {
 					t.Errorf("a test ran in %q, want %q", c["cwd"], tc.cwd)
 				}
-				for _, k := range []string{"yt", "pot"} {
+				if c["godebug"] != "-" {
+					t.Errorf("GODEBUG reached a test: %s", c["godebug"])
+				}
+				if c["private"] != "1" {
+					t.Error("a test was not told its cookie file is already a private copy")
+				}
+				if !strings.Contains(strings.ToLower(c["tmp"]), "live-tmp") {
+					t.Errorf("a test's TMP is outside the run directory: %s", c["tmp"])
+				}
+				if tc.name == "twitch picks a live channel" && c["channel"] != "somechannel" {
+					t.Errorf("the Twitch channel tests got channel %q", c["channel"])
+				}
+				want := ""
+				if tc.cookies {
+					want = cookieVar[c["pkg"]]
+				}
+				for _, k := range []string{"yt", "twitch", "pot"} {
 					got := c[k]
-					if k != tc.cookieOn {
+					if k != want {
 						if got != "-" {
-							t.Errorf("%s carried a cookie path it should not: %s", k, got)
+							t.Errorf("%s (%s) carried a cookie path it should not: %s", k, c["pkg"], got)
 						}
 						continue
 					}
-					if got == "-" || got == filepath.ToSlash(source) {
+					if got == "-" || got == filepath.ToSlash(r.source) {
 						t.Errorf("%s = %q, want a private copy", k, got)
 					}
 					if _, err := os.Stat(got); !os.IsNotExist(err) {
 						t.Errorf("the copy %s survived the run", got)
 					}
 				}
-				if tc.cookieOn == "pot" && c["video"] != "aqz-KE-bpKQ" {
+				if tc.name == "pot-accept in another tree" && c["video"] != "aqz-KE-bpKQ" {
 					t.Errorf("pot-accept video = %q", c["video"])
 				}
 			}
-			if left, _ := filepath.Glob(filepath.Join(state, "live-tmp", "*")); len(left) != 0 {
+			if left := r.leftovers(); len(left) != 0 {
 				t.Errorf("run directories left behind: %v", left)
 			}
-			logs, _ := filepath.Glob(filepath.Join(state, "live-logs", "*.log"))
+			logs, _ := filepath.Glob(filepath.Join(r.state, "live-logs", "*.log"))
 			if len(logs) != 1 {
 				t.Fatalf("want one saved log, got %v", logs)
 			}
 			logText, _ := os.ReadFile(logs[0])
-			for _, secret := range []string{fakeSID, fakeSAPISID, fakeTwitch, fakeRenewed} {
+			for _, secret := range []string{fakeSID, fakeSAPISID, fakeTwitch, fakeRenewed, "QuotedRenewalNotInTheFile77"} {
 				if strings.Contains(console, secret) || strings.Contains(string(logText), secret) {
 					t.Errorf("a cookie value reached the console or the log")
 				}
 			}
-			if tc.cookieOn != "" {
+			if tc.cookies && tc.calls > 0 {
 				if !strings.Contains(string(logText), mask) {
 					t.Error("the log holds no mask: the stand-in's leak never went through the redactor")
 				}
-				if !strings.Contains(console, "Self-check: 0 cookie values") {
+				if !strings.Contains(console, "Self-check: 0 secrets") {
 					t.Errorf("no clean self-check line:\n%s", console)
 				}
 			}
 		})
+	}
+}
+
+// TestRunnerStopsAtOnceOnTerm sends TERM to a run whose test sleeps: the run
+// ends at once rather than when the test would, the test's processes are
+// ended, and nothing of the run is left. (Ctrl+C takes the same trap; a
+// background job of a non-interactive shell, which is all a test can start,
+// has INT ignored, so TERM stands in for it here.)
+func TestRunnerStopsAtOnceOnTerm(t *testing.T) {
+	bash := bashPath(t)
+	r := newRunnerEnv(t, "sleep")
+	wrapper := `"$@" & p=$!
+for _ in $(seq 1 100); do [ -s "$FAKE_RECORD" ] && break; sleep 0.2; done
+sleep 1
+kill -TERM $p
+wait $p`
+	start := time.Now()
+	cmd := exec.Command(bash, "-c", wrapper, "wrap", bash, r.script, "--no-probe", "youtube-auth")
+	cmd.Env = r.env
+	out, _ := cmd.CombinedOutput()
+	if took := time.Since(start); took > 40*time.Second {
+		t.Errorf("the interrupted run took %v; it waited for the test", took)
+	}
+	if len(readCalls(r.record)) != 1 {
+		t.Fatalf("the stand-in never started:\n%s", out)
+	}
+	time.Sleep(65 * time.Second)
+	if _, err := os.Stat(r.record + ".late"); err == nil {
+		t.Error("the sleeping test outlived the interrupted run")
+	}
+	if left := r.leftovers(); len(left) != 0 {
+		t.Errorf("left behind after an interrupt: %v\n%s", left, out)
+	}
+}
+
+// TestRunnerSweepsAndChecksWhatAKilledRunLeft plants what a hard kill leaves
+// (a run directory past its deadline, one whose runner is gone, and a log
+// with a cookie value and no summary) and checks that --sweep and the next
+// run clear them.
+func TestRunnerSweepsAndChecksWhatAKilledRunLeft(t *testing.T) {
+	bash := bashPath(t)
+	r := newRunnerEnv(t, "pass")
+	tmp := filepath.Join(r.state, "live-tmp")
+	logs := filepath.Join(r.state, "live-logs")
+	os.MkdirAll(tmp, 0o700)
+	os.MkdirAll(logs, 0o700)
+	plant := func(name, owner string) {
+		d := filepath.Join(tmp, name)
+		os.Mkdir(d, 0o700)
+		os.WriteFile(filepath.Join(d, "owner"), []byte(owner), 0o600)
+		os.WriteFile(filepath.Join(d, "work-1.txt"), []byte("copy"), 0o600)
+	}
+	// Past its deadline: stale whatever its pid names now.
+	plant("run.pastdeadline", fmt.Sprintf("1 %d\n", time.Now().Add(-time.Hour).Unix()))
+	plant("run.deadpid", fmt.Sprintf("999999 %d\n", time.Now().Add(time.Hour).Unix()))
+	cmd := exec.Command(bash, r.script, "--sweep")
+	cmd.Env = r.env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--sweep: %v\n%s", err, out)
+	}
+	if left := r.leftovers(); len(left) != 0 {
+		t.Errorf("--sweep left %v", left)
+	}
+
+	stopped := filepath.Join(logs, "live-20000101-000000-abcd.log")
+	os.WriteFile(stopped, []byte("=== RUN   TestX\n    x_test.go:1: leaked "+fakeSID+"\n"), 0o600)
+	cmd = exec.Command(bash, r.script, "--no-probe", "youtube-auth")
+	cmd.Env = r.env
+	out, _ := cmd.CombinedOutput()
+	data, err := os.ReadFile(stopped)
+	if err == nil && strings.Contains(string(data), fakeSID) {
+		t.Errorf("a stopped run's log still holds a cookie value:\n%s", out)
+	}
+	if err == nil && !strings.Contains(string(data), "==== summary") {
+		t.Error("the stopped run's log was not marked as checked")
+	}
+	if !strings.Contains(string(out), "redacted again") {
+		t.Errorf("the console does not say the stopped log was redacted:\n%s", out)
+	}
+	if strings.Contains(string(out), fakeSID) {
+		t.Error("the check printed the value it found")
+	}
+}
+
+// TestRunnerRefusesASecondRun: while a live run holds the lock, another
+// refuses to start.
+func TestRunnerRefusesASecondRun(t *testing.T) {
+	bash := bashPath(t)
+	r := newRunnerEnv(t, "pass")
+	lock := filepath.Join(r.state, "live-tmp", "lock")
+	os.MkdirAll(lock, 0o700)
+	// The holder is the wrapper shell itself: a live pid of the same runtime.
+	wrapper := `echo "$$ $2" >"$1/owner"; shift 2; "$@"`
+	cmd := exec.Command(bash, "-c", wrapper, "wrap", filepath.ToSlash(lock), fmt.Sprint(time.Now().Add(time.Hour).Unix()),
+		bash, r.script, "--no-probe", "youtube-auth")
+	cmd.Env = r.env
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "another live run") {
+		t.Errorf("a second run started: %v\n%s", err, out)
+	}
+	if len(readCalls(r.record)) != 0 {
+		t.Error("the second run ran a test")
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Error("the refused run removed the other run's lock")
 	}
 }
 
