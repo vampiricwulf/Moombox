@@ -14,9 +14,13 @@ const poTokenField = 0x32
 // integrity token and the content binding: 12 bytes, whatever the binding or
 // the integrity token. The payload itself is opaque (it differs in every byte
 // from one mint to the next, even for the same minter and binding), so these
-// bytes cannot be read out of it; the figure comes from measured mints over
-// bindings of 5 to 150 bytes and integrity tokens of 66 to 75 bytes
-// (2026-11-26/27 research).
+// bytes cannot be read out of it. The 12 was measured on goja mints, whose
+// integrity token length GenerateIT reports, over 11-byte video-ID bindings
+// (2026-11-26 research). That it does not move with the binding was checked
+// on 2026-11-27: three fresh sidecar minters each minted under bindings of
+// 11, 42, 57, 66, 102 and 150 bytes, and every token was one field-6 record
+// whose varint length (one byte up to 127, two above) was the binding plus
+// the same 78 bytes (an integrity token of 66, the sidecar's usual figure).
 const poTokenOverhead = 12
 
 // ITBytes reports the byte length of the integrity token a minted PO token
