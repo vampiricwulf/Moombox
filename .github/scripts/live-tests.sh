@@ -186,7 +186,9 @@ if [ -n "${MOOMBOX_LIVE_STATE_DIR:-}" ]; then
 	state=$MOOMBOX_LIVE_STATE_DIR
 	hooks=1
 else
-	main=$(cd "$(git -C "$self_root" rev-parse --git-common-dir)/.." && pwd) || exit 1
+	# git names the main checkout's common dir relative to $self_root
+	# (".git"), so it is resolved from there, not from the caller's cwd.
+	main=$(cd "$self_root" && cd "$(git rev-parse --git-common-dir)/.." && pwd) || exit 1
 	state=$main/.superpowers
 fi
 settings=$state/live-tests.env

@@ -450,6 +450,56 @@ func TestRunnerSweepsAndChecksWhatAKilledRunLeft(t *testing.T) {
 	}
 }
 
+// TestRunnerStateIsTheScriptsCheckout runs a copy of the script from the
+// main checkout of a repository (where git names the common dir relatively)
+// while standing at the root of another one, with no state hook: its state
+// directory is the script's checkout's .superpowers, never the caller's.
+// Only --sweep runs, which stops before the settings and any cookie source.
+func TestRunnerStateIsTheScriptsCheckout(t *testing.T) {
+	bash := bashPath(t)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", ".github", "scripts", "live-tests.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	repo, other := filepath.Join(dir, "repo"), filepath.Join(dir, "other")
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "MOOMBOX_LIVE_") && !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	for _, d := range []string{repo, other} {
+		cmd := exec.Command(git, "init", "-q", d)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init %s: %v\n%s", d, err, out)
+		}
+	}
+	scripts := filepath.Join(repo, ".github", "scripts")
+	os.MkdirAll(scripts, 0o700)
+	script := filepath.Join(scripts, "live-tests.sh")
+	if err := os.WriteFile(script, src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, filepath.ToSlash(script), "--sweep")
+	cmd.Dir = other
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("--sweep: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".superpowers", "live-tmp")); err != nil {
+		t.Errorf("the script's checkout has no state directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(other, ".superpowers")); err == nil {
+		t.Error("the state directory landed in the caller's repository")
+	}
+}
+
 // TestRunnerRefusesASecondRun: while a live run holds the lock, another
 // refuses to start.
 func TestRunnerRefusesASecondRun(t *testing.T) {
