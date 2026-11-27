@@ -444,9 +444,9 @@ the same version, and only after that the in-process solver, whose answers
 YouTube often refuses for current players. Each step is logged once per
 player version, as a warning:
 
-- *ejs cannot solve with this player's main variant; its tv variant solves,
-  and is used for this player from now on*: nothing to do, downloads carry
-  on.
+- *the sidecar cannot solve with this player's main variant; its tv variant
+  solves, and is used for this player from now on*: nothing to do, downloads
+  carry on.
 - *the sidecar could not solve for this player; goja, the last solver asked,
   is tried, and its answers may be refused*: expect failed or lower-quality
   downloads until a Moombox update brings a solver for that player version.
