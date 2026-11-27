@@ -80,8 +80,9 @@ var compileTimeout = 120 * time.Second
 // compileTimeout, or whose body the port could not prepare, is refused
 // instead of tried again. Without it every later request for that player
 // re-ran the script for the full bound, or fetched and parsed the body again
-// (about 0.1 s each), while holding the compile slot. A fetch that finds the
-// body changed under the player's URL ends the refusal (unrefuse).
+// (about 0.1 s each), while holding the compile slot. A fetch that finds a
+// new body replacing the cached one under the player's URL ends the refusal
+// (unrefuse); a cold fetch after the cache was removed does not.
 const compileRefusal = 10 * time.Minute
 
 // refusal is one entry of the refusal list: until when, and the failure
@@ -140,9 +141,10 @@ func (s *GojaResolver) refuses(playerURL string) bool {
 	return ok && resolverNow().Before(until)
 }
 
-// unrefuse ends the player's refusal:a fetch found its body changed, so the
-// failure on the old one says nothing about it. InvalidateSolver does not
-// call it: a per-job 403 invalidates a player whose body may well be the
+// unrefuse ends the player's refusal: a fetch found a body other than the
+// cached one (FetchResult.Replaced), so the failure on the old one says
+// nothing about it. A cold fetch does not count, and InvalidateSolver does
+// not call it: a per-job 403 invalidates a player whose body may well be the
 // same, and a timed-out compile lifted that way costs the slot up to
 // compileTimeout again (owner ruling R3-9).
 func (s *GojaResolver) unrefuse(key string) {
@@ -326,7 +328,7 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 
 func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
-	playerJS, changed, err := s.playerCache.Fetch(ctx, playerURL)
+	fr, err := s.playerCache.FetchDetail(ctx, playerURL)
 	if err != nil {
 		// PlayerCache.Fetch already includes "fetch player JS" in its message;
 		// wrap with a different verb to avoid "fetch player JS: fetch player JS: ..."
@@ -337,8 +339,11 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	// called when solverData has no entry, so this is mostly defensive against
 	// future call sites and against the path where Fetch coincidentally
 	// rotates the JS while compileSolver is racing in.
-	if changed {
+	playerJS := fr.JS
+	if fr.Changed {
 		s.dropSolverData(CacheKey(playerURL))
+	}
+	if fr.Replaced {
 		s.unrefuse(CacheKey(playerURL))
 	}
 	if err := ctx.Err(); err != nil {
@@ -692,15 +697,20 @@ func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []st
 // against fresh JS from YouTube and produce 403s at the CDN.
 func (s *GojaResolver) PlayerJS(playerID string) (string, error) {
 	playerURL := playerURLForID(playerID)
-	js, changed, err := s.playerCache.Fetch(context.Background(), playerURL)
+	fr, err := s.playerCache.FetchDetail(context.Background(), playerURL)
 	if err != nil {
 		return "", err
 	}
-	if changed {
+	if fr.Changed {
 		s.dropSolverData(CacheKey(playerURL))
+	}
+	// Only a body that replaced a cached one ends a refusal: the cold fetch
+	// after InvalidateSolver or RemovePlayerJS (a job's 403, the sidecar's
+	// stale-JS recovery) reports Changed for what may be the same body.
+	if fr.Replaced {
 		s.unrefuse(CacheKey(playerURL))
 	}
-	return js, nil
+	return fr.JS, nil
 }
 
 // RemovePlayerJS satisfies cipher.PlayerSource. Drops every cache layer

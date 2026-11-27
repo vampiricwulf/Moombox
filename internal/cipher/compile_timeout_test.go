@@ -277,3 +277,55 @@ func TestGetSolversRefusesAPlayerThePortCannotPrepare(t *testing.T) {
 		t.Errorf("CDN requests after the body changed = %d, want 3: the player was to be tried again", got)
 	}
 }
+
+// A refused player stays refused through a cold refetch of the same body.
+// InvalidateSolver and RemovePlayerJS (a job's 403, the sidecar's stale-JS
+// recovery) empty the disk cache, so the sidecar's next PlayerJS is a cold
+// fetch that reports the body changed; that alone must not lift the
+// refusal (R3-9), or a timed-out compile is run again for the full bound.
+// A body that then replaces the cached one still ends it.
+//
+// Mutants: PlayerJS unrefusing on Changed (the refusal ends after the cold
+// fetch); Replaced set on a cold fetch (the same); Replaced never set (the
+// refusal outlives the real change).
+func TestRefusalOutlivesAColdRefetchOfTheSameBody(t *testing.T) {
+	const playerID = "eeee5555"
+	playerURL := playerURLForID(playerID)
+	var body atomic.Value
+	body.Store("var player = 1;")
+	origClient, origNow := playerHTTPClient, resolverNow
+	playerHTTPClient = httpxtest.NewClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body.Load().(string)))
+	}))
+	clock := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	resolverNow = func() time.Time { return clock }
+	t.Cleanup(func() { playerHTTPClient, resolverNow = origClient, origNow })
+
+	s, err := NewGojaResolver(t.TempDir(), &testLogger{})
+	if err != nil {
+		t.Fatalf("NewGojaResolver: %v", err)
+	}
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("first PlayerJS: %v", err)
+	}
+	key := CacheKey(playerURL)
+	s.refuse(key, mbgoja.ErrExecutionTimeout)
+
+	if err := s.RemovePlayerJS(playerID); err != nil {
+		t.Fatalf("RemovePlayerJS: %v", err)
+	}
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("PlayerJS after the remove: %v", err)
+	}
+	if s.refusedUntil(key).IsZero() {
+		t.Fatal("a cold refetch of the same body ended the refusal")
+	}
+
+	body.Store("var player = 2; var other = 3;")
+	if _, err := s.PlayerJS(playerID); err != nil {
+		t.Fatalf("PlayerJS of the new body: %v", err)
+	}
+	if !s.refusedUntil(key).IsZero() {
+		t.Error("the refusal outlived a body that replaced the cached one")
+	}
+}

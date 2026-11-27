@@ -442,9 +442,16 @@ func (pc *PlayerCache) atomicWrite(path string, data string) error {
 // network-failure-with-cache, on cache-hit-with-no-revalidation, and on
 // 200 responses whose Content-Length matches the cached size (treated as
 // a Last-Modified flap).
+//
+// Replaced is narrower: true only when a cached copy existed and a body of
+// another length came back. A cold fetch (nothing cached, as after Remove)
+// reports Changed but not Replaced: it cannot tell whether the body differs
+// from the one removed, so state that must outlive a refetch of the same
+// body (the goja refusal list, owner ruling R3-9) keys on Replaced.
 type FetchResult struct {
-	JS      string
-	Changed bool
+	JS       string
+	Changed  bool
+	Replaced bool
 }
 
 // Fetch returns the player JS for the given URL, performing conditional-GET
@@ -479,6 +486,12 @@ type FetchResult struct {
 // The extraction already hands every caller the main variant; this is the
 // layer that makes the one-body-per-key rule hold for any caller.
 func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, bool, error) {
+	fr, err := pc.FetchDetail(ctx, playerURL)
+	return fr.JS, fr.Changed, err
+}
+
+// FetchDetail is Fetch returning the whole FetchResult, Replaced included.
+func (pc *PlayerCache) FetchDetail(ctx context.Context, playerURL string) (FetchResult, error) {
 	playerURL = CanonicalPlayerURL(playerURL)
 	key := CacheKey(playerURL)
 	// DoChan, not Do: the leader runs detached from every caller (below), so
@@ -522,13 +535,12 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, boo
 	case r := <-ch:
 		res, err = r.Val, r.Err
 	case <-ctx.Done():
-		return "", false, ctx.Err()
+		return FetchResult{}, ctx.Err()
 	}
 	if err != nil {
-		return "", false, err
+		return FetchResult{}, err
 	}
-	fr := res.(FetchResult)
-	return fr.JS, fr.Changed, nil
+	return res.(FetchResult), nil
 }
 
 // fetchInternal performs one (uncoalesced) round-trip. Always called via
@@ -645,7 +657,7 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 		_ = os.Remove(pc.FilePathSigSpec(playerURL))
 		pc.specMu.Unlock()
 
-		return FetchResult{JS: js, Changed: true}, nil
+		return FetchResult{JS: js, Changed: true, Replaced: cachedExists}, nil
 
 	default:
 		if cachedExists {
