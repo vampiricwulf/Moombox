@@ -32,10 +32,12 @@ type GojaResolver struct {
 	solverOrder []string
 	compileSlot compileSlot // serializes compilation to prevent thundering herd
 	// timedOut maps the CacheKey of a player whose compile ran out of
-	// compileTimeout to the time it may be compiled again. Read and written
-	// under timedOutMu; held to maxTimedOutPlayers entries.
+	// compileTimeout, or whose body the port could not prepare
+	// (ErrExtractorMismatch), to when it may be tried again and why it was
+	// refused. Read and written under timedOutMu; held to
+	// maxTimedOutPlayers entries.
 	timedOutMu sync.Mutex
-	timedOut   map[string]time.Time
+	timedOut   map[string]refusal
 	logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -71,10 +73,20 @@ func (c *compileSlot) release() { <-c.ch }
 var compileTimeout = 120 * time.Second
 
 // compileRefusal is how long a player whose compile ran out of
-// compileTimeout is refused instead of compiled again. Without it every
-// later request for that player re-ran the script for the full bound while
-// holding the compile slot.
+// compileTimeout, or whose body the port could not prepare, is refused
+// instead of tried again. Without it every later request for that player
+// re-ran the script for the full bound, or fetched and parsed the body again
+// (about 0.1 s and 110 MB at peak), while holding the compile slot. A body
+// that changes under the player's URL ends the refusal (unrefuse).
 const compileRefusal = 10 * time.Minute
+
+// refusal is one entry of the refusal list: until when, and the failure
+// that put it there (wrapping mbgoja.ErrExecutionTimeout or
+// ErrExtractorMismatch).
+type refusal struct {
+	until time.Time
+	cause error
+}
 
 // maxTimedOutPlayers caps the refusal list. Players rotate a few times a
 // week, so more than a handful at once means the list is being churned;
@@ -92,51 +104,74 @@ var ErrCompileRefused = errors.New("cipher: player compile timed out recently; n
 // refusedUntil returns when the player under key may be compiled again, or
 // the zero time when it is not refused. An expired entry is dropped.
 func (s *GojaResolver) refusedUntil(key string) time.Time {
-	s.timedOutMu.Lock()
-	defer s.timedOutMu.Unlock()
-	until, ok := s.timedOut[key]
-	if !ok {
-		return time.Time{}
-	}
-	if !resolverNow().Before(until) {
-		delete(s.timedOut, key)
-		return time.Time{}
-	}
-	return until
+	return s.refusalOf(key).until
 }
 
-// refuse records that the player under key timed out compiling.
-func (s *GojaResolver) refuse(key string) {
+// refusalOf returns the player's refusal, the zero one when it is not
+// refused. An expired entry is dropped.
+func (s *GojaResolver) refusalOf(key string) refusal {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	r, ok := s.timedOut[key]
+	if !ok {
+		return refusal{}
+	}
+	if !resolverNow().Before(r.until) {
+		delete(s.timedOut, key)
+		return refusal{}
+	}
+	return r
+}
+
+// unrefuse ends the player's refusal: its body changed, so the failure on
+// the old one says nothing about it.
+func (s *GojaResolver) unrefuse(key string) {
+	s.timedOutMu.Lock()
+	defer s.timedOutMu.Unlock()
+	delete(s.timedOut, key)
+}
+
+// refuse records that the player under key failed with cause: its compile
+// timed out, or the port could not prepare its body.
+func (s *GojaResolver) refuse(key string, cause error) {
 	s.timedOutMu.Lock()
 	defer s.timedOutMu.Unlock()
 	now := resolverNow()
 	if s.timedOut == nil {
-		s.timedOut = make(map[string]time.Time)
+		s.timedOut = make(map[string]refusal)
 	}
-	for k, until := range s.timedOut {
-		if !now.Before(until) {
+	for k, r := range s.timedOut {
+		if !now.Before(r.until) {
 			delete(s.timedOut, k)
 		}
 	}
 	for len(s.timedOut) >= maxTimedOutPlayers {
 		var oldest string
-		for k, until := range s.timedOut {
-			if oldest == "" || until.Before(s.timedOut[oldest]) {
+		for k, r := range s.timedOut {
+			if oldest == "" || r.until.Before(s.timedOut[oldest].until) {
 				oldest = k
 			}
 		}
 		delete(s.timedOut, oldest)
 	}
-	s.timedOut[key] = now.Add(compileRefusal)
+	s.timedOut[key] = refusal{until: now.Add(compileRefusal), cause: cause}
 }
 
-// refusedErr is the error for a refused player, or nil when it is not.
+// refusedErr is the error for a refused player, or nil when it is not. A
+// player the port could not prepare is refused with that failure, so the
+// error still wraps ErrExtractorMismatch.
 func (s *GojaResolver) refusedErr(key, playerID string) error {
-	until := s.refusedUntil(key)
-	if until.IsZero() {
+	r := s.refusalOf(key)
+	if r.until.IsZero() {
 		return nil
 	}
-	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until.Format(time.RFC3339))
+	until := r.until.Format(time.RFC3339)
+	if errors.Is(r.cause, ErrExtractorMismatch) {
+		s.logger.Debug("cipher: the goja port could not prepare this player lately; not preparing it again yet",
+			"playerID", playerID, "until", until)
+		return fmt.Errorf("cipher: player %s not prepared again until %s: %w", playerID, until, r.cause)
+	}
+	return fmt.Errorf("%w (player %s, until %s)", ErrCompileRefused, playerID, until)
 }
 
 // NewGojaResolver creates a new GojaResolver with the given cache directory.
@@ -241,13 +276,21 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	if err != nil {
 		// Don't cache errors — allow retry on next request (may be transient).
 		// The compileSlot serialization prevents thundering herd during this request.
-		// The one exception is a compile that ran out of compileTimeout: the
-		// script on disk is the same next time, so that player is refused for
+		// The exceptions are failures the player's body decides: a compile
+		// that ran out of compileTimeout, and a body the port could not
+		// prepare (ErrExtractorMismatch; a fetch failure never wraps it). The
+		// body is the same next time, so that player is refused for
 		// compileRefusal. A cancelled context is the caller's, not the player's.
 		if errors.Is(err, mbgoja.ErrExecutionTimeout) {
-			s.refuse(key)
+			s.refuse(key, err)
 			s.logger.Error("cipher: solver compilation timed out; refusing this player for a while",
 				"playerID", playerID, "timeout", compileTimeout, "refusedFor", compileRefusal)
+			return nil, err
+		}
+		if errors.Is(err, ErrExtractorMismatch) {
+			s.refuse(key, err)
+			s.logger.Warn("cipher: the goja port could not prepare this player; not trying it again for a while",
+				"playerID", playerID, "refusedFor", compileRefusal, "error", err.Error())
 			return nil, err
 		}
 		s.logger.Error("cipher: solver compilation failed", "playerID", playerID, "error", err.Error())
@@ -275,6 +318,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 	// rotates the JS while compileSolver is racing in.
 	if changed {
 		s.dropSolverData(CacheKey(playerURL))
+		s.unrefuse(CacheKey(playerURL))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -352,6 +396,7 @@ func (s *GojaResolver) InvalidateSolver(playerURL string) {
 		s.stsCache.InvalidateKey(key)
 	}
 	s.playerCache.Remove(playerURL)
+	s.unrefuse(key)
 	s.logger.Info("cipher: invalidated solver", "playerID", PlayerIDFromURL(playerURL))
 }
 
@@ -581,6 +626,7 @@ func (s *GojaResolver) PlayerJS(playerID string) (string, error) {
 	}
 	if changed {
 		s.dropSolverData(CacheKey(playerURL))
+		s.unrefuse(CacheKey(playerURL))
 	}
 	return js, nil
 }
