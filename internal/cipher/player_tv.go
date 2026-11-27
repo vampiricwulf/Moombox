@@ -44,7 +44,7 @@ func fetchTVPlayerJS(ctx context.Context, playerID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrPlayerJSFetch, err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", playerFetchUserAgent)
 	resp, err := playerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrPlayerJSFetch, err)
@@ -53,7 +53,7 @@ func fetchTVPlayerJS(ctx context.Context, playerID string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%w: %w", ErrPlayerJSFetch, playerFetchStatus(resp.StatusCode))
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB max, as PlayerCache reads
+	body, err := io.ReadAll(io.LimitReader(resp.Body, playerJSMaxBytes))
 	if err != nil {
 		return "", fmt.Errorf("%w: read body: %v", ErrPlayerJSFetch, err)
 	}

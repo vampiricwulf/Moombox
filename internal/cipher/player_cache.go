@@ -35,6 +35,14 @@ const (
 // transport for keep-alive amortisation across cipher / youtube / etc.
 var playerHTTPClient = httpx.Client(30 * time.Second)
 
+// playerFetchUserAgent and playerJSMaxBytes are what every GET of a player
+// file carries and how much of its body is read, for the main body
+// (fetchInternal) and the tv one (fetchTVPlayerJS) alike.
+const (
+	playerFetchUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+	playerJSMaxBytes     = 10 << 20 // 10MB
+)
+
 // playerFetchAttempts is how many times a COLD player GET — one with no
 // cached copy to serve instead — is made before Fetch fails with
 // ErrPlayerJSFetch (owner decision PR-R3: "retry a cold player GET 3 times").
@@ -491,7 +499,7 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 	if err != nil {
 		return FetchResult{}, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", playerFetchUserAgent)
 
 	if cachedExists {
 		meta := pc.readMeta(playerURL)
@@ -543,7 +551,7 @@ func (pc *PlayerCache) fetchInternal(ctx context.Context, playerURL string) (Fet
 		return FetchResult{JS: cachedJS, Changed: false}, nil
 
 	case http.StatusOK:
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB max player JS
+		body, err := io.ReadAll(io.LimitReader(resp.Body, playerJSMaxBytes))
 		if err != nil {
 			// A body that broke off mid-read — a reset, or the client's 30s
 			// timeout, which covers the body of a player of about 3 MB — is
