@@ -126,6 +126,8 @@ var (
 	bashOnce  sync.Once
 	bashFound string
 	bashSkip  string
+	// bashStub is Git for Windows' bin/bash.exe launcher (Windows only).
+	bashStub string
 	// bashDirs are the directories bashEnv puts first on PATH (Windows only).
 	bashDirs []string
 )
@@ -152,6 +154,9 @@ func findBash() {
 		if _, err := os.Stat(p); err == nil {
 			bashFound = p
 			bashDirs = []string{filepath.Join(root, "usr", "bin"), filepath.Join(root, "mingw64", "bin")}
+			if _, err := os.Stat(filepath.Join(root, "bin", "bash.exe")); err == nil {
+				bashStub = filepath.Join(root, "bin", "bash.exe")
+			}
 			return
 		}
 	}
@@ -436,41 +441,91 @@ func TestRunnerKeepsTheSourceAndRemovesItsCopies(t *testing.T) {
 
 // TestRunnerStopsAtOnceOnTerm sends TERM to a run whose test sleeps: the run
 // ends at once rather than when the test would, the test's processes are
-// ended, and nothing of the run is left. Ctrl+C (INT) takes the same trap,
-// which was checked by hand from a bash parent against a native process
-// tree (cmd.exe running ping): exit 130, the tree gone, nothing left. Sent
-// from this Go-started wrapper, INT did not reach the runner's trap, so TERM
-// stands in for it here.
+// ended, and nothing of the run is left, all by the runner's own trap (the
+// watchdog never acts). Ctrl+C (INT) takes the same trap, which was checked
+// by hand from a bash parent against a native process tree (cmd.exe running
+// ping): exit 130, the tree gone, nothing left. Sent from this Go-started
+// wrapper, INT did not reach the runner's trap, so TERM stands in for it here.
 func TestRunnerStopsAtOnceOnTerm(t *testing.T) {
 	t.Parallel()
-	runInterrupted(t, `kill -TERM $p`, "trap TERM")
+	runInterrupted(t, interrupt{kill: `kill -TERM $p`,
+		want: []string{"trap TERM", "cleanup done"}, forbid: []string{"watchdog: runner gone"}})
 }
 
 // TestRunnerCleansUpAfterAHardKill ends the runner's own bash with no chance
-// to run a trap (taskkill /F of its Windows process alone, or SIGKILL),
-// which is what CI's Windows runner once did to it: its watchdog then ends
-// the sleeping test and removes the run directory and the lock, so no
-// cookie copy waits for the next run's sweep.
+// to run a trap (taskkill /F of its Windows process alone, or SIGKILL): its
+// watchdog then ends the sleeping test and removes the run directory and the
+// lock, so no cookie copy waits for the next run's sweep.
 func TestRunnerCleansUpAfterAHardKill(t *testing.T) {
 	t.Parallel()
 	kill := `kill -KILL $p`
 	if runtime.GOOS == "windows" {
 		kill = `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' taskkill /F /PID "$(cat /proc/$p/winpid)"`
 	}
-	runInterrupted(t, kill, "watchdog: runner gone")
+	runInterrupted(t, interrupt{kill: kill, want: []string{"watchdog: runner gone", "watchdog: done"}})
 }
 
-// runInterrupted starts the runner on a test that sleeps for a minute, waits
-// until the test has started, runs kill (with $p the runner's pid) and checks
-// that the run ended at once, the test with it, and nothing was left. The
-// runner's trace (a test hook) must hold want. On failure it prints the
-// trace: which signal the trap saw, the pids kill_tree knew, and what
-// taskkill answered.
-func runInterrupted(t *testing.T, kill, want string) {
+// TestRunnerCleansUpAfterATrapThenAHardKill sends TERM and, while the trap's
+// cleanup runs, ends the runner's bash with no further chance (as a CI cancel
+// or docker stop does): the watchdog, which cleanup ends only last, finishes
+// the job, the rest of the tree cleanup had listed included. The cleanup is
+// held after it ends the first process of its list (MOOMBOX_LIVE_KILL_PAUSE),
+// so the hard kill lands there every time.
+func TestRunnerCleansUpAfterATrapThenAHardKill(t *testing.T) {
+	t.Parallel()
+	hard := `kill -KILL $p`
+	if runtime.GOOS == "windows" {
+		hard = `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' taskkill /F /PID "$w"`
+	}
+	kill := `w=$(cat /proc/$p/winpid 2>/dev/null); kill -TERM $p; ` +
+		`for _ in $(seq 1 300); do grep -q '^kill paused' "$TRACE" 2>/dev/null && break; sleep 0.1; done; ` + hard
+	runInterrupted(t, interrupt{kill: kill, pause: true,
+		want:   []string{"trap TERM", "kill paused", "watchdog: runner gone", "watchdog: ending what cleanup listed", "watchdog: done"},
+		forbid: []string{"cleanup done"}})
+}
+
+// TestRunnerCleansUpWhenItsLauncherIsSignalled starts the runner the way
+// "bash" from PowerShell or cmd does, through Git for Windows' bin/bash.exe
+// launcher stub, and sends TERM to the stub: the failure CI's Windows runner
+// once showed. Whether the runtime's native-kill emulation hands the runner a
+// TERM (its trap cleans up) or ends it with none (its watchdog does), the
+// test is ended and nothing is left.
+func TestRunnerCleansUpWhenItsLauncherIsSignalled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "windows" {
+		t.Skip("the launcher stub is Git for Windows'")
+	}
+	bashPath(t)
+	if bashStub == "" {
+		t.Skip("no bin/bash.exe launcher beside usr/bin/bash.exe")
+	}
+	runInterrupted(t, interrupt{launcher: bashStub, kill: `kill -TERM $p`,
+		anyOf: []string{"cleanup done", "watchdog: done"}})
+}
+
+// interrupt is one way of stopping the runner and what its trace must then
+// hold: every one of want, at least one of anyOf, none of forbid.
+type interrupt struct {
+	launcher, kill      string
+	pause               bool // the cleanup pauses after its first kill
+	want, anyOf, forbid []string
+}
+
+// runInterrupted starts the runner (through in.launcher when set) on a test
+// that sleeps for a minute, waits until the test has started, runs in.kill
+// (with $p the runner's pid and $TRACE its trace) and checks that the run
+// ended at once, the test with it, and nothing was left. The trace is logged
+// on every run: which signal the trap saw, the pids kill_tree knew, what
+// taskkill answered and what the watchdog did.
+func runInterrupted(t *testing.T, in interrupt) {
 	bash := bashPath(t)
+	launcher := in.launcher
+	if launcher == "" {
+		launcher = bash
+	}
 	r := newRunnerEnv(t, "sleep")
 	trace := filepath.Join(r.dir, "trace.txt")
-	r.env = append(r.env, "MOOMBOX_LIVE_TRACE="+filepath.ToSlash(trace))
+	r.env = append(r.env, "MOOMBOX_LIVE_TRACE="+filepath.ToSlash(trace), "TRACE="+filepath.ToSlash(trace))
 	wrapper := `"$@" & p=$!
 for _ in $(seq 1 100); do [ -s "$FAKE_RECORD" ] && break; sleep 0.2; done
 sleep 1
@@ -480,12 +535,13 @@ echo "wrapper: kill exit $?"
 wait $p
 echo "wrapper: runner exit $?"`
 	start := time.Now()
-	cmd := exec.Command(bash, "-c", wrapper, "wrap", bash, r.script, "--no-probe", "youtube-auth")
-	cmd.Env = append(r.env, "KILL="+kill)
+	cmd := exec.Command(bash, "-c", wrapper, "wrap", launcher, r.script, "--no-probe", "youtube-auth")
+	cmd.Env = append(r.env, "KILL="+in.kill)
+	if in.pause {
+		cmd.Env = append(cmd.Env, "MOOMBOX_LIVE_KILL_PAUSE=20")
+	}
 	out, _ := cmd.CombinedOutput()
 	took := time.Since(start)
-	// The trace is logged on every run (go test -v shows it), the console
-	// only on a failure.
 	defer func() {
 		tr, err := os.ReadFile(trace)
 		if err != nil {
@@ -503,15 +559,47 @@ echo "wrapper: runner exit $?"`
 	if len(readCalls(r.record)) != 1 {
 		t.Fatalf("the stand-in never started")
 	}
-	time.Sleep(65*time.Second - time.Since(start))
+	// The stand-in writes its record as it starts and .late 60 s later: wait
+	// until well past that, timed from the record, not from this test's start
+	// (the runner builds its helper first, which on a cold machine is slow).
+	st, err := os.Stat(r.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(st.ModTime().Add(63 * time.Second)))
 	if _, err := os.Stat(r.record + ".late"); err == nil {
 		t.Error("the sleeping test outlived the interrupted run")
 	}
-	if left := r.leftovers(); len(left) != 0 {
+	// The watchdog may still be removing what it found: give it a moment.
+	var left []string
+	for i := 0; i < 10; i++ {
+		if left = r.leftovers(); len(left) == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if len(left) != 0 {
 		t.Errorf("left behind after an interrupt: %v", left)
 	}
-	if tr, _ := os.ReadFile(trace); !strings.Contains(string(tr), want) {
-		t.Errorf("the runner's trace lacks %q", want)
+	tr, _ := os.ReadFile(trace)
+	for _, w := range in.want {
+		if !strings.Contains(string(tr), w) {
+			t.Errorf("the runner's trace lacks %q", w)
+		}
+	}
+	for _, f := range in.forbid {
+		if strings.Contains(string(tr), f) {
+			t.Errorf("the runner's trace holds %q", f)
+		}
+	}
+	if len(in.anyOf) > 0 {
+		found := false
+		for _, a := range in.anyOf {
+			found = found || strings.Contains(string(tr), a)
+		}
+		if !found {
+			t.Errorf("the runner's trace holds none of %q", in.anyOf)
+		}
 	}
 }
 
