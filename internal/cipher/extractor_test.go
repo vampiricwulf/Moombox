@@ -37,6 +37,17 @@ func TestEjsPortPinMatchesVendoredEjs(t *testing.T) {
 // two side-effect statements that throw if they run are in the body: ejs
 // drops them.
 func synthPlayer(builders string) string {
+	return synthPlayerWithPool(splitPool, builders)
+}
+
+// splitPool is the string pool real players mostly carry, a split string:
+// "set" at 1, "alr" at 2, "yes" at 3, so the pool numbers extractArray
+// reduces it to are [1, 1^2, 2^3] = [1, 3, 1].
+const splitPool = `var P="x;set;alr;yes".split(";");`
+
+// synthPlayerWithPool is synthPlayer with pool, the statement that defines
+// the string pool P, in place of splitPool.
+func synthPlayerWithPool(pool, builders string) string {
 	return `var _yt_player={};(function(g){var window=this;
 g.inh=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a};
 var Base=function(){};
@@ -50,7 +61,7 @@ var sx=function(a){a=a.split("");var c=a[0];a[0]=a[a.length-1];a[a.length-1]=c;r
 U.prototype.fin=function(){if(this.p.n!=null)this.p.n=nx(this.p.n);if(this.p.s!=null)this.p.s=encodeURIComponent(sx(decodeURIComponent(this.p.s)))};
 document.title.length;
 boom();
-var P="x;set;alr;yes".split(";");
+` + pool + `
 ` + builders + `
 })(_yt_player);
 `
@@ -70,25 +81,62 @@ g.use=function(){return B(4,"https://example.com/")};`
 	builderPoolOp = `var B=function(a,b,c){var k=g.K^9;var d=new U(a,!0);d[P[k^5]](P[k^6],P[k^7]);if(c)d.set(b,c);return d};`
 )
 
-// TestPreprocessPlayerRoutes: each of the four ways ejs matches the
-// URL-builder function prepares a player that solves n and sig, the
-// signature with a '%' in it included. A signature handed to the player
-// without ejs's encodeURIComponent throws "URI malformed" there.
+// poolBuilder is a builder that reads its key k (4) from what head
+// computes, ahead of the pool call. params are its leading parameters.
+func poolBuilder(params, head string) string {
+	return `var B=function(` + params + `a,b,c){` + head + `var d=new U(a,!0);d[P[k^5]](P[k^6],P[k^7]);if(c)d.set(b,c);return d};`
+}
+
+// bigArrayPool is the pool as a literal array of more than 500 strings, the
+// other form extractArray reads, with "set", "alr" and "yes" where
+// splitPool has them.
+func bigArrayPool() string {
+	return `var P=["x","set","alr","yes"` + strings.Repeat(`,"z"`, 600) + `];`
+}
+
+// TestPreprocessPlayerRoutes: each of the ways ejs matches the URL-builder
+// function prepares a player that solves n and sig, the signature with a '%'
+// in it included. A signature handed to the player without ejs's
+// encodeURIComponent throws "URI malformed" there. The tcl bodies (the
+// string-pool routes) take branches the two committed fixture players
+// (alr) never reach, and the vector bodies that do are a download CI does
+// not make; each such branch has a row here. The pool-args rows pass two
+// literals of which only one operator gives the key 4 (1^5, 1+3, 9-5), and
+// the pool-op rows read the key through each operator resolveOp knows, set
+// as ejs sets it: g.K%9 from g.K = 4 (9 > 4), g.K+2 from 2, 10-g.K from 6,
+// g.K-3 from 7, g.K&7 and g.K|4 from 4, and g.K itself from 4.
 //
 // Mutants: createSolver not escaping the signature (the '%' rows fail);
 // the prototype-helper call dropped (no fin, so nothing transforms); the
 // side-effect calls kept (boom() throws); any route's match broken (no
 // solver, ErrExtractorMismatch); findArgs or resolveOp computing another key
-// (the pool call sets no alr, so the URL has no s and n is unchanged).
+// (the pool call sets no alr, so the URL has no s and n is unchanged);
+// findArgs' two-argument branch dropped, or one of its operators (the
+// pool-args rows of two literals); one of resolveOp's operator cases or its
+// plain-member case dropped (that pool-op row); extractArray's literal-array
+// branch dropped (the array-pool row); hasNewWithTrue's `true` arm dropped
+// (the new-with-true row).
 func TestPreprocessPlayerRoutes(t *testing.T) {
-	for _, tc := range []struct{ route, builders string }{
-		{"alr", builderAlr},
-		{"pool-direct", builderPoolDirect},
-		{"pool-args", builderPoolArgs},
-		{"pool-op", builderPoolOp},
+	for _, tc := range []struct{ name, route, src string }{
+		{"alr", "alr", synthPlayer(builderAlr)},
+		{"pool-direct", "pool-direct", synthPlayer(builderPoolDirect)},
+		{"pool-args, the key itself", "pool-args", synthPlayer(builderPoolArgs)},
+		{"pool-args, x^y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x^y;") + `g.use=function(){return B(1,5,"u")};`)},
+		{"pool-args, x+y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x+y;") + `g.use=function(){return B(1,3,"u")};`)},
+		{"pool-args, x-y", "pool-args", synthPlayer(poolBuilder("x,y,", "var k=x-y;") + `g.use=function(){return B(9,5,"u")};`)},
+		{"pool-op, g.K^9", "pool-op", synthPlayer(builderPoolOp)},
+		{"pool-op, g.K%9", "pool-op", synthPlayer(poolBuilder("", "var k=g.K%9;"))},
+		{"pool-op, g.K+2", "pool-op", synthPlayer(poolBuilder("", "var k=g.K+2;"))},
+		{"pool-op, 10-g.K", "pool-op", synthPlayer(poolBuilder("", "var k=10-g.K;"))},
+		{"pool-op, g.K-3", "pool-op", synthPlayer(poolBuilder("", "var k=g.K-3;"))},
+		{"pool-op, g.K&7", "pool-op", synthPlayer(poolBuilder("", "var k=g.K&7;"))},
+		{"pool-op, g.K|4", "pool-op", synthPlayer(poolBuilder("", "var k=g.K|4;"))},
+		{"pool-op, g.K", "pool-op", synthPlayer(poolBuilder("", "var k=g.K;"))},
+		{"pool as a literal array", "pool-direct", synthPlayerWithPool(bigArrayPool(), builderPoolDirect)},
+		{"new with true", "pool-direct", synthPlayer(strings.Replace(builderPoolDirect, "new U(a,!0)", "new U(a,true)", 1))},
 	} {
-		t.Run(tc.route, func(t *testing.T) {
-			code, st, err := preprocessPlayer(synthPlayer(tc.builders))
+		t.Run(tc.name, func(t *testing.T) {
+			code, st, err := preprocessPlayer(tc.src)
 			if err != nil {
 				t.Fatalf("preprocessPlayer: %v", err)
 			}
