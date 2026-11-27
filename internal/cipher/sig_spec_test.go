@@ -345,8 +345,9 @@ func (s *specGoja) putSigSpec(playerID string, length int, spec []int) {
 }
 
 // Batch learns from a sidecar batch, and while the sidecar is down answers
-// the sigs from the specs and the ns from goja; one sig with no spec still
-// fails the batch, as before.
+// the sigs from the specs and the ns from goja; one sig with no spec goes
+// to goja, last, and fails the batch when goja (here, with no sig answers)
+// cannot answer it either.
 //
 // Mutants: Batch not learning on success; the failed-sidecar arm returning
 // the error with specs present; the nil-sidecar arm returning
@@ -370,7 +371,7 @@ func TestBatchAnswersSigsFromSpecsWhileTheSidecarIsDown(t *testing.T) {
 		t.Fatalf("Batch with the sidecar failing = %v, %v; want sig from the spec and n from goja", sr, nr)
 	}
 	if _, _, err := c.Batch(ctx, specPlayer, []string{sigB, sigB + "x"}, nil); err == nil {
-		t.Fatalf("Batch with one sig of an unlearned length: want the sidecar's error")
+		t.Fatalf("Batch with one sig of an unlearned length goja cannot answer: want the sidecar's error")
 	}
 
 	c.SetSidecar(nil)

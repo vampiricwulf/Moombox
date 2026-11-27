@@ -38,9 +38,8 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 			// it — the CDN deterministically 403s an unsigned URL. Failing
 			// here gives the caller an actionable error (invalidate / retry /
 			// exclude format) instead of silently returning a URL that turns
-			// into downstream 403 churn. Modern players routinely defeat the
-			// goja sig extractor, so this fires whenever the sidecar route is
-			// unavailable for a sig-bearing format.
+			// into downstream 403 churn. The Go port of ejs prepares a player
+			// with both functions or not at all, so this is a guard.
 			return nil, fmt.Errorf("decrypt signature: no sig solver available for player %s", PlayerIDFromURL(req.PlayerURL))
 		}
 		decryptedSig, err := solvers.DecryptSig(req.EncryptedSignature)

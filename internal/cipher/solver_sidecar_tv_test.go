@@ -401,10 +401,11 @@ func TestTVFetchRefusesANonPlayerID(t *testing.T) {
 	}
 }
 
-// TestGojaAnswersTheSigAloneTheNStaysRouted: a signature the routed solver
-// could not answer is goja's to try, last. The n of the same URL is still
-// the routed solver's first: it used to go to goja with the signature, in
-// one gojaResolver.ResolveURL, without the sidecar having been asked for it.
+// TestGojaAnswersTheSigAloneTheNStaysRouted: a signature the sidecar could
+// not answer is goja's to try, last, inside the composite. The n of the same
+// URL is still the sidecar's first: it used to go to goja with the
+// signature, in one gojaResolver.ResolveURL, without the sidecar having been
+// asked for it.
 //
 // Mutant: the sig failure handing the whole URL back to
 // gojaResolver.ResolveURL (the URL carries goja's n).
@@ -417,7 +418,7 @@ func TestGojaAnswersTheSigAloneTheNStaysRouted(t *testing.T) {
 		Sig: func(s string) (string, error) { return "goja-sig", nil },
 		N:   func(s string) (string, error) { return "goja-n", nil },
 	})
-	routed := &staticSolver{sigErr: ErrPlayerJSStale, n: map[string]string{"rawnvalue": "routed-n"}}
+	routed := newCompositeSolverWith(&staticSolver{sigErr: ErrPlayerJSStale, n: map[string]string{"rawnvalue": "routed-n"}}, g)
 	res, err := RoutedResolveURL(context.Background(), routed, g, ResolveURLRequest{
 		PlayerURL:          nTestPlayerURL,
 		StreamURL:          "https://example.com/videoplayback?n=rawnvalue",

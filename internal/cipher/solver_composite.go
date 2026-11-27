@@ -35,8 +35,8 @@ type SidecarSwappable interface {
 	Solver
 	SetSidecar(sidecar Solver)
 	// SidecarReady reports whether a sidecar half is installed and its child
-	// is up — whether player JS challenges (sig above all, which is
-	// sidecar-only) can be solved at all right now. See compositeSolver's.
+	// is up — whether player JS challenges can be solved by the sidecar
+	// right now, rather than by the goja fallback alone. See compositeSolver's.
 	SidecarReady() bool
 }
 
@@ -54,27 +54,32 @@ func solverReady(s Solver) bool {
 	return !ok || r.ready()
 }
 
-// compositeSolver routes cipher requests across two underlying solvers
-// per the policy in docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md
+// compositeSolver routes cipher requests across two underlying solvers, and
+// is the one place that decides the order they are asked in (owner rulings
+// RV-11 and RV-12):
+//
+//	sig: the sidecar, which asks ejs on the player's main body and then on
+//	     its tv body (sidecarSolver.solve); then the player's learned sig
+//	     spec; then, within the readiness grace of a sidecar outage, the
+//	     sidecar once it is back (PR-R3); then goja, last.
+//	n:   the sidecar (main body, then tv body), then goja.
+//
+// Goja runs the Go port of the same ejs (preprocessPlayer), so its answers
+// are ejs's; it is still asked last, because the sidecar is the solver ejs
+// itself runs in and a healthy one is never passed over. RoutedResolveURL and
+// RoutedDecryptNInURL ask this solver; they do not ask goja for a signature
+// themselves.
+//
+// The routing was first written down in
+// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md section 7
 // (removed after implementation; read it from git history, e.g. `git show
-// 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)
-// section 7:
+// 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`),
+// when goja's regex extractor could not solve current players' signatures
+// and sig was sidecar-only.
 //
-//	sig: sidecar, then the player's learned sig spec. Goja sig is dead on
-//	     current players. If the sidecar fails and no spec is stored for
-//	     the signature's length, we surface the error.
-//	n:   sidecar primary, goja fallback. n stays available even if
-//	     the sidecar is down.
-//
-// The sidecar half itself asks ejs on the player's main body and then on
-// its tv body (sidecarSolver.solve), so for both operations goja comes after
-// everything the sidecar can try (owner ruling RV-11): here for n, and for a
-// signature in RoutedResolveURL, which asks the goja resolver once this
-// solver's Sig has failed.
-//
-// One of sidecar or goja may be nil. A nil sidecar means sig fails
-// with ErrSidecarUnavailable, unless a spec answers it; a nil goja means n
-// has no fallback.
+// One of sidecar or goja may be nil. A nil sidecar means a signature no
+// spec answers goes to goja; a nil goja means neither has a fallback, and
+// sig then fails with ErrSidecarUnavailable.
 //
 // The sig spec (audit G49) is yt-dlp's: a signature function only moves
 // characters around, so solving the synthetic challenge chr(0)..chr(L-1)
@@ -84,10 +89,10 @@ func solverReady(s Solver) bool {
 // 3311-3334 at b77c9304e, stored on disk). yt-dlp answers every signature
 // from the spec; Moombox keeps the sidecar's direct answer as the primary
 // and the spec as what answers while the sidecar is down, restarting, or
-// switched off after having run, which is the outage that otherwise lost
-// every signatureCipher format for players already known. Beyond upstream,
-// a spec is kept only once it reproduces the sidecar's own answer for a real
-// signature of that length.
+// switched off after having run, ahead of goja's compile of the player.
+// Beyond upstream, a spec is kept only once it reproduces the answer of the
+// solver that answered a real signature of that length: the sidecar, or
+// goja when it was goja that answered.
 type compositeSolver struct {
 	// mu guards sidecarSolver only. goja is fixed at construction.
 	mu            sync.RWMutex
@@ -299,10 +304,33 @@ func sidecarDown(sc Solver, err error) error {
 	return fmt.Errorf("%w: the sidecar is not running: %w", ErrSidecarUnavailable, err)
 }
 
-// Sig asks the sidecar, and answers from the player's sig spec when the
-// sidecar is absent or fails. A context that has ended is the caller's own
-// error, not an outage, and is surfaced as it is.
+// Sig asks the sidecar, answers from the player's sig spec when the sidecar
+// is absent or fails, and asks goja last (owner ruling RV-12). A context that
+// has ended is the caller's own error, not an outage, and is surfaced as it
+// is, goja not asked.
 func (c *compositeSolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
+	out, err := c.sidecarSig(ctx, playerID, encryptedSig)
+	if err == nil {
+		return out, nil
+	}
+	if c.goja == nil || ctx.Err() != nil {
+		return "", err
+	}
+	c.noteGojaFall(ctx, playerID, "sig", err)
+	out, gerr := c.goja.Sig(ctx, playerID, encryptedSig)
+	if gerr != nil {
+		// What the sidecar failed with stays the one errors.Is sees
+		// (ErrSidecarUnavailable, ErrPlayerJSStale): the worker reads it as
+		// a failure every format of the player shares.
+		return "", fmt.Errorf("%w (goja fallback: %v)", err, gerr)
+	}
+	c.learnSigSpecs(ctx, c.goja, playerID, map[string]string{encryptedSig: out})
+	return out, nil
+}
+
+// sidecarSig is everything Sig tries ahead of goja: the sidecar, the sig
+// spec, and the sidecar again once it is back within the readiness grace.
+func (c *compositeSolver) sidecarSig(ctx context.Context, playerID, encryptedSig string) (string, error) {
 	sc := c.sidecar()
 	if sc == nil {
 		if out, ok := c.sigFromSpec(playerID, encryptedSig); ok {
@@ -366,18 +394,12 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 	return c.goja.N(ctx, playerID, encryptedN)
 }
 
-// gojaFallNoter is the routed solver's way to be told that a caller is about
-// to ask goja for what it failed (RoutedResolveURL, for a signature).
-// compositeSolver is the one that has it.
-type gojaFallNoter interface {
-	noteGojaFall(ctx context.Context, playerID, op string, err error)
-}
-
 // noteGojaFall logs, once per player, that a solve the sidecar failed (err)
-// goes to goja, the last solver asked. Goja's answers are not to be relied on
-// for current players, so the operator is told the first time a player gets
-// there; the line carries what the sidecar failed with, the main body's
-// failure and the tv body's.
+// goes to goja, the last solver asked. Goja runs the Go port of the ejs the
+// sidecar runs, but a player ejs cannot solve with on either body is one the
+// port is not likely to solve either, so the operator is told the first time
+// a player gets there; the line carries what the sidecar failed with, the
+// main body's failure and the tv body's.
 //
 // The Warn is kept for a solve the sidecar was there for and that failed on
 // the player itself (playerFailure): ejs cannot solve with it on either body,
@@ -405,25 +427,16 @@ func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string,
 	if !c.players.firstGojaFall(playerID) {
 		return
 	}
-	slog.Warn("cipher: the sidecar could not solve for this player; goja, the last solver asked, is tried, and its answers may be refused",
+	slog.Warn("cipher: the sidecar could not solve for this player; goja, the last solver asked, is tried",
 		"playerID", playerID, "challenge", op, "err", err)
 }
 
 // Batch combines sig and n decryption into a single solver call where
-// possible. The composite issues ONE sidecar call for both arrays;
-// only on sidecar failure do we fall through to per-element goja for
-// the n entries. Sig has no goja fallback (sidecar-only routing
-// policy from the spec).
-//
-// TRADE-OFF: when both sigs and ns are non-empty and the sidecar call
-// fails, the n entries that goja could have served are lost too —
-// the entire batch errors. The pre-5cc4e5b two-call design avoided
-// this at the cost of a second round-trip on every healthy mixed
-// batch. The single-call design is correct for the steady state
-// (sidecar healthy → one round-trip) but trades resilience: a
-// transient sidecar hiccup with mixed input fails the whole batch.
-// Callers that want max resilience should call Sig and N separately;
-// Batch is for callers that prioritise round-trip count.
+// possible. The composite issues ONE sidecar call for both arrays, and asks
+// in Sig's and N's order when it fails: the signatures from the player's sig
+// specs, and from goja for any no spec answers (owner ruling RV-12), and the
+// n entries from goja. A mixed batch the sidecar cannot answer is no longer
+// lost whole: it used to fail as soon as one signature had no spec.
 //
 // Implementations MUST return a result for every input in sigs and
 // ns on success, or return an error. Partial maps are a contract
@@ -438,6 +451,10 @@ func (c *compositeSolver) noteGojaFall(ctx context.Context, playerID, op string,
 func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	sigResults := map[string]string{}
 	nResults := map[string]string{}
+	// sigErr is why the signatures got no answer ahead of goja; nil while
+	// they have one, or there are none.
+	var sigErr error
+	sigsAnswered := len(sigs) == 0
 
 	sc := c.sidecar()
 	if sc != nil && !solverReady(sc) {
@@ -446,13 +463,11 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 		// readiness grace, as Sig's do (PR-R3), and go to it once it is back.
 		down := sc
 		sc = nil
-		if len(sigs) > 0 {
-			var ok bool
-			if sigResults, ok = c.sigsFromSpecs(playerID, sigs); !ok {
-				if sc = c.awaitSidecar(ctx); sc == nil {
-					return nil, nil, sidecarDown(down, nil)
-				}
-				sigResults = map[string]string{}
+		if !sigsAnswered {
+			if res, ok := c.sigsFromSpecs(playerID, sigs); ok {
+				sigResults, sigsAnswered = res, true
+			} else if sc = c.awaitSidecar(ctx); sc == nil {
+				sigErr = sidecarDown(down, nil)
 			}
 		}
 	} else if sc != nil {
@@ -474,32 +489,58 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 			}
 			return sr, nr, nil
 		}
-		// Sidecar failed. Sig has no goja fallback, only the player's sig
-		// specs: if any sigs were requested and a spec does not answer every
-		// one, surface the error — typed as Sig types it, when the child is
-		// down. n falls back to goja per-element.
-		if len(sigs) > 0 {
+		// Sidecar failed: the signatures from the specs if they answer
+		// every one, goja below otherwise; typed as Sig types it, when the
+		// child is down. n falls back to goja per-element.
+		if !sigsAnswered {
 			if ctx.Err() != nil {
 				return nil, nil, err
 			}
-			var ok bool
-			if sigResults, ok = c.sigsFromSpecs(playerID, sigs); !ok {
-				return nil, nil, sidecarDown(sc, err)
+			if res, ok := c.sigsFromSpecs(playerID, sigs); ok {
+				sigResults, sigsAnswered = res, true
+			} else {
+				sigErr = sidecarDown(sc, err)
 			}
 		}
-		if len(ns) > 0 && c.goja != nil {
-			c.noteGojaFall(ctx, playerID, "n", err)
+		if c.goja != nil && (len(ns) > 0 || sigErr != nil) {
+			op := "n"
+			if sigErr != nil {
+				op = "sig"
+			}
+			c.noteGojaFall(ctx, playerID, op, err)
 		}
-	} else if len(sigs) > 0 {
-		// No sidecar configured but sig requested: the specs or nothing.
-		var ok bool
-		if sigResults, ok = c.sigsFromSpecs(playerID, sigs); !ok {
-			return nil, nil, ErrSidecarUnavailable
+	} else if !sigsAnswered && sigErr == nil {
+		// No sidecar configured: the specs, then goja.
+		if res, ok := c.sigsFromSpecs(playerID, sigs); ok {
+			sigResults, sigsAnswered = res, true
+		} else {
+			sigErr = ErrSidecarUnavailable
 		}
 	}
 
-	// We're here because: sidecar nil with no sigs, OR sidecar n-batch failed.
-	// Either way, n has to come from goja.
+	if sigErr != nil {
+		// Goja, last, for every signature no spec answers.
+		if c.goja == nil || ctx.Err() != nil {
+			return nil, nil, sigErr
+		}
+		fromGoja := map[string]string{}
+		for _, sig := range sigs {
+			if out, ok := c.sigFromSpec(playerID, sig); ok {
+				sigResults[sig] = out
+				continue
+			}
+			out, err := c.goja.Sig(ctx, playerID, sig)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w (goja fallback: %v)", sigErr, err)
+			}
+			sigResults[sig] = out
+			fromGoja[sig] = out
+		}
+		c.learnSigSpecs(ctx, c.goja, playerID, fromGoja)
+	}
+
+	// n comes from goja here: the sidecar is not configured, down, or
+	// failed the batch.
 	if len(ns) > 0 {
 		if c.goja == nil {
 			return nil, nil, errors.New("cipher: no solver available for n batch")
@@ -573,10 +614,10 @@ func sigSpecKey(playerID string, length int) string {
 }
 
 // learnSigSpecs stores a spec for every signature length in solved (real
-// signatures the sidecar has just answered, mapped to its answers) that the
-// player has none for yet. One extra sidecar call asks the synthetic
-// challenge of every such length; its answer becomes a spec only if it
-// reproduces the sidecar's answer for the real signature of that length.
+// signatures sc has just answered, mapped to its answers) that the player
+// has none for yet. One extra call of sc asks the synthetic challenge of
+// every such length; its answer becomes a spec only if it reproduces sc's
+// answer for the real signature of that length.
 // yt-dlp keeps the synthetic answer as it comes (_video.py:3325-3331);
 // the check here is Moombox's own, as the spec is used only when the sidecar
 // is not there to be asked, and a wrong one would build URLs that 403.
@@ -586,6 +627,13 @@ func sigSpecKey(playerID string, length int) string {
 // synthetic challenge fails; its failure costs only the spec, and the caller
 // already has its answer. The challenge goes through the sidecar's probe
 // path, which never runs the stale-JS recovery a real signature gets.
+//
+// sc is the solver that answered: the sidecar half, or goja when it was
+// asked last (owner ruling RV-12). Goja answers the synthetic challenge
+// through GojaResolver.Batch, the challenge percent-escaped on its way into
+// the player as ejs does it. Goja's failures are kept in neither refused nor
+// failed, which are the sidecar's: a goja-answered signature asks goja's
+// synthetic challenge again until a spec is stored.
 func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID string, solved map[string]string) {
 	if c.specs == nil {
 		return
@@ -644,15 +692,24 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 	} else {
 		answers, _, err = sc.Batch(ctx, playerID, synth, nil)
 	}
+	// What goja does with the challenge says nothing about the sidecar:
+	// refused and failed are the sidecar's, and a mark from goja would stop
+	// the sidecar learning the same length later.
+	mark := func(set map[string]struct{}, n int) {
+		if sc == c.goja {
+			return
+		}
+		c.specMu.Lock()
+		set[sigSpecKey(playerID, n)] = struct{}{}
+		c.specMu.Unlock()
+	}
 	if err != nil {
 		// The caller's own ended context says nothing about the challenge:
 		// the next signature asks it again.
 		if ctx.Err() == nil {
-			c.specMu.Lock()
 			for n := range samples {
-				c.failed[sigSpecKey(playerID, n)] = struct{}{}
+				mark(c.failed, n)
 			}
-			c.specMu.Unlock()
 		}
 		slog.Debug("cipher: sig spec: synthetic challenge failed", "playerID", playerID, "err", err)
 		return
@@ -660,9 +717,7 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 	for n, smp := range samples {
 		ans, ok := answers[syntheticSigChallenge(n)]
 		if !ok {
-			c.specMu.Lock()
-			c.refused[sigSpecKey(playerID, n)] = struct{}{}
-			c.specMu.Unlock()
+			mark(c.refused, n)
 			continue
 		}
 		spec := make([]int, 0, len(ans))
@@ -670,10 +725,8 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 			spec = append(spec, int(r))
 		}
 		if got, ok := applySigSpec([]rune(smp.in), spec); !ok || got != smp.out || len(spec) == 0 {
-			c.specMu.Lock()
-			c.refused[sigSpecKey(playerID, n)] = struct{}{}
-			c.specMu.Unlock()
-			slog.Debug("cipher: sig spec: synthetic answer does not reproduce the sidecar's, not stored",
+			mark(c.refused, n)
+			slog.Debug("cipher: sig spec: synthetic answer does not reproduce the real one's, not stored",
 				"playerID", playerID, "length", n)
 			continue
 		}
@@ -685,4 +738,3 @@ func (c *compositeSolver) learnSigSpecs(ctx context.Context, sc Solver, playerID
 // swappable variant the BotGuard sidecar supervisor installs restarts through.
 var _ Solver = (*compositeSolver)(nil)
 var _ SidecarSwappable = (*compositeSolver)(nil)
-var _ gojaFallNoter = (*compositeSolver)(nil)

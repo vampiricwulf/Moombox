@@ -111,10 +111,8 @@ type ResolveURLResponse struct {
 
 // Solver is the contract for cipher solving. Sig and N each take the
 // encrypted parameter value plus the playerID that produced it; both
-// return the decrypted value. A solver that cannot serve sig (e.g., a
-// legacy in-process extractor on a current player) returns
-// ErrSigUnavailable from Sig; the composite solver routes around such
-// solvers for sig.
+// return the decrypted value. A solver that cannot serve sig for a player
+// returns ErrSigUnavailable from Sig.
 //
 // Batch is a hint that callers can use to amortise per-implementation
 // overhead when a manifest yields multiple sig and/or n challenges

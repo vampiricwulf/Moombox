@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -69,13 +70,24 @@ func TestCompositeSig_RoutesToSidecar(t *testing.T) {
 	}
 }
 
-func TestCompositeSig_DoesNotFallBackToGoja(t *testing.T) {
-	side := &staticSolver{sigErr: errors.New("sidecar down")}
-	goja := &staticSolver{sig: map[string]string{"X": "gojaX"}}
-	c := newCompositeSolverWith(side, goja)
+// TestCompositeSigAsksGojaLast (owner ruling RV-12): a signature the
+// sidecar fails, with no spec for it, is goja's to answer. When goja fails
+// too, the sidecar's failure stays the one errors.Is sees, and goja's rides
+// along in the text.
+//
+// Mutants: Sig not asking goja (the first row fails); the error wrapping
+// goja's failure instead (errors.Is fails).
+func TestCompositeSigAsksGojaLast(t *testing.T) {
+	side := &staticSolver{sigErr: fmt.Errorf("%w: ejs solve sig: no solutions", ErrPlayerJSStale)}
+	c := newCompositeSolverWith(side, &staticSolver{sig: map[string]string{"X": "gojaX"}})
+	if got, err := c.Sig(context.Background(), "P1", "X"); err != nil || got != "gojaX" {
+		t.Errorf("sidecar failed: Sig = %q, %v; want goja's answer", got, err)
+	}
 
-	if _, err := c.Sig(context.Background(), "P1", "X"); err == nil {
-		t.Fatalf("expected error when sidecar fails sig; got nil")
+	c = newCompositeSolverWith(side, &staticSolver{sigErr: errors.New("goja: no solutions")})
+	_, err := c.Sig(context.Background(), "P1", "X")
+	if !errors.Is(err, ErrPlayerJSStale) || !strings.Contains(err.Error(), "goja fallback: goja: no solutions") {
+		t.Errorf("both failed: err = %v; want ErrPlayerJSStale with goja's failure in the text", err)
 	}
 }
 
@@ -114,8 +126,8 @@ func TestCompositeWithoutSidecar_GojaOnly(t *testing.T) {
 	}
 	c := newCompositeSolverWith(nil, goja)
 
-	if _, err := c.Sig(context.Background(), "P1", "X"); err == nil {
-		t.Errorf("expected sig to fail when sidecar absent; got nil")
+	if got, err := c.Sig(context.Background(), "P1", "X"); err != nil || got != "gojaX" {
+		t.Errorf("Sig with no sidecar = %q, %v; want goja's answer", got, err)
 	}
 	got, err := c.N(context.Background(), "P1", "Y")
 	if err != nil {
@@ -294,7 +306,8 @@ func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []st
 }
 
 // TestCompositeSetSidecarSwapsTheSigPath pins the seam the BotGuard sidecar
-// supervisor needs. sig is sidecar-ONLY (the routing policy), so a process
+// supervisor needs. Goja is asked for a signature only last (the routing
+// policy; here it cannot answer one), so a process
 // whose sidecar died and came back must be able to install the REBUILT
 // sidecar solver — the old one's per-player "already sent" map describes the
 // dead child's memory. Before this, the sidecar half was captured at
@@ -305,7 +318,7 @@ func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []st
 //   - Sig reading a value snapshotted in the ctor → the first Sig still errors
 //   - SetSidecar(nil) not clearing the slot       → the last Sig returns "S"
 func TestCompositeSetSidecarSwapsTheSigPath(t *testing.T) {
-	goja := &staticSolver{sig: map[string]string{"x": "goja-should-never-serve-sig"}}
+	goja := &staticSolver{sigErr: errors.New("goja: no solutions")}
 	c := NewCompositeSolver(nil, goja)
 
 	if _, err := c.Sig(context.Background(), "p1", "x"); !errors.Is(err, ErrSidecarUnavailable) {

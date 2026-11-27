@@ -960,8 +960,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// `git show 67755b9:docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md`)).
 	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
 	// only constructed when the sidecar is healthy. compositeSolver
-	// applies the routing policy (sig: sidecar, then the sig specs; n: sidecar,
-	// then goja; RoutedResolveURL asks goja last for a signature too). PlayerAPI continues to take *GojaResolver directly
+	// applies the routing policy and is the one place that decides it (sig:
+	// sidecar, then the sig specs, then goja; n: sidecar, then goja; owner
+	// rulings RV-11 and RV-12). PlayerAPI continues to take *GojaResolver directly
 	// so its existing GetSolvers/GetSts call sites work unchanged; the
 	// composite is constructed for downstream callers that take the
 	// cipher.Solver interface (currently a placeholder until those

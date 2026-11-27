@@ -43,18 +43,16 @@ func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureReques
 	return resp, nil
 }
 
-// RoutedResolveURL applies sig and n-param decryption to a stream URL, routing
-// through the composite Solver first (the sidecar on the player's main body,
-// then on its tv body; the sig spec for a signature). The goja resolver is
-// asked last, and for each challenge on its own (owner ruling RV-11): for the
-// signature once the routed solver has failed it (gojaSig), and for the n
-// through solveN. A signature goja had to answer used to hand the whole URL
-// to gojaResolver.ResolveURL, which then solved the n with goja as well,
-// without the sidecar having been asked for it.
+// RoutedResolveURL applies sig and n-param decryption to a stream URL
+// through the routed Solver, the composite, which alone decides the order its
+// solvers are asked in (owner rulings RV-11 and RV-12): the sidecar on the
+// player's main body, then on its tv body, the sig spec for a signature, and
+// goja last. The signature is the routed solver's alone: this function used
+// to ask the goja resolver for it itself once the routed solver had failed,
+// a second place deciding the order. The n goes through solveN, the routed
+// solver first and the goja resolver's own compile after it.
 //
-// This is the worker-side equivalent of PlayerAPI.decryptN:
-// it keeps the worker's URL-resolution call sites routing through the sidecar
-// on cb017549-family players where the goja extractor cannot produce a sig.
+// This is the worker-side equivalent of PlayerAPI.decryptN.
 //
 // Pass a nil routedSolver to skip the routed path and use gojaResolver directly
 // (matches prior behaviour on startup before the sidecar is healthy).
@@ -79,29 +77,11 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	result := req.StreamURL
 	playerID := PlayerIDFromURL(req.PlayerURL)
 
-	// --- Sig decryption (routed solver first; goja last, for the sig alone) ---
+	// --- Sig decryption (the routed solver, goja last within it) ---
 	if req.EncryptedSignature != "" {
 		decryptedSig, err := routedSolver.Sig(ctx, playerID, req.EncryptedSignature)
 		if err != nil {
-			// Sig via routed solver failed: goja, the last one asked, for the
-			// signature alone. The n below still goes to the routed solver
-			// first.
-			if gojaResolver == nil {
-				return nil, fmt.Errorf("cipher: routed sig failed and no goja fallback: %w", err)
-			}
-			if w, ok := routedSolver.(gojaFallNoter); ok {
-				w.noteGojaFall(ctx, playerID, "sig", err)
-			}
-			var gojaErr error
-			decryptedSig, gojaErr = gojaSig(ctx, gojaResolver, req.PlayerURL, req.EncryptedSignature)
-			if gojaErr != nil {
-				// Both paths failed. On its own the goja error reads the same
-				// whether the sidecar is down, the player is stale or ejs
-				// found no solution ("no sig solver available for player
-				// …"), so the routed cause rides along — and stays the one
-				// errors.Is sees (ErrPlayerJSStale, ErrSidecarUnavailable).
-				return nil, fmt.Errorf("cipher: routed sig: %w (goja fallback: %v)", err, gojaErr)
-			}
+			return nil, fmt.Errorf("cipher: routed sig: %w", err)
 		}
 		sigKey := req.SignatureKey
 		if sigKey == "" {
@@ -146,25 +126,6 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 	}
 
 	return &ResolveURLResponse{URL: result}, nil
-}
-
-// gojaSig answers one signature with the goja resolver's own compile of
-// playerURL, as GojaResolver.ResolveURL does for the signature of a URL it is
-// handed whole, and fails as it does: a player goja extracts no sig function
-// from (every current one) is an error, never the signature unchanged.
-func gojaSig(ctx context.Context, gojaResolver *GojaResolver, playerURL, encryptedSig string) (string, error) {
-	solvers, err := gojaResolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		return "", fmt.Errorf("get solvers: %w", err)
-	}
-	if !solvers.HasSig() {
-		return "", fmt.Errorf("decrypt signature: no sig solver available for player %s", PlayerIDFromURL(playerURL))
-	}
-	out, err := solvers.DecryptSig(encryptedSig)
-	if err != nil {
-		return "", fmt.Errorf("decrypt signature: %w", err)
-	}
-	return out, nil
 }
 
 // solveN answers one n challenge for RoutedResolveURL and RoutedDecryptNInURL:

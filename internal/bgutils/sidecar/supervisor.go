@@ -47,10 +47,10 @@ type SupervisorConfig struct {
 //
 // Before this existed the sidecar was started once: a crash or an OOM-abort
 // flipped markUnhealthy and nothing ever flipped it back, so for the rest of
-// the process signature-ciphered formats were unresolvable (the composite
-// solver answers a signature from the sidecar or a learned sig spec only;
-// RoutedResolveURL asks goja last, which fails on current players) and PO
-// tokens fell to the goja path, which rejects the websafe-only response.
+// the process signature-ciphered formats were left to a learned sig spec and
+// the goja fallback (the composite solver asks goja last, after the sidecar
+// and the spec) and PO tokens fell to the goja path, which rejects the
+// websafe-only response.
 // Restarting is the fix; the health snapshot beside it is what makes the
 // outage visible while it lasts.
 type Supervisor struct {

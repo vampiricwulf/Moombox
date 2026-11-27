@@ -28,7 +28,8 @@ func TestRoutedResolveURL_NilRoutedSolverFallsThroughWhenGojaNil(t *testing.T) {
 }
 
 func TestRoutedResolveURL_RoutedSigFailReturnsErrorWhenGojaNil(t *testing.T) {
-	// Routed solver fails; goja is nil. Should error cleanly, not panic.
+	// Routed solver fails; goja is nil. Should error cleanly, not panic, with
+	// the routed solver's failure.
 	routed := &staticSolver{sigErr: errors.New("sidecar boom")}
 	_, err := RoutedResolveURL(context.Background(), routed, nil, ResolveURLRequest{
 		PlayerURL:          "https://www.youtube.com/s/player/cb017549/player_ias.vflset/en_US/base.js",
@@ -39,8 +40,8 @@ func TestRoutedResolveURL_RoutedSigFailReturnsErrorWhenGojaNil(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when routed sig fails and goja fallback is nil")
 	}
-	if !strings.Contains(err.Error(), "no goja fallback") {
-		t.Errorf("expected error to mention 'no goja fallback'; got: %v", err)
+	if !strings.Contains(err.Error(), "sidecar boom") {
+		t.Errorf("expected error to carry the routed failure; got: %v", err)
 	}
 }
 
@@ -132,15 +133,18 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 // routed sig error used to be dropped on the floor before the goja fallback
 // ran, so the error a caller saw was goja's alone — "no sig solver available
 // for player X" — whether the sidecar was dead, the player was stale or ejs
-// had found no solution. Both causes now travel, and the routed one stays the
-// one errors.Is matches.
+// had found no solution. Both causes now travel, and the sidecar's stays the
+// one errors.Is matches. Goja is asked inside the composite (owner ruling
+// RV-12), and the error comes back through RoutedResolveURL as it was.
 //
 // Mutants this kills:
-//   - returning gojaResolver.ResolveURL's error as before → errors.Is fails,
+//   - the composite returning goja's error alone → errors.Is fails,
 //     "no solutions" missing
-//   - %w on the goja error instead                        → errors.Is fails
+//   - %w on the goja error instead              → errors.Is fails
 func TestRoutedResolveURL_SigFailureKeepsTheRoutedCauseWhenGojaFailsToo(t *testing.T) {
-	routed := &staticSolver{sigErr: fmt.Errorf("%w: ejs solve sig: no solutions", ErrPlayerJSStale)}
+	routed := newCompositeSolverWith(
+		&staticSolver{sigErr: fmt.Errorf("%w: ejs solve sig: no solutions", ErrPlayerJSStale)},
+		&staticSolver{sigErr: errors.New("goja: no solutions either")})
 	_, err := RoutedResolveURL(context.Background(), routed, newFailingGojaResolver(t), ResolveURLRequest{
 		PlayerURL:          unreachablePlayerURL,
 		StreamURL:          "https://example.com/stream",
