@@ -180,8 +180,9 @@ type VideoInfo struct {
 
 	// JSLess is true when this info came from an extraction that ranked the
 	// JS-less client first because no player JS challenge could be solved —
-	// the cipher sidecar disabled or down (PlayerAPI.SetJSChallengeSolvable)
-	// — as yt-dlp asks _DEFAULT_JSLESS_CLIENTS then. The worker warns, as
+	// the sidecar disabled or down and goja refusing the player (owner ruling
+	// RV-16, PlayerAPI.SetJSChallengeSolvable) — as yt-dlp asks
+	// _DEFAULT_JSLESS_CLIENTS then. The worker warns, as
 	// upstream does, that formats may be missing. Never serialised.
 	JSLess bool `json:"-"`
 
@@ -696,7 +697,8 @@ type YtcfgData struct {
 // winning a same-itag tie is the 2026-08-15 incident this comment block
 // opens with, and android_vr sits under selective enforcement with no token
 // that applies to it. Save while no player JS challenge can be solved (the
-// cipher sidecar disabled or down): visionos is then pooled at
+// sidecar disabled or down and goja refusing the player, ruling RV-16):
+// visionos is then pooled at
 // AuthLevelVisionOSJSLess, ahead of every tier here, because every other
 // client's copy needs the player JS (yt-dlp asks visionos alone then,
 // _DEFAULT_JSLESS_CLIENTS; challenge_free.go's jslessState) — and so it is

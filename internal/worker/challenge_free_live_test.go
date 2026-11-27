@@ -558,8 +558,8 @@ func TestExecuteWithChatRecordsLiveHlsWhenChallengesCannotBeSolved(t *testing.T)
 }
 
 // TestExecuteWithChatWarnsOfAJSLessExtraction: an extraction that ranked for
-// a download without player JS (youtube.VideoInfo.JSLess — the cipher
-// sidecar disabled or down) puts yt-dlp's warning in the job's log at Warn,
+// a download without player JS (youtube.VideoInfo.JSLess — no solver could
+// answer the player, owner ruling RV-16) puts yt-dlp's warning in the job's log at Warn,
 // once, that some formats may be missing (owner decision 4); any other
 // extraction puts none there.
 //

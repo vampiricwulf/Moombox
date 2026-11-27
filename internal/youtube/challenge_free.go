@@ -12,8 +12,8 @@ import (
 )
 
 // NeedsPlayerJS reports whether f's URL can be fetched only once a player JS
-// challenge has been solved: a signatureCipher entry (EncryptedSig, which
-// only the sidecar can sign) or an n challenge in the URL
+// challenge has been solved: a signatureCipher entry (EncryptedSig, which a
+// solver must sign) or an n challenge in the URL
 // (cipher.HasNChallenge). Its complement is a copy yt-dlp's
 // REQUIRE_JS_PLAYER False clients serve — visionos's, android_vr's — whose
 // URL goes out as YouTube sent it.
@@ -85,26 +85,39 @@ func (p *PlayerAPI) CookielessHlsManifest(ctx context.Context, videoID, visitorD
 // this one applies instead.
 const AuthLevelVisionOSJSLess = -1
 
-// SetJSChallengeSolvable installs the report of whether the player's JS
-// challenges can be solved right now — cmd/moombox wires the cipher
-// composite's SidecarReady: the sidecar is the primary solver, and with it
-// disabled or down only the learned sig specs and the goja port of ejs,
-// asked last (owner rulings RV-11 and RV-12), are left. nil (the
-// default, and every test that sets none) answers that they can, which is
-// the healthy ranking.
-func (p *PlayerAPI) SetJSChallengeSolvable(fn func() bool) {
+// SetJSChallengeSolvable installs the report of whether the JS challenges of
+// the player at a given URL can be solved right now — cmd/moombox wires the
+// cipher composite's ChallengesSolvable (owner ruling RV-16): the sidecar is
+// ready, or the goja port of ejs, asked last (rulings RV-11 and RV-12), is
+// there and has not refused that player. A sidecar outage alone no longer
+// makes them unsolvable. nil (the default, and every test that sets none)
+// answers that they can, which is the healthy ranking.
+func (p *PlayerAPI) SetJSChallengeSolvable(fn func(playerURL string) bool) {
 	p.jsChallengesSolvable = fn
 }
 
-// jsLess reports whether an extraction starting now must rank for a
-// download without player JS: the hook says the challenges cannot be solved.
-func (p *PlayerAPI) jsLess() bool {
+// jsLess reports whether an extraction running on the player at playerURL
+// (resolvePlayerURL's; "" when there is none) must rank for a download
+// without player JS: the hook says that player's challenges cannot be solved.
+func (p *PlayerAPI) jsLess(playerURL string) bool {
 	fn := p.jsChallengesSolvable
-	return fn != nil && !fn()
+	return fn != nil && !fn(playerURL)
+}
+
+// rememberedPlayerURL is the player URL the last extraction ran on
+// (rememberPlayerURL), "" when none has: what CookielessFormats, which
+// fetches no page, asks the hook about. The worker calls it right after the
+// job's own extraction, so it is that extraction's player in practice.
+func (p *PlayerAPI) rememberedPlayerURL() string {
+	p.playerURLMu.Lock()
+	defer p.playerURLMu.Unlock()
+	return p.playerURL
 }
 
 // jslessState is one extraction's JS-less ranking, owner decision 4 of the
-// yt-dlp parity plan: while the cipher sidecar is disabled or down, yt-dlp's
+// yt-dlp parity plan: while no solver can answer the player's JS challenges
+// (the sidecar disabled or down AND goja refusing the player, owner ruling
+// RV-16; cipher.SidecarSwappable.ChallengesSolvable), yt-dlp's
 // _DEFAULT_JSLESS_CLIENTS — ('visionos',), the client whose URLs need no player
 // JS (_video.py:144, 2972-2977, 2994-3000; dae52d838, #17461) — is what
 // upstream asks when no JS runtime is available, with a warning that "some

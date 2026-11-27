@@ -10,18 +10,20 @@ import (
 
 // TestJSLessRankingIsWiredToTheCompositeSolver pins owner decision 4's one
 // production wire: initServices hands the PlayerAPI the composite cipher
-// solver's health accessor, ytService.PlayerAPI.SetJSChallengeSolvable(
-// cipherSolver.SidecarReady), after the composite is built. With no hook the
+// solver's solvability predicate, ytService.PlayerAPI.SetJSChallengeSolvable(
+// cipherSolver.ChallengesSolvable), after the composite is built (owner
+// ruling RV-16: the sidecar ready, or goja there and not refusing the
+// player; a sidecar outage alone is not unsolvable). With no hook the
 // PlayerAPI ranks as if the player JS were solvable, so without this line
-// every extraction keeps the healthy ranking while the sidecar is disabled
-// or down — no visionos-first ranking, no "some formats may be missing" Warn
+// every extraction keeps the healthy ranking while no solver can answer a
+// player — no visionos-first ranking, no "some formats may be missing" Warn
 // — and every behavioural test stays green, because internal/youtube's tests
 // install the hook themselves. This package cannot drive initServices, so
 // the call's presence and position are what is checked, as
 // profiledir_verdict_callsite_test.go checks its call.
 //
 // Mutants: the call deleted (the "never" fatal); handed anything but the
-// composite's SidecarReady — a constant, the goja solver's, a method of
+// composite's ChallengesSolvable — a constant, a method of
 // something else (the argument check); hoisted above the composite's
 // construction, or moved out of initServices' top level (the order check, or
 // the "never" fatal).
@@ -70,12 +72,12 @@ func TestJSLessRankingIsWiredToTheCompositeSolver(t *testing.T) {
 	}
 	if wiredIdx < 0 {
 		t.Fatal("initServices never calls ytService.PlayerAPI.SetJSChallengeSolvable: with no hook every " +
-			"extraction ranks as if the player JS were solvable, so a disabled or down sidecar never " +
+			"extraction ranks as if the player JS were solvable, so a player no solver can answer never " +
 			"turns on the JS-less ranking (owner decision 4)")
 	}
-	if arg != "cipherSolver.SidecarReady" {
-		t.Errorf("SetJSChallengeSolvable is handed %q, want cipherSolver.SidecarReady — the composite's own "+
-			"reading of whether its sidecar half can solve a signature", arg)
+	if arg != "cipherSolver.ChallengesSolvable" {
+		t.Errorf("SetJSChallengeSolvable is handed %q, want cipherSolver.ChallengesSolvable — the composite's one "+
+			"predicate for whether any solver can answer the player (RV-16), not SidecarReady", arg)
 	}
 	if wiredIdx < builtIdx {
 		t.Errorf("SetJSChallengeSolvable is called at statement %d, before cipherSolver is built at %d",
