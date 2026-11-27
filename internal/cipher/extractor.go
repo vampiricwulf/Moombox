@@ -293,8 +293,13 @@ func helperKey(e ast.Expression) (string, bool) {
 
 // findPrototypeHelpers is ejs findPrototypeHelpers: the targets of
 // `X = function(){ ...; Y.prototype = ...; ... }` statements. A target ejs
-// cannot turn into a pattern (makePrototypeHelpersIdentifier returning null)
-// is left out.
+// cannot turn into a pattern (`this.X = ...`, `a[0] = ...`) diverges on
+// purpose: ejs's makePrototypeHelpersIdentifier returns null for it, the null
+// is pushed, and modifyPlayer's filter then throws in matchesStructure
+// (`"or" in null`) at the first call statement it checks against it, failing
+// the whole player in the sidecar. The port skips the entry instead and goes
+// on, so goja may answer for such a player. An ejs bump that changes this
+// should be matched here.
 func findPrototypeHelpers(body []ast.Statement) map[string]bool {
 	helpers := map[string]bool{}
 	for _, s := range body {

@@ -498,10 +498,11 @@ func playerURLForID(playerID string) string {
 	return playerVariantURL(playerID, mainVariantPath)
 }
 
-// Sig satisfies cipher.Solver. Returns ErrSigUnavailable when the
-// player's sig algorithm could not be extracted by the goja patterns
-// (typical on current YouTube players where sig is no longer
-// statically representable — see the cipher-via-ejs-sidecar spec).
+// Sig satisfies cipher.Solver. Returns ErrSigUnavailable only when the
+// prepared copy left no sig function. A copy from preprocessPlayer always
+// has one (it sets _result.n and _result.sig together), so for a real player
+// this is effectively unreachable: a player the port cannot match fails
+// earlier, in GetSolvers, with ErrExtractorMismatch.
 func (s *GojaResolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
 	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
 	if err != nil {
@@ -514,8 +515,10 @@ func (s *GojaResolver) Sig(ctx context.Context, playerID, encryptedSig string) (
 }
 
 // N satisfies cipher.Solver. Returns a non-sentinel error when the
-// goja extractor failed to extract an n algorithm; callers should
-// treat that as a hard failure rather than substituting a fallback.
+// prepared copy left no n function, which, as for Sig, a copy from
+// preprocessPlayer never does: a player the port cannot match fails earlier,
+// in GetSolvers, with ErrExtractorMismatch. Callers should treat either as a
+// hard failure rather than substituting a fallback.
 func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
 	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
 	if err != nil {

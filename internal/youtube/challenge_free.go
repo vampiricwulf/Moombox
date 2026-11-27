@@ -87,8 +87,9 @@ const AuthLevelVisionOSJSLess = -1
 
 // SetJSChallengeSolvable installs the report of whether the player's JS
 // challenges can be solved right now — cmd/moombox wires the cipher
-// composite's SidecarReady: the sidecar is the only signature solver, and
-// with it disabled or down only the goja n fallback is left. nil (the
+// composite's SidecarReady: the sidecar is the primary solver, and with it
+// disabled or down only the learned sig specs and the goja port of ejs,
+// asked last (owner rulings RV-11 and RV-12), are left. nil (the
 // default, and every test that sets none) answers that they can, which is
 // the healthy ranking.
 func (p *PlayerAPI) SetJSChallengeSolvable(fn func() bool) {

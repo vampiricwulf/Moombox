@@ -270,10 +270,10 @@ func TestSystemicResolveFailure(t *testing.T) {
 // TestNoSolverWiredIsTheSidecarUnavailable: a signatureCipher format resolved
 // with no solver wired at all — neither the routed composite nor goja — fails
 // with cipher.ErrSidecarUnavailable wrapped, so it is the systemic failure it
-// is (the sidecar is the only signature solver) and the setup falls back to
-// the formats that need no player JS. It used to be an untyped "requires sig
-// but no solver wired", which the fallback could not tell from one URL's own
-// failure.
+// is (no sidecar, and not even goja's port of ejs, the last solver asked) and
+// the setup falls back to the formats that need no player JS. It used to be
+// an untyped "requires sig but no solver wired", which the fallback could not
+// tell from one URL's own failure.
 //
 // Mutants: either wrap reverted to the untyped error (its row).
 func TestNoSolverWiredIsTheSidecarUnavailable(t *testing.T) {
