@@ -221,8 +221,8 @@ func TestRefusalListIsBounded(t *testing.T) {
 
 // A player whose body the port cannot prepare (ErrExtractorMismatch) is
 // refused for compileRefusal, like one whose compile timed out: every later
-// signature or n used to fetch and parse it again (about 0.1 s and 110 MB at
-// peak) while holding the compile slot. The refusal still wraps
+// signature or n used to fetch and parse it again (about 0.1 s each) while
+// holding the compile slot. The refusal still wraps
 // ErrExtractorMismatch, and a changed body under the player's URL (the
 // sidecar's fetch, PlayerJS) ends it.
 //

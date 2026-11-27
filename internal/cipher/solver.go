@@ -76,8 +76,8 @@ var compileTimeout = 120 * time.Second
 // compileTimeout, or whose body the port could not prepare, is refused
 // instead of tried again. Without it every later request for that player
 // re-ran the script for the full bound, or fetched and parsed the body again
-// (about 0.1 s and 110 MB at peak), while holding the compile slot. A body
-// that changes under the player's URL ends the refusal (unrefuse).
+// (about 0.1 s each), while holding the compile slot. A fetch that finds the
+// body changed under the player's URL ends the refusal (unrefuse).
 const compileRefusal = 10 * time.Minute
 
 // refusal is one entry of the refusal list: until when, and the failure
@@ -123,8 +123,11 @@ func (s *GojaResolver) refusalOf(key string) refusal {
 	return r
 }
 
-// unrefuse ends the player's refusal: its body changed, so the failure on
-// the old one says nothing about it.
+// unrefuse ends the player's refusal: a fetch found its body changed, so the
+// failure on the old one says nothing about it. InvalidateSolver does not
+// call it: a per-job 403 invalidates a player whose body may well be the
+// same, and a timed-out compile lifted that way costs the slot up to
+// compileTimeout again (owner ruling R3-9).
 func (s *GojaResolver) unrefuse(key string) {
 	s.timedOutMu.Lock()
 	defer s.timedOutMu.Unlock()
@@ -396,7 +399,6 @@ func (s *GojaResolver) InvalidateSolver(playerURL string) {
 		s.stsCache.InvalidateKey(key)
 	}
 	s.playerCache.Remove(playerURL)
-	s.unrefuse(key)
 	s.logger.Info("cipher: invalidated solver", "playerID", PlayerIDFromURL(playerURL))
 }
 
