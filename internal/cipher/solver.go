@@ -123,7 +123,13 @@ func (s *GojaResolver) refusalOf(key string) refusal {
 	return r
 }
 
-// unrefuse ends the player's refusal: a fetch found its body changed, so the
+// refuses reports whether the player at playerURL is on the refusal list now
+// (the composite's ChallengesSolvable, owner ruling RV-16).
+func (s *GojaResolver) refuses(playerURL string) bool {
+	return !s.refusedUntil(CacheKey(playerURL)).IsZero()
+}
+
+// unrefuse ends the player's refusal:a fetch found its body changed, so the
 // failure on the old one says nothing about it. InvalidateSolver does not
 // call it: a per-job 403 invalidates a player whose body may well be the
 // same, and a timed-out compile lifted that way costs the slot up to

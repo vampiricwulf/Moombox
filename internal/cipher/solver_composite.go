@@ -39,6 +39,17 @@ type SidecarSwappable interface {
 	// is up — whether player JS challenges can be solved by the sidecar
 	// right now, rather than by the goja fallback alone. See compositeSolver's.
 	SidecarReady() bool
+	// ChallengesSolvable reports whether the JS challenges of the player at
+	// playerURL can be solved right now, by any solver (owner ruling RV-16).
+	// See compositeSolver's.
+	ChallengesSolvable(playerURL string) bool
+}
+
+// playerRefuser is the optional half of a goja Solver that keeps a refusal
+// list: the players it will not prepare again for a while (GojaResolver's,
+// compileRefusal). A goja Solver without it — the test fakes — refuses none.
+type playerRefuser interface {
+	refuses(playerURL string) bool
 }
 
 // readinessReporter is the optional half of a Solver that knows whether it
@@ -236,13 +247,42 @@ func (c *compositeSolver) sidecar() Solver {
 // — `[bgutils] use_sidecar = false`, a first start that failed, a crash until
 // the supervisor's restart installs the rebuilt solver (SetSidecar) — which
 // is when signatures have only the sig specs and the goja fallback, and n
-// only the goja fallback. The
-// extraction reads it to rank the JS-less client first, yt-dlp's
-// _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
-// youtube.PlayerAPI's SetJSChallengeSolvable, wired in cmd/moombox.
+// only the goja fallback. Whether those can still solve a player is
+// ChallengesSolvable's question, not this one's.
 func (c *compositeSolver) SidecarReady() bool {
 	sc := c.sidecar()
 	return sc != nil && solverReady(sc)
+}
+
+// ChallengesSolvable is the one predicate for whether the JS challenges
+// (signatureCipher signatures, n) of the player at playerURL can be solved
+// right now (owner ruling RV-16: "If it works, then we shouldn't treat them
+// as unsolvable"): the sidecar is ready, or goja — the Go port of ejs, asked
+// last (rulings RV-11, RV-12) — is there and is not refusing that player
+// (GojaResolver's refusal list: a player whose body the port could not
+// prepare, or whose compile ran out of time, within the last ten minutes).
+// It says nothing about the order the solvers are asked in.
+//
+// An empty playerURL names no player, so no refusal is known: the answer is
+// then whether any solver is there at all. A player goja has not been asked
+// about yet is taken as solvable; a failure on it surfaces through the solve
+// itself (ErrSidecarUnavailable, ErrNUnsolved), which the worker's
+// challenge-free fallback acts on, and refuses the player for later asks.
+//
+// The extraction reads it to rank the JS-less client first when it is false,
+// yt-dlp's _DEFAULT_JSLESS_CLIENTS (_video.py:144, 2972-2977, 2994-3000):
+// youtube.PlayerAPI's SetJSChallengeSolvable, wired in cmd/moombox. A PO
+// token is another matter: with the sidecar down none is minted whatever this
+// answers, and the worker's missing_pot degrade handles that.
+func (c *compositeSolver) ChallengesSolvable(playerURL string) bool {
+	if c.SidecarReady() {
+		return true
+	}
+	if c.goja == nil {
+		return false
+	}
+	r, ok := c.goja.(playerRefuser)
+	return !ok || playerURL == "" || !r.refuses(playerURL)
 }
 
 // awaitSidecar waits, within the readiness grace (sidecarReadyGrace) of the
