@@ -39,18 +39,32 @@ type PlayerSource interface {
 // it has already sent JS for in the current sidecar lifetime; on
 // ErrPlayerNotLoaded it clears that record and retries once with
 // playerJS attached.
+//
+// A player is asked on its main body first and, when ejs cannot solve with
+// that, on its tv body (solve; owner ruling RV-11). The sent record and the
+// first-send gates are keyed by the sidecar's player key
+// (sidecarPlayerKey), so the two bodies of one player have one each.
 type sidecarSolver struct {
 	client sidecarClient
 	src    PlayerSource
 
+	// mem remembers which players are solved with the tv body. The solver's
+	// own until a compositeSolver hands it the one it keeps across sidecar
+	// restarts (adoptMemory), before the solver is asked anything.
+	mem *playerMemory
+
 	mu   sync.Mutex
-	sent map[string]struct{} // playerIDs already sent in this sidecar lifetime
+	sent map[string]struct{} // player keys already sent in this sidecar lifetime
 	// sending gates the first send of a player's JS: one one-slot channel per
-	// playerID. Concurrent first solves used to each ship the ~3 MB player
+	// player key. Concurrent first solves used to each ship the ~3 MB player
 	// and each make the sidecar load it — a synchronous pass on its event
 	// loop that stalls every PO-token request queued behind it. Guarded by mu.
 	sending map[string]chan struct{}
 }
+
+// adoptMemory replaces the solver's player memory with one that outlives it.
+// Called on a solver nothing has asked yet (memoryAdopter).
+func (s *sidecarSolver) adoptMemory(m *playerMemory) { s.mem = m }
 
 // NewSidecarSolver constructs a sidecarSolver. The client must already
 // be Started; the source must yield player JS for any playerID we may
@@ -63,6 +77,7 @@ func newSidecarSolverWith(s sidecarClient, src PlayerSource) *sidecarSolver {
 	return &sidecarSolver{
 		client:  s,
 		src:     src,
+		mem:     newPlayerMemory(),
 		sent:    make(map[string]struct{}),
 		sending: make(map[string]chan struct{}),
 	}
@@ -105,9 +120,94 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 	return ok
 }
 
-// solve issues the JSON-RPC call, attaching playerJS based on whether
-// we've sent this player before. Two recovery paths sit alongside the
-// happy path:
+// solve answers the challenges with the sidecar, on the player's main body
+// and, when ejs cannot solve with that one, on its tv body (owner ruling
+// RV-11: "stay on main, retry tv, then goja" — goja is the caller's, after
+// this has failed).
+//
+// The tv body is asked only when the main one ended in ErrPlayerJSStale, the
+// failure that is ejs's and the player's: the sidecar being down, a timeout
+// or a player fetch that failed would fail tv alike. It is asked once. When
+// it solves, the player is remembered as a tv one (playerMemory) and every
+// later solve skips main; a Warn says so, once per player. When it fails too,
+// the main body's ErrPlayerJSStale is returned with the tv failure beside it.
+// A PlayerSource that cannot yield a tv body (TVPlayerSource) gets no retry.
+func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
+	if s.mem.usesTV(playerID) {
+		res, err := s.solveTV(ctx, playerID, sigs, ns)
+		if isStaleJSError(err) {
+			// Main is known not to work for this player, so this is all the
+			// sidecar has: the same sentinel a failed main body ends in.
+			err = fmt.Errorf("%w: tv variant: %v", ErrPlayerJSStale, err)
+		}
+		return res, err
+	}
+	res, err := s.solveMain(ctx, playerID, sigs, ns)
+	if !errors.Is(err, ErrPlayerJSStale) || ctx.Err() != nil {
+		return res, err
+	}
+	if _, ok := s.src.(TVPlayerSource); !ok {
+		return res, err
+	}
+	tvRes, tvErr := s.solveTV(ctx, playerID, sigs, ns)
+	if tvErr != nil {
+		return tvRes, fmt.Errorf("%w (tv variant: %v)", err, tvErr)
+	}
+	if s.mem.setTV(playerID) {
+		slog.Warn("cipher: ejs cannot solve with this player's main variant; its tv variant solves, and is used for this player from now on",
+			"playerID", playerID, "from", string(variantMain), "to", string(variantTV), "err", err)
+	}
+	return tvRes, nil
+}
+
+// solveTV asks the sidecar on the player's tv body, under its own player key
+// (tvKeySuffix). The first ask goes without the JS: the sidecar may hold the
+// prepared copy in memory or in its store, from before a restart too. Only
+// when it does not (ErrPlayerNotLoaded) is the body fetched
+// (TVPlayerSource, never PlayerCache) and sent, one send per player at a
+// time. There is no stale-JS recovery here: the body sent is the one just
+// fetched, and nothing of it is cached on the Go side to evict.
+func (s *sidecarSolver) solveTV(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
+	tvSrc, ok := s.src.(TVPlayerSource)
+	if !ok {
+		return sidecar.SolveCipherResult{}, fmt.Errorf("cipher: no tv player source for %s", playerID)
+	}
+	key := sidecarPlayerKey(playerID, variantTV)
+	res, err := s.ask(ctx, key, "", false, sigs, ns)
+	if !errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+		return res, err
+	}
+	release, err := s.claimFirstSend(ctx, key)
+	if err != nil {
+		return sidecar.SolveCipherResult{}, err
+	}
+	defer release()
+	if s.playerSent(key) {
+		// Another solve sent the body while this one waited for the gate.
+		res, err = s.ask(ctx, key, "", false, sigs, ns)
+		if !errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+			return res, err
+		}
+		s.clearPlayerSent(key)
+	}
+	js, err := tvSrc.TVPlayerJS(ctx, playerID)
+	if err != nil {
+		return sidecar.SolveCipherResult{}, fmt.Errorf("tv player JS for %s: %w", playerID, err)
+	}
+	res, err = s.ask(ctx, key, js, false, sigs, ns)
+	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+		// As solveMain: %v, so this no longer reads as a miss to retry.
+		return res, fmt.Errorf("sidecar: tv player not loaded after it was sent: %v", err)
+	}
+	if err == nil {
+		s.markPlayerSent(key)
+	}
+	return res, err
+}
+
+// solveMain issues the JSON-RPC call on the main body, attaching playerJS
+// based on whether we've sent this player before. Two recovery paths sit
+// alongside the happy path:
 //
 //   - ErrPlayerNotLoaded (sidecar evicted JS from its in-memory LRU,
 //     restart, etc.): drop the sent-record and retry once with JS
@@ -127,7 +227,7 @@ func (s *sidecarSolver) playerSent(playerID string) bool {
 //
 // Both paths are bounded to one retry; the goal is reactive recovery,
 // not infinite-loop tolerance for genuinely-broken cipher state.
-func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
+func (s *sidecarSolver) solveMain(ctx context.Context, playerID string, sigs, ns []string) (sidecar.SolveCipherResult, error) {
 	includeJS := !s.playerSent(playerID)
 	if includeJS {
 		// One first send per player; the solves that waited on it find the
@@ -221,24 +321,30 @@ func isStaleJSError(err error) bool {
 // only meaningful when includeJS is also true (no JS = nothing to
 // reload to).
 func (s *sidecarSolver) callOnce(ctx context.Context, playerID string, includeJS, forceReload bool, sigs, ns []string) (sidecar.SolveCipherResult, error) {
-	req := sidecar.SolveCipherRequest{
-		PlayerID:      playerID,
-		SigChallenges: sigs,
-		NChallenges:   ns,
-		ForceReload:   forceReload,
-	}
+	js := ""
 	if includeJS {
-		js, err := s.src.PlayerJS(playerID)
-		if err != nil {
+		var err error
+		if js, err = s.src.PlayerJS(playerID); err != nil {
 			return sidecar.SolveCipherResult{}, fmt.Errorf("player JS for %s: %w", playerID, err)
 		}
-		req.PlayerJS = js
 	}
-	res, err := s.client.SolveCipher(ctx, req)
+	res, err := s.ask(ctx, playerID, js, forceReload, sigs, ns)
 	if err == nil && includeJS {
 		s.markPlayerSent(playerID)
 	}
 	return res, err
+}
+
+// ask is one SolveCipher round-trip under a sidecar player key
+// (sidecarPlayerKey), with js attached when it is not "".
+func (s *sidecarSolver) ask(ctx context.Context, key, js string, forceReload bool, sigs, ns []string) (sidecar.SolveCipherResult, error) {
+	return s.client.SolveCipher(ctx, sidecar.SolveCipherRequest{
+		PlayerID:      key,
+		PlayerJS:      js,
+		SigChallenges: sigs,
+		NChallenges:   ns,
+		ForceReload:   forceReload,
+	})
 }
 
 func (s *sidecarSolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
@@ -307,12 +413,20 @@ func (s *sidecarSolver) ready() bool {
 // signature of that length used to wipe and refetch a healthy player on
 // the sidecar's single-threaded loop, which also serves PO-token mints.
 // A sidecar that has lost the player (ErrPlayerNotLoaded) is re-sent it
-// once, as solve does; that evicts nothing.
+// once, as solve does; that evicts nothing. A player solved with its tv body
+// is probed on that one, the body whose real answer the spec is checked
+// against; solveTV has no recovery to bypass.
 func (s *sidecarSolver) probeSigs(ctx context.Context, playerID string, sigs []string) (map[string]string, error) {
-	res, err := s.callOnce(ctx, playerID, !s.playerSent(playerID), false, sigs, nil)
-	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
-		s.clearPlayerSent(playerID)
-		res, err = s.callOnce(ctx, playerID, true, false, sigs, nil)
+	var res sidecar.SolveCipherResult
+	var err error
+	if s.mem.usesTV(playerID) {
+		res, err = s.solveTV(ctx, playerID, sigs, nil)
+	} else {
+		res, err = s.callOnce(ctx, playerID, !s.playerSent(playerID), false, sigs, nil)
+		if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+			s.clearPlayerSent(playerID)
+			res, err = s.callOnce(ctx, playerID, true, false, sigs, nil)
+		}
 	}
 	if err != nil {
 		return nil, err

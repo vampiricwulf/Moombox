@@ -520,7 +520,7 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 // it (CacheKey playerID-hash, sidecar's per-player cache keyed on
 // playerID) will need to learn about the new shape.
 func playerURLForID(playerID string) string {
-	return "https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_US/base.js"
+	return playerVariantURL(playerID, mainVariantPath)
 }
 
 // Sig satisfies cipher.Solver. Returns ErrSigUnavailable when the

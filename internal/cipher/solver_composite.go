@@ -66,6 +66,12 @@ func solverReady(s Solver) bool {
 //	n:   sidecar primary, goja fallback. n stays available even if
 //	     the sidecar is down.
 //
+// The sidecar half itself asks ejs on the player's main body and then on
+// its tv body (sidecarSolver.solve), so for both operations goja comes after
+// everything the sidecar can try (owner ruling RV-11): here for n, and for a
+// signature in RoutedResolveURL, which asks the goja resolver once this
+// solver's Sig has failed.
+//
 // One of sidecar or goja may be nil. A nil sidecar means sig fails
 // with ErrSidecarUnavailable, unless a spec answers it; a nil goja means n
 // has no fallback.
@@ -92,6 +98,11 @@ type compositeSolver struct {
 	// and drops them with it (InvalidateSolver, RemovePlayerJS). Nil when
 	// goja is not a store, and then nothing is learned.
 	specs sigSpecStore
+
+	// players is what is remembered about the players ejs could not solve
+	// with on the main variant. It is handed to every sidecar half installed
+	// (memoryAdopter), so it outlives the sidecar restarts that rebuild them.
+	players *playerMemory
 
 	// specMu guards learning, refused and failed. learning holds the
 	// (player, length) pairs a learnSigSpecs is already asking the sidecar
@@ -134,6 +145,13 @@ var sidecarReadyGrace = 60 * time.Second
 // installed half whether its child is back.
 var sidecarReadyPoll = time.Second
 
+// memoryAdopter is the sidecar half's way to take the composite's player
+// memory in place of its own (sidecarSolver.adoptMemory). It is called on a
+// half nothing has asked yet.
+type memoryAdopter interface {
+	adoptMemory(m *playerMemory)
+}
+
 // sigSpecProber is the sidecar half's way to ask the synthetic challenge
 // without its stale-JS recovery (sidecarSolver.probeSigs). A sidecar half
 // that has none is asked through Batch.
@@ -162,21 +180,34 @@ func NewCompositeSolver(sidecar, goja Solver) SidecarSwappable {
 
 func newCompositeSolverWith(sidecar, goja Solver) *compositeSolver {
 	specs, _ := goja.(sigSpecStore)
-	return &compositeSolver{
+	c := &compositeSolver{
 		sidecarSolver: sidecar,
 		goja:          goja,
 		specs:         specs,
+		players:       newPlayerMemory(),
 		learning:      make(map[string]struct{}),
 		refused:       make(map[string]struct{}),
 		failed:        make(map[string]struct{}),
+	}
+	c.sharePlayerMemory(sidecar)
+	return c
+}
+
+// sharePlayerMemory hands the composite's player memory to a sidecar half
+// about to be installed.
+func (c *compositeSolver) sharePlayerMemory(sidecar Solver) {
+	if a, ok := sidecar.(memoryAdopter); ok {
+		a.adoptMemory(c.players)
 	}
 }
 
 // SetSidecar installs (or, with nil, removes) the sidecar half. Safe to call
 // while other goroutines are solving.
 // The synthetic challenges the previous sidecar failed are asked again of
-// the new one.
+// the new one. What is remembered about players (which are solved with the
+// tv body) carries over to it.
 func (c *compositeSolver) SetSidecar(sidecar Solver) {
+	c.sharePlayerMemory(sidecar)
 	c.mu.Lock()
 	c.sidecarSolver = sidecar
 	c.mu.Unlock()
