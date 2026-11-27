@@ -21,9 +21,11 @@ import (
 // TestEveryRuntimeConstructorBoundsRecursion runs an endless recursion on a
 // runtime from each constructor in this package and expects goja's
 // stack-overflow abort within MaxCallStackSize frames, quickly and without the
-// heap growth an unbounded run shows (306 MB in 5 s, RV-13). The second script
-// recurses through a native call (Array.prototype.forEach), the path a
-// bound counted only on direct JS calls would miss.
+// heap growth an unbounded run shows (306 MB in 5 s in the RV-13 research).
+// The second script recurses through a native call (Array.prototype.forEach),
+// the path a bound counted only on direct JS calls would miss. The third enters
+// through a Go-held callable, as the cipher calls its sig and n functions, and
+// expects the abort back as an error rather than a panic.
 //
 // Not parallel: the heap figure is process-wide.
 func TestEveryRuntimeConstructorBoundsRecursion(t *testing.T) {
@@ -46,23 +48,40 @@ func TestEveryRuntimeConstructorBoundsRecursion(t *testing.T) {
 			return vm
 		},
 	}
-	scripts := map[string]string{
-		"direct":         "var depth = 0; function f() { depth++; return f() + 1; } f();",
-		"through_native": "var depth = 0; function f() { depth++; [0].forEach(f); } f();",
+	run := func(src string) func(vm *goja.Runtime) error {
+		return func(vm *goja.Runtime) error {
+			_, err := RunStringWithTimeout(context.Background(), vm, src, 5*time.Second)
+			return err
+		}
+	}
+	scripts := map[string]func(vm *goja.Runtime) error{
+		"direct":         run("var depth = 0; function f() { depth++; return f() + 1; } f();"),
+		"through_native": run("var depth = 0; function f() { depth++; [0].forEach(f); } f();"),
+		"via_callable": func(vm *goja.Runtime) error {
+			if _, err := vm.RunString("var depth = 0; function f() { depth++; return f() + 1; }"); err != nil {
+				return err
+			}
+			fn, ok := goja.AssertFunction(vm.Get("f"))
+			if !ok {
+				t.Fatal("f is not callable")
+			}
+			_, err := CallWithTimeout(vm, 5*time.Second, "f", func() (goja.Value, error) { return fn(goja.Undefined()) })
+			return err
+		},
 	}
 	// The bounded runs allocate about 9 MB (direct) and 22 MB (through a native
 	// call). The RV-13 research saw an unbounded run reach 306 MB in 5 s.
 	const allocCeiling = 128 << 20
 
 	for cname, mk := range constructors {
-		for sname, src := range scripts {
+		for sname, exec := range scripts {
 			t.Run(cname+"/"+sname, func(t *testing.T) {
 				vm := mk(t)
 				var before, after runtime.MemStats
 				runtime.GC()
 				runtime.ReadMemStats(&before)
 				start := time.Now()
-				_, err := RunStringWithTimeout(context.Background(), vm, src, 5*time.Second)
+				err := exec(vm)
 				elapsed := time.Since(start)
 				runtime.ReadMemStats(&after)
 
@@ -72,7 +91,9 @@ func TestEveryRuntimeConstructorBoundsRecursion(t *testing.T) {
 				}
 				depth := vm.Get("depth").ToInteger()
 				t.Logf("aborted at depth %d after %v, %d KB allocated", depth, elapsed, (after.TotalAlloc-before.TotalAlloc)>>10)
-				if depth > MaxCallStackSize {
+				// A call entered from Go starts on an empty stack, so that path
+				// gets one frame more than the limit.
+				if depth > MaxCallStackSize+1 {
 					t.Errorf("recursion reached depth %d, past MaxCallStackSize %d", depth, MaxCallStackSize)
 				}
 				if alloc := after.TotalAlloc - before.TotalAlloc; alloc > allocCeiling {
@@ -94,10 +115,6 @@ func TestEveryRuntimeConstructorBoundsRecursion(t *testing.T) {
 // NewPlainRuntime.
 func TestEveryGojaRuntimeIsMadeByNewPlainRuntime(t *testing.T) {
 	root := moduleRoot(t)
-	skipDirs := map[string]bool{
-		".git": true, ".worktrees": true, ".superpowers": true, "references": true,
-		"node_modules": true, "vendor": true, "bgutil-sidecar": true, "docs-site": true,
-	}
 	allowed := filepath.Join(root, "internal", "goja", "runtime.go")
 	fset := token.NewFileSet()
 	var found []string
@@ -106,8 +123,18 @@ func TestEveryGojaRuntimeIsMadeByNewPlainRuntime(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if path != root && skipDirs[d.Name()] {
+			// The same walk as internal/childproc's pin tests: no hidden
+			// directories (.git, .worktrees, .superpowers), no upstream clones,
+			// no fixtures, no other module.
+			name := d.Name()
+			if path != root && (strings.HasPrefix(name, ".") || name == "references" || name == "node_modules" ||
+				name == "vendor" || name == "testdata") {
 				return filepath.SkipDir
+			}
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir // another module
+				}
 			}
 			return nil
 		}

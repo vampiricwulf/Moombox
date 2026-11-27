@@ -11,8 +11,8 @@ import (
 
 // MaxCallStackSize is the deepest JavaScript call stack any goja runtime in
 // Moombox may reach (owner ruling RV-13). goja's own default is effectively
-// unbounded: an endless recursion in a fetched player or BotGuard program grew
-// to depth 985,087 and 306 MB in 5 s before anything stopped it. Past this depth
+// unbounded: in the RV-13 research an endless recursion grew to depth 985,087
+// and 306 MB in 5 s before anything stopped it. Past this depth
 // goja aborts the run with a *goja.StackOverflowError.
 //
 // JavaScript try/catch does not see that abort: the whole run ends, unlike V8,
@@ -21,8 +21,10 @@ import (
 //
 // Measured on Windows x64, goja 5e92a7e2 (2026-11-26): the three testdata
 // players compile and solve sig and n with a limit of 20 and fail at 15, so
-// the cipher needs fewer than 20 frames. The BotGuard program could not be
-// measured (its live test fails for another reason), hence the wide headroom.
+// the cipher needs fewer than 20 frames. The BotGuard program's need is not
+// measured: its goja run is declined today (TestBotGuardLiveFingerprint) and
+// fails the same way with this limit, with none and with a limit of 30, so it
+// never gets deep enough to tell. Hence the wide headroom.
 // At this limit an endless recursion aborts in about 3 ms having allocated
 // about 9 MB; recursing through a native call (Array.prototype.forEach) stops
 // at depth 5,000, since each round costs two frames, in about 25 ms and 22 MB.
