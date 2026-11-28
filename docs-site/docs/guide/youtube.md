@@ -140,7 +140,12 @@ lines its chat up with the recording by the time its first segment reached
 YouTube, so the chat appears where it was sent. Earlier versions put that chat
 late by the whole time the stream had been live, so on a long stream no chat
 appeared at all; a recording made before the fix is corrected by its join
-point. The playlist reaches back about an hour before the moment the capture
+point. If you had re-timed such a recording's chat by hand with the
+player's chat offset to make up for the old placement, that offset now moves
+the chat too early by the same amount: clear it (the **✕** beside the offset
+box) and the corrected placement takes over.
+
+The playlist reaches back about an hour before the moment the capture
 started, but chat is recorded only from that moment, so the first hour or so
 of such a recording has no chat.
 
