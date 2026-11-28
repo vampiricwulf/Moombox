@@ -490,7 +490,9 @@ type latencyFailure struct {
 	kind     youtube.PlayabilityError
 	reason   string
 	// status is playabilityStatus.status as YouTube sent it, on an answer
-	// (VideoInfo.PlayabilityStatus); never logged, read by refused.
+	// (VideoInfo.PlayabilityStatus) or ANDROID_VR's on an inconclusive
+	// probe (StatusProbeInconclusiveError.Status); never logged, read by
+	// refused.
 	status  string
 	details bool
 	// client names the client that answered (latencyAnswerClient), set on
@@ -510,7 +512,7 @@ func latencyFailureOf(info *youtube.VideoInfo, err error) latencyFailure {
 	f := latencyFailure{err: redact.MediaText(errText(err))}
 	if inc, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
 		f.answered, f.inconclusive = true, true
-		f.kind, f.reason, f.client = inc.Playability, inc.Reason, "android_vr"
+		f.kind, f.reason, f.status, f.client = inc.Playability, inc.Reason, inc.Status, "android_vr"
 		f.escalation, f.escalationKind = inc.Escalation, inc.EscalationPlayability
 		return f
 	}

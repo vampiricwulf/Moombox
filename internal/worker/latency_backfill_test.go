@@ -773,18 +773,24 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 // panic counted as a refusal; an inconclusive probe whose escalation failed
 // counted; the bot wall counted; an answer with no playabilityStatus
 // counted; an answer with a status and no reason read as no playabilityStatus
-// (the noreason row stays NULL); the settle reached before the last try.
+// (the noreason row stays NULL); an inconclusive probe's status not read
+// (the incnoreason row stays NULL); the settle reached before the last try.
 func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 	t.Parallel()
 	h := newBackfillHarness(t, openTestDB(t))
 	log := &infoArgsLogger{}
 	h.b.logger = log
 	const gone = "This video is no longer available because the YouTube account associated with this video has been terminated."
-	inconclusive := func(esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
+	// inconclusiveSaid is an inconclusive probe whose ANDROID_VR refusal
+	// carried status and reason; inconclusive is the terminated channel's.
+	inconclusiveSaid := func(status, reason string, esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
 		return func() (*youtube.VideoInfo, error) {
-			return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+			return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: reason, Status: status,
 				Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: escErr, EscalationPlayability: esc}
 		}
+	}
+	inconclusive := func(esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
+		return inconclusiveSaid("ERROR", gone, esc, escErr)
 	}
 	refusal := func(p youtube.PlayabilityError, status, reason string) func() (*youtube.VideoInfo, error) {
 		return func() (*youtube.VideoInfo, error) {
@@ -809,6 +815,8 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 		"members":    refusal(youtube.PlayabilityMembersOnly, "LOGIN_REQUIRED", "Join this channel to get access to members-only content like this video."),
 		// A refusal with its status and no reason text: YouTube said UNPLAYABLE.
 		"noreason": refusal(youtube.PlayabilityUnknown, "UNPLAYABLE", ""),
+		// The same on an inconclusive probe, both clients refusing it.
+		"incnoreason": inconclusiveSaid("UNPLAYABLE", "", youtube.PlayabilityUnknown, errors.New("refused too")),
 	}
 	staysNull := map[string]func() (*youtube.VideoInfo, error){
 		"mixed":   thenOnTry(2, copyright, func() (*youtube.VideoInfo, error) { return nil, errors.New("dial tcp: timeout") }),
@@ -818,6 +826,8 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 		// No playabilityStatus at all: the parser reads it unknown, with
 		// nothing YouTube said.
 		"nostatus": refusal(youtube.PlayabilityUnknown, "", ""),
+		// And on an inconclusive probe whose ANDROID_VR answer had none.
+		"incnostatus": inconclusiveSaid("", "", youtube.PlayabilityUnknown, errors.New("refused too")),
 	}
 	for _, m := range []map[string]func() (*youtube.VideoInfo, error){settles, staysNull} {
 		for id, a := range m {

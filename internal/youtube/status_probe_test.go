@@ -284,7 +284,8 @@ func TestStatusProbeEscalationAnswersInTheProbesPlace(t *testing.T) {
 // *StatusProbeInconclusiveError: the waiting room counted a web_embedded 400
 // toward its give-up, internal/worker's classifyProbeErr reading "http 4");
 // Unwrap dropped (errors.Is cannot see the cancellation); the ended-context
-// check dropped (the escalation is still attempted: Escalation names it).
+// check dropped (the escalation is still attempted: Escalation names it);
+// ANDROID_VR's status left off the error (Status empty).
 func TestStatusProbeEscalationThatFailsLeavesItInconclusive(t *testing.T) {
 	t.Run("an HTTP failure", func(t *testing.T) {
 		stubEmbedPage(t)
@@ -311,6 +312,11 @@ func TestStatusProbeEscalationThatFailsLeavesItInconclusive(t *testing.T) {
 		}
 		if inconclusive.EscalationPlayability != "" {
 			t.Errorf("EscalationPlayability = %q on a failed call, want none", inconclusive.EscalationPlayability)
+		}
+		// ANDROID_VR's status rides on the error (the latency-mode backfill
+		// tells a refusal from an answer with no playabilityStatus by it).
+		if inconclusive.Status != "LOGIN_REQUIRED" {
+			t.Errorf("Status = %q, want android_vr's LOGIN_REQUIRED", inconclusive.Status)
 		}
 		if got := strings.Join(tr.calls, ","); got != clientAndroidVR+","+clientWebEmbedded {
 			t.Errorf("calls %s, want android_vr then one web_embedded", got)
