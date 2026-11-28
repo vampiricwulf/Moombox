@@ -85,7 +85,7 @@ export function deriveMissingOffsets(messages, streamStartTime) {
  * @param {string|undefined} text
  */
 export function parseTimeMs(text) {
-  return Date.parse(String(text || "").replace(/(.d{3})d+/, "$1"));
+  return Date.parse(String(text || "").replace(/(\.\d{3})\d+/, "$1"));
 }
 
 /**

@@ -86,6 +86,24 @@ test("parseTimeMs: RFC3339Nano is read to the millisecond", () => {
   assert.ok(Number.isNaN(parseTimeMs(undefined)));
 });
 
+// ECMAScript only promises three fractional digits; V8 happens to read more,
+// so the case above passes in node whatever the trim does. This one checks
+// what Date.parse is handed. Mutant: the trim's pattern unescaped (`.d{3}`,
+// which matches nothing in a time, so all nine digits reach Date.parse).
+test("parseTimeMs hands Date.parse at most three fractional digits", () => {
+  const seen = [];
+  const real = Date.parse;
+  Date.parse = (s) => { seen.push(s); return real(s); };
+  try {
+    parseTimeMs("2026-11-27T22:56:50.408302123Z");
+    parseTimeMs("2026-11-27T22:56:50.408302Z");
+    parseTimeMs("2026-11-27T22:56:50Z");
+  } finally {
+    Date.parse = real;
+  }
+  assert.deepEqual(seen, ["2026-11-27T22:56:50.408Z", "2026-11-27T22:56:50.408Z", "2026-11-27T22:56:50Z"]);
+});
+
 test("computeChatBiasMs: an anchored live-edge capture puts each message on its frame (capture A)", () => {
   const bias = computeChatBiasMs({
     chatStreamStartTime: CAPTURE_A.chatEpoch, jobStreamStartTime: CAPTURE_A.chatEpoch,
