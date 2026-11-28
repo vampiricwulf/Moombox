@@ -164,7 +164,10 @@ func TestMediaStartTimePrefersTheVideo(t *testing.T) {
 //
 // Mutants: the finalize not writing media_start_time (the live row stays
 // at the older value); the VOD guard dropped (the VOD row reads the
-// staged value); the platform gate dropped (the Twitch row is cleared).
+// staged value); the platform gate dropped (the Twitch row is cleared); the
+// gate back on the row's is_vod alone (the post-live DRM rows, which
+// recorded from the live edge, read NULL); the row's live_edge_reason not
+// read (the re-finalized one reads NULL).
 func TestFinalizeRecordsTheMediaStartTime(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	const older = "2026-01-01T00:00:00Z"
@@ -172,12 +175,16 @@ func TestFinalizeRecordsTheMediaStartTime(t *testing.T) {
 		name     string
 		platform string
 		vod      bool
+		edge     string // the run's LiveEdgeReason
+		rowEdge  string // the row's live_edge_reason (a re-finalize)
 		entry    string
 		want     string
 	}{
 		{name: "live capture", entry: captureAStart, want: captureAStart},
 		{name: "no wall clock recorded"},
 		{name: "VOD", vod: true, entry: captureAStart},
+		{name: "post-live DRM from the live edge", vod: true, edge: liveEdgePostLiveDRM, entry: captureAStart, want: captureAStart},
+		{name: "post-live DRM re-finalized", vod: true, rowEdge: liveEdgePostLiveDRM, entry: captureAStart, want: captureAStart},
 		{name: "Twitch", platform: "twitch", entry: captureAStart, want: older},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +201,10 @@ func TestFinalizeRecordsTheMediaStartTime(t *testing.T) {
 				o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"is_vod": true})
 				jobCtx.Job.IsVod = true
 			}
+			if tc.rowEdge != "" {
+				o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"live_edge_reason": tc.rowEdge})
+				jobCtx.Job.LiveEdgeReason = tc.rowEdge
+			}
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{"media_start_time": older})
 			jobCtx.Config = &JobConfig{}
 			jobCtx.StagingDir = t.TempDir()
@@ -204,7 +215,7 @@ func TestFinalizeRecordsTheMediaStartTime(t *testing.T) {
 			if tc.entry != "" {
 				noteMediaStartFixture(t, video, tc.entry)
 			}
-			result := &DownloadResult{HasVideo: true, VideoPath: video, VideoFormat: &youtube.Format{TargetDurationSec: 2}}
+			result := &DownloadResult{HasVideo: true, VideoPath: video, VideoFormat: &youtube.Format{TargetDurationSec: 2}, LiveEdgeReason: tc.edge}
 			if err := o.muxAndFinalize(context.Background(), jobCtx, result); err != nil {
 				t.Fatalf("muxAndFinalize: %v", err)
 			}

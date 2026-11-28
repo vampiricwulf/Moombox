@@ -191,6 +191,24 @@ func noteMediaStart(path string, wall time.Time) {
 	noteStagingRecord(path, mediaStartFile, wall.UTC().Format(time.RFC3339Nano))
 }
 
+// anchorsMediaStart reports whether a YouTube finalize stores the archive's
+// time-zero wall clock (owner ruling RV-19): a live capture's always, and a
+// VOD's only when its staged run recorded from the live edge — the post-live
+// DRM arm (liveEdgePostLiveDRM), whose HLS holds only the broadcast's last
+// ~2 h, so its file starts far into the broadcast. The run's result says so,
+// and the row's live_edge_reason says so for a re-finalize (the Mux action)
+// that has no result. A VOD downloaded whole, or a post-live download from
+// its start, is on the video's own timeline and stores none.
+func anchorsMediaStart(job *database.Job, result *DownloadResult) bool {
+	if job == nil {
+		return false
+	}
+	if !job.IsVod {
+		return true
+	}
+	return (result != nil && result.LiveEdgeReason != "") || job.LiveEdgeReason != ""
+}
+
 // mediaStartTime is the wall clock of a single-file mux's time zero, for the
 // job's media_start_time (owner ruling RV-19): the video input's
 // mediaStartFile entry, which is what the picture starts at. A video that

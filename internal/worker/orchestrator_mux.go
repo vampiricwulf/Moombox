@@ -1296,12 +1296,13 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		}
 	}
 	// The wall clock of the archive's time zero, which the dashboard player
-	// lines chat up with (owner ruling RV-19): a live YouTube capture's, read
-	// from what its staged recording recorded; NULL when it is not known and
-	// for a VOD, whose archive is the video's own timeline.
+	// lines chat up with (owner ruling RV-19): a live YouTube capture's, or a
+	// post-live one's that recorded from the live edge, read from what its
+	// staged recording recorded; NULL when it is not known and for a VOD
+	// downloaded whole, whose archive is the video's own timeline.
 	if jobCtx.Job != nil && jobCtx.Job.Platform == "youtube" {
 		updates["media_start_time"] = nil
-		if !jobCtx.Job.IsVod {
+		if anchorsMediaStart(jobCtx.Job, result) {
 			if start, ok := mediaStartTime(videoPath, audioPath); ok {
 				updates["media_start_time"] = start
 			}
@@ -1719,7 +1720,7 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	// RV-19).
 	if jobCtx.Job.Platform == "youtube" {
 		updates["media_start_time"] = nil
-		if !jobCtx.Job.IsVod {
+		if anchorsMediaStart(jobCtx.Job, result) {
 			if start, ok := splitMediaStartTime(jobCtx, segments); ok {
 				updates["media_start_time"] = start
 			}
