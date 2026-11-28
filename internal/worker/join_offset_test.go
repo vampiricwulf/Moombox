@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -181,25 +182,36 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 // the earlier half's first segment, and the join point is that half's
 // sequence times the advertised segment duration — the audio rendition's
 // when it began a segment before the video variant, the video's otherwise.
-// No file is read: an MPEG-TS's own timestamps place nothing.
+// A pair the mux does not place (no dates, or too far apart) starts each
+// half at 0:00, so it takes the video's. No file is read: an MPEG-TS's own
+// timestamps place nothing.
 //
-// Mutant: the pair rule dropped (the video's later sequence is read first).
+// Mutants: the pair rule dropped (the video's later sequence is read first);
+// the placement check dropped (an unplaced pair takes the audio's).
 func TestJoinOffsetOfAnHlsPairIsItsEarlierHalf(t *testing.T) {
 	o, _ := muxTestOrchestrator(t, notificationtest.New(), 0)
 	for _, tc := range []struct {
 		name         string
 		video, audio int
+		undated      bool
 		want         float64
 	}{
-		{"audio began a segment earlier", 1001, 1000, 5000},
-		{"video began a segment earlier", 1000, 1001, 5000},
-		{"the audio began at sq 0", 3, 0, 0},
+		{"audio began a segment earlier", 1001, 1000, false, 5000},
+		{"video began a segment earlier", 1000, 1001, false, 5000},
+		{"the audio began at sq 0", 1, 0, false, 0},
+		{"too far apart to place", 1010, 1000, false, 5050},
+		{"no dates", 1001, 1000, true, 5005},
 	} {
 		dir := t.TempDir()
 		video, audio := filepath.Join(dir, "video.ts"), filepath.Join(dir, hlsAudioFile)
 		data, _ := json.Marshal(map[string]int{"video.ts": tc.video, hlsAudioFile: tc.audio})
 		if err := os.WriteFile(filepath.Join(dir, recordingStartFile), data, 0o644); err != nil {
 			t.Fatal(err)
+		}
+		if !tc.undated {
+			day := time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)
+			noteMediaStart(video, day.Add(time.Duration(tc.video*5)*time.Second))
+			noteMediaStart(audio, day.Add(time.Duration(tc.audio*5)*time.Second))
 		}
 		res := &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, VideoPath: video, AudioPath: audio, SegmentDurationSec: 5}
 		got, ok := o.joinOffsetSeconds(context.Background(), res, video, audio)

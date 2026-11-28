@@ -343,11 +343,45 @@ func isStagedHlsPair(video, audio string) bool {
 	return stem(video) == "video.ts" && stem(audio) == hlsAudioFile
 }
 
-// hlsPairMaxSkew bounds how far apart the two halves of an HLS pair may
-// start for alignHlsPair to place them: a downloader that started a segment
-// or a few later than its sibling is minutes at most. Beyond it the records
-// cannot be describing one capture, and the pair is muxed as it stands.
-const hlsPairMaxSkew = 300.0
+// hlsPairMaxSkew is the largest start difference between the two halves of
+// an HLS pair that alignHlsPair places: the most the copy can delay an
+// MPEG-TS input by. FFmpeg's timestamp-discontinuity correction for MPEG-TS
+// input (-dts_delta_threshold, 10 s by default, a global option) undoes an
+// -itsoffset past it, so the delayed half comes out level (measured
+// 2026-11-28 on FFmpeg 8.0.1: 10 s lands, 10.5 s does not, in either
+// direction), and nothing in the copy says so: the per-track start check
+// reads fragmented MP4 only. Half a second of margin below it. A downloader
+// that started a segment later than its sibling (2 or 5 s) is inside it;
+// pairLoneHlsHalf keeps the known routes to a larger skew from arising.
+const hlsPairMaxSkew = 9.5
+
+// stagedWallClock is the date of the first segment of the staged file at p
+// (mediaStartFile); ok is false when none is recorded.
+func stagedWallClock(p string) (time.Time, bool) {
+	v, ok := readStagingRecord[string](filepath.Dir(p), mediaStartFile)[filepath.Base(p)]
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	return t, err == nil
+}
+
+// hlsPairSkew is how many seconds after the staged video.ts its audio.ts
+// begins, negative when it begins before, read from their first segments'
+// dates. dated is false when either date is not recorded; placed is whether
+// alignHlsPair places the pair by it (within hlsPairMaxSkew), which is
+// whether the archive's 0:00 is the earlier half's first segment — what
+// mediaStartTime and joinOffsetSeconds read. An unplaced pair starts each
+// half at the archive's 0:00, so its time zero is the video's.
+func hlsPairSkew(video, audio string) (skew float64, dated, placed bool) {
+	vw, vok := stagedWallClock(video)
+	aw, aok := stagedWallClock(audio)
+	if !vok || !aok {
+		return 0, false, false
+	}
+	skew = aw.Sub(vw).Seconds()
+	return skew, true, math.Abs(skew) <= hlsPairMaxSkew
+}
 
 // alignHlsPair places the two halves of a demuxed HLS capture (video.ts and
 // audio.ts) against each other. They are recorded by two downloaders, each
@@ -364,23 +398,17 @@ const hlsPairMaxSkew = 300.0
 // capture: both began at sq 1740509, dated 01:14:05.026Z). The first
 // segment's date of each file is in mediaStartFile, so the later one is
 // delayed by the difference (engine.InputOffsets) and the archive starts at
-// the earlier one's first frame — the time zero mediaStartTime stores. With
-// no date for one of them, two halves recordingStartFile says began at the
-// same sequence are level, as FFmpeg muxes them; any other pair (an aside,
-// whose records stayed with the live names, a staging dir an older binary
-// left) is muxed as it stands, said in the log.
+// the earlier one's first frame — the time zero mediaStartTime stores. A
+// difference past hlsPairMaxSkew cannot be applied by the copy, so the pair
+// is muxed as it stands, its sound out of step by that much, with a Warn
+// naming the job. With no date for one of them, two halves
+// recordingStartFile says began at the same sequence are level, as FFmpeg
+// muxes them; any other pair (an aside, whose records stayed with the live
+// names, a staging dir an older binary left) is muxed as it stands, said in
+// the log.
 func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
-	wall := func(p string) (time.Time, bool) {
-		v, ok := readStagingRecord[string](filepath.Dir(p), mediaStartFile)[filepath.Base(p)]
-		if !ok {
-			return time.Time{}, false
-		}
-		t, err := time.Parse(time.RFC3339Nano, v)
-		return t, err == nil
-	}
-	vw, vok := wall(ins.video.path)
-	aw, aok := wall(ins.audio.path)
-	if !vok || !aok {
+	diff, dated, placed := hlsPairSkew(ins.video.path, ins.audio.path) // audio after video when positive
+	if !dated {
 		vs, vsok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
 		as, asok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
 		if !vsok || !asok || vs != as {
@@ -389,10 +417,9 @@ func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
 		}
 		return
 	}
-	diff := aw.Sub(vw).Seconds() // audio after video when positive
-	if math.Abs(diff) > hlsPairMaxSkew {
-		o.logger.Warn("the two halves of an HLS capture are recorded as starting too far apart to be one capture; they are muxed as they stand",
-			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
+	if !placed {
+		o.logger.Warn("the two halves of an HLS capture start further apart than the copy can delay one of them by; they are muxed as they stand, and the archive's sound is out of step with its picture by that much",
+			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "maxSeconds", hlsPairMaxSkew, "jobID", jobID)
 		return
 	}
 	if diff > 0 {

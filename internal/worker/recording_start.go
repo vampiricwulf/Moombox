@@ -247,11 +247,11 @@ func mediaStartTime(videoPath, audioPath string) (string, bool) {
 		// other at the mux (alignHlsPair), so the archive's 0:00 is the
 		// earlier one's first segment: an audio.ts that began a segment
 		// before its video.ts moves time zero to its own wall clock.
+		// A pair too far apart to place is muxed as it stands, its time
+		// zero the video's (hlsPairSkew).
 		if audioPath != "" && isStagedHlsPair(videoPath, audioPath) {
-			if a, aok := entry(audioPath); aok {
-				vt, _ := time.Parse(time.RFC3339Nano, v)
-				at, _ := time.Parse(time.RFC3339Nano, a)
-				if at.Before(vt) {
+			if skew, _, placed := hlsPairSkew(videoPath, audioPath); placed && skew < 0 {
+				if a, aok := entry(audioPath); aok {
 					return a, true
 				}
 			}
@@ -341,7 +341,13 @@ func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *Do
 		vs, vok := readRecordingStarts(filepath.Dir(videoPath))[filepath.Base(videoPath)]
 		as, aok := readRecordingStarts(filepath.Dir(audioPath))[filepath.Base(audioPath)]
 		if vok && aok {
-			seq := min(vs, as)
+			// A pair the mux does not place by dates (none recorded, or too
+			// far apart: hlsPairSkew) starts each half at 0:00, so the
+			// video's sequence is the archive's start.
+			seq := vs
+			if _, _, placed := hlsPairSkew(videoPath, audioPath); placed {
+				seq = min(vs, as)
+			}
 			if seq <= 0 {
 				return 0, true
 			}

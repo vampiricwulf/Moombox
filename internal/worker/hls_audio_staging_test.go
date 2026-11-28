@@ -127,7 +127,9 @@ func TestSetAsideOtherLiveShapeCoversTheHlsAudio(t *testing.T) {
 // TestMediaStartTimeOfAnHlsPairIsTheEarlierHalf: the mux places the two
 // halves of a demuxed HLS capture against each other (alignHlsPair), so the
 // archive's 0:00 is the earlier one's first segment; a DASH pair keeps the
-// video's (RV-19).
+// video's (RV-19), and so does an HLS pair too far apart to place.
+//
+// Mutant: the placement check dropped from mediaStartTime.
 func TestMediaStartTimeOfAnHlsPairIsTheEarlierHalf(t *testing.T) {
 	dir := t.TempDir()
 	v0 := time.Date(2026, 11, 27, 10, 0, 5, 0, time.UTC)
@@ -144,6 +146,14 @@ func TestMediaStartTimeOfAnHlsPairIsTheEarlierHalf(t *testing.T) {
 	}
 	if got, _ := mediaStartTime("", filepath.Join(dir, "audio.ts")); got != a0.Format(time.RFC3339Nano) {
 		t.Errorf("audio-only HLS: %q, want the rendition's", got)
+	}
+	// A pair too far apart for the copy to place is muxed as it stands, so
+	// its 0:00 is the video's first segment.
+	far := t.TempDir()
+	noteMediaStart(filepath.Join(far, "video.ts"), v0)
+	noteMediaStart(filepath.Join(far, "audio.ts"), v0.Add(-30*time.Second))
+	if got, _ := mediaStartTime(filepath.Join(far, "video.ts"), filepath.Join(far, "audio.ts")); got != v0.Format(time.RFC3339Nano) {
+		t.Errorf("HLS pair too far apart to place: %q, want the video's", got)
 	}
 }
 
@@ -167,7 +177,9 @@ func writeOffsetAudioTSFixture(t *testing.T, ffmpegPath, path string, seconds, o
 // first segments' #EXT-X-PROGRAM-DATE-TIME (media-start.json): the MPEG-TS
 // clocks of YouTube's variant and rendition are unrelated.
 //
-// Mutant: alignHlsPair not called (both tracks start at 0 in the copy).
+// Mutants: alignHlsPair not called (both tracks start at 0 in the copy);
+// hlsPairMaxSkew below a segment's skew (the 9 s rows come out level); a
+// skew past it not said in a Warn.
 func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 	ffmpegPath, _ := requireFFmpegTools(t)
 	for _, tc := range []struct {
@@ -178,6 +190,12 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 		{"audio a segment late", 100, 105, 0, 5},
 		{"video a segment late", 105, 100, 5, 0},
 		{"level", 100, 100, 0, 0},
+		// Just inside what the copy can delay an MPEG-TS input by.
+		{"audio 9 s late", 100, 109, 0, 9},
+		{"video 9 s late", 109, 100, 9, 0},
+		// Past it FFmpeg's discontinuity correction undoes the offset:
+		// muxed as it stands, said in a Warn.
+		{"audio 30 s late", 100, 130, 0, 0},
 		{"no dates recorded", -1, -1, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -193,6 +211,8 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 				noteMediaStart(audio, day.Add(time.Duration(tc.audioAt)*time.Second))
 			}
 			o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
+			logs := &captureLogger{}
+			o.logger = logs
 			out := filepath.Join(dir, "out.mp4")
 			if _, err := o.copyStaged(context.Background(), "j1", video, audio, out, "", nil); err != nil {
 				t.Fatalf("copyStaged: %v", err)
@@ -205,6 +225,11 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 			}
 			if math.Abs(vs-tc.wantVideo) > 0.3 || math.Abs(as-tc.wantAudio) > 0.3 {
 				t.Errorf("output starts video %.2f audio %.2f, want %.0f and %.0f", vs, as, tc.wantVideo, tc.wantAudio)
+			}
+			_, warned := logs.field("the two halves of an HLS capture start further apart than the copy can delay one of them by; they are muxed as they stand, and the archive's sound is out of step with its picture by that much", "jobID")
+			// Past FFmpeg's 10 s, the measured limit, never the constant.
+			if want := tc.videoAt >= 0 && math.Abs(float64(tc.audioAt-tc.videoAt)) > 10; warned != want {
+				t.Errorf("out-of-step Warn logged %v, want %v", warned, want)
 			}
 		})
 	}
