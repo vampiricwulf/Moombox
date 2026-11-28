@@ -27,3 +27,24 @@ func restoreRateLimitHold(st *openAlerts, gate interface {
 	}
 	st.update(func(d *openAlertsDoc) { d.RateLimitHeldUntil = time.Time{} })
 }
+
+// restoreLatencyBackfillHold is restoreRateLimitHold for the latency-mode
+// backfill's own rate-limit hold (owner ruling RV-19): the walk holds its
+// requests for the hour after YouTube rate-limits one, and without this a
+// restart inside that hour sent its next request into the same limit five
+// minutes after start. Saved in st (openAlertsDoc.LatencyBackfillHeldUntil),
+// restored before the worker starts, recorder first; one that has already
+// run out restores nothing and is cleared from the file.
+func restoreLatencyBackfillHold(st *openAlerts, walk interface {
+	RestoreLatencyBackfillHold(until time.Time) bool
+	RecordLatencyBackfillHold(record func(until time.Time))
+}) {
+	walk.RecordLatencyBackfillHold(func(until time.Time) {
+		st.update(func(d *openAlertsDoc) { d.LatencyBackfillHeldUntil = until.UTC() })
+	})
+	until := st.snapshot().LatencyBackfillHeldUntil
+	if until.IsZero() || walk.RestoreLatencyBackfillHold(until) {
+		return
+	}
+	st.update(func(d *openAlertsDoc) { d.LatencyBackfillHeldUntil = time.Time{} })
+}

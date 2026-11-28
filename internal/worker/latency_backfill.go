@@ -24,7 +24,10 @@ import (
 //     backlog scheduler's (Scheduler.RateLimitHeld), or its own, placed for
 //     rateLimitBackoff (the hour the scheduler holds) when its own request is
 //     refused for a rate limit. It does not place the scheduler's hold: a
-//     verdict on a background request is not a reason to hold the backlog;
+//     verdict on a background request is not a reason to hold the backlog.
+//     Its own hold outlives a restart as the scheduler's does: saved in
+//     open-alerts.json by cmd/moombox (RecordLatencyBackfillHold,
+//     RestoreLatencyBackfillHold);
 //   - never while a capture is starting (a row in Live: the step between the
 //     go-live confirmation and the first segment, when the capture makes its
 //     own requests);
@@ -45,7 +48,9 @@ import (
 //     loop. A failure met while going offline is not counted.
 //
 // The rows themselves are the state: a restart walks every row still NULL
-// from the start, and nothing else is saved. No config key: like the Twitch
+// from the start. The one thing saved beside them is the walk's own
+// rate-limit hold, so a restart inside its hour does not ask again into the
+// limit. No config key: like the Twitch
 // gap-fill sweep and the session keep-alive, it is a background job of the
 // archive's own with no switch. Once the archive is caught up it costs one
 // request per newly finished row it has to ask about (a VOD download of an
@@ -93,8 +98,11 @@ type latencyBackfill struct {
 	// cursor is the job ID of the last row handed out: the walk goes on
 	// after it, and from the start once it runs off the end.
 	cursor string
-	// heldUntil is the walk's own rate-limit hold.
+	// heldUntil is the walk's own rate-limit hold; zero when none stands.
 	heldUntil time.Time
+	// recordHold is told when the walk's own hold now runs out (zero: none
+	// stands), on every change; nil records nothing.
+	recordHold func(until time.Time)
 	// tries counts each row's failed requests in this process.
 	tries map[string]latencyTry
 	// current is the row being asked about, for the recover.
@@ -110,7 +118,7 @@ type latencyTry struct {
 // newLatencyBackfill is the worker's walk: its database, its YouTube
 // service, its connectivity monitor, and its scheduler's rate-limit hold.
 func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
-	b := &latencyBackfill{db: w.db, logger: w.logger}
+	b := &latencyBackfill{db: w.db, logger: w.logger, heldUntil: w.latencyHoldUntil, recordHold: w.latencyHoldRecord}
 	if w.yt != nil {
 		b.probe = w.latencyProbe
 	}
@@ -206,6 +214,9 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 	if !b.isOnline() {
 		return latencyBackfillPause
 	}
+	if !b.heldUntil.IsZero() && !now.Before(b.heldUntil) {
+		b.setHold(time.Time{})
+	}
 	if now.Before(b.heldUntil) || (b.rateLimitHeld != nil && b.rateLimitHeld(now)) {
 		return latencyBackfillPause
 	}
@@ -236,7 +247,7 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 			b.logger.Debug("latency backfill: stored the broadcast's latency mode", "jobID", row.JobID, "mode", string(mode))
 		}
 	case latencyRateLimited:
-		b.heldUntil = now.Add(rateLimitBackoff)
+		b.setHold(now.Add(rateLimitBackoff))
 		b.logger.Info("latency backfill: YouTube rate-limited the request; asking again after the hold",
 			"jobID", row.JobID, "until", b.heldUntil.UTC().Format(time.RFC3339))
 	default:
@@ -253,6 +264,42 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 		}
 	}
 	return latencyBackfillPause
+}
+
+// setHold sets the walk's own rate-limit hold to until (zero: none) and
+// records it for the next process.
+func (b *latencyBackfill) setHold(until time.Time) {
+	b.heldUntil = until
+	if b.recordHold != nil {
+		b.recordHold(until)
+	}
+}
+
+// RecordLatencyBackfillHold has the latency-mode backfill report its own
+// rate-limit hold on every change (zero when it runs out), for cmd/moombox
+// to save in open-alerts.json beside the scheduler's hold. In memory alone,
+// a restart inside the hour sent the walk's next request, five minutes after
+// start, into the limit it had just met. Call it before Start.
+func (w *DownloadWorker) RecordLatencyBackfillHold(record func(until time.Time)) {
+	w.latencyHoldRecord = record
+}
+
+// RestoreLatencyBackfillHold starts the backfill held until until, for a
+// host whose previous process stopped with the walk's own hold standing, and
+// reports whether it did: by Scheduler.RestoreRateLimitHold's rules, a hold
+// that has run out restores nothing, and one ending more than
+// rateLimitBackoff from now (a clock set back) is held for the hour only.
+// Call it before Start.
+func (w *DownloadWorker) RestoreLatencyBackfillHold(until time.Time) bool {
+	now := time.Now()
+	if !now.Before(until) {
+		return false
+	}
+	if limit := now.Add(rateLimitBackoff); until.After(limit) {
+		until = limit
+	}
+	w.latencyHoldUntil = until
+	return true
 }
 
 // errText is err's text, or "" for none.

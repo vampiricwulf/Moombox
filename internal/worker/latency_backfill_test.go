@@ -429,3 +429,68 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		}
 	}
 }
+
+// TestLatencyBackfillHoldOutlivesARestart: the walk's own rate-limit hold is
+// recorded when placed and when it runs out, restored into the next
+// process's walk (RestoreLatencyBackfillHold, by the scheduler's rules: a
+// run-out hold restores nothing, one past the hour is clamped), and the
+// restored walk asks nothing until it runs out (owner ruling RV-19: the
+// walk backs off as the scheduler does, whose hold outlives a restart).
+//
+// Mutants: setHold not recording (nothing saved); the run-out not recorded
+// (the file keeps a stale hold); newLatencyBackfill not seeding heldUntil
+// (the restarted walk asks at once); the restore's expiry check or clamp
+// dropped.
+func TestLatencyBackfillHoldOutlivesARestart(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	h.now = time.Now()
+	h.add("aaa", database.StatusFinished)
+	var saved []time.Time
+	record := func(until time.Time) { saved = append(saved, until) }
+	h.b.recordHold = record
+	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
+		return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityRateLimited}
+	}
+	h.step(latencyBackfillPause)
+	if len(saved) != 1 || !saved[0].Equal(h.now.Add(rateLimitBackoff)) {
+		t.Fatalf("recorded %v, want the hold until %v", saved, h.now.Add(rateLimitBackoff))
+	}
+	h.takeAsked()
+
+	// The restart, ten minutes into the hold.
+	h.now = h.now.Add(10 * time.Minute)
+	w := &DownloadWorker{}
+	w.RecordLatencyBackfillHold(record)
+	if !w.RestoreLatencyBackfillHold(saved[0]) {
+		t.Fatal("a hold still standing was not restored")
+	}
+	seeded := w.newLatencyBackfill()
+	if !seeded.heldUntil.Equal(saved[0]) || seeded.recordHold == nil {
+		t.Fatalf("the new walk starts held until %v (recorder %v), want %v", seeded.heldUntil, seeded.recordHold != nil, saved[0])
+	}
+	h.b = h.newWalk()
+	h.b.heldUntil, h.b.recordHold = seeded.heldUntil, seeded.recordHold
+	h.answers["aaa"] = answered("MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL")
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 0 {
+		t.Fatalf("asked %v inside the restored hold", got)
+	}
+	h.now = saved[0]
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 1 || h.mode("aaa") != database.LatencyModeNormal {
+		t.Fatalf("after the hold: asked %v, mode %q, want aaa answered", got, h.mode("aaa"))
+	}
+	if last := saved[len(saved)-1]; !last.IsZero() {
+		t.Errorf("the run-out hold was not recorded as none: last %v", last)
+	}
+
+	// The restore's own rules.
+	r := &DownloadWorker{}
+	if r.RestoreLatencyBackfillHold(time.Now().Add(-time.Second)) || !r.latencyHoldUntil.IsZero() {
+		t.Error("a hold that has run out was restored")
+	}
+	if !r.RestoreLatencyBackfillHold(time.Now().Add(5*rateLimitBackoff)) || r.latencyHoldUntil.After(time.Now().Add(rateLimitBackoff)) {
+		t.Errorf("a hold past the hour restored until %v, want at most the hour", r.latencyHoldUntil)
+	}
+}

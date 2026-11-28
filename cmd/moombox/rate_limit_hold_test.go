@@ -71,3 +71,66 @@ func TestRateLimitHoldSurvivesARestart(t *testing.T) {
 		t.Errorf("the file still holds %v after a restart found it run out, want it cleared", got)
 	}
 }
+
+// latencyWalkSpy is the latency-mode backfill's half of
+// restoreLatencyBackfillHold, as rateLimitGateSpy is the scheduler's.
+type latencyWalkSpy struct {
+	restored []time.Time
+	record   func(until time.Time)
+}
+
+func (w *latencyWalkSpy) RestoreLatencyBackfillHold(until time.Time) bool {
+	w.restored = append(w.restored, until)
+	return time.Now().Before(until)
+}
+
+func (w *latencyWalkSpy) RecordLatencyBackfillHold(record func(until time.Time)) { w.record = record }
+
+// TestLatencyBackfillHoldSurvivesARestart: the backfill's own rate-limit
+// hold is saved in open-alerts.json apart from the scheduler's, and the next
+// process is handed it; the run-out it records clears it, and one that ran
+// out while no process ran is cleared from the file (owner ruling RV-19: the
+// walk backs off as the scheduler does, whose hold outlives a restart).
+//
+// Mutants: no recorder installed (nothing is saved); the field left out of
+// the file (the next start sees no hold); the scheduler's field written
+// instead (the backlog's hold is touched); the clear of a run-out hold
+// skipped.
+func TestLatencyBackfillHoldSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), openAlertsFileName)
+	until := time.Now().Add(40 * time.Minute).UTC()
+
+	first := &latencyWalkSpy{}
+	restoreLatencyBackfillHold(restart(t, path), first)
+	if len(first.restored) != 0 || first.record == nil {
+		t.Fatalf("first start: restored %v, recorder set %v, want nothing restored and a recorder", first.restored, first.record != nil)
+	}
+	first.record(until) // the walk's request was rate-limited
+
+	reread := restart(t, path)
+	if got := reread.snapshot().RateLimitHeldUntil; !got.IsZero() {
+		t.Errorf("the backfill's hold reached the scheduler's field: %v", got)
+	}
+	second := &latencyWalkSpy{}
+	restoreLatencyBackfillHold(reread, second)
+	if len(second.restored) != 1 || !second.restored[0].Equal(until) {
+		t.Fatalf("restored %v after a restart inside the hold, want [%v]", second.restored, until)
+	}
+	second.record(time.Time{}) // the step that finds it run out
+
+	third := &latencyWalkSpy{}
+	restoreLatencyBackfillHold(restart(t, path), third)
+	if len(third.restored) != 0 {
+		t.Errorf("restored %v after the hold ran out, want nothing", third.restored)
+	}
+
+	third.record(time.Now().Add(-time.Minute)) // ran out while the process was down
+	stale := &latencyWalkSpy{}
+	restoreLatencyBackfillHold(restart(t, path), stale)
+	if len(stale.restored) != 1 {
+		t.Fatalf("restored %v, want the expired hold offered once", stale.restored)
+	}
+	if got := restart(t, path).snapshot().LatencyBackfillHeldUntil; !got.IsZero() {
+		t.Errorf("the file still holds %v after a restart found it run out, want it cleared", got)
+	}
+}

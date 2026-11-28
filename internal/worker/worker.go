@@ -324,6 +324,13 @@ type DownloadWorker struct {
 	wg        sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
+	// latencyHoldUntil and latencyHoldRecord are the latency-mode backfill's
+	// own rate-limit hold carried across a restart
+	// (RestoreLatencyBackfillHold, RecordLatencyBackfillHold): set before
+	// Start, read once by newLatencyBackfill.
+	latencyHoldUntil  time.Time
+	latencyHoldRecord func(until time.Time)
+
 	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
 	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
 	// one staging directory and one output directory, and each calls
