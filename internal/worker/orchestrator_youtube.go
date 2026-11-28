@@ -351,8 +351,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 		segJobCtx := *jobCtx
 		segJobCtx.StagingDir = segStagingDir
-		segJobCtx.VideoStartSeq = oldVideoSeq
-		segJobCtx.AudioStartSeq = oldAudioSeq
+		segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = carriedStartSeqs(result, oldVideoSeq, oldAudioSeq)
 
 		// refreshOrSwitch is the new part's refresh over info: when it fails
 		// on the player's JS challenges (liveSwitchWanted) the part is a new
@@ -542,7 +541,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if !jobCtx.Run.canSwitchBack() || ctx.Err() != nil || freshInfo == nil {
 			return false
 		}
-		oldAudioSeq = switchBackAudioSeq(result, oldVideoSeq, oldAudioSeq)
+		oldVideoSeq, oldAudioSeq = carriedStartSeqs(result, oldVideoSeq, oldAudioSeq)
 		var strategy DownloadStrategy
 		switch {
 		case HasManifestlessDashFormats(freshInfo.Formats):
@@ -1847,15 +1846,28 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 	}
 }
 
-// switchBackAudioSeq is where switchBack starts the from-start pair's audio:
-// the stopped audio downloader's position, or for a capture of a muxed HLS
-// master, which has no audio downloader (its one stream carries the sound),
-// the position its video stopped at — one timeline across shapes. A demuxed
-// master's capture records its audio rendition with a downloader of its own
-// (DownloadHls), whose position stands.
-func switchBackAudioSeq(result *DownloadResult, oldVideoSeq, oldAudioSeq int) int {
-	if result.IsHls && result.AudioDownloader == nil {
-		return oldVideoSeq
+// carriedStartSeqs is where the next capture of a live job starts its video
+// and audio once the stopped capture, result, leaves its part: each stopped
+// downloader's position, and for an HLS capture with no downloader for one
+// half, the other half's position — one timeline across shapes. A capture of
+// a muxed HLS master has no audio downloader (its one stream carries the
+// sound), so the next capture's audio starts where its video stopped; an
+// audio-only HLS recording has no video downloader, so the next capture's
+// video starts where its audio stopped. A demuxed master's capture records
+// its audio rendition with a downloader of its own (DownloadHls), whose
+// position stands. switchBack's from-start pair and a part split's next
+// capture (splitPart) both start here: a muxed master refreshed into a
+// demuxed one would otherwise start the new audio rendition at the
+// playlist window's start, up to an hour behind its video.
+func carriedStartSeqs(result *DownloadResult, oldVideoSeq, oldAudioSeq int) (videoSeq, audioSeq int) {
+	if result == nil || !result.IsHls {
+		return oldVideoSeq, oldAudioSeq
 	}
-	return oldAudioSeq
+	if result.AudioDownloader == nil {
+		oldAudioSeq = oldVideoSeq
+	}
+	if result.VideoDownloader == nil {
+		oldVideoSeq = oldAudioSeq
+	}
+	return oldVideoSeq, oldAudioSeq
 }

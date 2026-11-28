@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,24 +210,55 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 	}
 }
 
-// TestSwitchBackAudioSeqKeepsTheRenditionsPosition: switching back from the
-// live HLS playlist to the from-start pair starts its audio where the HLS
-// capture's audio stopped: a muxed master's video position (it has no audio
-// downloader), a demuxed master's own audio rendition position.
+// TestCarriedStartSeqsKeepOneTimelineAcrossShapes: the capture that follows
+// a stopped one — switchBack's from-start pair, a part split's next capture —
+// starts each half where the stopped capture's same half stopped, and an
+// HLS half the stopped capture did not record where its other half stopped:
+// a muxed master's audio at its video's position, an audio-only recording's
+// video at its audio's, a demuxed master's audio at its own rendition's.
 //
-// Mutant: the AudioDownloader check dropped (the rendition's position is
-// replaced by the video's).
-func TestSwitchBackAudioSeqKeepsTheRenditionsPosition(t *testing.T) {
-	muxed := &DownloadResult{IsHls: true, VideoDownloader: nilSafeDownloader(t)}
-	if got := switchBackAudioSeq(muxed, 500, 0); got != 500 {
-		t.Errorf("muxed master: %d, want the video's 500", got)
+// Mutants: the AudioDownloader check dropped (the muxed master's next audio
+// starts at 0, the playlist window's start), the VideoDownloader check
+// dropped (the audio-only recording's next video starts at 0), the IsHls
+// gate dropped (a DASH capture's positions are rewritten).
+func TestCarriedStartSeqsKeepOneTimelineAcrossShapes(t *testing.T) {
+	d := func() *engine.SegmentDownloader { return nilSafeDownloader(t) }
+	for _, tc := range []struct {
+		name         string
+		result       *DownloadResult
+		v, a         int
+		wantV, wantA int
+	}{
+		{"muxed master", &DownloadResult{IsHls: true, HasVideo: true, VideoDownloader: d()}, 500, 0, 500, 500},
+		{"demuxed master", &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, VideoDownloader: d(), AudioDownloader: d()}, 500, 498, 500, 498},
+		{"audio-only recording", &DownloadResult{IsHls: true, HasAudio: true, AudioDownloader: d()}, 0, 498, 498, 498},
+		{"DASH", &DownloadResult{HasVideo: true, HasAudio: true, VideoDownloader: d(), AudioDownloader: d()}, 500, 498, 500, 498},
+		{"DASH with no audio downloader", &DownloadResult{HasVideo: true, VideoDownloader: d()}, 500, 0, 500, 0},
+	} {
+		v, a := carriedStartSeqs(tc.result, tc.v, tc.a)
+		if v != tc.wantV || a != tc.wantA {
+			t.Errorf("%s: carried video %d audio %d, want %d and %d", tc.name, v, a, tc.wantV, tc.wantA)
+		}
 	}
-	demuxed := &DownloadResult{IsHls: true, VideoDownloader: nilSafeDownloader(t), AudioDownloader: nilSafeDownloader(t)}
-	if got := switchBackAudioSeq(demuxed, 500, 498); got != 498 {
-		t.Errorf("demuxed master: %d, want the rendition's 498", got)
+}
+
+// Both captures that follow a stopped one start at carriedStartSeqs: the
+// switch back and a part split. Pinned on runLiveStreamDownload's source, as
+// the live loop's other split conditions are (TestLiveLoopSplitsOnAChangedItag).
+//
+// Mutant: either call replaced by the raw positions.
+func TestLiveLoopCarriesStartSeqsAcrossShapes(t *testing.T) {
+	src, err := os.ReadFile("orchestrator_youtube.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := switchBackAudioSeq(&DownloadResult{AudioDownloader: nilSafeDownloader(t)}, 500, 498); got != 498 {
-		t.Errorf("DASH: %d, want 498", got)
+	for _, want := range []string{
+		"oldVideoSeq, oldAudioSeq = carriedStartSeqs(result, oldVideoSeq, oldAudioSeq)",
+		"segJobCtx.VideoStartSeq, segJobCtx.AudioStartSeq = carriedStartSeqs(result, oldVideoSeq, oldAudioSeq)",
+	} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("runLiveStreamDownload no longer has %q", want)
+		}
 	}
 }
 

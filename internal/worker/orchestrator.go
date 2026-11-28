@@ -1218,9 +1218,21 @@ func refreshFormatMatches(old, fresh *DownloadResult) bool {
 // does not have) decides nothing. The live loop splits on it exactly as on a
 // quality change, since a refreshed downloader continues the current part's
 // files and the engine's append path cannot tell codecs apart.
+//
+// Two HLS captures of different shapes are different renditions too: a muxed
+// master's (video.ts alone, its sound in it), a demuxed master's (video.ts
+// video-only, audio.ts beside it) and an audio-only recording's (audio.ts
+// alone) record different things into the same file names, so a refresh that
+// came back in another shape continuing the part would leave a stale audio.ts
+// beside a muxed video.ts, or start an audio.ts mid-part beside a video.ts
+// that carried its own sound until then. HasVideo and HasAudio say which
+// halves an HLS result records (a muxed master's sets no HasAudio).
 func streamIdentityChanged(old, fresh *DownloadResult) bool {
 	if old == nil || fresh == nil {
 		return false
+	}
+	if old.IsHls && fresh.IsHls && (old.HasVideo != fresh.HasVideo || old.HasAudio != fresh.HasAudio) {
+		return true
 	}
 	return (old.VideoItag != 0 && fresh.VideoItag != 0 && old.VideoItag != fresh.VideoItag) ||
 		(old.AudioItag != 0 && fresh.AudioItag != 0 && old.AudioItag != fresh.AudioItag)

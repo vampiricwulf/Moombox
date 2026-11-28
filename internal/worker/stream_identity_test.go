@@ -98,3 +98,39 @@ func TestLiveLoopSplitsOnAChangedItag(t *testing.T) {
 		}
 	}
 }
+
+// A live HLS refresh that comes back in another shape is a new rendition:
+// a muxed master's capture (video.ts carrying its sound), a demuxed master's
+// (video.ts video-only beside audio.ts) and an audio-only recording's
+// (audio.ts alone) write different things under the same names, so the live
+// loop splits the part rather than continue it, whichever way the master
+// changed. Two captures of one shape are not split for it.
+//
+// Mutant: the HLS shape comparison dropped (every changed-shape case reads
+// unchanged), or HasVideo left out of it (audio-only cases).
+func TestStreamIdentityChangesWithTheHlsShape(t *testing.T) {
+	muxed := func() *DownloadResult { return &DownloadResult{IsHls: true, HasVideo: true} }
+	demuxed := func() *DownloadResult {
+		return &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, AudioItag: 234}
+	}
+	audioOnly := func() *DownloadResult { return &DownloadResult{IsHls: true, HasAudio: true, AudioItag: 234} }
+	for _, tc := range []struct {
+		name       string
+		old, fresh *DownloadResult
+		want       bool
+	}{
+		{"demuxed to muxed", demuxed(), muxed(), true},
+		{"muxed to demuxed", muxed(), demuxed(), true},
+		{"audio-only to demuxed", audioOnly(), demuxed(), true},
+		{"demuxed to audio-only", demuxed(), audioOnly(), true},
+		{"muxed to muxed", muxed(), muxed(), false},
+		{"demuxed to demuxed", demuxed(), demuxed(), false},
+	} {
+		if got := streamIdentityChanged(tc.old, tc.fresh); got != tc.want {
+			t.Errorf("%s: changed = %v, want %v", tc.name, got, tc.want)
+		}
+		if got := refreshFormatMatches(tc.old, tc.fresh); got == tc.want {
+			t.Errorf("%s: refreshFormatMatches = %v, want %v", tc.name, got, !tc.want)
+		}
+	}
+}
