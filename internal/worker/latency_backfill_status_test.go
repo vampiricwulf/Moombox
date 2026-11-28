@@ -3,6 +3,7 @@ package worker
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -259,5 +260,48 @@ func TestLatencyBackfillLineParity(t *testing.T) {
 		if got := LatencyBackfillLine(s, time.FixedZone("", c.UTCOffsetMinutes*60)); got != c.Line {
 			t.Errorf("%s: %q, want %q", c.Name, got, c.Line)
 		}
+	}
+}
+
+// TestLatencyBackfillPauseKeepsItsPlace: the look a pause takes for a row
+// to ask about leaves the cursor where it was, so the row it found is the
+// one asked about once the pause ends; and a failed read during a pause
+// stays paused and looks again a pause later, never logging a caught-up line
+// it has not read.
+//
+// Mutants: pauseIfWork not restoring the cursor (bbb is asked first, aaa
+// skipped until the walk wraps); pauseIfWork reading a failed read as
+// nothing to ask (caught up, the idle hour, a false caught-up line).
+func TestLatencyBackfillPauseKeepsItsPlace(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	h.add("aaa", database.StatusFinished)
+	h.add("bbb", database.StatusFinished)
+	h.answers["aaa"] = answered("")
+	h.answers["bbb"] = answered("")
+	h.online = false
+	h.step(latencyBackfillPause)
+	h.online = true
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); !reflect.DeepEqual(got, []string{"aaa"}) {
+		t.Errorf("the step after the pause asked %v, want [aaa]", got)
+	}
+
+	db, err := database.Open(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newBackfillHarness(t, db)
+	f.add("aaa", database.StatusFinished)
+	log := &infoArgsLogger{}
+	f.b.logger = log
+	db.Close()
+	f.online = false
+	f.step(latencyBackfillPause)
+	if got := f.b.snapshot(); got.state != LatencyBackfillPaused || got.pause != LatencyPauseOffline {
+		t.Errorf("after a failed read during a pause: %+v, want paused offline", got)
+	}
+	if got := log.take(); !reflect.DeepEqual(got, [][]any{{"latency backfill: paused while the device is offline"}}) {
+		t.Errorf("logged %v, want only the offline pause", got)
 	}
 }
