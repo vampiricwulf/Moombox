@@ -95,6 +95,9 @@ type memGVS struct {
 	// onRequest, when set, runs for every segment request (not probes)
 	// before it is answered.
 	onRequest func(seq int)
+	// body, when set, replaces gvsMedia as what gvsServe answers a segment
+	// request with.
+	body func(seq int) []byte
 
 	mu       sync.Mutex
 	attempts map[int]int
@@ -133,6 +136,9 @@ func (g *memGVS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body := gvsInit()
 		if seq >= 0 {
 			body = gvsMedia(seq)
+		}
+		if seq >= 0 && g.body != nil {
+			body = g.body(seq)
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)

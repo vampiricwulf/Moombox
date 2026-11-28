@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -850,6 +852,17 @@ type SegmentDownloader struct {
 	// (recordingStartFile, FE-18). Runs on the download goroutine, so it must
 	// not block. Assign before Start, like the callbacks above.
 	OnFirstMedia func(seq int)
+	// OnFirstMediaWallclock is called right after OnFirstMedia, once, with the
+	// wall clock of that same first segment when it carries one: a live
+	// YouTube DASH segment's Ingestion-Walltime-Us (segmentIngestWalltime),
+	// an HLS segment's #EXT-X-PROGRAM-DATE-TIME. FFmpeg's mux moves each
+	// input's first timestamp to 0, so this is the wall clock of the archive's
+	// time zero, which the dashboard player lines chat up with (the job's
+	// media_start_time, owner ruling RV-19). Not called when the segment
+	// carries none (a WebM segment, a playlist with no date-time), or on a
+	// resume or an append. Runs on the download goroutine, so it must not
+	// block. Assign before Start.
+	OnFirstMediaWallclock func(wall time.Time)
 	// OnCipherFailure is called once on first 403 before any bytes
 	// written (likely cipher rotation). The callback should
 	// invalidate any cached cipher solver and OPTIONALLY return a
@@ -2083,7 +2096,12 @@ func truncateURL(u string, maxLen int) string {
 // the file's first: OnFirstMedia hears the sequence then, and the HLS loop
 // adds its OnFirstSegment date-time. A no-op after the first, and on a
 // resumed or appended file, which Start never arms.
-func (d *SegmentDownloader) firstMediaWritten(seq int) bool {
+//
+// OnFirstMediaWallclock hears the segment's wall clock: programDateTime when
+// it is set (the HLS paths), else the Ingestion-Walltime-Us that data — the
+// segment as written — carries (the DASH paths), read only here, once per
+// file, never for the segments after it.
+func (d *SegmentDownloader) firstMediaWritten(seq int, data []byte, programDateTime time.Time) bool {
 	if !d.reportFirstSegment {
 		return false
 	}
@@ -2091,5 +2109,53 @@ func (d *SegmentDownloader) firstMediaWritten(seq int) bool {
 	if d.OnFirstMedia != nil {
 		d.OnFirstMedia(seq)
 	}
+	if d.OnFirstMediaWallclock != nil {
+		wall := programDateTime
+		if wall.IsZero() {
+			wall = segmentIngestWalltime(data)
+		}
+		if !wall.IsZero() {
+			d.OnFirstMediaWallclock(wall)
+		}
+	}
 	return true
+}
+
+// ingestWalltimeKey is the key of the text metadata a live YouTube segment
+// leads with ("Ingestion-Walltime-Us: 1795822144764160\r\n", beside
+// Sequence-Number and First-Frame-Time-Us): the wall clock, in Unix
+// microseconds, at which YouTube ingested the segment. Measured on two real
+// captures (2026-11-27, owner ruling RV-19): over 399 fragments it stayed
+// within 0.062 s of the fragment's decode time, and YouTube's own
+// yt:segmentIngestTime and #EXT-X-PROGRAM-DATE-TIME for the same sequence
+// agree with it to 0.071 s, so it is the segment's media time on the wall
+// clock. First-Frame-Time-Us sits about one segment later and is not.
+const ingestWalltimeKey = "Ingestion-Walltime-Us:"
+
+// ingestWalltimeScan bounds how far into a segment segmentIngestWalltime
+// looks: the metadata leads the segment, after at most sq=0's inline init.
+const ingestWalltimeScan = 64 << 10
+
+// segmentIngestWalltime is the Ingestion-Walltime-Us a live YouTube segment
+// carries in its leading metadata (ingestWalltimeKey), as UTC; the zero time
+// when data holds none in its first ingestWalltimeScan bytes or the value is
+// not a positive whole number.
+func segmentIngestWalltime(data []byte) time.Time {
+	if len(data) > ingestWalltimeScan {
+		data = data[:ingestWalltimeScan]
+	}
+	i := bytes.Index(data, []byte(ingestWalltimeKey))
+	if i < 0 {
+		return time.Time{}
+	}
+	rest := bytes.TrimLeft(data[i+len(ingestWalltimeKey):], " \t")
+	n := 0
+	for n < len(rest) && rest[n] >= '0' && rest[n] <= '9' {
+		n++
+	}
+	usec, err := strconv.ParseInt(string(rest[:n]), 10, 64)
+	if err != nil || usec <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMicro(usec).UTC()
 }
