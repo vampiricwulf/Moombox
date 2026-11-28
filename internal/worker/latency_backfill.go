@@ -46,8 +46,10 @@ import (
 //
 // The rows themselves are the state: a restart walks every row still NULL
 // from the start, and nothing else is saved. No config key: like the Twitch
-// gap-fill sweep and the session keep-alive, it is a bounded background job
-// of the archive's own, and it ends once every row has an answer.
+// gap-fill sweep and the session keep-alive, it is a background job of the
+// archive's own with no switch. Once the archive is caught up it costs one
+// request per newly finished row it has to ask about (a VOD download of an
+// upload, which the worker leaves NULL) and a database read an hour.
 
 const (
 	// latencyBackfillStartDelay is how long after start the first request
@@ -131,10 +133,17 @@ func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
 // members-only refusal the authenticated TV probe when the jar is signed in
 // (the feed walk's retry: a member's session sees the broadcast's details).
 func (w *DownloadWorker) latencyProbe(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
-	info, err := w.yt.ProbeVideoStatus(ctx, videoID)
+	return latencyProbeVia(ctx, videoID, w.yt.ProbeVideoStatus, w.yt.ProbeVideoStatusAuthenticated, w.yt.HasAuthCookies)
+}
+
+// latencyProbeVia is latencyProbe over its three calls: probe, then authProbe
+// for a members-only refusal with no videoDetails while signedIn.
+func latencyProbeVia(ctx context.Context, videoID string,
+	probe, authProbe func(context.Context, string) (*youtube.VideoInfo, error), signedIn func() bool) (*youtube.VideoInfo, error) {
+	info, err := probe(ctx, videoID)
 	if err == nil && info != nil && !info.LatencyClassAsked &&
-		info.PlayabilityError == youtube.PlayabilityMembersOnly && w.yt.HasAuthCookies() {
-		return w.yt.ProbeVideoStatusAuthenticated(ctx, videoID)
+		info.PlayabilityError == youtube.PlayabilityMembersOnly && signedIn() {
+		return authProbe(ctx, videoID)
 	}
 	return info, err
 }

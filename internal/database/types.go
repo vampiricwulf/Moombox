@@ -197,9 +197,11 @@ func (s ChatStatus) InFlight() bool {
 // (owner ruling RV-19), read from the player response's
 // videoDetails.latencyClass (ParseLatencyClass). Stored in jobs.latency_mode
 // at the first extraction of a live capture and of a VOD download of a past
-// stream; NULL ("") until then, and for an ordinary uploaded video and a
-// Twitch job. jobstate.SuggestedChatOffset reads it. A fact about the
-// broadcast, so a Reinitialize keeps it.
+// stream; NULL ("") until then, and for a Twitch job. A Finished YouTube
+// row the worker left NULL (one from before v30, an ordinary upload's VOD
+// download) is filled in by the worker's latency-mode backfill, which stores
+// LatencyModeUnstated for an upload. jobstate.SuggestedChatOffset reads it.
+// A fact about the broadcast, so a Reinitialize keeps it.
 type LatencyMode string
 
 const (

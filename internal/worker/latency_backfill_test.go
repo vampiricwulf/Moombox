@@ -348,3 +348,46 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 		t.Error("a Live row is not a capture starting")
 	}
 }
+
+// TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal: the walk's
+// request is the status probe, and for a members-only refusal with no
+// videoDetails the authenticated TV probe, but only while signed in; any
+// other answer is returned as it is.
+//
+// Mutants: the follow-up dropped (members-only signed in returns the
+// refusal); the signed-in check dropped (a signed-out jar asks TV).
+func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
+	t.Parallel()
+	member := &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
+	for _, c := range []struct {
+		name     string
+		first    *youtube.VideoInfo
+		signedIn bool
+		wantAuth bool
+	}{
+		{"members only, signed in", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly}, true, true},
+		{"members only, signed out", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly}, false, false},
+		{"members only with details", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true}, true, false},
+		{"an answer", &youtube.VideoInfo{LatencyClassAsked: true}, true, false},
+		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate}, true, false},
+	} {
+		authAsked := false
+		got, err := latencyProbeVia(context.Background(), "vid",
+			func(context.Context, string) (*youtube.VideoInfo, error) { return c.first, nil },
+			func(context.Context, string) (*youtube.VideoInfo, error) { authAsked = true; return member, nil },
+			func() bool { return c.signedIn })
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if authAsked != c.wantAuth {
+			t.Errorf("%s: authenticated probe asked = %v, want %v", c.name, authAsked, c.wantAuth)
+		}
+		if want := c.first; c.wantAuth {
+			if got != member {
+				t.Errorf("%s: returned the refusal, want the member's answer", c.name)
+			}
+		} else if got != want {
+			t.Errorf("%s: answer replaced", c.name)
+		}
+	}
+}

@@ -3,6 +3,8 @@ package youtube
 import (
 	"context"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // TestLatencyClassThroughTheCascade: a response's videoDetails.latencyClass
@@ -74,5 +76,26 @@ func TestLatencyClassThroughTheCascade(t *testing.T) {
 	}
 	if info.LatencyClass != "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL" || !info.LatencyClassAsked {
 		t.Errorf("the extraction's class = %q asked %v, want the first videoDetails response's NORMAL", info.LatencyClass, info.LatencyClassAsked)
+	}
+}
+
+// TestStatusProbeCarriesTheLatencyClass: the latency-mode backfill's request
+// is the status probe, one ANDROID_VR call outside any cascade, and an ended
+// stream's answer carries its class through it (owner ruling RV-19).
+//
+// Mutant: parsePlayerResponse leaving LatencyClass off the VideoInfo it
+// builds (only the cascade's stamp setting it).
+func TestStatusProbeCarriesTheLatencyClass(t *testing.T) {
+	serveBodies(t, map[string]string{
+		clientAndroidVR: `{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"test1234567","title":"t","author":"a",` +
+			`"isLive":false,"isLiveContent":true,"latencyClass":"MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}}`,
+	})
+	svc := NewService(cookies.NewCookieJar(), noopLogger{})
+	info, err := svc.ProbeVideoStatus(context.Background(), "test1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.LatencyClass != "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL" || !info.LatencyClassAsked {
+		t.Errorf("probe: class %q asked %v, want NORMAL asked", info.LatencyClass, info.LatencyClassAsked)
 	}
 }
