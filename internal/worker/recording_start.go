@@ -216,6 +216,15 @@ func anchorsMediaStart(job *database.Job, result *DownloadResult) bool {
 // audio's entry only when the two are known to have begun at the same
 // sequence (recordingStartFile), or when there is no video input; otherwise
 // it is unknown — never a guess. ok is false when it is not known.
+//
+// A known limit: when a mux repair cut the first fragment(s) of BOTH staged
+// inputs, alignStagedInputs puts the archive's 0:00 at the earlier of the two
+// repaired starts, later than the first segment whose wall clock this
+// returns, so the player shows that archive's chat early by the dropped
+// stretch (a second or a few). One input losing its start is placed against
+// the other, which keeps 0:00 at the original start, and is exact. Left as
+// it is: the case is rare, the error small, and the fallbacks (the join
+// point, the start time) carry the same error.
 func mediaStartTime(videoPath, audioPath string) (string, bool) {
 	entry := func(p string) (string, bool) {
 		if p == "" {
