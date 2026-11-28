@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -366,13 +367,14 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 			// Failed as the device went offline: not the video's failure.
 			return latencyBackfillPause
 		}
+		why := latencyFailureOf(info, err)
 		if n := b.fail(row.JobID, now); n >= latencyBackfillMaxTries {
 			b.run.gaveUp++
 			b.logger.Info("latency backfill: giving up on this recording until the next start",
-				"jobID", row.JobID, "tries", n, "err", errText(err))
+				why.logArgs(row.JobID, n)...)
 		} else {
 			b.logger.Debug("latency backfill: the request failed; asking again on a later pass",
-				"jobID", row.JobID, "tries", n, "err", errText(err))
+				why.logArgs(row.JobID, n)...)
 		}
 	}
 	return latencyBackfillPause
@@ -431,6 +433,77 @@ func (w *DownloadWorker) RestoreLatencyBackfillHold(until time.Time) bool {
 	}
 	w.latencyHoldUntil = until
 	return true
+}
+
+// latencyFailure is what one failed request's answer said, for the walk's
+// failure lines: a nil error with an answer YouTube refused or would not
+// place, or the status probe's inconclusive refusal by both clients asked.
+// It never holds a cookie, a token or visitor data: the kind, YouTube's
+// reason text, whether videoDetails came back and the client's name are all
+// the answer carries, and err's text goes through redact.MediaText.
+type latencyFailure struct {
+	err string
+	// answered is whether YouTube answered at all: false for a network
+	// failure, a timeout or an empty answer, whose lines carry err alone.
+	answered bool
+	kind     youtube.PlayabilityError
+	reason   string
+	details  bool
+	// client names the client that answered, "" when the answer does not
+	// say (latencyAnswerClient); escalation and escalationKind are the
+	// status probe's second client and its own refusal, on an inconclusive
+	// probe.
+	client         string
+	escalation     string
+	escalationKind youtube.PlayabilityError
+}
+
+// latencyFailureOf reads one failed request's info and err.
+func latencyFailureOf(info *youtube.VideoInfo, err error) latencyFailure {
+	f := latencyFailure{err: redact.MediaText(errText(err))}
+	if inc, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
+		f.answered = true
+		f.kind, f.reason, f.client = inc.Playability, inc.Reason, "android_vr"
+		f.escalation, f.escalationKind = inc.Escalation, inc.EscalationPlayability
+		return f
+	}
+	if err == nil && info != nil {
+		f.answered = true
+		f.kind, f.reason, f.details = info.PlayabilityError, info.PlayabilityReason, info.LatencyClassAsked
+		f.client = latencyAnswerClient(info)
+	}
+	return f
+}
+
+// latencyAnswerClient is the client an answer names: the status probe's
+// escalation when it answered in ANDROID_VR's place, else the client
+// stamped on its manifest; "" when it names none (an upload's answer often
+// carries no manifest).
+func latencyAnswerClient(info *youtube.VideoInfo) string {
+	switch {
+	case info.StatusProbeEscalation != "":
+		return info.StatusProbeEscalation
+	case info.DashManifestSource != "":
+		return info.DashManifestSource
+	default:
+		return info.HlsManifestSource
+	}
+}
+
+// logArgs are a failure line's key-value pairs for jobID's n-th try.
+func (f latencyFailure) logArgs(jobID string, n int) []any {
+	args := []any{"jobID", jobID, "tries", n, "err", f.err}
+	if !f.answered {
+		return args
+	}
+	args = append(args, "playability", string(f.kind), "reason", f.reason, "videoDetails", f.details)
+	if f.client != "" {
+		args = append(args, "client", f.client)
+	}
+	if f.escalation != "" {
+		args = append(args, "escalation", f.escalation, "escalationPlayability", string(f.escalationKind))
+	}
+	return args
 }
 
 // errText is err's text, or "" for none.

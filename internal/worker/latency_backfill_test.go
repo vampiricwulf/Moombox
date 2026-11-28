@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -652,5 +654,81 @@ func TestLatencyBackfillWakeOnlyWhenTheSwitchMoved(t *testing.T) {
 	wake <- struct{}{}
 	if !bounded() {
 		t.Error("a switch moved to on did not end the wait")
+	}
+}
+
+// TestLatencyBackfillFailureLinesSayWhy: a failed request's Debug line and
+// the give-up Info line carry YouTube's answer beside err: the playability
+// kind, its reason text, whether videoDetails came back and the client that
+// answered (an inconclusive probe's two clients and their refusals), and
+// err's text with a media URL's credentials cut. A network failure, which
+// has no answer, carries err alone.
+//
+// Mutants: the answer's fields left off either line (both lines read
+// err=""); err logged unredacted (the pot value shows).
+func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &lockedLogger{}
+	h.b.logger = log
+	const gone = "This video is no longer available because the YouTube account associated with this video has been terminated."
+	h.add("aaa", database.StatusFinished)
+	h.add("bbb", database.StatusFinished)
+	h.add("ccc", database.StatusFinished)
+	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityLoginRequired, PlayabilityReason: "Sign in to confirm you're not a bot",
+			StatusProbeEscalation: youtube.StatusProbeEscalationTVAuth}, nil
+	}
+	h.answers["bbb"] = func() (*youtube.VideoInfo, error) {
+		return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}
+	}
+	h.answers["ccc"] = func() (*youtube.VideoInfo, error) {
+		return nil, errors.New(`Get "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&pot=SECRETPOT&sig=x": dial tcp: timeout`)
+	}
+	lines := func() map[string][]any {
+		log.mu.Lock()
+		defer log.mu.Unlock()
+		out := map[string][]any{}
+		for _, l := range log.lines {
+			for i := 1; i+1 < len(l); i += 2 {
+				if l[i] == "jobID" {
+					out[fmt.Sprint(l[0], " ", l[i+1])] = l[1:]
+				}
+			}
+		}
+		log.lines = nil
+		return out
+	}
+	const retry = "latency backfill: the request failed; asking again on a later pass"
+	const gaveUp = "latency backfill: giving up on this recording until the next start"
+	want := map[string][]any{
+		"aaa": {"jobID", "aaa", "tries", 1, "err", "", "playability", "login_required", "reason", "Sign in to confirm you're not a bot",
+			"videoDetails", false, "client", "tv_auth"},
+		"bbb": {"jobID", "bbb", "tries", 1, "err", (&youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}).Error(),
+			"playability", "unknown", "reason", gone, "videoDetails", false, "client", "android_vr",
+			"escalation", "tv_auth", "escalationPlayability", "unknown"},
+	}
+	for i := 1; i <= latencyBackfillMaxTries; i++ {
+		for range 3 {
+			h.step(latencyBackfillPause)
+		}
+		got := lines()
+		msg := retry
+		if i == latencyBackfillMaxTries {
+			msg = gaveUp
+		}
+		for id, w := range want {
+			w[3] = i
+			if !reflect.DeepEqual(got[msg+" "+id], w) {
+				t.Errorf("try %d, %s: logged %v, want %v", i, id, got[msg+" "+id], w)
+			}
+		}
+		c := got[msg+" ccc"]
+		if len(c) != 6 || strings.Contains(fmt.Sprint(c), "SECRETPOT") || !strings.Contains(fmt.Sprint(c), "dial tcp: timeout") {
+			t.Errorf("try %d, ccc: logged %v, want jobID, tries and a redacted err only", i, c)
+		}
+		h.now = h.now.Add(latencyBackfillRetryAfter)
 	}
 }
