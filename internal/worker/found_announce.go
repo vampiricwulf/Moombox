@@ -146,7 +146,7 @@ func lengthOf(info *youtube.VideoInfo) time.Duration {
 // checkPlayability calls it — any verdict but OK — and the parse uses the same
 // line to keep a refusal's upload date out of the start time.
 func foundKind(info *youtube.VideoInfo) string {
-	if info.PlayabilityError != "" && info.PlayabilityError != youtube.PlayabilityOK {
+	if !info.PlayabilityError.Playable() {
 		return ""
 	}
 	switch {

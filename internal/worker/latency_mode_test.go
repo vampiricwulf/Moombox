@@ -17,11 +17,13 @@ import (
 // Mutants: the job.LatencyMode guard dropped (the later LOW answer replaces
 // NORMAL); the VOD arm storing a classless answer (the upload reads
 // unstated); the upcoming case storing; the in-memory job not synced; a
-// refusal's classless videoDetails stored as unstated.
+// refusal's classless videoDetails stored as unstated; the playable check
+// reading only an empty verdict (the two "would not say" cases store nothing,
+// as on every real answer, which the parser spells PlayabilityOK).
 func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
 	info := func(status youtube.StreamStatus, class string, asked bool) *youtube.VideoInfo {
-		i := &youtube.VideoInfo{LatencyClass: class, LatencyClassAsked: asked}
+		i := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: class, LatencyClassAsked: asked}
 		i.SetStatus(status)
 		return i
 	}
@@ -34,6 +36,7 @@ func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 		{"post_live", info(youtube.StreamPostLive, "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", true), database.LatencyModeUltraLow},
 		{"a past stream's VOD", info(youtube.StreamVOD, "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", true), database.LatencyModeLow},
 		{"live, YouTube would not say", info(youtube.StreamLive, "", true), database.LatencyModeUnstated},
+		{"post_live, YouTube would not say", info(youtube.StreamPostLive, "", true), database.LatencyModeUnstated},
 		{"an ordinary upload", info(youtube.StreamVOD, "", true), database.LatencyModeNone},
 		{"upcoming", info(youtube.StreamUpcoming, normal, true), database.LatencyModeNone},
 		{"not a stream", info(youtube.StreamNotAStream, "", true), database.LatencyModeNone},

@@ -60,6 +60,17 @@ const (
 	PlayabilityUnknown     PlayabilityError = "unknown"
 )
 
+// Playable reports whether p is an answer YouTube did not refuse: the
+// parser's PlayabilityOK, or the empty verdict of an info no player response
+// filled in. It is the worker's one reading of "this answer is playable"
+// (its playability check, the discovery embed's wording, the latency mode
+// stored at capture and by the backfill). The sites that need YouTube's own
+// word that a parsed response was OK compare against PlayabilityOK instead,
+// where an empty verdict must not count.
+func (p PlayabilityError) Playable() bool {
+	return p == "" || p == PlayabilityOK
+}
+
 // SessionAuthState is what YouTube itself said about the login state of the
 // session that performed an extraction — not what our config claims. It is
 // read straight off the watch page's ytcfg, which is the cheapest available

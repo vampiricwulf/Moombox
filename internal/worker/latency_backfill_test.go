@@ -22,7 +22,9 @@ import (
 // escalation failed (the "escalation failed" case); a members-only refusal
 // taken as final; the escalation's rate limit read as transient; a
 // refusal's classless videoDetails read as unstated (the members-only and
-// login-required "with details" cases).
+// login-required "with details" cases); the playable check reading only an
+// empty verdict (the upload, spelled PlayabilityOK as the parser does, reads
+// transient).
 func TestClassifyLatencyAnswer(t *testing.T) {
 	t.Parallel()
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
@@ -38,11 +40,11 @@ func TestClassifyLatencyAnswer(t *testing.T) {
 		mode    database.LatencyMode
 		verdict latencyVerdict
 	}{
-		{"an ended stream with its class", &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, LatencyClass: normal, LatencyClassAsked: true},
+		{"an ended stream with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamVOD, LatencyClass: normal, LatencyClassAsked: true},
 			nil, database.LatencyModeNormal, latencyAnswered},
-		{"ultra low", &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", LatencyClassAsked: true},
+		{"ultra low", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", LatencyClassAsked: true},
 			nil, database.LatencyModeUltraLow, latencyAnswered},
-		{"an upload: videoDetails, no class", &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, LatencyClassAsked: true},
+		{"an upload: playable, videoDetails, no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamNotAStream, LatencyClassAsked: true},
 			nil, database.LatencyModeUnstated, latencyAnswered},
 		{"private on the answer itself", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate},
 			nil, database.LatencyModeUnstated, latencyAnswered},
@@ -191,7 +193,7 @@ func (h *backfillHarness) takeAsked() []string {
 
 func answered(class string) func() (*youtube.VideoInfo, error) {
 	return func() (*youtube.VideoInfo, error) {
-		return &youtube.VideoInfo{LatencyClass: class, LatencyClassAsked: true}, nil
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: class, LatencyClassAsked: true}, nil
 	}
 }
 
@@ -228,6 +230,50 @@ func TestLatencyBackfillStoresOneRowPerStep(t *testing.T) {
 	}
 	if h.mode("ccc") != database.LatencyModeNone {
 		t.Error("an Error row was asked about")
+	}
+}
+
+// TestLatencyBackfillSettlesAMembersOnlyUploadInOneRequest is the measured
+// members-only upload (2026-11-27): ANDROID_VR refuses it members_only with
+// its videoDetails, the signed-in TV probe answers it playable with
+// videoDetails and no class, and the walk stores unstated in that one
+// request; a stream the member session sees still stores its class.
+//
+// Mutants: classifyLatencyAnswer's playable check back to an empty verdict
+// only (the upload stays NULL and is counted as a failure).
+func TestLatencyBackfillSettlesAMembersOnlyUploadInOneRequest(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	h.add("upload", database.StatusFinished)
+	h.add("stream", database.StatusFinished)
+	member := map[string]*youtube.VideoInfo{
+		"upload": {PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamNotAStream, LatencyClassAsked: true},
+		"stream": {PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamVOD, LatencyClassAsked: true,
+			LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW"},
+	}
+	h.b.probe = func(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+		h.asked = append(h.asked, videoID)
+		return latencyProbeVia(ctx, videoID,
+			func(context.Context, string) (*youtube.VideoInfo, error) {
+				return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true,
+					PlayabilityReason: "Join this channel to get access to members-only content like this video."}, nil
+			},
+			func(_ context.Context, id string) (*youtube.VideoInfo, error) { return member[id], nil },
+			func() bool { return true })
+	}
+	h.step(latencyBackfillPause)
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 2 {
+		t.Fatalf("asked %v, want each row once", got)
+	}
+	if h.mode("upload") != database.LatencyModeUnstated {
+		t.Errorf("upload = %q, want unstated in one request", h.mode("upload"))
+	}
+	if h.mode("stream") != database.LatencyModeLow {
+		t.Errorf("stream = %q, want low", h.mode("stream"))
+	}
+	if len(h.b.tries) != 0 {
+		t.Errorf("failures counted: %v", h.b.tries)
 	}
 }
 
@@ -403,7 +449,7 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 // follow-up skipped for a refusal that carried videoDetails.
 func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 	t.Parallel()
-	member := &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
+	member := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
 	for _, c := range []struct {
 		name     string
 		first    *youtube.VideoInfo
@@ -415,7 +461,7 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		{"members only with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true}, true, true},
 		{"members only with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true,
 			LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}, true, false},
-		{"an answer", &youtube.VideoInfo{LatencyClassAsked: true}, true, false},
+		{"an answer", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClassAsked: true}, true, false},
 		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate}, true, false},
 	} {
 		authAsked := false

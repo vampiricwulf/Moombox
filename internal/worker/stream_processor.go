@@ -614,7 +614,7 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, er
 // playabilityVerdict is checkPlayability's rule, free of the processor so the
 // live loop can apply it to a mid-capture player response too.
 func playabilityVerdict(info *youtube.VideoInfo) (string, error) {
-	if info.PlayabilityError == "" || info.PlayabilityError == youtube.PlayabilityOK {
+	if info.PlayabilityError.Playable() {
 		return "", nil
 	}
 	reason := info.PlayabilityReason
@@ -1005,7 +1005,7 @@ func latencyModeToStore(job *database.Job, info *youtube.VideoInfo) (database.La
 	}
 	switch info.StreamStatus {
 	case youtube.StreamLive, youtube.StreamPostLive:
-		if info.LatencyClass == "" && info.PlayabilityError != "" {
+		if info.LatencyClass == "" && !info.PlayabilityError.Playable() {
 			// A refusal's videoDetails without a class (a members-only
 			// broadcast seen signed out) say nothing; a later answer may.
 			return "", false

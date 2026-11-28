@@ -533,7 +533,7 @@ func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.Latency
 		return "", latencyTransient
 	case info.LatencyClass != "":
 		return database.ParseLatencyClass(info.LatencyClass), latencyAnswered
-	case info.LatencyClassAsked && info.PlayabilityError == "":
+	case info.LatencyClassAsked && info.PlayabilityError.Playable():
 		// A playable answer with videoDetails and no class: YouTube would
 		// not say. A refusal's details without a class say nothing (a
 		// members-only or age-gated archive often carries its title and
