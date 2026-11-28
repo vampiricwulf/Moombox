@@ -27,12 +27,16 @@ const (
 // The suggested chat offsets, in seconds: how far behind YouTube's ingest a
 // typical viewer of a broadcast in each latency mode watched, so how much
 // sooner the player shows chat to match what the chatters were reacting to.
-// Typical, not measured per recording. The ingest figures are the segment
-// length plus the player's readahead YouTube sends for each mode
-// (2026-11-27 research: Normal 5 s segments and 10-12 s readahead, Low 2 s
-// and 4-4.8 s, Ultra low 1 s and 1-1.6 s), rounded up, and agree with
-// YouTube's help, which promises Low "less than 10 seconds" and Ultra low
-// "less than 5 seconds" of delay. The start figures are those less the 5 s
+// Typical, not measured per recording. The 2026-11-27 research put a typical
+// viewer's delay behind ingest at the head lag it measured (ingest to
+// downloadable: Normal about 6-11 s, Low 1-3 s, Ultra low 2-4 s), plus up to
+// one segment (the lag is measured to a segment's start), plus the player's
+// readahead YouTube sends for each mode (that the readahead adds to the
+// delay is an inference the run did not show): about 15-25 s for Normal,
+// 5-9 s for Low and 3-6 s for Ultra low. The ingest figures, 20, 7 and 4,
+// are chosen inside those ranges. They agree with YouTube's help, which says
+// most viewers see under 10 seconds of delay on Low and under 5 on Ultra low
+// (it gives no figure for Normal). The start figures are those less the 5 s
 // the start-time baseline already sits behind ingest, never below 0. Built
 // in, one per mode, not configurable (owner ruling RV-19 c).
 const (

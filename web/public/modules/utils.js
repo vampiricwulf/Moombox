@@ -1530,8 +1530,9 @@ export function isAwaitingProcessing(job) {
 /**
  * The suggested chat offsets in seconds, jobstate's constants (owner ruling
  * RV-19): the typical delay a viewer of each YouTube latency mode watched
- * behind ingest (segment length plus player readahead; typical, not
- * measured). INGEST for a recording placed on its file-zero wall clock
+ * behind ingest (measured head lag plus up to one segment plus the
+ * player's readahead, about 15-25 / 5-9 / 3-6 s, the figures chosen inside
+ * those ranges; typical, not measured per recording). INGEST for a recording placed on its file-zero wall clock
  * (mediaStartTime), START for one placed by the broadcast's start, which
  * already sits about 5 s behind ingest. cmd/moombox's parity test pins each
  * to the Go value.
