@@ -8,7 +8,7 @@
     { "name": "running over one recording", "utcOffsetMinutes": 0, "status": { "state": "running", "done": 0, "total": 1 }, "line": "0 of 1 recording done" },
     { "name": "running with nothing counted", "utcOffsetMinutes": 0, "status": { "state": "running", "done": 0, "total": 0 }, "line": "running" },
     { "name": "paused offline", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "offline", "done": 212, "total": 540 }, "line": "paused: offline (212 of 540 recordings done)" },
-    { "name": "paused for a capture", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "capture_live", "done": 212, "total": 540 }, "line": "paused: a capture is live (212 of 540 recordings done)" },
+    { "name": "paused for a capture", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "capture_live", "done": 212, "total": 540 }, "line": "paused: a capture is starting (212 of 540 recordings done)" },
     { "name": "paused for a rate limit, UTC", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T14:05:00Z", "done": 212, "total": 540 }, "line": "paused: YouTube rate limit until 14:05 (212 of 540 recordings done)" },
     { "name": "paused for a rate limit, worded in UTC+1", "utcOffsetMinutes": 60, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T14:05:00Z", "done": 212, "total": 540 }, "line": "paused: YouTube rate limit until 15:05 (212 of 540 recordings done)" },
     { "name": "paused for a rate limit, worded in UTC-5 across midnight", "utcOffsetMinutes": -300, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T03:30:00Z", "done": 1, "total": 2 }, "line": "paused: YouTube rate limit until 22:30 (1 of 2 recordings done)" },

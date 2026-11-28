@@ -47,7 +47,9 @@ const (
 	// LatencyPauseRateLimit: a YouTube rate-limit hold stands, the walk's own
 	// or the backlog scheduler's; LatencyBackfillStatus.Until is its end.
 	LatencyPauseRateLimit LatencyBackfillPause = "rate_limit"
-	// LatencyPauseCaptureLive: a capture is starting (a row in Live).
+	// LatencyPauseCaptureLive: a live capture is starting (a row in Live, the
+	// step between the go-live confirmation and the first segment; once it is
+	// Downloading the walk goes on). The bytes keep the ruling's name.
 	LatencyPauseCaptureLive LatencyBackfillPause = "capture_live"
 )
 
@@ -162,7 +164,7 @@ func (b *latencyBackfill) logEntered(prev, p latencyPhase) {
 		case LatencyPauseRateLimit:
 			b.logger.Info("latency backfill: paused for a YouTube rate limit", "until", p.until.UTC().Format(time.RFC3339))
 		case LatencyPauseCaptureLive:
-			b.logger.Info("latency backfill: paused while a capture is live")
+			b.logger.Info("latency backfill: paused while a capture is starting")
 		}
 	case LatencyBackfillCaughtUp:
 		run := b.run
@@ -221,7 +223,7 @@ func (w *DownloadWorker) LatencyBackfillStatus() LatencyBackfillStatus {
 //	212 of 540 recordings done
 //	paused: offline (212 of 540 recordings done)
 //	paused: YouTube rate limit until 14:05 (212 of 540 recordings done)
-//	paused: a capture is live (212 of 540 recordings done)
+//	paused: a capture is starting (212 of 540 recordings done)
 //	caught up (540 recordings)
 //	caught up (538 of 540 recordings done; 2 not answered yet)
 //
@@ -258,7 +260,7 @@ func LatencyBackfillLine(s LatencyBackfillStatus, loc *time.Location) string {
 		case LatencyPauseOffline:
 			return with("paused: offline")
 		case LatencyPauseCaptureLive:
-			return with("paused: a capture is live")
+			return with("paused: a capture is starting")
 		case LatencyPauseRateLimit:
 			if s.Until.IsZero() {
 				return with("paused: YouTube rate limit")

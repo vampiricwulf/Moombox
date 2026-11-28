@@ -893,7 +893,7 @@ export function latencyBackfillLine(status, utcOffsetMinutes) {
         case "offline":
           return withCounts("paused: offline");
         case "capture_live":
-          return withCounts("paused: a capture is live");
+          return withCounts("paused: a capture is starting");
         case "rate_limit": {
           const until = Date.parse(status.until || "");
           if (Number.isNaN(until)) return withCounts("paused: YouTube rate limit");

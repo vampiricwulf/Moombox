@@ -23,7 +23,7 @@ import (
 //   - one row at a time, latencyBackfillPause between requests, the first
 //     latencyBackfillStartDelay after start (past the boot's own burst);
 //   - only while online, and never while a rate-limit hold stands: the
-//     backlog scheduler's (Scheduler.RateLimitHeld), or its own, placed for
+//     backlog scheduler's (Scheduler.RateLimitHeldUntil), or its own, placed for
 //     rateLimitBackoff (the hour the scheduler holds) when its own request is
 //     refused for a rate limit. It does not place the scheduler's hold: a
 //     verdict on a background request is not a reason to hold the backlog.

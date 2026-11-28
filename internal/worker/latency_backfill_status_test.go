@@ -94,7 +94,7 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 	h.starting = true
 	h.step(latencyBackfillPause)
 	h.step(latencyBackfillPause)
-	expect("capture", []any{"latency backfill: paused while a capture is live"})
+	expect("capture", []any{"latency backfill: paused while a capture is starting"})
 	h.starting = false
 
 	h.held, h.schedUntil = true, h.now.Add(30*time.Minute)
