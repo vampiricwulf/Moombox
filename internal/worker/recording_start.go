@@ -389,11 +389,17 @@ func partOneStagingMedia(jobCtx *JobContext, segments []database.Segment) *Downl
 	if len(segments) == 0 || jobCtx.StagingDir == "" {
 		return nil
 	}
-	dir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segments[0].SegmentIndex))
-	if segments[0].SegmentIndex == 0 && rootIsPartZero(jobCtx.StagingDir) {
-		dir = jobCtx.StagingDir
+	return discoverStagingMedia(partStagingDir(jobCtx, segments[0].SegmentIndex))
+}
+
+// partStagingDir is where the part at segment index idx was staged: the
+// job's staging root for part 0 (unless a seg_0 dir exists: rootIsPartZero),
+// else seg_<idx>.
+func partStagingDir(jobCtx *JobContext, idx int) string {
+	if idx == 0 && rootIsPartZero(jobCtx.StagingDir) {
+		return jobCtx.StagingDir
 	}
-	return discoverStagingMedia(dir)
+	return filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", idx))
 }
 
 // formatTargetDuration is the advertised per-segment duration of the format
@@ -490,4 +496,41 @@ func (o *DownloadOrchestrator) archiveMissesAdvertisedAudio(jobCtx *JobContext, 
 	o.logger.Warn("the archive has no audio stream although the stream advertised sound for what was recorded; it is kept as it is, flagged on the job",
 		"jobID", jobCtx.Job.ID, "output", outputFile)
 	return true
+}
+
+// splitArchiveMissesAdvertisedAudio is the missing-audio guard for a split
+// archive: true when any part's file has no audio stream although the stream
+// advertised sound for what that part recorded, with a Warn naming the job
+// and the part. What was advertised is read from the record DownloadHls left
+// in the part's staging dir (advertisedAudioFile, kept until the finalize's
+// staging cleanup), so the finalize's own result, which describes the last
+// part only, is not asked. A part whose dir holds no such record (a DASH
+// capture, a part recorded by an older binary) and a part that cannot be
+// probed are not flagged. Long marathon captures are the ones most often
+// split, so a split archive is checked as a single file is.
+func (o *DownloadOrchestrator) splitArchiveMissesAdvertisedAudio(ctx context.Context, jobCtx *JobContext, segments []database.Segment) bool {
+	if jobCtx.StagingDir == "" {
+		return false
+	}
+	missing := false
+	for i, seg := range segments {
+		advertised := false
+		for _, v := range readStagingRecord[bool](partStagingDir(jobCtx, seg.SegmentIndex), advertisedAudioFile) {
+			advertised = advertised || v
+		}
+		if !advertised || seg.FilePath == "" {
+			continue
+		}
+		probe := o.runFFprobe(ctx, seg.FilePath)
+		if probe == nil {
+			continue
+		}
+		if _, present := probe.streamSeconds("audio"); present {
+			continue
+		}
+		o.logger.Warn("a part of the archive has no audio stream although the stream advertised sound for what was recorded; it is kept as it is, flagged on the job",
+			"jobID", jobCtx.Job.ID, "part", i+1, "output", seg.FilePath)
+		missing = true
+	}
+	return missing
 }

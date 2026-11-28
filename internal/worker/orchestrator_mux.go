@@ -1734,10 +1734,10 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			}
 		}
 	}
-	// The missing-audio guard checks a single-file archive only; a split
-	// archive is not checked, so a flag an earlier single-file finalize of
-	// this job set no longer describes what is written here.
-	updates["missing_audio"] = false
+	// The missing-audio guard, part by part: a split archive any of whose
+	// parts has no audio stream although the stream advertised sound for it
+	// does not finish silently either.
+	updates["missing_audio"] = o.splitArchiveMissesAdvertisedAudio(ctx, jobCtx, segments)
 
 	// Copy assets
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
