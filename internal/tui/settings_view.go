@@ -395,8 +395,8 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		line := prefixStyle.Render(prefix) + labelStyle.Render(labelStr) + value
 		lines = append(lines, line)
 
-		if fd.previewFn != nil {
-			preview := fd.previewFn(m.values[fd.key])
+		if fieldHasSecondRow(fd) {
+			preview := m.fieldSecondRow(fd)
 			if preview != "" {
 				// One row, as settingsContentHeight budgets: the box would
 				// word-wrap a long preview into rows nothing reserved.

@@ -369,8 +369,8 @@ func (m *SettingsModel) contentYToFieldIndex(contentY int, sec settingsSection) 
 		lineCount++ // The field line itself
 
 		// Preview line
-		if sec.fields[i].previewFn != nil {
-			preview := sec.fields[i].previewFn(m.values[sec.fields[i].key])
+		if fieldHasSecondRow(sec.fields[i]) {
+			preview := m.fieldSecondRow(sec.fields[i])
 			if preview != "" {
 				if contentY == lineCount {
 					return i // Click on preview line selects the field

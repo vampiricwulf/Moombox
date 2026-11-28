@@ -390,6 +390,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.SetAdmissionHolds(msg.Holds)
 		return a, nil
 
+	case LatencyBackfillLineMsg:
+		a.settings.latencyBackfillLine = msg.Line
+		return a, nil
+
 	case ChannelFailingMsg:
 		a.settings.SetFailingChannels(msg.Failing)
 		return a, nil

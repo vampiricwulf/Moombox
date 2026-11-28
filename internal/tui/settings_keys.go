@@ -489,7 +489,7 @@ func (m *SettingsModel) settingsContentHeight() int {
 	// not resize under the operator as they type.
 	previewRows := 0
 	for i := range sections[m.sectionIndex].fields {
-		if sections[m.sectionIndex].fields[i].previewFn != nil {
+		if fieldHasSecondRow(sections[m.sectionIndex].fields[i]) {
 			previewRows++
 		}
 	}

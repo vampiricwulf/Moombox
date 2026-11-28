@@ -666,6 +666,13 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				a.settings.SetFailingChannels(a.OnFailingChannels())
 			}
 			a.settings.Open(a.cfg)
+			// The latency backfill's line beside its switch (owner ruling
+			// RV-20), read off the update goroutine: it counts rows in the
+			// database. Each change after this arrives as a
+			// LatencyBackfillLineMsg.
+			if lineFn := a.OnLatencyBackfillLine; lineFn != nil {
+				return a, safeCmd(func() tea.Msg { return LatencyBackfillLineMsg{Line: lineFn()} })
+			}
 		}
 	case "?":
 		a.help.SetMenuItems(a.buildMenuItems())

@@ -468,8 +468,8 @@ func (m *SettingsModel) bareFields(sec settingsSection) string {
 		if fd.ftype == fieldToggle {
 			f.options = []string{"Yes", "No"}
 		}
-		if i == focus && fd.previewFn != nil {
-			f.preview = fd.previewFn(m.values[fd.key])
+		if i == focus && fieldHasSecondRow(fd) {
+			f.preview = m.fieldSecondRow(fd)
 		}
 		items[i] = m.bareFieldRows(f, i == focus, col)
 	}
