@@ -1,0 +1,25 @@
+{
+  "comment": "One line, two languages: Go worker.LatencyBackfillLine and utils.js latencyBackfillLine (owner ruling RV-20). `status` is the latencyBackfill object of initial_state, the latency_backfill frame and GET /api/latency-backfill. `utcOffsetMinutes` is the zone a rate-limit pause's end is worded in. A jsOnly row is a payload Go cannot produce.",
+  "cases": [
+    { "name": "off", "utcOffsetMinutes": 0, "status": { "state": "off", "done": 212, "total": 540 }, "line": "off (212 of 540 recordings done)" },
+    { "name": "off with nothing to consider", "utcOffsetMinutes": 0, "status": { "state": "off", "done": 0, "total": 0 }, "line": "off" },
+    { "name": "waiting to start", "utcOffsetMinutes": 0, "status": { "state": "waiting", "done": 0, "total": 540 }, "line": "waiting to start (0 of 540 recordings done)" },
+    { "name": "running", "utcOffsetMinutes": 0, "status": { "state": "running", "done": 212, "total": 540 }, "line": "212 of 540 recordings done" },
+    { "name": "running over one recording", "utcOffsetMinutes": 0, "status": { "state": "running", "done": 0, "total": 1 }, "line": "0 of 1 recording done" },
+    { "name": "running with nothing counted", "utcOffsetMinutes": 0, "status": { "state": "running", "done": 0, "total": 0 }, "line": "running" },
+    { "name": "paused offline", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "offline", "done": 212, "total": 540 }, "line": "paused: offline (212 of 540 recordings done)" },
+    { "name": "paused for a capture", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "capture_live", "done": 212, "total": 540 }, "line": "paused: a capture is live (212 of 540 recordings done)" },
+    { "name": "paused for a rate limit, UTC", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T14:05:00Z", "done": 212, "total": 540 }, "line": "paused: YouTube rate limit until 14:05 (212 of 540 recordings done)" },
+    { "name": "paused for a rate limit, worded in UTC+1", "utcOffsetMinutes": 60, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T14:05:00Z", "done": 212, "total": 540 }, "line": "paused: YouTube rate limit until 15:05 (212 of 540 recordings done)" },
+    { "name": "paused for a rate limit, worded in UTC-5 across midnight", "utcOffsetMinutes": -300, "status": { "state": "paused", "pause": "rate_limit", "until": "2026-11-27T03:30:00Z", "done": 1, "total": 2 }, "line": "paused: YouTube rate limit until 22:30 (1 of 2 recordings done)" },
+    { "name": "paused for a rate limit with no end", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "rate_limit", "done": 212, "total": 540 }, "line": "paused: YouTube rate limit (212 of 540 recordings done)" },
+    { "name": "paused for a reason this build does not know", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "sideways", "done": 212, "total": 540 }, "line": "paused (212 of 540 recordings done)" },
+    { "name": "caught up", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 540, "total": 540 }, "line": "caught up (540 recordings)" },
+    { "name": "caught up with one", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 1, "total": 1 }, "line": "caught up (1 recording)" },
+    { "name": "caught up with rows given up on", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 538, "total": 540 }, "line": "caught up (538 of 540 recordings done; 2 are asked again at the next start)" },
+    { "name": "caught up with one row given up on", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 539, "total": 540 }, "line": "caught up (539 of 540 recordings done; 1 is asked again at the next start)" },
+    { "name": "caught up with nothing to consider", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 0, "total": 0 }, "line": "caught up (no recordings to ask about)" },
+    { "name": "a state this build does not know", "utcOffsetMinutes": 0, "status": { "state": "sideways", "done": 1, "total": 2 }, "line": "" },
+    { "name": "no status at all, as from an older binary", "jsOnly": true, "utcOffsetMinutes": 0, "status": null, "line": "" }
+  ]
+}

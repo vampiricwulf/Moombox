@@ -338,6 +338,12 @@ type DownloadWorker struct {
 	// latencyWake (capacity 1) wakes the latency-mode backfill when its
 	// switch may have moved (WakeLatencyBackfill).
 	latencyWake chan struct{}
+	// latencyChanged (capacity 1) is signalled on each change of the
+	// backfill's status (LatencyBackfillChanged).
+	latencyChanged chan struct{}
+	// latencyWalk is the running walk, for LatencyBackfillStatus; nil
+	// before Start.
+	latencyWalk atomic.Pointer[latencyBackfill]
 
 	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
 	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
@@ -574,22 +580,23 @@ func NewDownloadWorker(
 	orchestrator.trims = trims
 
 	w := &DownloadWorker{
-		db:           db,
-		yt:           yt,
-		tw:           tw,
-		cfg:          cfg,
-		queue:        queue,
-		scheduler:    sched,
-		orchestrator: orchestrator,
-		twitchChats:  twitchChats,
-		runChats:     runChats,
-		streamProc:   sp,
-		notifier:     nm,
-		logger:       logger,
-		conn:         conn,
-		notifyJob:    make(chan struct{}, 1),
-		latencyWake:  make(chan struct{}, 1),
-		captcha:      captcha,
+		db:             db,
+		yt:             yt,
+		tw:             tw,
+		cfg:            cfg,
+		queue:          queue,
+		scheduler:      sched,
+		orchestrator:   orchestrator,
+		twitchChats:    twitchChats,
+		runChats:       runChats,
+		streamProc:     sp,
+		notifier:       nm,
+		logger:         logger,
+		conn:           conn,
+		notifyJob:      make(chan struct{}, 1),
+		latencyWake:    make(chan struct{}, 1),
+		latencyChanged: make(chan struct{}, 1),
+		captcha:        captcha,
 	}
 	// The scheduler reads the disk through the worker, which holds the
 	// config: the output directory and the critical threshold both follow a
@@ -682,7 +689,9 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 	// The latency-mode backfill (owner ruling RV-19): archived YouTube
 	// recordings with no latency mode, asked about one a minute.
-	go w.runLatencyBackfill(ctx, w.newLatencyBackfill())
+	walk := w.newLatencyBackfill()
+	w.latencyWalk.Store(walk)
+	go w.runLatencyBackfill(ctx, walk)
 
 	// Process jobs from queue
 	for {

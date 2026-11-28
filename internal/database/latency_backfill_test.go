@@ -16,7 +16,9 @@ import (
 // the mode filter dropped (the asked rows are walked); the cursor ignored
 // (the second page repeats the first); the placeholder filter dropped (the
 // import row is walked) or widened to every "imp_" ID (the eleven-character
-// one is missed).
+// one is missed); LatencyBackfillCounts over a selection of its own (the
+// counts take in the Twitch, Upcoming or import row) or counting NULL rows
+// as done.
 func TestLatencyBackfillRows(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -64,6 +66,20 @@ func TestLatencyBackfillRows(t *testing.T) {
 	}
 	if got, want := ids("b-noplatform", 2), []string{"g-yt", "imp_wouldbe"}; !slices.Equal(got, want) {
 		t.Errorf("second page = %v, want %v", got, want)
+	}
+
+	// The status line's counts (owner ruling RV-20) are over the same rows,
+	// whatever their mode: the four walked and the two asked, never the
+	// Twitch, Upcoming or import rows; done is the two with a mode.
+	done, total, err := db.LatencyBackfillCounts()
+	if err != nil {
+		t.Fatalf("LatencyBackfillCounts: %v", err)
+	}
+	if done != 2 || total != 6 {
+		t.Errorf("counts = %d of %d, want 2 of 6", done, total)
+	}
+	if walked := len(ids("", 10)); total-done != walked {
+		t.Errorf("counts leave %d to ask about, the walk has %d", total-done, walked)
 	}
 }
 

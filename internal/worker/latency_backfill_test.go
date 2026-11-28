@@ -97,8 +97,10 @@ type backfillHarness struct {
 	held        bool
 	starting    bool
 	switchedOff bool
-	answers     map[string]func() (*youtube.VideoInfo, error)
-	asked       []string
+	// schedUntil is when the scheduler's hold (held) runs out.
+	schedUntil time.Time
+	answers    map[string]func() (*youtube.VideoInfo, error)
+	asked      []string
 }
 
 func newBackfillHarness(t *testing.T, db *database.Database) *backfillHarness {
@@ -119,8 +121,13 @@ func (h *backfillHarness) newWalk() *latencyBackfill {
 			}
 			return nil, errors.New("no scripted answer")
 		},
-		online:          func() bool { return h.online },
-		rateLimitHeld:   func(time.Time) bool { return h.held },
+		online: func() bool { return h.online },
+		rateLimitHeld: func(time.Time) (time.Time, bool) {
+			if h.held {
+				return h.schedUntil, true
+			}
+			return time.Time{}, false
+		},
 		captureStarting: func() bool { return h.starting },
 		enabled:         func() bool { return !h.switchedOff },
 		now:             func() time.Time { return h.now },
@@ -368,12 +375,12 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 		t.Error("a walk with no YouTube service has a probe")
 	}
 	now := time.Now()
-	if b.rateLimitHeld(now) {
+	if _, held := b.rateLimitHeld(now); held {
 		t.Fatal("held with no verdict")
 	}
 	w.scheduler.holdForRateLimit(now, rateLimitBackoff)
-	if !b.rateLimitHeld(now) {
-		t.Error("the scheduler's hold is not seen")
+	if until, held := b.rateLimitHeld(now); !held || !until.Equal(now.Add(rateLimitBackoff)) {
+		t.Errorf("the scheduler's hold is not seen: (%v, %v), want until %v", until, held, now.Add(rateLimitBackoff))
 	}
 	if b.captureStarting() {
 		t.Fatal("a capture starting with no rows")

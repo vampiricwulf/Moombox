@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -51,17 +52,21 @@ import (
 // The rows themselves are the state: a restart walks every row still NULL
 // from the start. The one thing saved beside them is the walk's own
 // rate-limit hold, so a restart inside its hour does not ask again into the
-// limit. No config key: like the Twitch
-// gap-fill sweep and the session keep-alive, it is a background job of the
-// archive's own with no switch. The membership scan's switch
-// (monitors.membership_discovery) is not the model: that scan reads every
-// channel's members-only tab with the login cookies every feed cycle, for
-// good, and finds jobs, a feature an operator may not want; this walk finds
-// nothing, changes no job's course, asks each recording once (cookieless
-// unless a members-only refusal needs the signed-in retry) and ends when the
-// archive is caught up. Once the archive is caught up it costs one
-// request per newly finished row it has to ask about (a VOD download of an
-// upload, which the worker leaves NULL) and a database read an hour.
+// limit.
+//
+// The switch is monitors.latency_backfill (owner ruling RV-20), default on,
+// read before every request: off stops the walk before its next request (a
+// request already sent finishes and stores its answer) and touches nothing
+// else, so the saved hold stays and the rows keep what they hold; on resumes
+// from the NULL rows. A Settings save wakes the walk
+// (DownloadWorker.WakeLatencyBackfill) so it stops or resumes at once. Off
+// stops only this walk: a new capture or download still stores its mode at
+// its first extraction, and the player still applies suggested offsets.
+// What the walk is doing is told twice (latency_backfill_status.go): an
+// Info line each time it enters a state, and one derived status line beside
+// the switch in Settings in both UIs. Once the archive is caught up it costs
+// one request per newly finished row it has to ask about (a VOD download of
+// an upload, which the worker leaves NULL) and a database read an hour.
 
 const (
 	// latencyBackfillStartDelay is how long after start the first request
@@ -104,8 +109,8 @@ type latencyBackfill struct {
 	// online reports the device online; nil always is.
 	online func() bool
 	// rateLimitHeld reports the backlog scheduler's rate-limit hold standing
-	// at now; nil never is.
-	rateLimitHeld func(now time.Time) bool
+	// at now, and when it runs out; nil never is.
+	rateLimitHeld func(now time.Time) (until time.Time, held bool)
 	// captureStarting reports a capture starting; nil never is.
 	captureStarting func() bool
 	// now is the clock; nil is time.Now.
@@ -123,6 +128,32 @@ type latencyBackfill struct {
 	tries map[string]latencyTry
 	// current is the row being asked about, for the recover.
 	current string
+
+	// mu guards phase, which LatencyBackfillStatus reads from other
+	// goroutines; every other field is the walk goroutine's own.
+	mu sync.Mutex
+	// phase is the state the walk last entered (enter); the zero value is
+	// LatencyBackfillWaiting, before the first step.
+	phase latencyPhase
+	// changed is told after every phase change (production: the worker's
+	// latencyChanged signal, which cmd/moombox pushes to both UIs); nil
+	// tells nobody.
+	changed func()
+	// run is what the run in progress has done, for its log lines.
+	run latencyRun
+}
+
+// latencyRun is one run of the walk: from the step that found a row to ask
+// about, after start, after being switched on or after catching up, to the
+// step that finds none left (or the switch off).
+type latencyRun struct {
+	// active is whether a run is in progress: its next running phase is a
+	// resume, not a start.
+	active bool
+	// filled is how many rows the run stored a mode for; unstated is how
+	// many of them YouTube would not say (LatencyModeUnstated); gaveUp is
+	// how many rows it stopped asking about until the next start.
+	filled, unstated, gaveUp int
 }
 
 // latencyTry is one row's failed requests and when it may be asked again.
@@ -152,8 +183,9 @@ func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
 		b.online = w.conn.IsOnline
 	}
 	if w.scheduler != nil {
-		b.rateLimitHeld = w.scheduler.RateLimitHeld
+		b.rateLimitHeld = w.scheduler.RateLimitHeldUntil
 	}
+	b.changed = w.signalLatencyChanged
 	if w.db != nil {
 		b.captureStarting = func() bool {
 			has, err := w.db.HasJobWithStatus(database.StatusLive)
@@ -269,18 +301,22 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 	// not ask into the limit.
 	b.off = !b.isEnabled()
 	if b.off {
+		b.enter(latencyPhase{state: LatencyBackfillOff})
 		return latencyBackfillPause
 	}
 	if !b.isOnline() {
+		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseOffline})
 		return latencyBackfillPause
 	}
 	if !b.heldUntil.IsZero() && !now.Before(b.heldUntil) {
 		b.setHold(time.Time{})
 	}
-	if now.Before(b.heldUntil) || (b.rateLimitHeld != nil && b.rateLimitHeld(now)) {
+	if until, held := b.rateLimitHold(now); held {
+		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseRateLimit, until: until})
 		return latencyBackfillPause
 	}
 	if b.captureStarting != nil && b.captureStarting() {
+		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseCaptureLive})
 		return latencyBackfillPause
 	}
 	row, ok, err := b.next(now)
@@ -289,8 +325,10 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 		return latencyBackfillPause
 	}
 	if !ok {
+		b.enter(latencyPhase{state: LatencyBackfillCaughtUp})
 		return latencyBackfillIdle
 	}
+	b.enter(latencyPhase{state: LatencyBackfillRunning})
 
 	// Named for stepRecovered while the request runs: a panic leaves it set.
 	b.current = row.JobID
@@ -304,18 +342,24 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 	case latencyAnswered:
 		delete(b.tries, row.JobID)
 		if b.db.SetLatencyModeIfUnset(row.JobID, mode) {
+			b.run.filled++
+			if mode == database.LatencyModeUnstated {
+				b.run.unstated++
+			}
 			b.logger.Debug("latency backfill: stored the broadcast's latency mode", "jobID", row.JobID, "mode", string(mode))
 		}
 	case latencyRateLimited:
 		b.setHold(now.Add(rateLimitBackoff))
-		b.logger.Info("latency backfill: YouTube rate-limited the request; asking again after the hold",
-			"jobID", row.JobID, "until", b.heldUntil.UTC().Format(time.RFC3339))
+		b.logger.Debug("latency backfill: YouTube rate-limited the request", "jobID", row.JobID)
+		until, _ := b.rateLimitHold(now)
+		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseRateLimit, until: until})
 	default:
 		if !b.isOnline() {
 			// Failed as the device went offline: not the video's failure.
 			return latencyBackfillPause
 		}
 		if n := b.fail(row.JobID, now); n >= latencyBackfillMaxTries {
+			b.run.gaveUp++
 			b.logger.Info("latency backfill: giving up on this recording until the next start",
 				"jobID", row.JobID, "tries", n, "err", errText(err))
 		} else {
