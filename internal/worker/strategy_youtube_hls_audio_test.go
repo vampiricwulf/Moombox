@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -258,5 +260,88 @@ func TestSelectHlsAudioRendition(t *testing.T) {
 	}
 	if got := selectHlsAudioRendition(p.AudioRenditions("g"), youtube.AudioLanguages{Original: "en"}); got == nil || got.Name != "Described" {
 		t.Errorf("original en: picked %+v, want the English one", got)
+	}
+}
+
+// TestDownloadHlsResumesTheAudioRendition: a demuxed capture stopped
+// mid-stream (a restart, a refresh) and set up again in the same part dir
+// continues BOTH files from their resume sidecars — audio.ts as video.ts —
+// rather than starting the rendition over or refusing the staged audio.
+//
+// Mutant: the rendition recorded under another name than the one the
+// discovery and the sidecar know (audio.ts holds the second run only).
+func TestDownloadHlsResumesTheAudioRendition(t *testing.T) {
+	fastEngine(t)
+	var mu sync.Mutex
+	ended := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		mu.Lock()
+		end := ended
+		mu.Unlock()
+		switch {
+		case strings.HasSuffix(p, "/seg"):
+			_, _ = w.Write([]byte("[" + strings.TrimSuffix(strings.TrimPrefix(p, "/master/"), "/seg") + "]"))
+		case p == "/master/index.m3u8":
+			_, _ = w.Write([]byte(demuxedTestMaster))
+		default:
+			dir := strings.TrimSuffix(p, "index.m3u8")
+			body := "#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:40\n"
+			n := 2
+			if end {
+				n = 4
+			}
+			for i := 0; i < n; i++ {
+				body += "#EXTINF:5.0,\n" + dir + "sq/" + strconv.Itoa(40+i) + "/seg\n"
+			}
+			if end {
+				body += "#EXT-X-ENDLIST\n"
+			}
+			_, _ = w.Write([]byte(body))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	job, _ := vodPotJob(t)
+	job.Config.MaxVideoResolution = 1080
+	info := &youtube.VideoInfo{StreamStatus: youtube.StreamLive, HlsManifestURL: srv.URL + "/master/index.m3u8", HlsManifestSource: "visionos"}
+
+	first, err := DownloadHls(context.Background(), job, info, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("first DownloadHls: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for _, d := range []*engine.SegmentDownloader{first.VideoDownloader, first.AudioDownloader} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = d.Start(ctx)
+		}()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		v, _ := os.ReadFile(first.VideoPath)
+		a, _ := os.ReadFile(first.AudioPath)
+		if strings.Count(string(v), "[") == 2 && strings.Count(string(a), "[") == 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+
+	mu.Lock()
+	ended = true
+	mu.Unlock()
+	second, err := DownloadHls(context.Background(), job, info, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("second DownloadHls: %v", err)
+	}
+	runHlsResult(t, second)
+	if got := readStaged(t, second.AudioPath); got != "[a/itag/234/sq/40][a/itag/234/sq/41][a/itag/234/sq/42][a/itag/234/sq/43]" {
+		t.Errorf("audio.ts = %q, want sq 40-43 once each", got)
+	}
+	if got := readStaged(t, second.VideoPath); got != "[v/itag/270/sq/40][v/itag/270/sq/41][v/itag/270/sq/42][v/itag/270/sq/43]" {
+		t.Errorf("video.ts = %q, want sq 40-43 once each", got)
 	}
 }
