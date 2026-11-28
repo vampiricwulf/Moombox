@@ -14,6 +14,7 @@ import {
   cookieSetupAcceptedToast,
   cookieSetupRejectedMessage,
   formatRelativeTime,
+  latencyBackfillLine,
   needsChannelResolve,
   NOT_A_CHANNEL_URL,
   passwordLengthError,
@@ -717,6 +718,11 @@ export class SettingsController {
     if (membershipSwitch) {
       membershipSwitch.checked = config.monitors?.membership_discovery !== false;
     }
+    // Latency-mode backfill switch (owner ruling RV-20; default on likewise)
+    const latencySwitch = document.getElementById("cfg-latency-backfill");
+    if (latencySwitch) {
+      latencySwitch.checked = config.monitors?.latency_backfill !== false;
+    }
 
     // Downloader settings
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
@@ -1000,6 +1006,7 @@ export class SettingsController {
       "monitors.decapi_check_interval": num("cfg-decapi-check-interval") ?? null,
       "monitors.twitch_check_interval": num("cfg-twitch-check-interval") ?? null,
       "monitors.membership_discovery": checked("cfg-membership-discovery", true),
+      "monitors.latency_backfill": checked("cfg-latency-backfill", true),
 
       "downloader.output_template": text("cfg-output-template"),
       "downloader.max_video_resolution": num("cfg-max-resolution"),
@@ -1539,6 +1546,40 @@ export class SettingsController {
       ? ` <span class="channel-health-error">${this.app.escapeHtml(failing.lastError)}</span>`
       : "";
     return `<sl-badge variant="danger" pill>Checks failing</sl-badge>${error}`;
+  }
+
+  /**
+   * Draw the latency-mode backfill's line beside its switch (owner ruling
+   * RV-20) from the status the app holds (app.latencyBackfill), worded by
+   * latencyBackfillLine. A rate-limit pause's end is shown in this browser's
+   * zone. Hidden while there is nothing to say (no status yet, or one from
+   * a state this build does not know).
+   */
+  renderLatencyBackfill() {
+    const el = document.getElementById("latency-backfill-status");
+    if (!el) return;
+    const status = this.app.latencyBackfill;
+    const at = Date.parse(status?.until || "");
+    const offset = -new Date(Number.isNaN(at) ? Date.now() : at).getTimezoneOffset();
+    const line = latencyBackfillLine(status, offset);
+    el.textContent = line;
+    el.style.display = line ? "" : "none";
+  }
+
+  /**
+   * Read the backfill's status afresh (GET /api/latency-backfill): Settings
+   * calls it when it opens, so the counts are current; each change of state
+   * arrives as a latency_backfill frame. A failed read leaves the line as it
+   * was.
+   */
+  async loadLatencyBackfill() {
+    try {
+      const response = await fetch("/api/latency-backfill");
+      if (!response.ok) return;
+      this.app.setLatencyBackfill(await response.json());
+    } catch (e) {
+      // Unreachable: the next frame or Settings visit reads it again.
+    }
   }
 
   /** Redraw every rendered card's failing flag (a new channelMonitors snapshot). */

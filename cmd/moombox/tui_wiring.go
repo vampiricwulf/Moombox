@@ -655,6 +655,7 @@ func (s *runState) runTUI() {
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		s.applyReorderBudget(snap.Downloader)
 		s.applyKeepAwake(snap.Downloader.KeepAwake)
+		s.applyLatencyBackfill()
 		s.warnSegmentWorkers(snap.Downloader.SegmentWorkers)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
@@ -1282,6 +1283,13 @@ func (s *runState) runTUI() {
 	failingFn := func(f tui.FailingChannels) { app.Send(tui.ChannelFailingMsg{Failing: f}) }
 	s.channelMonitorsPush.tui.Store(&failingFn)
 	defer s.channelMonitorsPush.tui.Store(nil)
+
+	// The latency backfill's Settings line (owner ruling RV-20): read when
+	// Settings opens, and each change after through runLatencyBackfillPush.
+	app.OnLatencyBackfillLine = s.latencyBackfillLine
+	latencyFn := func(line string) { app.Send(tui.LatencyBackfillLineMsg{Line: line}) }
+	s.latencyBackfillTUI.Store(&latencyFn)
+	defer s.latencyBackfillTUI.Store(nil)
 	app.OnFailingChannels = s.channelMonitorsPush.failing
 
 	// Wire connectivity state to TUI (uses program.Send, not a channel)

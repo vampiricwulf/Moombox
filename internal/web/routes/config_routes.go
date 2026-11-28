@@ -110,6 +110,12 @@ type ConfigRoutesCallbacks struct {
 	// whole saved DownloaderConfig because the two keys are reconciled
 	// against each other (see config.DownloaderConfig.ReorderLimitBytes).
 	OnReorderBudgetChange func(d config.DownloaderConfig)
+	// OnLatencyBackfillChange is called with the new monitors.latency_backfill
+	// when it changes, so the latency-mode backfill walk notices at once
+	// rather than at its next look (owner ruling RV-20). The walk reads the
+	// key itself before every request, so the switch holds without it; this
+	// only wakes the walk to log the change and stop or resume now.
+	OnLatencyBackfillChange func(on bool)
 	// ResolveRateLimit bounds a PUT whose channels[] carries an ID that has
 	// to be resolved — a URL or a bare @handle, each a youtube.com fetch
 	// with retries — as POST /api/config/channels is bounded for the same
@@ -1015,6 +1021,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := mon["membership_discovery"].(bool); ok {
 			cfg.Monitors.MembershipDiscovery = &v
 		}
+		if v, ok := mon["latency_backfill"].(bool); ok {
+			cfg.Monitors.LatencyBackfill = &v
+		}
 	}
 
 	// Downloader sub-fields
@@ -1332,6 +1341,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		oldDisk := diskSettingsOf(cfg)
 		oldSegWorkers := cfg.Downloader.SegmentWorkers
 		oldKeepAwake := cfg.Downloader.KeepAwake
+		oldLatencyBackfill := cfg.Monitors.LatencyBackfillEnabled()
 
 		// Work on a copy so the live config isn't modified if save fails.
 		// SaveLocked persists s.cfg, so we need to commit-then-save in a
@@ -1401,6 +1411,7 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		newDisk := diskSettingsOf(cfg)
 		newSegWorkers := cfg.Downloader.SegmentWorkers
 		newKeepAwake := cfg.Downloader.KeepAwake
+		newLatencyBackfill := cfg.Monitors.LatencyBackfillEnabled()
 		// A copy, taken under the lock: DownloaderConfig holds only value
 		// types, so the callback below can read it after mu.Unlock without
 		// racing the next PUT.
@@ -1438,6 +1449,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if newKeepAwake != oldKeepAwake && callbacks.OnKeepAwakeChange != nil {
 				callbacks.OnKeepAwakeChange(newKeepAwake)
+			}
+			if newLatencyBackfill != oldLatencyBackfill && callbacks.OnLatencyBackfillChange != nil {
+				callbacks.OnLatencyBackfillChange(newLatencyBackfill)
 			}
 			// The targets, when this save changed them — not on the mere
 			// presence of notification_edits: the reload flushes every

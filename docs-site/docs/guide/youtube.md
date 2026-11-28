@@ -588,6 +588,7 @@ YouTube lifts it, or when Moombox connects from a different address.
 | [`downloader.segment_workers`](../configuration/downloader.md#downloadersegment_workers) | Catch-up speed |
 | [`downloader.maximum_timeout`](../configuration/downloader.md#downloadermaximum_timeout), [`downloader.interruption_timeout`](../configuration/downloader.md#downloaderinterruption_timeout) | Stalls and interruptions |
 | [`monitors.membership_discovery`](../configuration/monitors.md#monitorsmembership_discovery) | Members-only discovery |
+| [`monitors.latency_backfill`](../configuration/monitors.md#monitorslatency_backfill) | Asking YouTube the latency setting of old recordings |
 | [`monitors.decapi_check_interval`](../configuration/monitors.md#monitorsdecapi_check_interval) | DecAPI polling |
 | [`bgutils.use_sidecar`](../configuration/updates-bgutils-twitch.md#bgutilsuse_sidecar) | BotGuard sidecar on/off |
 | [`memory.sidecar_soft_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_soft_limit_mb), [`memory.sidecar_hard_limit_mb`](../configuration/disk-memory-connectivity.md#memorysidecar_hard_limit_mb) | Sidecar memory |

@@ -862,6 +862,57 @@ export function renewalLine(status, nowMs) {
 }
 
 /**
+ * latencyBackfillLine is the dashboard's twin of Go's
+ * worker.LatencyBackfillLine (owner ruling RV-20), compared with it over
+ * web/tests/fixtures/latency-backfill-line-parity.json: the one line beside
+ * the monitors.latency_backfill switch in Settings, from the status object
+ * of initial_state, the latency_backfill frame and GET /api/latency-backfill
+ * ({state, pause, until, done, total}). A rate-limit pause's end is worded
+ * as a wall-clock time in the zone utcOffsetMinutes east of UTC. "" for no
+ * status, or a state this build does not know.
+ * @param {object|null|undefined} status
+ * @param {number} utcOffsetMinutes
+ * @returns {string}
+ */
+export function latencyBackfillLine(status, utcOffsetMinutes) {
+  if (!status) return "";
+  const done = Number(status.done) || 0;
+  const total = Number(status.total) || 0;
+  const noun = total === 1 ? "recording" : "recordings";
+  const counts = total > 0 ? `${done} of ${total} ${noun} done` : "";
+  const withCounts = (head) => (counts ? `${head} (${counts})` : head);
+  switch (status.state) {
+    case "off":
+      return withCounts("off");
+    case "waiting":
+      return withCounts("waiting to start");
+    case "running":
+      return counts || "running";
+    case "paused":
+      switch (status.pause) {
+        case "offline":
+          return withCounts("paused: offline");
+        case "capture_live":
+          return withCounts("paused: a capture is starting");
+        case "rate_limit": {
+          const until = Date.parse(status.until || "");
+          if (Number.isNaN(until)) return withCounts("paused: YouTube rate limit");
+          const at = new Date(until + utcOffsetMinutes * 60000);
+          const hhmm = `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")}`;
+          return withCounts(`paused: YouTube rate limit until ${hhmm}`);
+        }
+      }
+      return withCounts("paused");
+    case "caught_up": {
+      if (total === 0) return "caught up (no recordings to ask about)";
+      if (done >= total) return `caught up (${total} ${noun})`;
+      return `caught up (${counts}; ${total - done} not answered yet)`;
+    }
+  }
+  return "";
+}
+
+/**
  * formatClockTime is a local wall-clock time, "14:05", for a timestamp in ms.
  */
 export function formatClockTime(ms) {

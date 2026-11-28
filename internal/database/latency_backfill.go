@@ -22,6 +22,13 @@ const latencyModeUnset = "(latency_mode IS NULL OR latency_mode = '')"
 // characters, so a YouTube video ID (eleven) never matches it.
 const importPlaceholderGlob = "imp_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
 
+// latencyBackfillScope is the rows the backfill considers, whatever their
+// latency mode: Finished, not Twitch, with a video ID that is not an archive
+// import's placeholder. Its one parameter is StatusFinished. Shared by
+// LatencyBackfillRows (which adds "no mode yet") and LatencyBackfillCounts.
+const latencyBackfillScope = `status = ? AND (platform IS NULL OR platform <> 'twitch') AND video_id <> ''
+		   AND video_id NOT GLOB '` + importPlaceholderGlob + `'`
+
 // LatencyBackfillRows returns, in job ID order, up to limit Finished
 // non-Twitch rows with a video ID and no latency mode whose ID sorts after
 // after ("" for the start). A Finished row is the archive the backfill is
@@ -37,8 +44,7 @@ func (db *Database) LatencyBackfillRows(after string, limit int) ([]LatencyBackf
 
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, video_id FROM jobs
-		 WHERE status = ? AND (platform IS NULL OR platform <> 'twitch') AND video_id <> ''
-		   AND video_id NOT GLOB '`+importPlaceholderGlob+`'
+		 WHERE `+latencyBackfillScope+`
 		   AND `+latencyModeUnset+` AND id > ?
 		 ORDER BY id LIMIT ?`,
 		StatusFinished, after, limit)
@@ -81,4 +87,19 @@ func (db *Database) HasJobWithStatus(status JobStatus) (bool, error) {
 	var one int
 	err := db.db.QueryRowContext(db.getCtx(), `SELECT EXISTS(SELECT 1 FROM jobs WHERE status = ?)`, status).Scan(&one)
 	return one == 1, err
+}
+
+// LatencyBackfillCounts returns how many rows the backfill considers (total)
+// and how many of them have a latency mode (done), in one statement over the
+// same selection as LatencyBackfillRows (latencyBackfillScope), so the walk's
+// status line and its walk can never disagree about which rows count. The
+// rows the walk asks about are total - done.
+func (db *Database) LatencyBackfillCounts() (done, total int, err error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	err = db.db.QueryRowContext(db.getCtx(),
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN `+latencyModeUnset+` THEN 0 ELSE 1 END), 0)
+		 FROM jobs WHERE `+latencyBackfillScope,
+		StatusFinished).Scan(&total, &done)
+	return done, total, err
 }

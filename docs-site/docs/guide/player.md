@@ -162,7 +162,38 @@ they are recorded or downloaded. In the background Moombox asks about one record
 YouTube is rate-limiting it or a live capture is starting, so the suggestion
 appears on them over time. A video that is now private or deleted cannot be
 asked about, and keeps no suggestion. The job details show the setting and the suggestion in a **Latency**
-row.
+row. The switch for this background walk is
+[`monitors.latency_backfill`](../configuration/monitors.md#monitorslatency_backfill)
+(default on).
+
+How to tell it ran:
+
+- **Settings → Monitors**, both UIs: the line under the **Latency Mode
+  Backfill** switch (TUI: **Latency backfill**) says what it is doing now,
+  with how many recordings have their setting (here 212 of 540):
+  `waiting to start (212 of 540 recordings done)` (the first 5 minutes after
+  a start), `212 of 540 recordings done`,
+  `paused: offline (212 of 540 recordings done)`,
+  `paused: YouTube rate limit until 14:05 (212 of 540 recordings done)`,
+  `paused: a capture is starting (212 of 540 recordings done)`,
+  `caught up (540 recordings)` or `off (212 of 540 recordings done)`. When
+  YouTube did not answer for some recordings, it says so:
+  `caught up (538 of 540 recordings done; 2 not answered yet)`. Each is
+  asked again an hour later, up to three tries in all, and after that at the next
+  start.
+- **The log**, at the default level, one line each time the walk changes
+  state, never once a minute: `latency backfill: started, asking YouTube
+  about one recording a minute` (with how many are left, `toAsk`),
+  `latency backfill: paused while the device is offline`,
+  `latency backfill: paused for a YouTube rate limit` (with `until`),
+  `latency backfill: paused while a capture is starting`,
+  `latency backfill: resumed`, `latency backfill: caught up` (with
+  `filled`, how many it stored this run, `unstated`, how many of those
+  YouTube would not name a setting for, `gaveUp`, how many it stopped asking
+  about until the next start, and `left`, how many still have none),
+  `latency backfill: switched off (...)` and `latency backfill: switched on`.
+- **A recording's job details**: the **Latency** row appears once its
+  setting is stored (a downloaded upload that was never a stream gets none).
 
 ## Flying comments (overlay)
 

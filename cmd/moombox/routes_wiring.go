@@ -91,6 +91,9 @@ func (s *runState) wireRoutes() func() {
 		// Every monitor's own list, unmerged: the failing flag needs each
 		// monitor's streak, which the merged channelHealth above drops.
 		GetChannelMonitors: func() any { return s.channelMonitors() },
+		// The latency-mode backfill's status (owner ruling RV-20), for the
+		// Settings line beside monitors.latency_backfill.
+		GetLatencyBackfill: s.dlWorker.LatencyBackfillStatus,
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: s.applyConfiguredLogLevel,
@@ -113,6 +116,7 @@ func (s *runState) wireRoutes() func() {
 		OnFfmpegPathChange:          s.applyFfmpegPath,
 		OnReorderBudgetChange:       s.applyReorderBudget,
 		OnKeepAwakeChange:           s.applyKeepAwake,
+		OnLatencyBackfillChange:     func(bool) { s.applyLatencyBackfill() },
 		ResolveRateLimit:            s.apiRL,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})

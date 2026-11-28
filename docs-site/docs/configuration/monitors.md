@@ -13,6 +13,7 @@ feed_check_interval = 10
 hide_finished_age_days = 30
 probe_cooldown = 0
 membership_discovery = true
+latency_backfill = true
 # decapi_check_interval and twitch_check_interval are absent by default
 ```
 
@@ -333,6 +334,56 @@ Only an explicit `false` turns it off.
 ```toml
 [monitors]
 membership_discovery = false
+```
+
+## Archived recordings
+
+### `monitors.latency_backfill`
+
+| Default | Allowed values | Takes effect | Where to change |
+|---|---|---|---|
+| `true` | `true` or `false` | At once, no restart | Dashboard: Settings → Monitors → **Latency Mode Backfill** switch. TUI: Settings → Monitors → **Latency backfill**. |
+
+In the background, ask YouTube once for each archived YouTube recording that
+has no latency setting stored yet (recordings made before this version, and
+VOD downloads), so the player can
+[suggest a chat offset](../guide/player.md#suggested-offset-youtube) for it.
+It asks about one recording a minute, starting 5 minutes after Moombox
+starts, and pauses while you are offline, while YouTube is rate-limiting
+requests, and while a live capture is starting (the moment between YouTube
+going live and the first segment; once the capture is recording, the walk
+goes on).
+
+Turning it off stops only this background walk, before its next request. A
+new capture or download still stores its latency setting when it starts,
+the player still applies the suggestions it has, and recordings already
+filled keep what they hold. Turning it on again goes on with the recordings
+still missing one. A YouTube rate-limit pause the walk was under is kept
+while it is off.
+
+How to tell it ran: the line under the switch in Settings (both UIs) says
+what it is doing, for example `212 of 540 recordings done`,
+`caught up (540 recordings)`,
+`paused: YouTube rate limit until 14:05 (212 of 540 recordings done)`,
+`paused: offline (212 of 540 recordings done)`,
+`paused: a capture is starting (212 of 540 recordings done)` or
+`off (212 of 540 recordings done)`. The log has a
+`latency backfill:` line each time it starts, pauses, resumes, catches up
+or is switched off or on (see
+[Player](../guide/player.md#suggested-offset-youtube)), and each stream
+recording it has filled shows a **Latency** row in its job details (a
+downloaded upload that was never a stream gets none).
+
+When to turn it off: if you do not use the player's chat overlay on old
+recordings, or want Moombox to make no requests to YouTube beyond what your
+channels need.
+
+Edge cases: if the key is absent from `config.toml`, it counts as `true`.
+Only an explicit `false` turns it off.
+
+```toml
+[monitors]
+latency_backfill = false
 ```
 
 ## Job list

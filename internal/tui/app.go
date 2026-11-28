@@ -526,6 +526,13 @@ type ChannelFailingMsg struct {
 	Failing FailingChannels
 }
 
+// LatencyBackfillLineMsg carries the latency-mode backfill's Settings line
+// (worker.LatencyBackfillLine, owner ruling RV-20): read when Settings opens
+// (OnLatencyBackfillLine) and pushed on each change of the walk's status.
+type LatencyBackfillLineMsg struct {
+	Line string
+}
+
 // AdmissionHoldsMsg carries the backlog scheduler's hold snapshot
 // (worker.DownloadWorker.AdmissionHolds, owner ruling R-D3) each time it
 // changes: what Queued rows show in place of a bare wait, and what turns the
@@ -973,6 +980,11 @@ type App struct {
 	// (owner ruling KA-5). "" when there is nothing to say; nil when there is no
 	// auto-cookie service. R C and a successful R F end with it.
 	OnCookieRenewalLine func() string
+	// OnLatencyBackfillLine reports worker.LatencyBackfillLine for the
+	// latency-mode backfill's status now (owner ruling RV-20), shown beside
+	// monitors.latency_backfill in Settings; read when Settings opens, off
+	// the update goroutine (it counts rows). nil shows no line.
+	OnLatencyBackfillLine func() string
 	// OnForceRefreshCookies runs the browser cookie refresh. nil if
 	// auto-cookies are not configured. It returns the pass's whole result
 	// rather than a bool: see cookieForceRefreshResultMsg for why the

@@ -146,6 +146,13 @@
 # include_non_live_content). Needs YouTube cookies to find anything.
 # membership_discovery = true
 
+# Ask YouTube, in the background, for the latency setting of each archived
+# YouTube recording that has none stored (recordings from before this
+# version, and VOD downloads), one a minute, so the player can suggest a
+# chat offset for it. Off stops only this walk; new recordings still store
+# theirs. Takes effect without a restart. Default: true.
+# latency_backfill = true
+
 # ─── Downloader ───────────────────────────────────────────────────────────────
 [downloader]
 

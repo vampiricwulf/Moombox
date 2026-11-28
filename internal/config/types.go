@@ -172,6 +172,21 @@ type MonitorsConfig struct {
 	// enabled: a nil pointer (absent from an existing config) is normalized to
 	// true on load, so only an explicit false disables it.
 	MembershipDiscovery *bool `toml:"membership_discovery,omitempty" json:"membership_discovery,omitempty"`
+	// LatencyBackfill runs the background walk over archived YouTube
+	// recordings that asks YouTube for each one's latency mode (owner rulings
+	// RV-19 and RV-20, worker.runLatencyBackfill). Off stops only that walk:
+	// a new capture or download still stores its mode at its first
+	// extraction, and rows already filled keep theirs. Defaults to on, shaped
+	// like MembershipDiscovery: nil (absent from an existing config)
+	// normalizes to true on load, so only an explicit false turns it off.
+	// Hot-reloaded: the walk reads it before every request.
+	LatencyBackfill *bool `toml:"latency_backfill,omitempty" json:"latency_backfill,omitempty"`
+}
+
+// LatencyBackfillEnabled reports whether the latency-mode backfill walk is
+// on. A nil pointer (the key absent, before normalization) counts as on.
+func (m MonitorsConfig) LatencyBackfillEnabled() bool {
+	return m.LatencyBackfill == nil || *m.LatencyBackfill
 }
 
 // MembershipDiscoveryEnabled reports whether members-only /membership discovery

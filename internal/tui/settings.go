@@ -162,6 +162,7 @@ var sections = []settingsSection{
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days, 0-365 (default: 30, 0 = archive immediately)", nil},
 			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle; fractions allowed (default: 0, no max)", nil},
 			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
+			{"latency_backfill", "Latency backfill", fieldToggle, nil, "ask YouTube each archived recording's latency mode, one a minute, so the player can suggest a chat offset; off stops only this walk (default: on)", nil},
 		},
 	},
 	{
@@ -425,6 +426,11 @@ type SettingsModel struct {
 	// replaced by every ChannelFailingMsg. The channel list tags its rows
 	// from it (channelFailing).
 	failing FailingChannels
+	// latencyBackfillLine is the latency-mode backfill's status line
+	// (worker.LatencyBackfillLine, owner ruling RV-20), drawn under the
+	// latency_backfill toggle: read when Settings opens and replaced by
+	// every LatencyBackfillLineMsg. "" draws nothing.
+	latencyBackfillLine string
 	// channelsAtOpen is the channel list as Open copied it. A save writes
 	// back only what the editor changed relative to it (mergeChannelEdits),
 	// so a channel the dashboard added, disabled or removed while the
@@ -748,6 +754,7 @@ func loadSettingsValues(v map[string]string, cfg *config.MoomboxConfig) {
 	v["probe_cooldown"] = strconv.FormatFloat(cfg.Monitors.ProbeCooldown.Value, 'f', -1, 64)
 	// nil normalizes to true (default on) — matches config validation.
 	v["membership_discovery"] = boolToDisplay(cfg.Monitors.MembershipDiscoveryEnabled())
+	v["latency_backfill"] = boolToDisplay(cfg.Monitors.LatencyBackfillEnabled())
 
 	// Downloader
 	v["output_template"] = cfg.Downloader.OutputTemplate
@@ -1299,6 +1306,8 @@ func writeSettingsField(c *config.MoomboxConfig, key string, v map[string]string
 		c.Monitors.ProbeCooldown = config.FlexDuration{Value: p.flex[key]}
 	case "membership_discovery":
 		c.Monitors.MembershipDiscovery = &yes
+	case "latency_backfill":
+		c.Monitors.LatencyBackfill = &yes
 
 	// Downloader
 	case "output_template":
@@ -1447,4 +1456,24 @@ func boolToDisplay(b bool) string {
 		return "Yes"
 	}
 	return "No"
+}
+
+// fieldHasSecondRow reports whether fd draws a second row under its own:
+// its previewFn, or the latency backfill's status line. The view, the bare
+// form, the height budget and the mouse hit-test all ask this, so the rows
+// they count are the rows drawn.
+func fieldHasSecondRow(fd fieldDef) bool {
+	return fd.previewFn != nil || fd.key == "latency_backfill"
+}
+
+// fieldSecondRow is that row's text now, "" for none: the preview of the
+// field's value, or the latency backfill's status line.
+func (m *SettingsModel) fieldSecondRow(fd fieldDef) string {
+	if fd.key == "latency_backfill" {
+		return m.latencyBackfillLine
+	}
+	if fd.previewFn != nil {
+		return fd.previewFn(m.values[fd.key])
+	}
+	return ""
 }

@@ -112,3 +112,15 @@ func (s *runState) applyReorderBudget(d config.DownloaderConfig) {
 		slog.Int("per_job_bytes", perJobBytes),
 		slog.Int("total_bytes", totalBytes))
 }
+
+// applyLatencyBackfill re-applies monitors.latency_backfill (owner ruling
+// RV-20): it wakes the latency-mode backfill, which reads the key itself and
+// stops before its next request or resumes from the NULL rows. Reached from
+// the config PUT's OnLatencyBackfillChange and the TUI's OnSaveConfig
+// hot-reload block, which calls it on every save (it has no snapshot to
+// diff; a wake that finds the switch unmoved does nothing).
+func (s *runState) applyLatencyBackfill() {
+	if s.dlWorker != nil {
+		s.dlWorker.WakeLatencyBackfill()
+	}
+}

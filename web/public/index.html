@@ -950,6 +950,23 @@
                                     not a member of.</span
                                 >
                             </sl-switch>
+                            <sl-switch id="cfg-latency-backfill" checked>
+                                Latency Mode Backfill
+                                <span slot="help-text"
+                                    >In the background, ask YouTube once for each
+                                    archived recording's latency mode, so the player
+                                    can suggest a chat offset for it. One recording a
+                                    minute, paused while offline, rate-limited or while a
+                                    live capture is starting. Off stops only this; new
+                                    recordings still store their mode.</span
+                                >
+                            </sl-switch>
+                            <!-- latencyBackfillLine (utils.js): what the backfill is doing now. Hidden while there is no status. -->
+                            <div
+                                id="latency-backfill-status"
+                                role="status"
+                                style="display: none; margin-top: 0.4em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-600)"
+                            ></div>
                         </div>
 
                         <!-- Downloader Settings -->

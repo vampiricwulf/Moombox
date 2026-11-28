@@ -89,15 +89,18 @@ func TestClassifyLatencyAnswer(t *testing.T) {
 // backfillHarness is a walk over a real database with a scripted probe and
 // a settable clock, online state, hold and starting capture.
 type backfillHarness struct {
-	t        *testing.T
-	db       *database.Database
-	b        *latencyBackfill
-	now      time.Time
-	online   bool
-	held     bool
-	starting bool
-	answers  map[string]func() (*youtube.VideoInfo, error)
-	asked    []string
+	t           *testing.T
+	db          *database.Database
+	b           *latencyBackfill
+	now         time.Time
+	online      bool
+	held        bool
+	starting    bool
+	switchedOff bool
+	// schedUntil is when the scheduler's hold (held) runs out.
+	schedUntil time.Time
+	answers    map[string]func() (*youtube.VideoInfo, error)
+	asked      []string
 }
 
 func newBackfillHarness(t *testing.T, db *database.Database) *backfillHarness {
@@ -118,9 +121,15 @@ func (h *backfillHarness) newWalk() *latencyBackfill {
 			}
 			return nil, errors.New("no scripted answer")
 		},
-		online:          func() bool { return h.online },
-		rateLimitHeld:   func(time.Time) bool { return h.held },
+		online: func() bool { return h.online },
+		rateLimitHeld: func(time.Time) (time.Time, bool) {
+			if h.held {
+				return h.schedUntil, true
+			}
+			return time.Time{}, false
+		},
 		captureStarting: func() bool { return h.starting },
+		enabled:         func() bool { return !h.switchedOff },
 		now:             func() time.Time { return h.now },
 	}
 }
@@ -366,12 +375,12 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 		t.Error("a walk with no YouTube service has a probe")
 	}
 	now := time.Now()
-	if b.rateLimitHeld(now) {
+	if _, held := b.rateLimitHeld(now); held {
 		t.Fatal("held with no verdict")
 	}
 	w.scheduler.holdForRateLimit(now, rateLimitBackoff)
-	if !b.rateLimitHeld(now) {
-		t.Error("the scheduler's hold is not seen")
+	if until, held := b.rateLimitHeld(now); !held || !until.Equal(now.Add(rateLimitBackoff)) {
+		t.Errorf("the scheduler's hold is not seen: (%v, %v), want until %v", until, held, now.Add(rateLimitBackoff))
 	}
 	if b.captureStarting() {
 		t.Fatal("a capture starting with no rows")
@@ -492,5 +501,110 @@ func TestLatencyBackfillHoldOutlivesARestart(t *testing.T) {
 	}
 	if !r.RestoreLatencyBackfillHold(time.Now().Add(5*rateLimitBackoff)) || r.latencyHoldUntil.After(time.Now().Add(rateLimitBackoff)) {
 		t.Errorf("a hold past the hour restored until %v, want at most the hour", r.latencyHoldUntil)
+	}
+}
+
+// TestLatencyBackfillSwitch: monitors.latency_backfill off stops the walk
+// before its next request, keeps its own rate-limit hold as saved, and on
+// resumes from the NULL rows (owner ruling RV-20). The worker's walk reads
+// the live config.
+//
+// Mutants: the off gate dropped (a request goes out while off); the gate
+// placed after the hold's expiry clear (the saved hold is cleared while
+// off); newLatencyBackfill not reading the config (the walk asks while the
+// key is false).
+func TestLatencyBackfillSwitch(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	h.add("aaa", database.StatusFinished)
+	h.add("bbb", database.StatusFinished)
+	h.answers["aaa"] = answered("MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW")
+	h.answers["bbb"] = answered("MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL")
+	var saved []time.Time
+	h.b.recordHold = func(until time.Time) { saved = append(saved, until) }
+
+	h.step(latencyBackfillPause) // aaa
+	h.switchedOff = true
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 1 || got[0] != "aaa" {
+		t.Fatalf("asked %v, want only aaa before the switch", got)
+	}
+	if h.mode("bbb") != database.LatencyModeNone {
+		t.Fatal("bbb was filled while switched off")
+	}
+
+	// A hold that ran out while off stays saved until the walk runs again.
+	h.b.heldUntil = h.now.Add(-time.Minute)
+	h.step(latencyBackfillPause)
+	if len(saved) != 0 || h.b.heldUntil.IsZero() {
+		t.Fatalf("the hold was touched while off: recorded %v", saved)
+	}
+
+	h.switchedOff = false
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 1 || got[0] != "bbb" || h.mode("bbb") != database.LatencyModeNormal {
+		t.Fatalf("after switching on: asked %v, bbb %q, want bbb answered", got, h.mode("bbb"))
+	}
+	if len(saved) != 1 || !saved[0].IsZero() {
+		t.Errorf("the run-out hold is cleared once on: recorded %v", saved)
+	}
+	if h.mode("aaa") != database.LatencyModeLow {
+		t.Error("a filled row lost its mode")
+	}
+
+	w, _ := testWorkerSetup(t)
+	f := false
+	w.cfg.Monitors.LatencyBackfill = &f
+	if w.newLatencyBackfill().isEnabled() {
+		t.Error("the worker's walk ignores monitors.latency_backfill = false")
+	}
+	w.cfg.Monitors.LatencyBackfill = nil
+	if !w.newLatencyBackfill().isEnabled() {
+		t.Error("the worker's walk reads an absent key as off")
+	}
+}
+
+// TestLatencyBackfillWakeOnlyWhenTheSwitchMoved: a wake ends the walk's
+// wait at once when the switch moved since the last step, and is ignored
+// when it did not, so a Settings save that leaves the switch where it was
+// never makes the walk ask sooner.
+//
+// Mutants: sleep ignoring the wake (the moved case waits out the timer);
+// sleep returning on every wake (the unmoved case returns early).
+func TestLatencyBackfillWakeOnlyWhenTheSwitchMoved(t *testing.T) {
+	t.Parallel()
+	wake := make(chan struct{}, 1)
+	on := true
+	b := &latencyBackfill{wake: wake, enabled: func() bool { return on }}
+
+	// Last step ran on; a wake while still on does not end the wait.
+	wake <- struct{}{}
+	start := time.Now()
+	if !b.sleep(context.Background(), 200*time.Millisecond) {
+		t.Fatal("sleep reported a cancelled context")
+	}
+	if waited := time.Since(start); waited < 150*time.Millisecond {
+		t.Errorf("an unmoved switch ended the wait after %v", waited)
+	}
+
+	// Switched off since: the wake ends the wait at once.
+	// The context ends the wait after a few seconds when the wake is
+	// ignored, which sleep reports as false.
+	bounded := func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return b.sleep(ctx, time.Hour)
+	}
+	on = false
+	wake <- struct{}{}
+	if !bounded() {
+		t.Error("a switch moved to off did not end the wait")
+	}
+
+	// And back on, from a step that found it off.
+	b.off, on = true, true
+	wake <- struct{}{}
+	if !bounded() {
+		t.Error("a switch moved to on did not end the wait")
 	}
 }

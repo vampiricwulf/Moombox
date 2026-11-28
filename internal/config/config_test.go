@@ -241,65 +241,90 @@ terms = "live|stream"
 	}
 }
 
-func TestMembershipDiscoveryDefaultOnAndPersist(t *testing.T) {
-	dir := t.TempDir()
+// TestMonitorSwitchesDefaultOnAndPersist: the two default-on monitor
+// switches, monitors.membership_discovery and monitors.latency_backfill
+// (owner ruling RV-20, shaped exactly like the first). Each loads as on from
+// a config without the key, normalizes nil to a concrete true, keeps an
+// explicit false through Load, Normalize and a Save/reload round trip.
+//
+// Mutants: a switch's nil normalization dropped (pointer stays nil); its
+// accessor reading nil as off; the field's TOML tag wrong (false does not
+// load or survive the round trip).
+func TestMonitorSwitchesDefaultOnAndPersist(t *testing.T) {
+	for _, sw := range []struct {
+		key     string
+		enabled func(MonitorsConfig) bool
+		ptr     func(*MonitorsConfig) **bool
+	}{
+		{"membership_discovery", MonitorsConfig.MembershipDiscoveryEnabled,
+			func(m *MonitorsConfig) **bool { return &m.MembershipDiscovery }},
+		{"latency_backfill", MonitorsConfig.LatencyBackfillEnabled,
+			func(m *MonitorsConfig) **bool { return &m.LatencyBackfill }},
+	} {
+		t.Run(sw.key, func(t *testing.T) {
+			dir := t.TempDir()
 
-	// 1. An existing config WITHOUT the key must load as enabled (default on),
-	//    and normalization must make the pointer concrete (non-nil).
-	absent := filepath.Join(dir, "absent.toml")
-	if err := os.WriteFile(absent, []byte("[monitors]\nfeed_check_interval = 5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(absent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Monitors.MembershipDiscoveryEnabled() {
-		t.Error("membership discovery should default ON when the key is absent")
-	}
-	if cfg.Monitors.MembershipDiscovery == nil {
-		t.Error("load should normalize the nil pointer to a concrete value")
-	}
+			// 1. An existing config WITHOUT the key loads as enabled, and
+			//    normalization makes the pointer concrete (non-nil).
+			absent := filepath.Join(dir, "absent.toml")
+			if err := os.WriteFile(absent, []byte("[monitors]\nfeed_check_interval = 5\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(absent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !sw.enabled(cfg.Monitors) {
+				t.Error("should default ON when the key is absent")
+			}
+			if *sw.ptr(&cfg.Monitors) == nil {
+				t.Error("load should normalize the nil pointer to a concrete value")
+			}
 
-	// 2. An explicit false must survive the load (disable persists).
-	off := filepath.Join(dir, "off.toml")
-	if err := os.WriteFile(off, []byte("[monitors]\nmembership_discovery = false\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfgOff, err := Load(off)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfgOff.Monitors.MembershipDiscoveryEnabled() {
-		t.Error("explicit membership_discovery=false must stay disabled after load")
-	}
+			// 2. An explicit false survives the load.
+			off := filepath.Join(dir, "off.toml")
+			if err := os.WriteFile(off, []byte("[monitors]\n"+sw.key+" = false\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfgOff, err := Load(off)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sw.enabled(cfgOff.Monitors) {
+				t.Error("explicit false must stay disabled after load")
+			}
 
-	// 3. Normalize directly: nil -> enabled; explicit false left untouched.
-	nilCfg := &MoomboxConfig{}
-	Normalize(nilCfg)
-	if !nilCfg.Monitors.MembershipDiscoveryEnabled() {
-		t.Error("Normalize should turn a nil membership_discovery ON")
-	}
-	f := false
-	falseCfg := &MoomboxConfig{Monitors: MonitorsConfig{MembershipDiscovery: &f}}
-	Normalize(falseCfg)
-	if falseCfg.Monitors.MembershipDiscoveryEnabled() {
-		t.Error("Normalize must not flip an explicit false to on")
-	}
+			// 3. Normalize directly: nil -> enabled; explicit false untouched.
+			nilCfg := &MoomboxConfig{}
+			Normalize(nilCfg)
+			if !sw.enabled(nilCfg.Monitors) || *sw.ptr(&nilCfg.Monitors) == nil {
+				t.Error("Normalize should turn a nil switch ON")
+			}
+			f := false
+			falseCfg := &MoomboxConfig{}
+			*sw.ptr(&falseCfg.Monitors) = &f
+			Normalize(falseCfg)
+			if sw.enabled(falseCfg.Monitors) {
+				t.Error("Normalize must not flip an explicit false to on")
+			}
+			if !sw.enabled(MonitorsConfig{}) {
+				t.Error("the accessor must read a nil pointer as on")
+			}
 
-	// 4. Save→reload round-trip: an explicit false must survive the ENCODER —
-	//    omitempty on a *bool keys off nil, not the pointed value, so a non-nil
-	//    &false is still written. This is the "…AndPersist" half of the contract.
-	saved := filepath.Join(dir, "saved.toml")
-	if err := Save(cfgOff, saved); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	reloaded, err := Load(saved)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if reloaded.Monitors.MembershipDiscoveryEnabled() {
-		t.Error("membership_discovery=false must survive a Save→reload round-trip")
+			// 4. Save→reload round-trip: omitempty on a *bool keys off nil,
+			//    not the pointed value, so a non-nil &false is still written.
+			saved := filepath.Join(dir, "saved.toml")
+			if err := Save(cfgOff, saved); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			reloaded, err := Load(saved)
+			if err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if sw.enabled(reloaded.Monitors) {
+				t.Error("false must survive a Save→reload round-trip")
+			}
+		})
 	}
 }
 
@@ -981,7 +1006,7 @@ func TestMaxFeedItemsIgnored(t *testing.T) {
 	// test helper exists in this package (grep: `func load\|toml.Decode` only
 	// matches the TOML round-trip test at TestChannelTermsTOMLRoundTrip) — use
 	// the write-temp-file-then-Load pattern already established by
-	// TestLoadFromFile/TestMembershipDiscoveryDefaultOnAndPersist above.
+	// TestLoadFromFile/TestMonitorSwitchesDefaultOnAndPersist above.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.toml")
 	content := "[monitors]\nmax_feed_items = 500\n"

@@ -193,6 +193,10 @@ type runState struct {
 	// admissionHoldsResync (capacity 1) asks runAdmissionHoldsPush to send the
 	// TUI the snapshot again (resyncAdmissionHoldsTUI); nil sends nothing.
 	admissionHoldsResync chan struct{}
+	// latencyBackfillTUI receives the latency-mode backfill's Settings line
+	// on each change of its status when the TUI runs
+	// (runLatencyBackfillPush); nil without one.
+	latencyBackfillTUI atomic.Pointer[func(string)]
 	// channelMonitorsPush tells both UIs when the set of failing channels
 	// changes (owner ruling R-H1). Set in wireMonitorCallbacks; checked after
 	// every monitor cycle.
