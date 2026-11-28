@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -88,6 +89,15 @@ const (
 type latencyBackfill struct {
 	db     *database.Database
 	logger logger
+	// enabled reports monitors.latency_backfill (production: the live
+	// config, read before every request); nil is always on.
+	enabled func() bool
+	// wake is signalled when the switch may have moved (a Settings save in
+	// either UI, DownloadWorker.WakeLatencyBackfill), so the walk stops or
+	// resumes at once rather than at its next look; nil never wakes.
+	wake <-chan struct{}
+	// off is whether the last step found the walk switched off.
+	off bool
 	// probe asks YouTube about one video (production: latencyProbe). nil:
 	// the walk never runs.
 	probe func(ctx context.Context, videoID string) (*youtube.VideoInfo, error)
@@ -124,7 +134,17 @@ type latencyTry struct {
 // newLatencyBackfill is the worker's walk: its database, its YouTube
 // service, its connectivity monitor, and its scheduler's rate-limit hold.
 func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
-	b := &latencyBackfill{db: w.db, logger: w.logger, heldUntil: w.latencyHoldUntil, recordHold: w.latencyHoldRecord}
+	b := &latencyBackfill{db: w.db, logger: w.logger, heldUntil: w.latencyHoldUntil, recordHold: w.latencyHoldRecord,
+		wake: w.latencyWake}
+	b.enabled = func() bool {
+		on := true
+		w.readConfig(func(c *config.MoomboxConfig) {
+			if c != nil {
+				on = c.Monitors.LatencyBackfillEnabled()
+			}
+		})
+		return on
+	}
 	if w.yt != nil {
 		b.probe = w.latencyProbe
 	}
@@ -181,11 +201,36 @@ func (w *DownloadWorker) runLatencyBackfill(ctx context.Context, b *latencyBackf
 	}
 	for {
 		d := b.stepRecovered(ctx)
-		if ctx.Err() != nil || utils.Sleep(ctx, d) != nil {
+		if ctx.Err() != nil || !b.sleep(ctx, d) {
 			return
 		}
 	}
 }
+
+// sleep waits d before the next step, or less when a wake finds the switch
+// moved since the last step (off to on, or on to off): the step then runs at
+// once, to stop or resume now. A wake that finds it where it was goes on
+// waiting out d, so a Settings save never makes the walk ask sooner than its
+// pace. Reports false when ctx ends.
+func (b *latencyBackfill) sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return true
+		case <-b.wake:
+			if b.isEnabled() == b.off {
+				return true
+			}
+		}
+	}
+}
+
+// isEnabled reports the switch; a nil enabled is on.
+func (b *latencyBackfill) isEnabled() bool { return b.enabled == nil || b.enabled() }
 
 // stepRecovered is step with a recover of its own: a row whose step
 // panicked is counted as a failed request, so it cannot panic the walk on
@@ -217,6 +262,15 @@ func (b *latencyBackfill) isOnline() bool { return b.online == nil || b.online()
 // next step.
 func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 	now := b.clock()
+	// Switched off (owner ruling RV-20): nothing is asked and nothing else
+	// is touched. A request already sent has finished and stored its answer,
+	// and the walk's own rate-limit hold stays as saved (only a step that
+	// runs while on clears it), so switching on again inside the hour does
+	// not ask into the limit.
+	b.off = !b.isEnabled()
+	if b.off {
+		return latencyBackfillPause
+	}
 	if !b.isOnline() {
 		return latencyBackfillPause
 	}
@@ -420,4 +474,18 @@ func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.Latency
 		return database.LatencyModeUnstated, latencyAnswered
 	}
 	return "", latencyTransient
+}
+
+// WakeLatencyBackfill tells the latency-mode backfill that
+// monitors.latency_backfill may have changed (a Settings save in either UI),
+// so a walk switched off stops before its next request and one switched on
+// resumes now, rather than at its next look, which may be up to
+// latencyBackfillIdle away. Non-blocking: a wake already pending covers it.
+// The walk reads the key itself, so a wake that changed nothing does
+// nothing.
+func (w *DownloadWorker) WakeLatencyBackfill() {
+	select {
+	case w.latencyWake <- struct{}{}:
+	default:
+	}
 }

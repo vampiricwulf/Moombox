@@ -113,6 +113,7 @@ func (s *runState) wireRoutes() func() {
 		OnFfmpegPathChange:          s.applyFfmpegPath,
 		OnReorderBudgetChange:       s.applyReorderBudget,
 		OnKeepAwakeChange:           s.applyKeepAwake,
+		OnLatencyBackfillChange:     func(bool) { s.applyLatencyBackfill() },
 		ResolveRateLimit:            s.apiRL,
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})

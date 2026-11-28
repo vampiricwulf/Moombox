@@ -655,6 +655,7 @@ func (s *runState) runTUI() {
 		s.applyFfmpegPath(snap.Paths.FfmpegPath)
 		s.applyReorderBudget(snap.Downloader)
 		s.applyKeepAwake(snap.Downloader.KeepAwake)
+		s.applyLatencyBackfill()
 		s.warnSegmentWorkers(snap.Downloader.SegmentWorkers)
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()

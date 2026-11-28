@@ -187,6 +187,7 @@ func Defaults() *MoomboxConfig {
 			HideFinishedAgeDays: FlexDuration{Value: 30},
 			ProbeCooldown:       FlexDuration{Value: 0}, // seconds; 0 = disabled
 			MembershipDiscovery: new(true),
+			LatencyBackfill:     new(true),
 		},
 		Downloader: DownloaderConfig{
 			OutputTemplate:              "${channel}/${start_date} ${title} [${id}]",
@@ -840,6 +841,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	// enabled unless an operator explicitly sets false.
 	if cfg.Monitors.MembershipDiscovery == nil && !reportOnly {
 		cfg.Monitors.MembershipDiscovery = new(true)
+	}
+	// monitors.latency_backfill defaults to on the same way.
+	if cfg.Monitors.LatencyBackfill == nil && !reportOnly {
+		cfg.Monitors.LatencyBackfill = new(true)
 	}
 	if cfg.Monitors.FeedCheckInterval.Value < 1 || cfg.Monitors.FeedCheckInterval.Value > 1440 {
 		fail("monitors.feed_check_interval %v out of range 1..1440 minutes", cfg.Monitors.FeedCheckInterval.Value)

@@ -335,6 +335,9 @@ type DownloadWorker struct {
 	// Start, read once by newLatencyBackfill.
 	latencyHoldUntil  time.Time
 	latencyHoldRecord func(until time.Time)
+	// latencyWake (capacity 1) wakes the latency-mode backfill when its
+	// switch may have moved (WakeLatencyBackfill).
+	latencyWake chan struct{}
 
 	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
 	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
@@ -585,6 +588,7 @@ func NewDownloadWorker(
 		logger:       logger,
 		conn:         conn,
 		notifyJob:    make(chan struct{}, 1),
+		latencyWake:  make(chan struct{}, 1),
 		captcha:      captcha,
 	}
 	// The scheduler reads the disk through the worker, which holds the
