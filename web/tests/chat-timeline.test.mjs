@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  normalizeOffsetMs, computeChatBiasMs, partitionChatByVideo, indexAfter, mergePartChats,
+  normalizeOffsetMs, computeChatBiasMs, parseTimeMs, partitionChatByVideo, indexAfter, mergePartChats,
   formatChatHeader, dividerLabelFor, deriveMissingOffsets, correctLegacyTwitchEmotes,
 } from "../public/modules/chat-timeline.js";
 
@@ -45,6 +45,113 @@ test("computeChatBiasMs: same epoch, missing or unparsable → 0", () => {
   assert.equal(computeChatBiasMs({ chatStreamStartTime: "", jobStreamStartTime: "2026-06-11T10:12:00Z" }), 0);
   assert.equal(computeChatBiasMs({ chatStreamStartTime: "2026-06-11T10:00:00Z", jobStreamStartTime: undefined }), 0);
   assert.equal(computeChatBiasMs({ chatStreamStartTime: "garbage", jobStreamStartTime: "2026-06-11T10:12:00Z" }), 0);
+});
+
+// Owner ruling RV-19, with the two real captures of the chat-alignment
+// measurement (2026-11-27). Each row is a chat message's stored offsetMs and
+// where its moment sits in the muxed file ("frame at": its wall time minus the
+// first segment's Ingestion-Walltime, which is the file's 0:00).
+//
+// Capture A: Lofi Girl, a 24/7 stream recorded from the live edge (HLS,
+// marathon), 100 days into the broadcast. Its file covers 1805 s from
+// 22:56:50.408; the ten messages were sent about an hour after its media, so
+// their frames lie past its end — but at 3603.757 s, not 8,698,391 s.
+const CAPTURE_A = {
+  chatEpoch: "2026-08-19T07:43:43Z",                // chat header streamStartTime = job streamStartTime
+  mediaStartTime: "2026-11-27T22:56:50.408302Z",    // sq 1738862's ingest wall clock
+  joinOffsetSeconds: 8694310,                       // seq x 5, what the finalize stored
+  durationMs: 1805000,
+  rows: [
+    [8698391165, 3603757], [8698402895, 3615487], [8698409367, 3621959], [8698415077, 3627669],
+    [8698422597, 3635189], [8698431236, 3643829], [8698446510, 3659103], [8698465089, 3677681],
+    [8698474612, 3687204], [8698487991, 3700583],
+  ],
+};
+// Capture B: recorded from sq=0 (DASH). Today chat shows 6.236 s early.
+const CAPTURE_B = {
+  chatEpoch: "2026-11-27T23:29:11Z",
+  mediaStartTime: "2026-11-27T23:29:04.76416Z",
+  rows: [
+    [1844146, 1850382], [1848075, 1854311], [1857488, 1863725], [1883529, 1889765], [1907570, 1913806],
+    [1917906, 1924143], [1931169, 1937405], [1940514, 1946750], [1951398, 1957634], [1978496, 1984733],
+  ],
+};
+const placed = (offsetMs, bias) => offsetMs - bias;
+
+test("parseTimeMs: RFC3339Nano is read to the millisecond", () => {
+  assert.equal(parseTimeMs("2026-11-27T22:56:50.408302Z"), Date.UTC(2026, 10, 27, 22, 56, 50, 408));
+  assert.equal(parseTimeMs("2026-11-27T22:56:50.408302123Z"), Date.UTC(2026, 10, 27, 22, 56, 50, 408));
+  assert.equal(parseTimeMs("2026-11-27T22:56:50Z"), Date.UTC(2026, 10, 27, 22, 56, 50));
+  assert.ok(Number.isNaN(parseTimeMs("")));
+  assert.ok(Number.isNaN(parseTimeMs(undefined)));
+});
+
+test("computeChatBiasMs: an anchored live-edge capture puts each message on its frame (capture A)", () => {
+  const bias = computeChatBiasMs({
+    chatStreamStartTime: CAPTURE_A.chatEpoch, jobStreamStartTime: CAPTURE_A.chatEpoch,
+    mediaStartTime: CAPTURE_A.mediaStartTime, joinOffsetSeconds: CAPTURE_A.joinOffsetSeconds,
+  });
+  assert.equal(bias, 8694787408);
+  for (const [offsetMs, frameMs] of CAPTURE_A.rows) {
+    // The measured "frame at" is to the millisecond; the stored offset is
+    // whole ms, so a row may round either way.
+    assert.ok(Math.abs(placed(offsetMs, bias) - frameMs) <= 1, `offset ${offsetMs} placed at ${placed(offsetMs, bias)}, frame at ${frameMs}`);
+  }
+});
+
+test("computeChatBiasMs: capture A's chat lands inside the file only with the anchor", () => {
+  // A message sent at 23:10:00, a moment the file holds (it covers 22:56:50.408
+  // to 23:26:55.4): its offset counts from the chat epoch.
+  const offsetMs = Date.UTC(2026, 10, 27, 23, 10, 0) - Date.parse(CAPTURE_A.chatEpoch);
+  const anchored = computeChatBiasMs({ chatStreamStartTime: CAPTURE_A.chatEpoch, jobStreamStartTime: CAPTURE_A.chatEpoch, mediaStartTime: CAPTURE_A.mediaStartTime });
+  assert.equal(placed(offsetMs, anchored), 789592);
+  const one = [{ id: "m", offsetMs: placed(offsetMs, anchored) }];
+  assert.deepEqual(partitionChatByVideo(one, CAPTURE_A.durationMs), { preCount: 0, firstLiveIndex: 0, postCount: 0, firstPostIndex: -1 });
+  // Without anchor or join point (the bug): 100 days past the end.
+  const before = computeChatBiasMs({ chatStreamStartTime: CAPTURE_A.chatEpoch, jobStreamStartTime: CAPTURE_A.chatEpoch });
+  assert.equal(before, 0);
+  assert.equal(partitionChatByVideo([{ id: "m", offsetMs: placed(offsetMs, before) }], CAPTURE_A.durationMs).postCount, 1);
+});
+
+test("computeChatBiasMs: an unanchored late join adds its join point (capture A archived before the anchor)", () => {
+  const bias = computeChatBiasMs({
+    chatStreamStartTime: CAPTURE_A.chatEpoch, jobStreamStartTime: CAPTURE_A.chatEpoch,
+    joinOffsetSeconds: CAPTURE_A.joinOffsetSeconds,
+  });
+  assert.equal(bias, 8694310000);
+  // Off by the stored join point's drift (477.408 s on 100 days), not by 100 days.
+  const [offsetMs, frameMs] = CAPTURE_A.rows[0];
+  assert.equal(placed(offsetMs, bias) - frameMs, 477408);
+  // Added to today's bias (a late actual start), not in place of it.
+  assert.equal(computeChatBiasMs({
+    chatStreamStartTime: "2026-06-11T10:00:00Z", jobStreamStartTime: "2026-06-11T10:12:00Z", joinOffsetSeconds: 90.5,
+  }), 12 * 60 * 1000 + 90500);
+});
+
+test("computeChatBiasMs: an anchored from-start capture loses its 6.236 s early shift (capture B)", () => {
+  const today = computeChatBiasMs({ chatStreamStartTime: CAPTURE_B.chatEpoch, jobStreamStartTime: CAPTURE_B.chatEpoch, joinOffsetSeconds: 0 });
+  assert.equal(today, 0);
+  const [o0, f0] = CAPTURE_B.rows[0];
+  assert.equal(placed(o0, today) - f0, -6236);
+  const bias = computeChatBiasMs({
+    chatStreamStartTime: CAPTURE_B.chatEpoch, jobStreamStartTime: CAPTURE_B.chatEpoch,
+    mediaStartTime: CAPTURE_B.mediaStartTime, joinOffsetSeconds: 0,
+  });
+  assert.equal(bias, -6236);
+  for (const [offsetMs, frameMs] of CAPTURE_B.rows) {
+    assert.ok(Math.abs(placed(offsetMs, bias) - frameMs) <= 1, `offset ${offsetMs} placed at ${placed(offsetMs, bias)}, frame at ${frameMs}`);
+  }
+});
+
+test("computeChatBiasMs: a from-start row without an anchor, Twitch, and a bad anchor keep today's rule", () => {
+  const base = { chatStreamStartTime: "2026-06-11T10:00:00Z", jobStreamStartTime: "2026-06-11T10:12:00Z" };
+  for (const join of [0, null, undefined, -5, "garbage"]) {
+    assert.equal(computeChatBiasMs({ ...base, joinOffsetSeconds: join }), 12 * 60 * 1000, `join ${join}`);
+  }
+  assert.equal(computeChatBiasMs({ ...base, mediaStartTime: "garbage" }), 12 * 60 * 1000);
+  assert.equal(computeChatBiasMs({ ...base, platform: "twitch", mediaStartTime: CAPTURE_A.mediaStartTime, joinOffsetSeconds: 90 }), 0);
+  // No chat epoch: no wall-clock offsets to move.
+  assert.equal(computeChatBiasMs({ chatStreamStartTime: "", jobStreamStartTime: base.jobStreamStartTime, mediaStartTime: CAPTURE_A.mediaStartTime }), 0);
 });
 
 const msgs = (...offsets) => offsets.map((o, i) => ({ id: String(i), offsetMs: o }));

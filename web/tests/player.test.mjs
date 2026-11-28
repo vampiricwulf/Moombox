@@ -1748,6 +1748,38 @@ test("a Twitch part's chat is never re-derived either", { skip }, async () => {
     "both parts keep their part-relative 0; only mergePartChats' shift applies");
 });
 
+// ── Late-join chat alignment (owner ruling RV-19) ───────────────────────────
+
+test("a YouTube job's mediaStartTime puts live chat on the file's clock", { skip }, async () => {
+  // Capture A of the chat-alignment measurement: a live-edge capture 100 days
+  // into the broadcast. Its job row carries the file's time zero; the chat
+  // file's offsets count from the broadcast start. Mutant: the player not
+  // passing mediaStartTime (the message stays 8,694,787 s out).
+  const epoch = "2026-08-19T07:43:43Z";
+  const offsetMs = Date.UTC(2026, 10, 27, 23, 10, 0) - Date.parse(epoch);
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", streamStartTime: epoch, mediaStartTime: "2026-11-27T22:56:50.408302Z", joinOffsetSeconds: 8694310 })],
+    watchState: {},
+    chat: chatOf([{ ...msg(offsetMs, "in the file"), hasOffset: true }], { platform: "youtube", streamStartTime: epoch }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [789592]);
+});
+
+test("a YouTube job with a join point and no mediaStartTime shifts chat by the join point", { skip }, async () => {
+  // Mutant: the player not passing joinOffsetSeconds (the message stays
+  // 90 s past its moment).
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", streamStartTime: D_EPOCH, joinOffsetSeconds: 90 })],
+    watchState: {},
+    chat: chatOf([{ ...msg(95000, "five seconds in"), hasOffset: true }], { platform: "youtube", streamStartTime: D_EPOCH }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [5000]);
+});
+
 // ── Legacy Twitch emote replay (Arc 1, T1-1) ────────────────────────────────
 
 /** The alt text and surrounding text of one sidebar row's content span. */

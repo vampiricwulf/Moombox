@@ -1637,13 +1637,15 @@ export class PlayerController {
         if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
         if (chatData) {
           // Chat-to-video timing correction (see chat-timeline.js for the
-          // semantics per platform). Multi-part YouTube jobs use the same
-          // rule: the video begins at the actual stream start regardless of
-          // when Moombox started downloading.
+          // semantics per platform). A multi-part YouTube job has one chat
+          // file on one timeline from part 1's start, which is what the
+          // job's mediaStartTime and joinOffsetSeconds describe.
           const chatBiasMs = computeChatBiasMs({
             platform: chatData.platform,
             chatStreamStartTime: chatData.streamStartTime,
             jobStreamStartTime: this.playerJob.streamStartTime,
+            mediaStartTime: this.playerJob.mediaStartTime,
+            joinOffsetSeconds: this.playerJob.joinOffsetSeconds,
           });
           // `raw` (a live Twitch message's whole tagged IRC line, usually
           // larger than the rest of the message) is left behind here: its one
