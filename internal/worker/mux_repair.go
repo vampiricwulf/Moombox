@@ -281,7 +281,23 @@ const muxStartTolerance = 0.5
 // it, and so is a copy of one input, whose tracks keep their places in it.
 func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID string, ins *stagedInputs) error {
 	if ins.video != nil && ins.audio != nil && isStagedHlsPair(ins.video.path, ins.audio.path) {
+		// An HLS pair is placed by its segments' dates, never by the
+		// decode-time comparison below: its two halves run on unrelated
+		// media clocks (alignHlsPair). A repair that cut the leading
+		// fragments of one half only happens to an fMP4 pair (EXT-X-MAP
+		// renditions; the walk reads no MPEG-TS), and how much it cut is
+		// not known — the walk sees where the first readable fragment
+		// starts, not where the dropped one did — so that half is placed by
+		// its first segment's date and plays early by the cut stretch.
+		// YouTube's renditions are MPEG-TS (2026-11-28), so no capture is
+		// in this case today; it is said in the log when one is.
 		o.alignHlsPair(jobID, ins)
+		for _, in := range []*stagedInput{ins.video, ins.audio} {
+			if in.lostStart() {
+				o.logger.Warn("a staged half of an HLS capture lost its first fragment(s) to damage; the pair is placed by its segments' dates, which do not account for the cut, so this half may play early by the dropped stretch",
+					"staged", in.path, "jobID", jobID)
+			}
+		}
 		return nil
 	}
 	if ins.video == nil || ins.audio == nil || (!ins.video.lostStart() && !ins.audio.lostStart()) {
