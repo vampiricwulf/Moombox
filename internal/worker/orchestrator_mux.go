@@ -323,7 +323,7 @@ func stagedAsideRecordings(stagingDir string) []string {
 type asideGroup struct {
 	stamp string   // the literal timestamp text, reused in the output name
 	video string   // "" when the restart set aside audio only
-	audio string   // "" for HLS/VOD captures and video-only DASH
+	audio string   // "" for a muxed HLS capture, a single-file VOD and video-only DASH
 	files []string // every file in the group, in the order the scan found them
 }
 
@@ -367,7 +367,7 @@ func groupStagedAsides(asides []string) []asideGroup {
 			order = append(order, key)
 		}
 		g.files = append(g.files, p)
-		if stem == "audio_stream" || stem == "audio.m4a" {
+		if stem == "audio_stream" || stem == "audio.m4a" || stem == hlsAudioFile {
 			g.audio = p
 		} else {
 			g.video = p
@@ -385,14 +385,17 @@ func groupStagedAsides(asides []string) []asideGroup {
 // asideRecordingOf names the recording an aside's stem belongs to: the two
 // halves of one DASH capture (video_stream, audio_stream) are one recording,
 // and so are the two halves of one whole-file download (video.mp4,
-// audio.m4a). Every other stem — video.ts, the HLS strategy's single muxed
-// stream — is a recording of its own, which no audio half ever joins.
+// audio.m4a), and the two halves of one demuxed HLS capture (video.ts,
+// audio.ts). A video.ts with no audio.ts beside it — a muxed master's
+// capture — is a recording of its own all the same.
 func asideRecordingOf(stem string) string {
 	switch stem {
 	case "audio_stream":
 		return "video_stream"
 	case "audio.m4a":
 		return "video.mp4"
+	case hlsAudioFile:
+		return "video.ts"
 	}
 	return stem
 }
@@ -2385,10 +2388,19 @@ func discoverStagingMedia(dir string) *DownloadResult {
 		result.HasAudio = true
 	}
 
-	// HLS (single muxed stream)
+	// HLS: video.ts, the picked variant, and beside it audio.ts when the
+	// master was demuxed (its variants video-only, the sound in a rendition
+	// of its own: DownloadHls); audio.ts alone for an audio-only recording
+	// of such a master. A muxed master's capture is video.ts alone, with its
+	// audio inside.
 	if !result.HasVideo && fileExists(filepath.Join(dir, "video.ts")) {
 		result.VideoPath = filepath.Join(dir, "video.ts")
 		result.HasVideo = true
+		result.IsHls = true
+	}
+	if !result.HasAudio && (result.IsHls || !result.HasVideo) && fileExists(filepath.Join(dir, hlsAudioFile)) {
+		result.AudioPath = filepath.Join(dir, hlsAudioFile)
+		result.HasAudio = true
 		result.IsHls = true
 	}
 

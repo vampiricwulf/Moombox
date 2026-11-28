@@ -528,8 +528,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// the same cause striking again later falls back again in a new part
 	// rather than stopping the capture on a spent switch.
 	//
-	// A capture on the live HLS playlist has no audio downloader — its one
-	// stream is the muxed playlist — so oldAudioSeq is 0 there. Left at 0,
+	// A capture of a muxed HLS master has no audio downloader — its one
+	// stream carries the sound — so oldAudioSeq is 0 there. (A demuxed
+	// master's capture records its audio rendition with a downloader of its
+	// own, whose position oldAudioSeq already is.) Left at 0,
 	// the from-start pair's audio was not forced and fell back to the job's
 	// resume position, which nothing moved while HLS recorded: sq 0 for a
 	// setup fallback, a stale one otherwise, so the new part's audio covered

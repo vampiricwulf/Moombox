@@ -280,6 +280,9 @@ const muxStartTolerance = 0.5
 // A copy whose inputs kept their starts is left as FFmpeg has always muxed
 // it, and so is a copy of one input, whose tracks keep their places in it.
 func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID string, ins *stagedInputs) error {
+	if ins.video != nil && ins.audio != nil && isStagedHlsPair(ins.video.path, ins.audio.path) {
+		return o.alignHlsPair(ctx, jobID, ins)
+	}
 	if ins.video == nil || ins.audio == nil || (!ins.video.lostStart() && !ins.audio.lostStart()) {
 		return nil
 	}
@@ -305,6 +308,77 @@ func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID stri
 		in.lead = off
 		o.logger.Warn("a staged recording lost its first fragment(s) to damage; its repaired copy is placed where its first readable fragment sits on the capture's timeline, so the archive keeps a gap at its start rather than play out of step",
 			"staged", in.path, "startGap", fmt.Sprintf("0:00:00.0 to %s (%.1fs)", engine.FormatTimelineSeconds(off), off), "jobID", jobID)
+	}
+	return nil
+}
+
+// isStagedHlsPair reports whether video and audio are the two halves of one
+// demuxed HLS capture: a video.ts and an audio.ts, or the asides of them
+// (video.ts.restart-<ts>).
+func isStagedHlsPair(video, audio string) bool {
+	stem := func(p string) string {
+		base := filepath.Base(p)
+		if i := strings.LastIndex(base, engine.StagedRestartSuffix); i >= 0 {
+			base = base[:i]
+		}
+		return base
+	}
+	return stem(video) == "video.ts" && stem(audio) == hlsAudioFile
+}
+
+// mpegtsWrapSeconds is the span of MPEG-TS's 33-bit 90 kHz timestamps, after
+// which they wrap to 0.
+const mpegtsWrapSeconds = float64(1<<33) / 90000
+
+// hlsPairMaxSkew bounds how far apart the two halves of an HLS pair may
+// start for alignHlsPair to place them: a downloader that started a segment
+// or a few later than its sibling is minutes at most. Beyond it the two do
+// not share a clock, and an offset worked out from them would be nonsense.
+const hlsPairMaxSkew = 300.0
+
+// alignHlsPair places the two halves of a demuxed HLS capture (video.ts and
+// audio.ts) against each other. They are recorded by two downloaders, each
+// from where its own playlist's window started when it first read it, so one
+// can begin a segment (or, after a failure, a few) after the other; and
+// FFmpeg starts every input file at its own first timestamp, which played
+// such a pair out of step by that much for the whole archive. Both are cut
+// from one encoder's output and carry its MPEG-TS timestamps, so ffprobe's
+// start time of each places them: the later one is delayed by the
+// difference (engine.InputOffsets), and the archive starts at the earlier
+// one's first frame. A pair whose start cannot be read refuses the copy, with
+// staging kept, as alignStagedInputs refuses; one whose starts are further
+// apart than hlsPairMaxSkew is muxed as it stands, with a Warn.
+func (o *DownloadOrchestrator) alignHlsPair(ctx context.Context, jobID string, ins *stagedInputs) error {
+	var starts [2]float64
+	for i, in := range []*stagedInput{ins.video, ins.audio} {
+		p := o.runFFprobe(ctx, in.read)
+		if p == nil {
+			return fmt.Errorf("where the staged %s begins cannot be read to place it against the other half of its HLS capture, so the two could play out of step — staging is preserved; mux them by hand",
+				filepath.Base(in.path))
+		}
+		starts[i] = p.StartSec
+	}
+	diff := starts[1] - starts[0] // audio after video when positive
+	switch {
+	case diff > mpegtsWrapSeconds/2:
+		diff -= mpegtsWrapSeconds
+	case diff < -mpegtsWrapSeconds/2:
+		diff += mpegtsWrapSeconds
+	}
+	if math.Abs(diff) > hlsPairMaxSkew {
+		o.logger.Warn("the two halves of an HLS capture start too far apart to share a clock; they are muxed as they stand",
+			"video", ins.video.path, "audio", ins.audio.path, "skewSeconds", diff, "jobID", jobID)
+		return nil
+	}
+	if diff > 0 {
+		ins.offsets = engine.InputOffsets{Audio: diff}
+	} else {
+		ins.offsets = engine.InputOffsets{Video: -diff}
+	}
+	ins.aligned = true
+	if math.Abs(diff) >= 0.5 {
+		o.logger.Info("the two halves of an HLS capture start apart; the later one is placed after the earlier",
+			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
 	}
 	return nil
 }

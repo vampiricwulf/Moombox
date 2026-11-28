@@ -19,7 +19,7 @@ import (
 // recording there began at: the media sequence of the first segment its
 // downloader wrote into it when it opened the file empty
 // (engine.SegmentDownloader.OnFirstMedia), keyed by the file's base name
-// ("video_stream", "audio_stream", "video.ts"). An entry is written once per
+// ("video_stream", "audio_stream", "video.ts", "audio.ts"). An entry is written once per
 // file a downloader starts and left alone by every resume and append, which
 // continue a file that began where the entry says; a downloader that starts
 // the file over (a set-aside, a discarded partial) drops the entry when it
@@ -215,7 +215,10 @@ func anchorsMediaStart(job *database.Job, result *DownloadResult) bool {
 // carries no wall clock (a WebM segment has no readable metadata) takes the
 // audio's entry only when the two are known to have begun at the same
 // sequence (recordingStartFile), or when there is no video input; otherwise
-// it is unknown — never a guess. ok is false when it is not known.
+// it is unknown — never a guess. ok is false when it is not known. The
+// halves of a demuxed HLS capture (video.ts, audio.ts) take the earlier of
+// their two entries, where alignHlsPair puts the archive's 0:00; an
+// audio-only HLS recording (audio.ts alone) takes the rendition's own.
 //
 // A known limit: when a mux repair cut the first fragment(s) of BOTH staged
 // inputs, alignStagedInputs puts the archive's 0:00 at the earlier of the two
@@ -240,6 +243,19 @@ func mediaStartTime(videoPath, audioPath string) (string, bool) {
 		return v, true
 	}
 	if v, ok := entry(videoPath); ok {
+		// The two halves of a demuxed HLS capture are placed against each
+		// other at the mux (alignHlsPair), so the archive's 0:00 is the
+		// earlier one's first segment: an audio.ts that began a segment
+		// before its video.ts moves time zero to its own wall clock.
+		if audioPath != "" && isStagedHlsPair(videoPath, audioPath) {
+			if a, aok := entry(audioPath); aok {
+				vt, _ := time.Parse(time.RFC3339Nano, v)
+				at, _ := time.Parse(time.RFC3339Nano, a)
+				if at.Before(vt) {
+					return a, true
+				}
+			}
+		}
 		return v, true
 	}
 	if videoPath != "" {
