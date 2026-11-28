@@ -1160,7 +1160,7 @@ func (db *Database) migrateV29() error {
 //   - chat_offset_set: the operator saved chat_offset (Job.ChatOffsetSet),
 //     so an operator's 0 is told from "none" and wins over a suggested
 //     offset. Default 0: an older row's non-zero chat_offset still counts as
-//     set (HasOperatorChatOffset).
+//     set (jobstate.HasOperatorChatOffset).
 //
 // No backfill here: a row from before the column did not keep
 // its first segment's wall clock, and the latency mode is learnt from YouTube.

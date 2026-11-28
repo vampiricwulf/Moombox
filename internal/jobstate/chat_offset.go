@@ -45,9 +45,19 @@ const (
 	SuggestedChatOffsetStartUltraLow = 0
 )
 
+// HasOperatorChatOffset reports whether the operator set job's chat offset:
+// ChatOffsetSet, or a non-zero ChatOffset saved before the flag existed (a
+// row from before v30 holds the flag at 0). An operator's offset, a 0
+// included, always wins over SuggestedChatOffset (owner ruling RV-19).
+// Derived, never stored. utils.js hasOperatorChatOffset is the dashboard's
+// copy (the job-state parity table's operatorChatOffset section).
+func HasOperatorChatOffset(job *database.Job) bool {
+	return job != nil && (job.ChatOffsetSet || job.ChatOffset != 0)
+}
+
 // SuggestedChatOffset is the chat offset, in whole seconds, the dashboard
 // player applies to a recording whose operator has set none
-// (database.Job.HasOperatorChatOffset), owner ruling RV-19. known is false
+// (HasOperatorChatOffset), owner ruling RV-19. known is false
 // for a Twitch job (Twitch has no latency mode, and its chat is already on
 // the media clock), and for a YouTube job whose latency mode is not known
 // (never asked, or YouTube would not say). basis says which table the

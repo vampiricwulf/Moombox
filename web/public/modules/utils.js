@@ -1592,7 +1592,7 @@ export function latencyText(job) {
 }
 
 /**
- * hasOperatorChatOffset is database.Job.HasOperatorChatOffset: the operator
+ * hasOperatorChatOffset is jobstate.HasOperatorChatOffset: the operator
  * saved a chat offset (chatOffsetSet, a 0 included), or a non-zero one was
  * saved before the flag existed. An operator's offset always wins over the
  * suggested one.

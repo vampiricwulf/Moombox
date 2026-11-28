@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 )
 
 type watchFixture struct {
@@ -357,7 +358,7 @@ func TestChatOffsetDeleteClearsOffset(t *testing.T) {
 	if got.ChatOffset != 0 {
 		t.Errorf("ChatOffset: want 0 after DELETE, got %v", got.ChatOffset)
 	}
-	if got.HasOperatorChatOffset() {
+	if jobstate.HasOperatorChatOffset(got) {
 		t.Error("DELETE left the offset marked as the operator's")
 	}
 }

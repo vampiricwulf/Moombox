@@ -74,15 +74,15 @@ func TestMigrationV30(t *testing.T) {
 
 // TestMigrationV30LatencyAndChatOffsetSet is the other two v30 columns
 // through the same real upgrade: a v29 row with an operator offset of 2.5
-// keeps it and still counts as set (HasOperatorChatOffset off the value, the
-// flag defaulting to 0); latency_mode reads back as the type through both
+// keeps it with the flag defaulting to 0 (jobstate.HasOperatorChatOffset
+// reads such a row as set off the value; its parity table pins that); latency_mode reads back as the type through both
 // read paths; UpdateChatOffset(0) is an operator's 0 (set), and
 // ClearChatOffset returns the row to none.
 //
 // Mutants: chat_offset_set left out of the v30 block (the SELECT fails);
 // the scan not assigning LatencyMode or ChatOffsetSet; UpdateChatOffset not
 // writing the flag (an operator's 0 reads as none); ClearChatOffset leaving
-// it set; HasOperatorChatOffset ignoring a pre-v30 value.
+// it set.
 func TestMigrationV30LatencyAndChatOffsetSet(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -109,9 +109,9 @@ func TestMigrationV30LatencyAndChatOffsetSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	if got.ChatOffset != 2.5 || got.ChatOffsetSet || !got.HasOperatorChatOffset() {
-		t.Errorf("a v29 operator offset after the upgrade: offset %v set %v operator %v, want 2.5, false, true",
-			got.ChatOffset, got.ChatOffsetSet, got.HasOperatorChatOffset())
+	if got.ChatOffset != 2.5 || got.ChatOffsetSet {
+		t.Errorf("a v29 operator offset after the upgrade: offset %v set %v, want 2.5, false",
+			got.ChatOffset, got.ChatOffsetSet)
 	}
 	if got.LatencyMode != LatencyModeNone {
 		t.Errorf("latency_mode after the upgrade = %q, want none", got.LatencyMode)
@@ -134,13 +134,13 @@ func TestMigrationV30LatencyAndChatOffsetSet(t *testing.T) {
 	if !db.UpdateChatOffset("old", 0) {
 		t.Fatal("UpdateChatOffset(0)")
 	}
-	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || !got.ChatOffsetSet || !got.HasOperatorChatOffset() {
+	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || !got.ChatOffsetSet {
 		t.Errorf("an operator's 0: offset %v set %v, want 0 and set", got.ChatOffset, got.ChatOffsetSet)
 	}
 	if !db.ClearChatOffset("old") {
 		t.Fatal("ClearChatOffset")
 	}
-	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || got.ChatOffsetSet || got.HasOperatorChatOffset() {
+	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || got.ChatOffsetSet {
 		t.Errorf("after ClearChatOffset: offset %v set %v, want 0 and not set", got.ChatOffset, got.ChatOffsetSet)
 	}
 	if db.ClearChatOffset("no-such") || db.UpdateChatOffset("no-such", 1) {

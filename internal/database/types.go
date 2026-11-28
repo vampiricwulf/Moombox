@@ -221,14 +221,6 @@ const (
 	LatencyModeUnstated LatencyMode = "unstated"
 )
 
-// HasOperatorChatOffset reports whether the operator set j's chat offset:
-// ChatOffsetSet, or a non-zero ChatOffset saved before the flag existed.
-// utils.js hasOperatorChatOffset is the dashboard's copy (the job-state
-// parity table's operatorChatOffset section).
-func (j *Job) HasOperatorChatOffset() bool {
-	return j != nil && (j.ChatOffsetSet || j.ChatOffset != 0)
-}
-
 // LatencyModes is every stored LatencyMode except the zero value.
 var LatencyModes = []LatencyMode{LatencyModeNormal, LatencyModeLow, LatencyModeUltraLow, LatencyModeUnstated}
 
@@ -447,7 +439,7 @@ type Job struct {
 	// (jobs.chat_offset_set, v30): PUT /api/jobs/{id}/chat-offset sets it,
 	// even for 0, and DELETE clears it. A saved offset always wins over the
 	// suggested one (jobstate.SuggestedChatOffset). A row from before v30
-	// holds 0 here, so HasOperatorChatOffset also counts a non-zero
+	// holds 0 here, so jobstate.HasOperatorChatOffset also counts a non-zero
 	// ChatOffset as set.
 	ChatOffsetSet bool `json:"chatOffsetSet,omitempty"`
 	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED

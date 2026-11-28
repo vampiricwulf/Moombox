@@ -342,7 +342,7 @@ func TestSuggestedChatOffsetParity(t *testing.T) {
 	}
 }
 
-// TestOperatorChatOffsetParity runs database.Job.HasOperatorChatOffset over
+// TestOperatorChatOffsetParity runs jobstate.HasOperatorChatOffset over
 // the table the dashboard's hasOperatorChatOffset runs over: an operator's
 // saved offset (a 0 included) always wins over the suggestion.
 //
@@ -357,7 +357,7 @@ func TestOperatorChatOffsetParity(t *testing.T) {
 		if err := json.Unmarshal(c.Job, &job); err != nil {
 			t.Fatalf("%s: %v", c.Name, err)
 		}
-		if got := job.HasOperatorChatOffset(); got != c.Want {
+		if got := jobstate.HasOperatorChatOffset(&job); got != c.Want {
 			t.Errorf("%s: HasOperatorChatOffset = %v, want %v", c.Name, got, c.Want)
 		}
 	}

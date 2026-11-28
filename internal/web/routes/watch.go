@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/jobstate"
 	"github.com/vampiricwulf/Moombox/internal/jobverbs"
 )
 
@@ -27,7 +28,7 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			"chatOffset":     job.ChatOffset,
 			// Whether the operator saved chatOffset (owner ruling RV-19): a
 			// saved 0 wins over a suggested offset; none falls back to it.
-			"chatOffsetSet": job.HasOperatorChatOffset(),
+			"chatOffsetSet": jobstate.HasOperatorChatOffset(job),
 		})
 	})
 
