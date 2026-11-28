@@ -64,6 +64,15 @@ is on. A message's place on the timeline comes from the capture; Moombox
 corrects for the gap between when the chat capture and the video started, and
 merges the per-part chat files of a split recording onto one timeline.
 
+For a YouTube live recording, the player places chat by the time the
+recording's first segment reached YouTube, which Moombox stores with the job.
+A recording that started at the live edge (see
+[When the recording starts at the live edge instead](youtube.md#when-the-recording-starts-at-the-live-edge-instead))
+then shows its chat where it belongs in the file. A recording archived before
+Moombox stored that time falls back to its join point (**joined H:MM:SS in**
+in the job details), which is accurate to a fraction of a percent: a few
+minutes off on a stream that had been live for 100 days.
+
 ### The sidebar
 
 The sidebar's header shows the message count, for example **12,345 messages ·

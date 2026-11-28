@@ -134,6 +134,16 @@ reasons are:
 | no GVS token could be minted for the from-start formats (missing_pot) | The from-start formats need a PO token and none could be made (see [PO tokens](#po-tokens-and-the-botguard-sidecar)). |
 | the player's JS challenges could not be solved and no split pair that needs none was left | See [Signature and n-parameter challenges](#signature-and-n-parameter-challenges). |
 
+Such a recording starts wherever the capture joined, often far into the
+broadcast (on a 24/7 stream, months). The [player](player.md#chat-replay)
+lines its chat up with the recording by the time its first segment reached
+YouTube, so the chat appears where it was sent. Earlier versions put that chat
+late by the whole time the stream had been live, so on a long stream no chat
+appeared at all; a recording made before the fix is corrected by its join
+point. The playlist reaches back about an hour before the moment the capture
+started, but chat is recorded only from that moment, so the first hour or so
+of such a recording has no chat.
+
 If the live HLS playlist is DRM-protected too, there is nothing Moombox can
 record: see [Streams Moombox cannot record (DRM)](#streams-moombox-cannot-record-drm).
 
