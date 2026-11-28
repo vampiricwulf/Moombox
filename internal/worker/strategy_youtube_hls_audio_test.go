@@ -455,20 +455,6 @@ func TestDownloadHlsPairsALoneStagedHalf(t *testing.T) {
 	}
 }
 
-// setupWithFallback is what marks a setup for DownloadHls's pairing, and
-// clears the mark for the refreshes that follow. Pinned on its source.
-//
-// Mutant: the mark not set, or not cleared.
-func TestSetupMarksItselfForHlsPairing(t *testing.T) {
-	src, err := os.ReadFile("challenge_free.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "\tjob.PairStagedHalves = true\n\tresult, err := setupMarathonOr(ctx, job, strategy, isVod, info, deps)\n\tjob.PairStagedHalves = false\n") {
-		t.Error("setupWithFallback no longer marks its setup for pairLoneHlsHalf, or no longer clears the mark")
-	}
-}
-
 // TestSetupPairsALoneStagedHalf is the lone-half rule through the job's real
 // setup (setupWithFallback): the mark it sets reaches DownloadHls on the job
 // it passes down, so the lone video.ts is set aside and both halves start

@@ -268,8 +268,12 @@ func TestCarriedStartSeqsKeepOneTimelineAcrossShapes(t *testing.T) {
 }
 
 // Both captures that follow a stopped one start at carriedStartSeqs: the
-// switch back and a part split. Pinned on runLiveStreamDownload's source, as
-// the live loop's other split conditions are (TestLiveLoopSplitsOnAChangedItag).
+// switch back and a part split. A source pin, kept on purpose: driving
+// runLiveStreamDownload through a real split needs the whole live loop, and
+// its other split conditions are pinned the same way
+// (TestLiveLoopSplitsOnAChangedItag); the rule itself is tested by
+// behaviour in TestCarriedStartSeqsKeepOneTimelineAcrossShapes, and the
+// start a fresh part then takes in TestDownloadHlsLevelsAFreshPart.
 //
 // Mutant: either call replaced by the raw positions.
 func TestLiveLoopCarriesStartSeqsAcrossShapes(t *testing.T) {
