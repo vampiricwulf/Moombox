@@ -8,12 +8,15 @@ import (
 // TestLatencyBackfillRows pins which rows the latency-mode backfill walks
 // (owner ruling RV-19): Finished, not Twitch (a row with no platform is
 // YouTube), with a video ID and no mode, after the cursor, in ID order, up
-// to the limit.
+// to the limit; an archive import's placeholder video ID ("imp_" and eight
+// hex digits) is left out, while an ID that only starts with "imp_" is not.
 //
 // Mutants: the status filter dropped (the Upcoming row is walked); the
 // platform filter written = 'youtube' (the NULL-platform row is missed);
 // the mode filter dropped (the asked rows are walked); the cursor ignored
-// (the second page repeats the first).
+// (the second page repeats the first); the placeholder filter dropped (the
+// import row is walked) or widened to every "imp_" ID (the eleven-character
+// one is missed).
 func TestLatencyBackfillRows(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -30,6 +33,8 @@ func TestLatencyBackfillRows(t *testing.T) {
 	add("e-asked", "youtube", StatusFinished, "e-asked")
 	add("f-unstated", "youtube", StatusFinished, "f-unstated")
 	add("g-yt", "youtube", StatusFinished, "g-yt")
+	add("imp_0123abcd", "youtube", StatusFinished, "imp_0123abcd")
+	add("imp_wouldbe", "youtube", StatusFinished, "imp_wouldbe")
 	if _, err := db.db.Exec(`UPDATE jobs SET platform = NULL WHERE id = 'b-noplatform'`); err != nil {
 		t.Fatal(err)
 	}
@@ -51,13 +56,13 @@ func TestLatencyBackfillRows(t *testing.T) {
 		}
 		return out
 	}
-	if got, want := ids("", 10), []string{"a-yt", "b-noplatform", "g-yt"}; !slices.Equal(got, want) {
+	if got, want := ids("", 10), []string{"a-yt", "b-noplatform", "g-yt", "imp_wouldbe"}; !slices.Equal(got, want) {
 		t.Errorf("all = %v, want %v", got, want)
 	}
 	if got, want := ids("", 2), []string{"a-yt", "b-noplatform"}; !slices.Equal(got, want) {
 		t.Errorf("first page = %v, want %v", got, want)
 	}
-	if got, want := ids("b-noplatform", 2), []string{"g-yt"}; !slices.Equal(got, want) {
+	if got, want := ids("b-noplatform", 2), []string{"g-yt", "imp_wouldbe"}; !slices.Equal(got, want) {
 		t.Errorf("second page = %v, want %v", got, want)
 	}
 }

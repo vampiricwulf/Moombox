@@ -16,13 +16,21 @@ type LatencyBackfillRow struct {
 // which nothing writes today but which Job.LatencyMode reads the same way.
 const latencyModeUnset = "(latency_mode IS NULL OR latency_mode = '')"
 
+// importPlaceholderGlob matches the video ID an archive import gives a row
+// that carries none of its own ("imp_" and randomHex(4)'s eight lowercase
+// hex digits, importPlaceholderPattern in internal/web/routes): twelve
+// characters, so a YouTube video ID (eleven) never matches it.
+const importPlaceholderGlob = "imp_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+
 // LatencyBackfillRows returns, in job ID order, up to limit Finished
 // non-Twitch rows with a video ID and no latency mode whose ID sorts after
 // after ("" for the start). A Finished row is the archive the backfill is
 // for; a row still on its way is the worker's to fill at its own
 // extraction. Twitch has no latency mode. The walk keeps its place by the
 // last ID it was handed, so a row it cannot settle does not stand at the
-// head of every pass.
+// head of every pass. An archive import's row is left out: its video ID is
+// the placeholder "imp_" and eight hex digits (importPlaceholderGlob), not
+// a video YouTube could answer about.
 func (db *Database) LatencyBackfillRows(after string, limit int) ([]LatencyBackfillRow, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -30,6 +38,7 @@ func (db *Database) LatencyBackfillRows(after string, limit int) ([]LatencyBackf
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, video_id FROM jobs
 		 WHERE status = ? AND (platform IS NULL OR platform <> 'twitch') AND video_id <> ''
+		   AND video_id NOT GLOB '`+importPlaceholderGlob+`'
 		   AND `+latencyModeUnset+` AND id > ?
 		 ORDER BY id LIMIT ?`,
 		StatusFinished, after, limit)
