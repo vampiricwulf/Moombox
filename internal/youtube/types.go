@@ -296,6 +296,18 @@ type VideoInfo struct {
 	// response's that states keywords (finishExtraction), as upstream's
 	// get_first does.
 	StretchedRatio float64 `json:"stretchedRatio,omitempty"`
+
+	// LatencyClass is videoDetails.latencyClass as YouTube sent it
+	// ("MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL", _LOW, _ULTRA_LOW;
+	// "" when not stated), and LatencyClassAsked whether the response
+	// carried videoDetails at all, so a missing class is YouTube declining
+	// to say, not a refusal (readLatencyClass). The worker stores
+	// database.ParseLatencyClass of it (owner ruling RV-19). A cascade's
+	// VideoInfo carries the first response's that had videoDetails
+	// (finishExtraction): the winner can be a client that returned none.
+	// Never serialised.
+	LatencyClass      string `json:"-"`
+	LatencyClassAsked bool   `json:"-"`
 }
 
 // ChatSource carries the chat-setup facts the WATCH PAGE this VideoInfo was

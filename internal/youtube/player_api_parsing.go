@@ -103,6 +103,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	extractionStateFrom(ctx).noteAudioLanguages(langs)
 	stretch, keywordsStated := stretchedRatio(videoDetails)
 	extractionStateFrom(ctx).noteStretch(stretch, keywordsStated)
+	latencyClass, latencyAsked := readLatencyClass(videoDetails)
+	extractionStateFrom(ctx).noteLatencyClass(latencyClass, latencyAsked)
 
 	// The response's pre-roll ad wait (playbackAvailableAt), stamped on every
 	// format it yields and on each manifest it carries, so that whichever of
@@ -229,6 +231,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		PlaybackWaitExempt: liveFlags.exempt(),
 		AudioLanguages:     langs,
 		StretchedRatio:     stretch,
+		LatencyClass:       latencyClass,
+		LatencyClassAsked:  latencyAsked,
 	}
 	info.SetStatus(streamStatus)
 	if info.DashManifestURL != "" {
@@ -410,6 +414,10 @@ type extractionState struct {
 	// get_first(video_details, 'keywords'); under langsMu.
 	stretch       float64
 	stretchStated bool
+	// latencyClass is videoDetails.latencyClass of the first parsed
+	// response that carried videoDetails (latencyAsked); under langsMu.
+	latencyClass string
+	latencyAsked bool
 }
 
 // noteStretch records a response's yt:stretch ratio when it is the first to
@@ -434,6 +442,44 @@ func (s *extractionState) stretchedRatio() (float64, bool) {
 	s.langsMu.Lock()
 	defer s.langsMu.Unlock()
 	return s.stretch, s.stretchStated
+}
+
+// noteLatencyClass records a response's latencyClass when it is the first
+// to carry videoDetails. Nil outside a cascade.
+func (s *extractionState) noteLatencyClass(class string, asked bool) {
+	if s == nil || !asked {
+		return
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	if !s.latencyAsked {
+		s.latencyClass, s.latencyAsked = class, true
+	}
+}
+
+// latency is the extraction's latencyClass and whether any response carried
+// videoDetails at all.
+func (s *extractionState) latency() (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	s.langsMu.Lock()
+	defer s.langsMu.Unlock()
+	return s.latencyClass, s.latencyAsked
+}
+
+// readLatencyClass is videoDetails.latencyClass
+// (MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL, _LOW or _ULTRA_LOW: the
+// broadcast's latency setting, owner ruling RV-19), and whether the response
+// carried videoDetails at all, which is what makes a missing class an answer
+// ("YouTube would not say") rather than no answer. Every client that returned
+// videoDetails gave the same class in the 2026-11-27 research, an ended
+// stream's included; yt-dlp reads none of it.
+func readLatencyClass(videoDetails map[string]any) (class string, asked bool) {
+	if len(videoDetails) == 0 {
+		return "", false
+	}
+	return getStr(videoDetails, "latencyClass"), true
 }
 
 // stretchRegex is upstream's `(\d+)\s*:\s*(\d+)` search in a yt:stretch

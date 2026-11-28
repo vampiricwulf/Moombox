@@ -139,6 +139,9 @@ func (p *PlayerAPI) finishExtraction(ctx context.Context, info *VideoInfo, wp *W
 		if ratio, stated := extractionStateFrom(ctx).stretchedRatio(); stated {
 			info.StretchedRatio = ratio
 		}
+		if class, asked := extractionStateFrom(ctx).latency(); asked {
+			info.LatencyClass, info.LatencyClassAsked = class, true
+		}
 		if live, ok := extractionStateFrom(ctx).playbackLive(); ok {
 			info.PlaybackWaitExempt = live.exempt()
 			if info.StreamStatus == StreamVOD && live.postLive() {
