@@ -292,6 +292,7 @@ func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID stri
 		// YouTube's renditions are MPEG-TS (2026-11-28), so no capture is
 		// in this case today; it is said in the log when one is.
 		o.alignHlsPair(jobID, ins)
+		o.warnOneSidedHlsGaps(jobID, ins)
 		for _, in := range []*stagedInput{ins.video, ins.audio} {
 			if in.lostStart() {
 				o.logger.Warn("a staged half of an HLS capture lost its first fragment(s) to damage; the pair is placed by its segments' dates, which do not account for the cut, so this half may play early by the dropped stretch",
@@ -433,6 +434,104 @@ func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
 		o.logger.Info("the two halves of an HLS capture start apart; the later one is placed after the earlier",
 			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
 	}
+}
+
+// warnOneSidedHlsGaps says in a Warn when one half of a demuxed HLS pair
+// skipped segments the other half has: a stuck segment skipped, or expired
+// ones jumped over (the job's gap rows, per stream). A YouTube HLS
+// downloader skips on its own, so each half does it alone, and FFmpeg's
+// MPEG-TS discontinuity correction (the -dts_delta_threshold that bounds
+// hlsPairMaxSkew) collapses a hole longer than about 10 s in that half:
+// everything after it plays early for the rest of the part. A muxed
+// master's one file collapses both tracks together and stays in step, and a
+// DASH pair is placed by its fragments' decode times. Detection only: the
+// part is muxed as it stands.
+//
+// Only the rows from the pair's earlier recorded start on are read (an
+// earlier part's gaps are below it); with no start recorded, all of them.
+// Rows the live tracker has not yet written (it writes them every few
+// seconds and at its finalize) are not seen.
+func (o *DownloadOrchestrator) warnOneSidedHlsGaps(jobID string, ins *stagedInputs) {
+	if o.db == nil {
+		return
+	}
+	job, err := o.db.GetJob(jobID)
+	if err != nil || job == nil || len(job.Gaps) == 0 {
+		return
+	}
+	from := 0
+	vs, vok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
+	as, aok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
+	if vok && aok {
+		from = min(vs, as)
+	}
+	videoOnly, audioOnly := oneSidedGaps(job.Gaps, from)
+	if len(videoOnly) == 0 && len(audioOnly) == 0 {
+		return
+	}
+	o.logger.Warn("one half of an HLS capture skipped segments the other half has; a skip longer than about 10 s makes everything after it in that half play early, out of step with the other, for the rest of the part",
+		"video", ins.video.path, "audio", ins.audio.path,
+		"videoOnlyGaps", formatSeqRanges(videoOnly), "audioOnlyGaps", formatSeqRanges(audioOnly), "jobID", jobID)
+}
+
+// oneSidedGaps is, for the gap rows at or after sequence from, the
+// sequences one stream skipped that the other did not: video's gaps less
+// audio's, and audio's less video's, as inclusive ranges.
+func oneSidedGaps(gaps []database.Gap, from int) (videoOnly, audioOnly [][2]int) {
+	var video, audio [][2]int
+	for _, g := range gaps {
+		lo, hi := max(g.From, from), g.To
+		if hi < lo {
+			continue
+		}
+		switch g.Stream {
+		case "video":
+			video = append(video, [2]int{lo, hi})
+		case "audio":
+			audio = append(audio, [2]int{lo, hi})
+		}
+	}
+	return subtractSeqRanges(video, audio), subtractSeqRanges(audio, video)
+}
+
+// subtractSeqRanges is the sequences in a's inclusive ranges that none of
+// b's covers, as inclusive ranges in a's order.
+func subtractSeqRanges(a, b [][2]int) [][2]int {
+	var out [][2]int
+	for _, r := range a {
+		pieces := [][2]int{r}
+		for _, c := range b {
+			var next [][2]int
+			for _, p := range pieces {
+				if c[1] < p[0] || c[0] > p[1] {
+					next = append(next, p)
+					continue
+				}
+				if c[0] > p[0] {
+					next = append(next, [2]int{p[0], c[0] - 1})
+				}
+				if c[1] < p[1] {
+					next = append(next, [2]int{c[1] + 1, p[1]})
+				}
+			}
+			pieces = next
+		}
+		out = append(out, pieces...)
+	}
+	return out
+}
+
+// formatSeqRanges is ranges as "40-42, 50".
+func formatSeqRanges(ranges [][2]int) string {
+	parts := make([]string, 0, len(ranges))
+	for _, r := range ranges {
+		if r[0] == r[1] {
+			parts = append(parts, fmt.Sprint(r[0]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", r[0], r[1]))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // stagedStart is where a staged input begins on its capture's timeline: its
