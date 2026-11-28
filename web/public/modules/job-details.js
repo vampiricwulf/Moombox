@@ -838,9 +838,8 @@ export class JobDetailsController {
             </span>
           </div>`;
           })() : ""}
-          ${job.status === "Finished" && job.missingAudio ? `
-          <div class="details-row">${MISSING_AUDIO_ROW}</div>` : ""}
-          ${job.status === "Finished" && job.incompleteTail ? `
+          ${job.status === "Finished" && job.missingAudio ? `<div class="details-row">${MISSING_AUDIO_ROW}</div>
+          ` : ""}${job.status === "Finished" && job.incompleteTail ? `
           <div class="details-row">
             <span class="details-label"></span>
             <span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>
