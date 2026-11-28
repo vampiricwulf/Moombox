@@ -76,7 +76,8 @@ func (m *TaskListModel) setCompact(compact bool) {
 // tag while the downloader waits, the hold tag, the pending mux or retry, the
 // cookie retries used; a capture
 // with no percent shows its elapsed time. Its own are the elapsed time while
-// live, the countdown while waiting, and the watched dot of a Finished row.
+// live, the countdown while waiting, and for a Finished row the no-audio
+// tag of the progress cell, else the watched dot.
 // "" when the row has none.
 func (m *TaskListModel) compactFigure(job *database.Job, now time.Time) (text string, dim bool) {
 	switch job.Status {
@@ -102,6 +103,9 @@ func (m *TaskListModel) compactFigure(job *database.Job, now time.Time) (text st
 			return "in " + compactSpan(start.Sub(now)), false
 		}
 	case database.StatusFinished:
+		if cell, _ := m.progressCell(job, now); cell != "" {
+			return strings.TrimSpace(cell), true
+		}
 		if job.Watched {
 			return watchedGlyph, true
 		}

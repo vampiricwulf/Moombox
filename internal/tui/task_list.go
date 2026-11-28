@@ -735,6 +735,16 @@ func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait
 // returns and decides nothing of its own for these statuses, so a tag added
 // here shows in both drawings.
 func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text string, isWait bool) {
+	if job.Status == database.StatusFinished {
+		// The missing-audio guard's flag (jobs.missing_audio), the row
+		// hint for the details pane's Audio line, as the dashboard's row
+		// carries its No audio mark. Gated on Finished: the flag stays on
+		// the row through a new download until the next finalize.
+		if job.MissingAudio {
+			return missingAudioTag, true
+		}
+		return "", false
+	}
 	if job.Status == database.StatusQueued {
 		return queuedHoldTag(m.holds.For(job, now)), true
 	}
@@ -784,6 +794,11 @@ func (m *TaskListModel) progressCell(job *database.Job, now time.Time) (text str
 	}
 	return "", false
 }
+
+// missingAudioTag is a Finished row's dim tag when its archive has no audio
+// stream although the stream advertised sound (MissingAudioText spells it
+// out in the details pane).
+const missingAudioTag = "no audio "
 
 // muxFinalizingTag is a Muxing row's dim tag while its archive is being
 // finalized (jobstate.MuxFinalizingLine); the details pane spells the line

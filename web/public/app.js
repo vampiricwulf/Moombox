@@ -2817,14 +2817,15 @@ export class MoomboxApp {
 
   /**
    * What of a card depends on more than the status and the fields
-   * updateJobCard patches: whether the row offers Resume, and the
-   * missing-tail mark. A same-status update that changes this draws the
+   * updateJobCard patches: whether the row offers Resume, the missing-tail
+   * mark and the no-audio mark. A same-status update that changes this draws the
    * card again (_moveJobCard).
    */
   _cardShape(job) {
     const thumb = this._thumbSources(job);
     return (canResumeJob(job, { requireKnownStaging: true }) ? "R" : "-")
       + (this.incompleteIndicatorHtml(job) ? "T" : "-")
+      + (this.missingAudioIndicatorHtml(job) ? "A" : "-")
       + (thumb.thumbnailUrl || thumb.fallbackThumb ? "I" : "-");
   }
 
@@ -3222,6 +3223,18 @@ export class MoomboxApp {
   }
 
   /**
+   * Returns the no-audio overlay for a Finished job whose archive has no audio
+   * stream although the stream advertised sound (jobs.missing_audio, the
+   * finalize's missing-audio guard), or empty string. Gated on Finished as the
+   * missing-tail mark is: the flag stays on the row through a new download
+   * until the next finalize writes it again.
+   */
+  missingAudioIndicatorHtml(job) {
+    if (job.status !== "Finished" || !job.missingAudio) return "";
+    return `<span class="missing-audio-indicator" title="No audio: the archive has no audio stream, though the stream advertised sound"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0"/></svg></span>`;
+  }
+
+  /**
    * Where a card's thumbnail comes from: thumbnailUrl is what the <img>
    * loads, fallbackThumb what its error handler swaps in. A row with neither
    * draws no <img> at all, and updateJobCard cannot add one, so _cardShape
@@ -3336,7 +3349,7 @@ export class MoomboxApp {
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}
                ${fallbackIsAvatar ? `data-fallback-avatar="true"` : ""}>` : ""}
           ${this.watchIndicatorHtml(job)}
-          ${this.incompleteIndicatorHtml(job)}
+          ${this.incompleteIndicatorHtml(job)}${this.missingAudioIndicatorHtml(job)}
         </div>
         <div class="stream-info" role="cell">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>

@@ -36,3 +36,29 @@ test("the details dialog shows the missing-audio badge and follows it", { skip }
   h.app.details.updateJobDetails(job({ missingAudio: true, status: "Downloading" }));
   assert.equal(badge(h), null);
 });
+
+// The row's own mark, beside the missing-tail one: a silent archive in a
+// list of Finished rows is seen without opening each job's details.
+//
+// Mutants: the mark left out of renderJobItem; the Finished gate dropped (a
+// stale flag on a job downloading again keeps the mark); _cardShape not
+// counting it (a same-status update that sets the flag leaves the row as it
+// was).
+test("a Finished row with no audio carries the No audio mark", { skip }, async () => {
+  const h = await harness.makeApp();
+  const row = (over = {}) => ({ ...job(), id: "r1", videoId: "vid-r1", title: "R one", channelName: "Chan", platform: "youtube", ...over });
+  const mark = () => h.document.querySelector('.video-item[data-job-id="r1"] .missing-audio-indicator');
+  h.app.jobs = [row({ missingAudio: true })];
+  h.app.renderJobs();
+  assert.ok(mark(), "the flagged Finished row carries the mark");
+  assert.match(mark().title, /No audio/);
+
+  h.app.jobs = [row()];
+  h.app.renderJobs();
+  assert.equal(mark(), null, "an unflagged row has none");
+  h.app.handleMessage({ type: "job_update", payload: row({ missingAudio: true }) });
+  assert.ok(mark(), "a same-status update that sets the flag draws the mark");
+
+  assert.equal(h.app.missingAudioIndicatorHtml(row({ missingAudio: true, status: "Downloading" })), "",
+    "a stale flag on a job downloading again draws no mark");
+});
