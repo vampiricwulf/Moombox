@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -343,5 +344,109 @@ func TestDownloadHlsResumesTheAudioRendition(t *testing.T) {
 	}
 	if got := readStaged(t, second.VideoPath); got != "[v/itag/270/sq/40][v/itag/270/sq/41][v/itag/270/sq/42][v/itag/270/sq/43]" {
 		t.Errorf("video.ts = %q, want sq 40-43 once each", got)
+	}
+}
+
+// TestDownloadHlsPairsALoneStagedHalf: a demuxed capture's setup in a part
+// dir that holds video.ts and no audio.ts — a job in flight under v2.9.8 to
+// v2.9.10, which recorded the video-only variant alone, or a crash before
+// the rendition wrote its first segment — sets the lone video.ts aside with
+// its sidecar and starts both halves together where it stopped (its
+// sidecar's next sequence, else the restart's seed), instead of resuming
+// video.ts and starting the rendition at the playlist window an hour back.
+// A staged pair, and a refresh into the running part (not a setup), leave
+// the part's files alone.
+//
+// Mutants: pairLoneHlsHalf not called (the lone half stays, audio unforced);
+// the setup gate dropped (the refresh sets the part's video.ts aside); the
+// seed ignored when there is no sidecar.
+func TestDownloadHlsPairsALoneStagedHalf(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		setup, sidecar    bool
+		dated, withAudio  bool
+		seedV, seedA      int
+		wantStart         int // both forced at it; 0: as the seeds say
+		wantVideoSetAside bool
+	}{
+		{name: "older version's lone video", setup: true, sidecar: true, wantStart: 42, wantVideoSetAside: true},
+		{name: "dated lone video", setup: true, sidecar: true, dated: true, wantStart: 42, wantVideoSetAside: true},
+		{name: "seeded restart, sidecar wins", setup: true, sidecar: true, seedV: 40, seedA: 40, wantStart: 42, wantVideoSetAside: true},
+		{name: "seeded restart, no sidecar", setup: true, seedV: 900, seedA: 900, wantStart: 900, wantVideoSetAside: true},
+		{name: "no sidecar, no seed", setup: true, wantVideoSetAside: true},
+		{name: "a staged pair", setup: true, sidecar: true, withAudio: true},
+		{name: "a refresh into the running part", sidecar: true, seedV: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			built := recordDownloaders(t)
+			srv := newHlsAudioServer(t, demuxedTestMaster)
+			job, _ := vodPotJob(t)
+			job.Config.MaxVideoResolution = 1080
+			job.PairStagedHalves = tc.setup
+			job.VideoStartSeq, job.AudioStartSeq = tc.seedV, tc.seedA
+			video := filepath.Join(job.StagingDir, "video.ts")
+			body := []byte("[v/itag/270/sq/40][v/itag/270/sq/41]")
+			if err := os.WriteFile(video, body, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.sidecar {
+				state, _ := json.Marshal(engine.ResumeState{LastSeq: 41, BytesWritten: int64(len(body)), Timestamp: time.Now().Unix(), BaseURL: srv.URL + "/master/v/itag/270/index.m3u8"})
+				if err := os.WriteFile(video+".resume.json", state, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.dated {
+				noteMediaStart(video, time.Date(2026, 11, 28, 1, 14, 5, 0, time.UTC))
+			}
+			if tc.withAudio {
+				if err := os.WriteFile(filepath.Join(job.StagingDir, hlsAudioFile), []byte("[a]"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := DownloadHls(context.Background(), job, hlsAudioInfo(srv, "visionos"), nil, nil, nil, nil); err != nil {
+				t.Fatalf("DownloadHls: %v", err)
+			}
+			if len(*built) != 2 {
+				t.Fatalf("built %d downloaders, want 2", len(*built))
+			}
+			v, a := (*built)[0], (*built)[1]
+			wantV, wantA := tc.wantStart, tc.wantStart
+			if tc.wantStart == 0 {
+				wantV, wantA = tc.seedV, tc.seedA
+			}
+			if v.ForceStartSeq != (wantV > 0) || (wantV > 0 && v.StartSeq != wantV) || a.ForceStartSeq != (wantA > 0) || (wantA > 0 && a.StartSeq != wantA) {
+				t.Errorf("starts: video %d/%v audio %d/%v, want %d and %d (forced when > 0)", v.StartSeq, v.ForceStartSeq, a.StartSeq, a.ForceStartSeq, wantV, wantA)
+			}
+			if fileExists(video) == tc.wantVideoSetAside {
+				t.Errorf("video.ts still staged = %v, want %v", fileExists(video), !tc.wantVideoSetAside)
+			}
+			asides, _ := filepath.Glob(video + engine.StagedRestartSuffix + "*")
+			var media []string
+			for _, p := range asides {
+				if engine.IsStagedRestartPath(p) {
+					media = append(media, p)
+				}
+			}
+			if (len(media) == 1) != tc.wantVideoSetAside {
+				t.Errorf("asides = %v, want set aside %v", asides, tc.wantVideoSetAside)
+			}
+			if tc.wantVideoSetAside && tc.sidecar && len(media) == 1 && !fileExists(engine.StagedRestartSidecar(media[0])) {
+				t.Errorf("the aside's sidecar did not go with it: %v", asides)
+			}
+		})
+	}
+}
+
+// setupWithFallback is what marks a setup for DownloadHls's pairing, and
+// clears the mark for the refreshes that follow. Pinned on its source.
+//
+// Mutant: the mark not set, or not cleared.
+func TestSetupMarksItselfForHlsPairing(t *testing.T) {
+	src, err := os.ReadFile("challenge_free.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "\tjob.PairStagedHalves = true\n\tresult, err := setupMarathonOr(ctx, job, strategy, isVod, info, deps)\n\tjob.PairStagedHalves = false\n") {
+		t.Error("setupWithFallback no longer marks its setup for pairLoneHlsHalf, or no longer clears the mark")
 	}
 }

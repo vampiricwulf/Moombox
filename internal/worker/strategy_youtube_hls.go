@@ -299,12 +299,20 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	result.VideoHeight = bestVariant.Height
 	result.VideoFps = bestVariant.FPS
 	result.AdvertisedAudio = audioRendition != nil || engine.CodecsNameAudio(bestVariant.Codecs)
-	result.VideoDownloader = newHlsDownloader(bestVariant.URL, result.VideoPath, "video", job.VideoStartSeq)
+	videoStart, audioStart := job.VideoStartSeq, job.AudioStartSeq
+	if audioRendition != nil {
+		var err error
+		videoStart, audioStart, err = pairLoneHlsHalf(job, result.VideoPath, filepath.Join(job.StagingDir, hlsAudioFile), videoStart, audioStart)
+		if err != nil {
+			return nil, err
+		}
+	}
+	result.VideoDownloader = newHlsDownloader(bestVariant.URL, result.VideoPath, "video", videoStart)
 	if audioRendition != nil {
 		result.HasAudio = true
 		result.AudioItag = hlsItagOf(audioRendition.URI)
 		result.AudioPath = filepath.Join(job.StagingDir, hlsAudioFile)
-		result.AudioDownloader = newHlsDownloader(audioRendition.URI, result.AudioPath, "audio", job.AudioStartSeq)
+		result.AudioDownloader = newHlsDownloader(audioRendition.URI, result.AudioPath, "audio", audioStart)
 	}
 
 	// Kept beside the staged files for a finalize that has no result (a
@@ -319,6 +327,57 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	return result, nil
+}
+
+// pairLoneHlsHalf is where the two downloaders of a demuxed HLS capture
+// start when the job's setup finds its part dir holding one half and not
+// the other: a video.ts with no audio.ts beside it, or the reverse. Without
+// it each half took its own position — the staged one its resume sidecar's,
+// the missing one the playlist window's start, up to an hour back — and the
+// archive's sound ran minutes to an hour out of step with its picture, with
+// an audio stream the missing-audio guard could not fault.
+//
+// Ways there: a job in flight under v2.9.8 to v2.9.10, which recorded a
+// demuxed master's video-only variant alone; a crash before the second half
+// wrote its first segment; a staged capture of a muxed master or an
+// audio-only recording that is resumed as a demuxed one. In every case the
+// lone half cannot be joined to a new one — the copy cannot delay an MPEG-TS
+// input by more than a few seconds (alignHlsPair), and an older version's
+// file has no recorded date to place it by — so it is set aside with its
+// sidecar, to be muxed into its own file beside the archive at finalize as
+// every aside is, and both halves start together where it stopped: its
+// sidecar's next sequence, else the setup's seed, else the playlist window.
+//
+// Only the job's setup pairs (JobContext.PairStagedHalves): a refresh into
+// the running part (the live loop's look at the stream) leaves the part's
+// files alone, and a refresh that changed the shape splits the part instead
+// (streamIdentityChanged).
+func pairLoneHlsHalf(job *JobContext, videoPath, audioPath string, videoStart, audioStart int) (int, int, error) {
+	if !job.PairStagedHalves {
+		return videoStart, audioStart, nil
+	}
+	hasVideo, hasAudio := nonEmptyFile(videoPath), nonEmptyFile(audioPath)
+	if hasVideo == hasAudio {
+		return videoStart, audioStart, nil
+	}
+	lone := videoPath
+	if hasAudio {
+		lone = audioPath
+	}
+	next, resumable := engine.StagedResumeNextSeq(lone)
+	if !resumable {
+		next = max(videoStart, audioStart, 0)
+	}
+	lg := newScopedLogger(job.Logger, "jobID", job.Job.ID)
+	asides, err := setAsideStagedMedia(filepath.Dir(lone), []string{filepath.Base(lone)})
+	if err != nil {
+		lg.Error("could not set aside a staged half of an HLS capture that has no other half to pair with; refusing to record a new pair beside it",
+			"staged", lone, "err", err)
+		return 0, 0, fmt.Errorf("staging holds one half of an HLS capture that could not be set aside: %w", err)
+	}
+	lg.Warn("a staged half of an HLS capture had no other half beside it; it was set aside, to be muxed into its own file beside the archive, and the new video and audio start together where it stopped",
+		"asides", strings.Join(asides, " | "), "startSeq", next)
+	return next, next, nil
 }
 
 // hlsAudioFile is the staged name of an HLS capture's separate audio
