@@ -221,13 +221,19 @@ func (w *DownloadWorker) latencyProbe(ctx context.Context, videoID string) (*you
 // latencyProbeVia is latencyProbe over its three calls: probe, then authProbe
 // for a members-only refusal that named no class (with or without
 // videoDetails: a refusal often carries the title and channel) while
-// signedIn.
+// signedIn. The authenticated answer is tagged
+// youtube.StatusProbeEscalationTVAuth, as the status probe tags its own
+// escalation, so the failure lines name the client that answered
+// (latencyAnswerClient); nothing else the walk reads looks at the tag.
 func latencyProbeVia(ctx context.Context, videoID string,
 	probe, authProbe func(context.Context, string) (*youtube.VideoInfo, error), signedIn func() bool) (*youtube.VideoInfo, error) {
 	info, err := probe(ctx, videoID)
 	if err == nil && info != nil && info.LatencyClass == "" &&
 		info.PlayabilityError == youtube.PlayabilityMembersOnly && signedIn() {
-		return authProbe(ctx, videoID)
+		info, err = authProbe(ctx, videoID)
+		if err == nil && info != nil && info.StatusProbeEscalation == "" {
+			info.StatusProbeEscalation = youtube.StatusProbeEscalationTVAuth
+		}
 	}
 	return info, err
 }
@@ -486,10 +492,9 @@ type latencyFailure struct {
 	// (VideoInfo.PlayabilityStatus); never logged, read by refused.
 	status  string
 	details bool
-	// client names the client that answered, "" when the answer does not
-	// say (latencyAnswerClient); escalation and escalationKind are the
-	// status probe's second client and its own refusal, on an inconclusive
-	// probe.
+	// client names the client that answered (latencyAnswerClient), set on
+	// every answer; escalation and escalationKind are the status probe's
+	// second client and its own refusal, on an inconclusive probe.
 	client         string
 	escalation     string
 	escalationKind youtube.PlayabilityError
@@ -548,18 +553,21 @@ func refusesTheRecording(p youtube.PlayabilityError) bool {
 	return !p.Playable() && p != youtube.PlayabilityRateLimited && p != youtube.PlayabilityLoginRequired
 }
 
-// latencyAnswerClient is the client an answer names: the status probe's
-// escalation when it answered in ANDROID_VR's place, else the client
-// stamped on its manifest; "" when it names none (an upload's answer often
-// carries no manifest).
+// latencyAnswerClient is the client that answered: the escalation when one
+// answered in ANDROID_VR's place (the status probe's own, or the walk's
+// member probe, latencyProbeVia), else the client stamped on its manifest,
+// else ANDROID_VR, whose answer every other status-probe answer is (an
+// upload's or a refusal's answer often carries no manifest).
 func latencyAnswerClient(info *youtube.VideoInfo) string {
 	switch {
 	case info.StatusProbeEscalation != "":
 		return info.StatusProbeEscalation
 	case info.DashManifestSource != "":
 		return info.DashManifestSource
-	default:
+	case info.HlsManifestSource != "":
 		return info.HlsManifestSource
+	default:
+		return "android_vr"
 	}
 }
 

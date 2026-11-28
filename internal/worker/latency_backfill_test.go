@@ -444,14 +444,16 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 // TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal: the walk's
 // request is the status probe, and for a members-only refusal that named no
 // class (with or without videoDetails) the authenticated TV probe, but only
-// while signed in; any other answer is returned as it is.
+// while signed in, its answer tagged as the TV client's; any other answer is
+// returned as it is.
 //
 // Mutants: the follow-up dropped (members-only signed in returns the
 // refusal); the signed-in check dropped (a signed-out jar asks TV); the
-// follow-up skipped for a refusal that carried videoDetails.
+// follow-up skipped for a refusal that carried videoDetails; the member's
+// answer left untagged (its failure line would name android_vr), or the
+// status probe's own answer tagged.
 func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 	t.Parallel()
-	member := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
 	for _, c := range []struct {
 		name     string
 		first    *youtube.VideoInfo
@@ -466,6 +468,7 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		{"an answer", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClassAsked: true}, true, false},
 		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate}, true, false},
 	} {
+		member := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
 		authAsked := false
 		got, err := latencyProbeVia(context.Background(), "vid",
 			func(context.Context, string) (*youtube.VideoInfo, error) { return c.first, nil },
@@ -480,9 +483,13 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		if want := c.first; c.wantAuth {
 			if got != member {
 				t.Errorf("%s: returned the refusal, want the member's answer", c.name)
+			} else if got.StatusProbeEscalation != youtube.StatusProbeEscalationTVAuth {
+				t.Errorf("%s: the member's answer is tagged %q, want %q", c.name, got.StatusProbeEscalation, youtube.StatusProbeEscalationTVAuth)
 			}
 		} else if got != want {
 			t.Errorf("%s: answer replaced", c.name)
+		} else if got.StatusProbeEscalation != "" {
+			t.Errorf("%s: the probe's own answer tagged %q", c.name, got.StatusProbeEscalation)
 		}
 	}
 }
@@ -660,12 +667,14 @@ func TestLatencyBackfillWakeOnlyWhenTheSwitchMoved(t *testing.T) {
 // TestLatencyBackfillFailureLinesSayWhy: a failed request's Debug line and
 // the give-up Info line carry YouTube's answer beside err: the playability
 // kind, its reason text, whether videoDetails came back and the client that
-// answered (an inconclusive probe's two clients and their refusals), and
-// err's text with a media URL's credentials cut. A network failure, which
+// answered (an inconclusive probe's two clients and their refusals; a
+// plain ANDROID_VR refusal, which names no client of its own, as android_vr),
+// and err's text with a media URL's credentials cut. A network failure, which
 // has no answer, carries err alone. The settle line carries the same.
 //
 // Mutants: the answer's fields left off either line (both lines read
-// err=""); err logged unredacted (the pot value shows).
+// err=""); err logged unredacted (the pot value shows); a plain refusal
+// logged with no client.
 func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 	t.Parallel()
 	h := newBackfillHarness(t, openTestDB(t))
@@ -675,6 +684,7 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 	h.add("aaa", database.StatusFinished)
 	h.add("bbb", database.StatusFinished)
 	h.add("ccc", database.StatusFinished)
+	h.add("ddd", database.StatusFinished)
 	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
 		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityLoginRequired, PlayabilityReason: "Sign in to confirm you're not a bot",
 			StatusProbeEscalation: youtube.StatusProbeEscalationTVAuth}, nil
@@ -682,6 +692,10 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 	h.answers["bbb"] = func() (*youtube.VideoInfo, error) {
 		return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
 			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}
+	}
+	const join = "Join this channel to get access to members-only content like this video."
+	h.answers["ddd"] = func() (*youtube.VideoInfo, error) {
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, PlayabilityStatus: "LOGIN_REQUIRED", PlayabilityReason: join}, nil
 	}
 	h.answers["ccc"] = func() (*youtube.VideoInfo, error) {
 		return nil, errors.New(`Get "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&pot=SECRETPOT&sig=x": dial tcp: timeout`)
@@ -710,9 +724,10 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}).Error(),
 			"playability", "unknown", "reason", gone, "videoDetails", false, "client", "android_vr",
 			"escalation", "tv_auth", "escalationPlayability", "unknown"},
+		"ddd": {"jobID", "ddd", "tries", 1, "err", "", "playability", "members_only", "reason", join, "videoDetails", false, "client", "android_vr"},
 	}
 	for i := 1; i <= latencyBackfillMaxTries; i++ {
-		for range 3 {
+		for range 4 {
 			h.step(latencyBackfillPause)
 		}
 		got := lines()
@@ -723,8 +738,9 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 		for id, w := range want {
 			w[3] = i
 			m := msg
-			if id == "bbb" && i == latencyBackfillMaxTries {
-				// Refused by both clients on every try: settled, not given up.
+			if id != "aaa" && i == latencyBackfillMaxTries {
+				// Refused on every try (bbb by both clients): settled, not
+				// given up.
 				m = settled
 			}
 			if !reflect.DeepEqual(got[m+" "+id], w) {
