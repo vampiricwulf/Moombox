@@ -743,18 +743,21 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 // refused on every one of its latencyBackfillMaxTries tries, an hour apart,
 // settles as unstated at the last one, counted as filled and unstated: the
 // measured terminated channel (both probe clients refused it, kind unknown),
-// the copyright removal on the answer itself, and a members-only upload the
-// session cannot see. A row with one try that failed some other way (a
-// network error, a panic, an escalation that failed) keeps today's give-up,
-// and so does the bot wall, which refuses the session and not the
-// recording, and so does an answer with no playabilityStatus at all, which
-// the parser reads unknown with no reason.
+// the copyright removal on the answer itself, a members-only upload the
+// session cannot see, and a refusal whose status came with no reason text.
+// Each refusal carries the playabilityStatus.status the parser pairs with
+// its kind. A row with one try that failed some other way (a network error,
+// a panic, an escalation that failed) keeps today's give-up, and so does
+// the bot wall, which refuses the session and not the recording, and so
+// does an answer with no playabilityStatus at all, which the parser reads
+// unknown with no reason and no status.
 //
 // Mutants: the settle rule dropped (the refused rows stay NULL); settling on
 // any third failure (the mixed, panic and escalation-failed rows settle); a
 // panic counted as a refusal; an inconclusive probe whose escalation failed
 // counted; the bot wall counted; an answer with no playabilityStatus
-// counted; the settle reached before the last try.
+// counted; an answer with a status and no reason read as no playabilityStatus
+// (the noreason row stays NULL); the settle reached before the last try.
 func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 	t.Parallel()
 	h := newBackfillHarness(t, openTestDB(t))
@@ -767,9 +770,9 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 				Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: escErr, EscalationPlayability: esc}
 		}
 	}
-	refusal := func(p youtube.PlayabilityError, reason string) func() (*youtube.VideoInfo, error) {
+	refusal := func(p youtube.PlayabilityError, status, reason string) func() (*youtube.VideoInfo, error) {
 		return func() (*youtube.VideoInfo, error) {
-			return &youtube.VideoInfo{PlayabilityError: p, PlayabilityReason: reason, LatencyClassAsked: true}, nil
+			return &youtube.VideoInfo{PlayabilityError: p, PlayabilityStatus: status, PlayabilityReason: reason, LatencyClassAsked: true}, nil
 		}
 	}
 	// thenOnTry answers a on every try but the n-th, which b answers.
@@ -783,20 +786,22 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 			return a()
 		}
 	}
-	copyright := refusal(youtube.PlayabilityUnknown, "This video has been removed following a copyright removal request.")
+	copyright := refusal(youtube.PlayabilityUnknown, "UNPLAYABLE", "This video has been removed following a copyright removal request.")
 	settles := map[string]func() (*youtube.VideoInfo, error){
 		"terminated": inconclusive(youtube.PlayabilityUnknown, errors.New("refused too")),
 		"copyright":  copyright,
-		"members":    refusal(youtube.PlayabilityMembersOnly, "Join this channel to get access to members-only content like this video."),
+		"members":    refusal(youtube.PlayabilityMembersOnly, "LOGIN_REQUIRED", "Join this channel to get access to members-only content like this video."),
+		// A refusal with its status and no reason text: YouTube said UNPLAYABLE.
+		"noreason": refusal(youtube.PlayabilityUnknown, "UNPLAYABLE", ""),
 	}
 	staysNull := map[string]func() (*youtube.VideoInfo, error){
 		"mixed":   thenOnTry(2, copyright, func() (*youtube.VideoInfo, error) { return nil, errors.New("dial tcp: timeout") }),
 		"panic":   thenOnTry(1, copyright, func() (*youtube.VideoInfo, error) { panic("boom") }),
 		"escfail": thenOnTry(1, copyright, inconclusive("", errors.New("HTTP 400"))),
-		"botwall": refusal(youtube.PlayabilityLoginRequired, "Sign in to confirm you're not a bot"),
+		"botwall": refusal(youtube.PlayabilityLoginRequired, "LOGIN_REQUIRED", "Sign in to confirm you're not a bot"),
 		// No playabilityStatus at all: the parser reads it unknown, with
 		// nothing YouTube said.
-		"nostatus": refusal(youtube.PlayabilityUnknown, ""),
+		"nostatus": refusal(youtube.PlayabilityUnknown, "", ""),
 	}
 	for _, m := range []map[string]func() (*youtube.VideoInfo, error){settles, staysNull} {
 		for id, a := range m {
