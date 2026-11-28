@@ -214,7 +214,7 @@ func TestDownloadHlsAudioOnlyTakesTheRenditionAlone(t *testing.T) {
 // downloader takes what the variant's does — the GVS token on its playlist
 // path and as its PoToken, and the audio position a split or a refresh
 // hands the setup (JobContext.AudioStartSeq), as the variant takes the
-// video one.
+// video one, in a part whose halves are staged.
 //
 // Mutants: the /pot/ suffix or PoToken left off the rendition; the audio
 // downloader seeded from VideoStartSeq or not forced.
@@ -224,6 +224,14 @@ func TestDownloadHlsAudioRenditionCarriesTokenAndPosition(t *testing.T) {
 	srv := newHlsAudioServer(t, demuxedTestMaster)
 	job, _ := vodPotJob(t)
 	job.VideoStartSeq, job.AudioStartSeq = 900, 899
+	// A refresh into the running part: both halves staged, so each keeps its
+	// own position (a fresh part starts both at the earlier one:
+	// TestDownloadHlsLevelsAFreshPart).
+	for _, name := range []string{"video.ts", hlsAudioFile} {
+		if err := os.WriteFile(filepath.Join(job.StagingDir, name), []byte("[x]"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	res, err := DownloadHls(context.Background(), job, hlsAudioInfo(srv, "web"), nil, nil, &bgutils.PotProvider{}, nil)
 	if err != nil {
 		t.Fatalf("DownloadHls: %v", err)
