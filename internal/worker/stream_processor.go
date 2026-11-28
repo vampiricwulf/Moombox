@@ -995,10 +995,12 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 //   - live or post_live: the stated mode, or LatencyModeUnstated when the
 //     response carried videoDetails without a class YouTube gave (only a
 //     playable one: a refusal's classless details store nothing);
-//   - vod: only when the response names a class at all, which is what tells
-//     a past stream's VOD from an ordinary upload (YouTube gives an ended
-//     stream's class on every client; an upload has none, and keeps NULL);
+//   - vod: only a stated class (YouTube gives an ended stream's class on
+//     every client); a classless VOD answer keeps NULL;
 //   - upcoming, not_a_stream, and an answer with no videoDetails: nothing.
+//     An ordinary upload parses as not_a_stream (no liveBroadcastDetails,
+//     not live content), so it stores nothing at download and never
+//     reaches the VOD arm; the latency backfill settles it as unstated.
 func latencyModeToStore(job *database.Job, info *youtube.VideoInfo) (database.LatencyMode, bool) {
 	if job == nil || info == nil || job.LatencyMode != database.LatencyModeNone || !info.LatencyClassAsked {
 		return "", false
