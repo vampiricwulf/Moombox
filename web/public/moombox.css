@@ -1913,10 +1913,16 @@ sl-progress-bar {
     color: var(--sl-color-neutral-600);
 }
 
+/* The 350 px sidebar header is one row: the hint gives way first (cut with an
+   ellipsis; the box's title carries the whole text). */
 .player-chat-offset-hint {
     font-size: var(--sl-font-size-x-small);
     color: var(--sl-color-neutral-500);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 0 1 auto;
     margin-left: var(--sl-spacing-2x-small);
 }
 

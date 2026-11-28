@@ -19,7 +19,7 @@ func TestMigrationV30(t *testing.T) {
 	if _, err := db.AddJob(&Job{ID: "legacy30", VideoID: "legacy30", URL: "u", Platform: "youtube", Status: StatusFinished}); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	for _, col := range []string{"media_start_time", "latency_mode"} {
+	for _, col := range []string{"media_start_time", "latency_mode", "chat_offset_set"} {
 		if _, err := db.db.Exec(`ALTER TABLE jobs DROP COLUMN ` + col); err != nil {
 			t.Fatalf("make a v29 database: %v", err)
 		}

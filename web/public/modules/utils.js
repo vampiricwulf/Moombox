@@ -1562,7 +1562,7 @@ export const LATENCY_MODE_LABELS = Object.freeze({
  */
 export function suggestedChatOffset(job) {
   const none = { seconds: 0, known: false, basis: "" };
-  if (!job || job.platform !== "youtube") return none;
+  if (!job || job.platform === "twitch") return none;
   const mode = job.latencyMode;
   if (!Object.hasOwn(LATENCY_MODE_LABELS, mode || "")) return none;
   if (job.mediaStartTime) {
@@ -1582,7 +1582,7 @@ export function suggestedChatOffset(job) {
  * @returns {string}
  */
 export function latencyText(job) {
-  if (!job || job.platform !== "youtube") return "";
+  if (!job || job.platform === "twitch") return "";
   if (job.latencyMode === "unstated") return "Not stated by YouTube";
   const s = suggestedChatOffset(job);
   if (!s.known) return "";

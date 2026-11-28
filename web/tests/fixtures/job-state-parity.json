@@ -92,6 +92,7 @@
     { "name": "YouTube would not say", "job": { "platform": "youtube", "latencyMode": "unstated", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "Not stated by YouTube" } },
     { "name": "never asked", "job": { "platform": "youtube", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
     { "name": "a mode this build does not know", "job": { "platform": "youtube", "latencyMode": "instant" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
+    { "name": "a row with no platform is YouTube, as elsewhere", "job": { "latencyMode": "normal" }, "want": { "seconds": 15, "known": true, "basis": "start", "line": "Normal latency, suggested chat offset 15 s" } },
     { "name": "Twitch has none", "job": { "platform": "twitch", "latencyMode": "normal", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
     { "name": "Twitch, unstated", "job": { "platform": "twitch", "latencyMode": "unstated" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } }
   ],

@@ -57,7 +57,7 @@ const (
 // utils.js suggestedChatOffset is the dashboard's copy; cmd/moombox's
 // job-state parity test runs both over web/tests/fixtures/job-state-parity.json.
 func SuggestedChatOffset(job *database.Job) (seconds int, known bool, basis ChatOffsetBasis) {
-	if job == nil || job.Platform != "youtube" || !job.LatencyMode.Known() {
+	if job == nil || job.Platform == "twitch" || !job.LatencyMode.Known() {
 		return 0, false, ""
 	}
 	if job.MediaStartTime != "" {
@@ -87,7 +87,7 @@ func SuggestedChatOffset(job *database.Job) (seconds int, known bool, basis Chat
 // (Twitch, an upload, never asked). utils.js latencyText is the dashboard's
 // copy (same parity table).
 func LatencyLine(job *database.Job) string {
-	if job == nil || job.Platform != "youtube" {
+	if job == nil || job.Platform == "twitch" {
 		return ""
 	}
 	if job.LatencyMode == database.LatencyModeUnstated {

@@ -1883,6 +1883,27 @@ test("a YouTube job's mediaStartTime puts live chat on the file's clock", { skip
   assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [789592]);
 });
 
+// The bias and the suggestion together: an anchored Normal-latency job puts
+// a message sent at 23:10:00 on the file's clock at 23:10:00 − time zero
+// (789.592 s) and plays with the ingest-basis 20 s, so the message shows (and
+// a click on it seeks) 20 s before that. Mutant: the anchored row given the
+// start-basis 15 s.
+test("an anchored Normal-latency job shows chat 20 s before its ingest moment", { skip }, async () => {
+  const epoch = "2026-08-19T07:43:43Z";
+  const offsetMs = Date.UTC(2026, 10, 27, 23, 10, 0) - Date.parse(epoch);
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { platform: "youtube", latencyMode: "normal", chatFilename: "chat.json", streamStartTime: epoch, mediaStartTime: "2026-11-27T22:56:50.408302Z" })],
+    watchState: { chatOffset: 0, chatOffsetSet: false },
+    chat: chatOf([{ ...msg(offsetMs, "in the file"), hasOffset: true }], { platform: "youtube", streamStartTime: epoch }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const placed = h.player.playerChatMessages[0].offsetMs;
+  assert.equal(placed, 789592);
+  assert.equal(h.player.playerCustomOffsetMs, 20000);
+  assert.equal(chatSeekTargetSeconds(placed, h.player.playerCustomOffsetMs, 0), 769.592);
+});
+
 test("a YouTube job with a join point and no mediaStartTime shifts chat by the join point", { skip }, async () => {
   // Mutant: the player not passing joinOffsetSeconds (the message stays
   // 90 s past its moment).
