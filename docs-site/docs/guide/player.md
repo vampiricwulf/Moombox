@@ -180,7 +180,9 @@ How to tell it ran:
   YouTube did not answer for some recordings, it says so:
   `caught up (538 of 540 recordings done; 2 not answered yet)`. Each is
   asked again an hour later, up to three tries in all, and after that at the next
-  start.
+  start. A recording YouTube refuses on all three tries (members-only or
+  age-restricted for the account Moombox is signed in with, removed, or from a
+  closed channel) counts as done with no setting, and is not asked again.
 - **The log**, at the default level, one line each time the walk changes
   state, never once a minute: `latency backfill: started, asking YouTube
   about one recording a minute` (with how many are left, `toAsk`),
