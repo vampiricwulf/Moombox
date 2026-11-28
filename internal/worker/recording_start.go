@@ -333,6 +333,24 @@ func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *Do
 	if recordedFromStart(videoPath, audioPath) {
 		return 0, true
 	}
+	// The halves of a demuxed HLS capture are placed against each other at
+	// the mux (alignHlsPair), so the archive's 0:00 is the earlier half's
+	// first segment, as mediaStartTime reads it: an audio.ts that began a
+	// segment before its video.ts moves the join point to its own sequence.
+	if videoPath != "" && audioPath != "" && isStagedHlsPair(videoPath, audioPath) {
+		vs, vok := readRecordingStarts(filepath.Dir(videoPath))[filepath.Base(videoPath)]
+		as, aok := readRecordingStarts(filepath.Dir(audioPath))[filepath.Base(audioPath)]
+		if vok && aok {
+			seq := min(vs, as)
+			if seq <= 0 {
+				return 0, true
+			}
+			if target := formatTargetDuration(result, true); target > 0 {
+				return float64(seq * target), true
+			}
+			return 0, false
+		}
+	}
 	for _, in := range []struct {
 		path   string
 		target int

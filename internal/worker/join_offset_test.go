@@ -175,3 +175,36 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 		})
 	}
 }
+
+// TestJoinOffsetOfAnHlsPairIsItsEarlierHalf: the two halves of a demuxed HLS
+// capture are placed against each other at the mux, so the archive starts at
+// the earlier half's first segment, and the join point is that half's
+// sequence times the advertised segment duration — the audio rendition's
+// when it began a segment before the video variant, the video's otherwise.
+// No file is read: an MPEG-TS's own timestamps place nothing.
+//
+// Mutant: the pair rule dropped (the video's later sequence is read first).
+func TestJoinOffsetOfAnHlsPairIsItsEarlierHalf(t *testing.T) {
+	o, _ := muxTestOrchestrator(t, notificationtest.New(), 0)
+	for _, tc := range []struct {
+		name         string
+		video, audio int
+		want         float64
+	}{
+		{"audio began a segment earlier", 1001, 1000, 5000},
+		{"video began a segment earlier", 1000, 1001, 5000},
+		{"the audio began at sq 0", 3, 0, 0},
+	} {
+		dir := t.TempDir()
+		video, audio := filepath.Join(dir, "video.ts"), filepath.Join(dir, hlsAudioFile)
+		data, _ := json.Marshal(map[string]int{"video.ts": tc.video, hlsAudioFile: tc.audio})
+		if err := os.WriteFile(filepath.Join(dir, recordingStartFile), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res := &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, VideoPath: video, AudioPath: audio, SegmentDurationSec: 5}
+		got, ok := o.joinOffsetSeconds(context.Background(), res, video, audio)
+		if !ok || got != tc.want {
+			t.Errorf("%s: joinOffsetSeconds = %v, %v; want %v", tc.name, got, ok, tc.want)
+		}
+	}
+}
