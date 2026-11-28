@@ -337,6 +337,10 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 // archive's sound ran minutes to an hour out of step with its picture, with
 // an audio stream the missing-audio guard could not fault.
 //
+// A dir holding both halves of which only one can resume is the same skew
+// (a crash between a half's first write and its first saved position): both
+// are set aside together and start at the resumable one's position.
+//
 // Ways there: a job in flight under v2.9.8 to v2.9.10, which recorded a
 // demuxed master's video-only variant alone; a crash before the second half
 // wrote its first segment; a staged capture of a muxed master or an
@@ -357,7 +361,30 @@ func pairLoneHlsHalf(job *JobContext, videoPath, audioPath string, videoStart, a
 		return videoStart, audioStart, nil
 	}
 	hasVideo, hasAudio := nonEmptyFile(videoPath), nonEmptyFile(audioPath)
-	if hasVideo == hasAudio {
+	lg := newScopedLogger(job.Logger, "jobID", job.Job.ID)
+	if hasVideo && hasAudio {
+		// Both staged, but only one can resume (a crash between a half's
+		// first write and its first saved position): the other would be
+		// started over at the playlist window by the engine while this one
+		// resumed. Both are set aside together and start at the resumable
+		// one's position.
+		vNext, vok := engine.StagedResumeNextSeq(videoPath)
+		aNext, aok := engine.StagedResumeNextSeq(audioPath)
+		if vok == aok {
+			return videoStart, audioStart, nil
+		}
+		next := max(vNext, aNext)
+		asides, err := setAsideStagedMedia(filepath.Dir(videoPath), []string{filepath.Base(videoPath), filepath.Base(audioPath)})
+		if err != nil {
+			lg.Error("could not set aside a staged HLS pair only one half of which can resume; refusing to record a new pair beside it",
+				"dir", filepath.Dir(videoPath), "err", err)
+			return 0, 0, fmt.Errorf("staging holds an HLS pair that could not be set aside: %w", err)
+		}
+		lg.Warn("only one half of a staged HLS pair can resume; the pair was set aside, to be muxed into its own file beside the archive, and the new video and audio start together where the resumable half stopped",
+			"asides", strings.Join(asides, " | "), "startSeq", next)
+		return next, next, nil
+	}
+	if !hasVideo && !hasAudio {
 		return videoStart, audioStart, nil
 	}
 	lone := videoPath
@@ -368,7 +395,6 @@ func pairLoneHlsHalf(job *JobContext, videoPath, audioPath string, videoStart, a
 	if !resumable {
 		next = max(videoStart, audioStart, 0)
 	}
-	lg := newScopedLogger(job.Logger, "jobID", job.Job.ID)
 	asides, err := setAsideStagedMedia(filepath.Dir(lone), []string{filepath.Base(lone)})
 	if err != nil {
 		lg.Error("could not set aside a staged half of an HLS capture that has no other half to pair with; refusing to record a new pair beside it",

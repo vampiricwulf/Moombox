@@ -164,6 +164,11 @@ no sound although the stream offered some is flagged **No audio** (see
     `ffprobe <file>` and look for an `Audio:` stream. Such a recording
     cannot be repaired after the fact: the sound was never downloaded.
 
+    A recording still in progress when you upgrade is split where the new
+    version takes over: what was recorded before is kept as a silent file
+    beside the archive (its name ends in `.restart-` and a number), and the
+    archive itself has sound from that point on.
+
 If the live HLS playlist is DRM-protected too, there is nothing Moombox can
 record: see [Streams Moombox cannot record (DRM)](#streams-moombox-cannot-record-drm).
 
