@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 func touchStaged(t *testing.T, dir string, names ...string) {
@@ -196,4 +198,30 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSwitchBackAudioSeqKeepsTheRenditionsPosition: switching back from the
+// live HLS playlist to the from-start pair starts its audio where the HLS
+// capture's audio stopped: a muxed master's video position (it has no audio
+// downloader), a demuxed master's own audio rendition position.
+//
+// Mutant: the AudioDownloader check dropped (the rendition's position is
+// replaced by the video's).
+func TestSwitchBackAudioSeqKeepsTheRenditionsPosition(t *testing.T) {
+	muxed := &DownloadResult{IsHls: true, VideoDownloader: nilSafeDownloader(t)}
+	if got := switchBackAudioSeq(muxed, 500, 0); got != 500 {
+		t.Errorf("muxed master: %d, want the video's 500", got)
+	}
+	demuxed := &DownloadResult{IsHls: true, VideoDownloader: nilSafeDownloader(t), AudioDownloader: nilSafeDownloader(t)}
+	if got := switchBackAudioSeq(demuxed, 500, 498); got != 498 {
+		t.Errorf("demuxed master: %d, want the rendition's 498", got)
+	}
+	if got := switchBackAudioSeq(&DownloadResult{AudioDownloader: nilSafeDownloader(t)}, 500, 498); got != 498 {
+		t.Errorf("DASH: %d, want 498", got)
+	}
+}
+
+func nilSafeDownloader(t *testing.T) *engine.SegmentDownloader {
+	t.Helper()
+	return engine.NewSegmentDownloader(engine.DownloaderOptions{OutputFile: filepath.Join(t.TempDir(), "x")})
 }

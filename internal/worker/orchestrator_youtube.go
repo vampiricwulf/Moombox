@@ -542,9 +542,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		if !jobCtx.Run.canSwitchBack() || ctx.Err() != nil || freshInfo == nil {
 			return false
 		}
-		if result.IsHls && result.AudioDownloader == nil {
-			oldAudioSeq = oldVideoSeq
-		}
+		oldAudioSeq = switchBackAudioSeq(result, oldVideoSeq, oldAudioSeq)
 		var strategy DownloadStrategy
 		switch {
 		case HasManifestlessDashFormats(freshInfo.Formats):
@@ -1847,4 +1845,17 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			Label:  FormatQualityLabel(best.Height, best.FPS),
 		}, nil
 	}
+}
+
+// switchBackAudioSeq is where switchBack starts the from-start pair's audio:
+// the stopped audio downloader's position, or for a capture of a muxed HLS
+// master, which has no audio downloader (its one stream carries the sound),
+// the position its video stopped at — one timeline across shapes. A demuxed
+// master's capture records its audio rendition with a downloader of its own
+// (DownloadHls), whose position stands.
+func switchBackAudioSeq(result *DownloadResult, oldVideoSeq, oldAudioSeq int) int {
+	if result.IsHls && result.AudioDownloader == nil {
+		return oldVideoSeq
+	}
+	return oldAudioSeq
 }
