@@ -1,5 +1,5 @@
 {
-  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity, TestCookieRetryParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
+  "_comment": "One table, two implementations: cmd/moombox/job_state_parity_test.go (TestPendingAutoActionParity, TestWaitLineParity, TestAwaitingProcessingParity, TestQueuedHoldParity, TestCookieRetryParity, TestSuggestedChatOffsetParity, TestOperatorChatOffsetParity) runs the Go side (internal/jobstate) and web/tests/job-substates.test.mjs the dashboard's (utils.js). Jobs are wire-shaped (the job JSON).",
   "pendingAutoAction": [
     { "name": "end unconfirmed is the mux's", "job": { "platform": "twitch", "status": "Error", "error": "twitch HLS: 500", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
     { "name": "end unconfirmed with the flap's text", "job": { "platform": "twitch", "status": "Error", "error": "twitch channel is offline", "parkReason": "twitch_end_unconfirmed" }, "want": "auto_mux" },
@@ -81,5 +81,25 @@
     {"name": "another job's count", "holds": {"cookieRetries": {"b": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
     {"name": "no snapshot entry at all", "holds": {}, "job": {"id": "a", "platform": "youtube", "status": "COOKIES?", "parkReason": "auth"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}},
     {"name": "not parked", "holds": {"cookieRetries": {"a": {"count": 2, "of": 3, "last": "2026-11-12T13:00:00Z"}}}, "job": {"id": "a", "platform": "youtube", "status": "Upcoming"}, "now": "2026-11-12T14:00:00Z", "want": {"count": 0}}
+  ],
+  "suggestedChatOffset": [
+    { "name": "anchored normal", "job": { "platform": "youtube", "latencyMode": "normal", "mediaStartTime": "2026-11-27T22:56:50.408302Z" }, "want": { "seconds": 20, "known": true, "basis": "ingest", "line": "Latency: Normal latency, suggested chat offset 20 s" } },
+    { "name": "anchored low", "job": { "platform": "youtube", "latencyMode": "low", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 7, "known": true, "basis": "ingest", "line": "Latency: Low latency, suggested chat offset 7 s" } },
+    { "name": "anchored ultra low", "job": { "platform": "youtube", "latencyMode": "ultra_low", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 4, "known": true, "basis": "ingest", "line": "Latency: Ultra low latency, suggested chat offset 4 s" } },
+    { "name": "start-time normal", "job": { "platform": "youtube", "latencyMode": "normal" }, "want": { "seconds": 15, "known": true, "basis": "start", "line": "Latency: Normal latency, suggested chat offset 15 s" } },
+    { "name": "start-time low, a late join from before v30", "job": { "platform": "youtube", "latencyMode": "low", "joinOffsetSeconds": 3600, "liveEdgeReason": "marathon" }, "want": { "seconds": 2, "known": true, "basis": "start", "line": "Latency: Low latency, suggested chat offset 2 s" } },
+    { "name": "start-time ultra low is a known 0", "job": { "platform": "youtube", "latencyMode": "ultra_low" }, "want": { "seconds": 0, "known": true, "basis": "start", "line": "Latency: Ultra low latency, suggested chat offset 0 s" } },
+    { "name": "YouTube would not say", "job": { "platform": "youtube", "latencyMode": "unstated", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "Latency: not stated by YouTube" } },
+    { "name": "never asked", "job": { "platform": "youtube", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
+    { "name": "a mode this build does not know", "job": { "platform": "youtube", "latencyMode": "instant" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
+    { "name": "Twitch has none", "job": { "platform": "twitch", "latencyMode": "normal", "mediaStartTime": "2026-11-27T22:56:50Z" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } },
+    { "name": "Twitch, unstated", "job": { "platform": "twitch", "latencyMode": "unstated" }, "want": { "seconds": 0, "known": false, "basis": "", "line": "" } }
+  ],
+  "operatorChatOffset": [
+    { "name": "none", "job": { "chatOffset": 0 }, "want": false },
+    { "name": "no field at all", "job": {}, "want": false },
+    { "name": "an operator's 0", "job": { "chatOffset": 0, "chatOffsetSet": true }, "want": true },
+    { "name": "an operator's 2", "job": { "chatOffset": 2, "chatOffsetSet": true }, "want": true },
+    { "name": "a value saved before the flag", "job": { "chatOffset": -1.5 }, "want": true }
   ]
 }

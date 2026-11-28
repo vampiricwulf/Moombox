@@ -3,7 +3,9 @@
 // Error row (PendingAutoAction), the progress line of a job that is waiting
 // rather than delivering (WaitLine, IsWaitLine), why a Queued backlog row is
 // not being admitted (AdmissionHolds.For), and how many automatic cookie
-// retries a job parked in COOKIES? has used (AdmissionHolds.CookieRetryFor). Each is derived, never
+// retries a job parked in COOKIES? has used (AdmissionHolds.CookieRetryFor),
+// and the chat offset a YouTube recording's latency mode suggests
+// (SuggestedChatOffset, LatencyLine). Each is derived, never
 // persisted (audit rule 5: "a sub-state that changes what the operator should
 // do is derived, never persisted, and shown in both UIs").
 //

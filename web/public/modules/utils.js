@@ -1528,6 +1528,80 @@ export function isAwaitingProcessing(job) {
 }
 
 /**
+ * The suggested chat offsets in seconds, jobstate's constants (owner ruling
+ * RV-19): the typical delay a viewer of each YouTube latency mode watched
+ * behind ingest (segment length plus player readahead; typical, not
+ * measured). INGEST for a recording placed on its file-zero wall clock
+ * (mediaStartTime), START for one placed by the broadcast's start, which
+ * already sits about 5 s behind ingest. cmd/moombox's parity test pins each
+ * to the Go value.
+ */
+export const SUGGESTED_CHAT_OFFSET_INGEST_NORMAL = 20;
+export const SUGGESTED_CHAT_OFFSET_INGEST_LOW = 7;
+export const SUGGESTED_CHAT_OFFSET_INGEST_ULTRA_LOW = 4;
+export const SUGGESTED_CHAT_OFFSET_START_NORMAL = 15;
+export const SUGGESTED_CHAT_OFFSET_START_LOW = 2;
+export const SUGGESTED_CHAT_OFFSET_START_ULTRA_LOW = 0;
+
+/** database.LatencyMode.Label for the three modes YouTube names. */
+export const LATENCY_MODE_LABELS = Object.freeze({
+  normal: "Normal latency",
+  low: "Low latency",
+  ultra_low: "Ultra low latency",
+});
+
+/**
+ * suggestedChatOffset is jobstate.SuggestedChatOffset: the chat offset the
+ * player applies to a YouTube recording with a known latency mode whose
+ * operator has set none. Returns { seconds, known, basis }; known is false
+ * (seconds 0, basis "") for Twitch and for a mode not known. Ultra low on the
+ * start basis is a KNOWN 0: test `known`, never the seconds' truthiness.
+ * A positive offset shows chat sooner. Parity table: job-state-parity.json.
+ * @param {object} job
+ * @returns {{seconds: number, known: boolean, basis: string}}
+ */
+export function suggestedChatOffset(job) {
+  const none = { seconds: 0, known: false, basis: "" };
+  if (!job || job.platform !== "youtube") return none;
+  const mode = job.latencyMode;
+  if (!Object.hasOwn(LATENCY_MODE_LABELS, mode || "")) return none;
+  if (job.mediaStartTime) {
+    if (mode === "normal") return { seconds: SUGGESTED_CHAT_OFFSET_INGEST_NORMAL, known: true, basis: "ingest" };
+    if (mode === "low") return { seconds: SUGGESTED_CHAT_OFFSET_INGEST_LOW, known: true, basis: "ingest" };
+    return { seconds: SUGGESTED_CHAT_OFFSET_INGEST_ULTRA_LOW, known: true, basis: "ingest" };
+  }
+  if (mode === "normal") return { seconds: SUGGESTED_CHAT_OFFSET_START_NORMAL, known: true, basis: "start" };
+  if (mode === "low") return { seconds: SUGGESTED_CHAT_OFFSET_START_LOW, known: true, basis: "start" };
+  return { seconds: SUGGESTED_CHAT_OFFSET_START_ULTRA_LOW, known: true, basis: "start" };
+}
+
+/**
+ * latencyText is jobstate.LatencyLine, the job-details line for a YouTube
+ * job's latency mode and its suggested chat offset; "" for none.
+ * @param {object} job
+ * @returns {string}
+ */
+export function latencyText(job) {
+  if (!job || job.platform !== "youtube") return "";
+  if (job.latencyMode === "unstated") return "Latency: not stated by YouTube";
+  const s = suggestedChatOffset(job);
+  if (!s.known) return "";
+  return `Latency: ${LATENCY_MODE_LABELS[job.latencyMode]}, suggested chat offset ${s.seconds} s`;
+}
+
+/**
+ * hasOperatorChatOffset is database.Job.HasOperatorChatOffset: the operator
+ * saved a chat offset (chatOffsetSet, a 0 included), or a non-zero one was
+ * saved before the flag existed. An operator's offset always wins over the
+ * suggested one.
+ * @param {{chatOffset?: number, chatOffsetSet?: boolean}} job
+ * @returns {boolean}
+ */
+export function hasOperatorChatOffset(job) {
+  return !!job && (job.chatOffsetSet === true || (typeof job.chatOffset === "number" && job.chatOffset !== 0));
+}
+
+/**
  * HOLD_PRECEDENCE is jobstate.HoldPrecedence: the order a Queued row's hold
  * reason is chosen in, the order the scheduler's admission sweep returns
  * early in (owner ruling R-D3). cmd/moombox's job-state parity test compares
