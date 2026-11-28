@@ -71,3 +71,101 @@ func TestMigrationV30(t *testing.T) {
 		t.Errorf("media_start_time after a nil write = %q, want none", got.MediaStartTime)
 	}
 }
+
+// TestMigrationV30LatencyAndChatOffsetSet is the other two v30 columns
+// through the same real upgrade: a v29 row with an operator offset of 2.5
+// keeps it and still counts as set (HasOperatorChatOffset off the value, the
+// flag defaulting to 0); latency_mode reads back as the type through both
+// read paths; UpdateChatOffset(0) is an operator's 0 (set), and
+// ClearChatOffset returns the row to none.
+//
+// Mutants: chat_offset_set left out of the v30 block (the SELECT fails);
+// the scan not assigning LatencyMode or ChatOffsetSet; UpdateChatOffset not
+// writing the flag (an operator's 0 reads as none); ClearChatOffset leaving
+// it set; HasOperatorChatOffset ignoring a pre-v30 value.
+func TestMigrationV30LatencyAndChatOffsetSet(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+
+	if _, err := db.AddJob(&Job{ID: "old", VideoID: "old", URL: "u", Platform: "youtube", Status: StatusFinished}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if !db.UpdateChatOffset("old", 2.5) {
+		t.Fatal("UpdateChatOffset on the fresh row")
+	}
+	for _, col := range []string{"media_start_time", "latency_mode", "chat_offset_set"} {
+		if _, err := db.db.Exec(`ALTER TABLE jobs DROP COLUMN ` + col); err != nil {
+			t.Fatalf("make a v29 database: %v", err)
+		}
+	}
+	if err := db.writeUserVersion(29); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	got, err := db.GetJob("old")
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.ChatOffset != 2.5 || got.ChatOffsetSet || !got.HasOperatorChatOffset() {
+		t.Errorf("a v29 operator offset after the upgrade: offset %v set %v operator %v, want 2.5, false, true",
+			got.ChatOffset, got.ChatOffsetSet, got.HasOperatorChatOffset())
+	}
+	if got.LatencyMode != LatencyModeNone {
+		t.Errorf("latency_mode after the upgrade = %q, want none", got.LatencyMode)
+	}
+
+	db.UpdateJobFields("old", map[string]any{"latency_mode": LatencyModeUltraLow})
+	if got, _ = db.GetJob("old"); got.LatencyMode != LatencyModeUltraLow {
+		t.Errorf("GetJob latency_mode = %q, want ultra_low", got.LatencyMode)
+	}
+	all, err := db.GetAllJobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range all {
+		if j.ID == "old" && j.LatencyMode != LatencyModeUltraLow {
+			t.Errorf("GetAllJobs latency_mode = %q, want ultra_low", j.LatencyMode)
+		}
+	}
+
+	if !db.UpdateChatOffset("old", 0) {
+		t.Fatal("UpdateChatOffset(0)")
+	}
+	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || !got.ChatOffsetSet || !got.HasOperatorChatOffset() {
+		t.Errorf("an operator's 0: offset %v set %v, want 0 and set", got.ChatOffset, got.ChatOffsetSet)
+	}
+	if !db.ClearChatOffset("old") {
+		t.Fatal("ClearChatOffset")
+	}
+	if got, _ = db.GetJob("old"); got.ChatOffset != 0 || got.ChatOffsetSet || got.HasOperatorChatOffset() {
+		t.Errorf("after ClearChatOffset: offset %v set %v, want 0 and not set", got.ChatOffset, got.ChatOffsetSet)
+	}
+	if db.ClearChatOffset("no-such") || db.UpdateChatOffset("no-such", 1) {
+		t.Error("an unknown job reported as written")
+	}
+}
+
+// TestParseLatencyClass pins the mapping from YouTube's latencyClass, and
+// that anything unknown or empty is the asked-and-unstated value.
+func TestParseLatencyClass(t *testing.T) {
+	t.Parallel()
+	for class, want := range map[string]LatencyMode{
+		"MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL":    LatencyModeNormal,
+		"MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW":       LatencyModeLow,
+		"MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW": LatencyModeUltraLow,
+		"MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_SOMETHING": LatencyModeUnstated,
+		"": LatencyModeUnstated,
+	} {
+		if got := ParseLatencyClass(class); got != want {
+			t.Errorf("ParseLatencyClass(%q) = %q, want %q", class, got, want)
+		}
+	}
+	for _, m := range LatencyModes {
+		if m.Known() != (m.Label() != "") {
+			t.Errorf("%q: Known %v but Label %q", m, m.Known(), m.Label())
+		}
+	}
+}

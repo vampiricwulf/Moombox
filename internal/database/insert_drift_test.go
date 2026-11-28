@@ -31,6 +31,10 @@ var runtimeOnlyJobFields = []string{
 	// MediaStartTime is written at finalize beside JoinOffsetSeconds (owner
 	// ruling RV-19).
 	"MediaStartTime",
+	// LatencyMode is the worker's, written at the first extraction of a
+	// broadcast; ChatOffsetSet is the player's, beside ChatOffset (owner
+	// ruling RV-19).
+	"LatencyMode", "ChatOffsetSet",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

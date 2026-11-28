@@ -25,6 +25,9 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			"watched":        job.Watched,
 			"resumePosition": job.ResumePosition,
 			"chatOffset":     job.ChatOffset,
+			// Whether the operator saved chatOffset (owner ruling RV-19): a
+			// saved 0 wins over a suggested offset; none falls back to it.
+			"chatOffsetSet": job.HasOperatorChatOffset(),
 		})
 	})
 
@@ -147,7 +150,8 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// PUT /api/jobs/{id}/chat-offset — save chat timing offset
+	// PUT /api/jobs/{id}/chat-offset — save the operator's chat offset (0
+	// included: it is a value, and wins over a suggested offset)
 	r.Put("/api/jobs/{id}/chat-offset", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		var body struct {
@@ -168,10 +172,11 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 		rw.WriteHeader(http.StatusNoContent)
 	})
 
-	// DELETE /api/jobs/{id}/chat-offset — clear chat timing offset
+	// DELETE /api/jobs/{id}/chat-offset — clear the operator's chat offset;
+	// the player falls back to the suggested one when the job has it.
 	r.Delete("/api/jobs/{id}/chat-offset", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		if !db.UpdateChatOffset(jobID, 0) {
+		if !db.ClearChatOffset(jobID) {
 			jsonError(rw, "job not found", http.StatusNotFound)
 			return
 		}

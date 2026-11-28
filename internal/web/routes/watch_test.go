@@ -74,7 +74,7 @@ func TestWatchStateReturnsAllFields(t *testing.T) {
 	}
 	var resp map[string]any
 	json.NewDecoder(rec.Body).Decode(&resp)
-	for _, key := range []string{"watched", "resumePosition", "chatOffset"} {
+	for _, key := range []string{"watched", "resumePosition", "chatOffset", "chatOffsetSet"} {
 		if _, ok := resp[key]; !ok {
 			t.Errorf("response missing field %q", key)
 		}
@@ -356,6 +356,47 @@ func TestChatOffsetDeleteClearsOffset(t *testing.T) {
 	got, _ := f.db.GetJob("yt_clr")
 	if got.ChatOffset != 0 {
 		t.Errorf("ChatOffset: want 0 after DELETE, got %v", got.ChatOffset)
+	}
+	if got.HasOperatorChatOffset() {
+		t.Error("DELETE left the offset marked as the operator's")
+	}
+}
+
+// TestChatOffsetZeroIsAnOperatorValue: a PUT of 0 is kept as the operator's
+// value (watch-state says chatOffsetSet), so it wins over a suggested offset
+// (owner ruling RV-19), and a DELETE then reports none.
+//
+// Mutants: DELETE writing through UpdateChatOffset (still set); watch-state
+// leaving chatOffsetSet out.
+func TestChatOffsetZeroIsAnOperatorValue(t *testing.T) {
+	f := newWatchFixture(t)
+	f.addJob(t, "yt_zero")
+	state := func() map[string]any {
+		rec := httptest.NewRecorder()
+		f.router.ServeHTTP(rec, httptest.NewRequest("GET", "/api/jobs/yt_zero/watch-state", nil))
+		var resp map[string]any
+		json.NewDecoder(rec.Body).Decode(&resp)
+		return resp
+	}
+	if s := state(); s["chatOffsetSet"] != false {
+		t.Errorf("a fresh job: chatOffsetSet = %v, want false", s["chatOffsetSet"])
+	}
+	body, _ := json.Marshal(map[string]float64{"chatOffset": 0})
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/jobs/yt_zero/chat-offset", bytes.NewReader(body)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT 0: want 204, got %d", rec.Code)
+	}
+	if s := state(); s["chatOffsetSet"] != true || s["chatOffset"] != 0.0 {
+		t.Errorf("after PUT 0: %v, want chatOffset 0 and set", s)
+	}
+	rec = httptest.NewRecorder()
+	f.router.ServeHTTP(rec, httptest.NewRequest("DELETE", "/api/jobs/yt_zero/chat-offset", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: want 204, got %d", rec.Code)
+	}
+	if s := state(); s["chatOffsetSet"] != false {
+		t.Errorf("after DELETE: chatOffsetSet = %v, want false", s["chatOffsetSet"])
 	}
 }
 

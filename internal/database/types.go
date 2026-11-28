@@ -193,6 +193,79 @@ func (s ChatStatus) InFlight() bool {
 	return s == ChatPending || s == ChatDownloading
 }
 
+// LatencyMode is the latency setting of the YouTube broadcast a job recorded
+// (owner ruling RV-19), read from the player response's
+// videoDetails.latencyClass (ParseLatencyClass). Stored in jobs.latency_mode
+// at the first extraction of a live capture and of a VOD download of a past
+// stream; NULL ("") until then, and for an ordinary uploaded video and a
+// Twitch job. jobstate.SuggestedChatOffset reads it. A fact about the
+// broadcast, so a Reinitialize keeps it.
+type LatencyMode string
+
+const (
+	// LatencyModeNone is the zero value: never asked (NULL).
+	LatencyModeNone LatencyMode = ""
+	// LatencyModeNormal is YouTube's "Normal latency".
+	LatencyModeNormal LatencyMode = "normal"
+	// LatencyModeLow is YouTube's "Low latency".
+	LatencyModeLow LatencyMode = "low"
+	// LatencyModeUltraLow is YouTube's "Ultra low latency".
+	LatencyModeUltraLow LatencyMode = "ultra_low"
+	// LatencyModeUnstated is a broadcast YouTube was asked about and whose
+	// answer named no latency class (a player response with videoDetails and
+	// no latencyClass, or one Moombox does not know), or one the background
+	// backfill found private, deleted or never a stream: asked once, and
+	// never asked again.
+	LatencyModeUnstated LatencyMode = "unstated"
+)
+
+// HasOperatorChatOffset reports whether the operator set j's chat offset:
+// ChatOffsetSet, or a non-zero ChatOffset saved before the flag existed.
+// utils.js hasOperatorChatOffset is the dashboard's copy (the job-state
+// parity table's operatorChatOffset section).
+func (j *Job) HasOperatorChatOffset() bool {
+	return j != nil && (j.ChatOffsetSet || j.ChatOffset != 0)
+}
+
+// LatencyModes is every stored LatencyMode except the zero value.
+var LatencyModes = []LatencyMode{LatencyModeNormal, LatencyModeLow, LatencyModeUltraLow, LatencyModeUnstated}
+
+// Known reports whether m names one of YouTube's three latency settings.
+func (m LatencyMode) Known() bool {
+	return m == LatencyModeNormal || m == LatencyModeLow || m == LatencyModeUltraLow
+}
+
+// Label is how both UIs name m: "Normal latency", "Low latency",
+// "Ultra low latency" (YouTube Studio's own words); "" for the rest.
+func (m LatencyMode) Label() string {
+	switch m {
+	case LatencyModeNormal:
+		return "Normal latency"
+	case LatencyModeLow:
+		return "Low latency"
+	case LatencyModeUltraLow:
+		return "Ultra low latency"
+	}
+	return ""
+}
+
+// ParseLatencyClass maps YouTube's videoDetails.latencyClass
+// (MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL, _LOW, _ULTRA_LOW) to a
+// LatencyMode. Anything else, the empty string included, is
+// LatencyModeUnstated: the caller asks only when it holds an answer that
+// should have said.
+func ParseLatencyClass(class string) LatencyMode {
+	switch class {
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL":
+		return LatencyModeNormal
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW":
+		return LatencyModeLow
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW":
+		return LatencyModeUltraLow
+	}
+	return LatencyModeUnstated
+}
+
 // Job is the primary data model for a download job.
 type Job struct {
 	// Version is the write that produced this copy of the row: a number
@@ -365,6 +438,16 @@ type Job struct {
 	// Reinitialize. "" (NULL) for a VOD, a Twitch capture, a row from before
 	// v30, and a capture whose first segment carried no wall clock.
 	MediaStartTime string `json:"mediaStartTime,omitempty"`
+	// LatencyMode is the YouTube broadcast's latency setting (owner ruling
+	// RV-19, see the type). "" (NULL) when never asked.
+	LatencyMode LatencyMode `json:"latencyMode,omitempty"`
+	// ChatOffsetSet is true when the operator saved a chat offset
+	// (jobs.chat_offset_set, v30): PUT /api/jobs/{id}/chat-offset sets it,
+	// even for 0, and DELETE clears it. A saved offset always wins over the
+	// suggested one (jobstate.SuggestedChatOffset). A row from before v30
+	// holds 0 here, so HasOperatorChatOffset also counts a non-zero
+	// ChatOffset as set.
+	ChatOffsetSet bool `json:"chatOffsetSet,omitempty"`
 	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED
 	// Twitch job last started to record (owner ruling RV-6). Such a job's ID
 	// is often not the key the live monitor looks a broadcast up by
