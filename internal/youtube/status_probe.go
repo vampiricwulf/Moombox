@@ -94,6 +94,13 @@ type StatusProbeInconclusiveError struct {
 	// EscalationErr is why the escalation settled nothing: the call's own
 	// failure, or a refusal of the same shape (errRefusedWithoutDetails).
 	EscalationErr error
+	// EscalationPlayability is the escalation's own refusal when it refused
+	// the way ANDROID_VR did ("" when it failed or was never asked). With
+	// Playability it tells two clients that both called the video private
+	// or gone from a refusal one of them made for another reason: the
+	// worker's latency-mode backfill stops asking about the first kind
+	// (owner ruling RV-19).
+	EscalationPlayability PlayabilityError
 }
 
 func (e *StatusProbeInconclusiveError) Error() string {
@@ -222,6 +229,9 @@ func (s *Service) escalateStatusProbe(ctx context.Context, videoID, visitorData 
 		info, err = s.PlayerAPI.probeVideoStatusEmbedded(ctx, videoID, visitorData)
 	}
 	if inconclusive.EscalationErr = escalationSettledNothing(info, err); inconclusive.EscalationErr != nil {
+		if err == nil && info != nil {
+			inconclusive.EscalationPlayability = info.PlayabilityError
+		}
 		s.logger.Debug("[YouTube] Status probe inconclusive", slog.String("videoID", videoID), slog.String("error", inconclusive.Error()))
 		return nil, inconclusive
 	}

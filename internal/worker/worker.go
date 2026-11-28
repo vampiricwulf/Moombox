@@ -664,6 +664,10 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 	// live captures left in twitch_gap_fills, looked at on their backoff.
 	go w.runTwitchGapFills(ctx, w.newTwitchGapFiller())
 
+	// The latency-mode backfill (owner ruling RV-19): archived YouTube
+	// recordings with no latency mode, asked about one a minute.
+	go w.runLatencyBackfill(ctx, w.newLatencyBackfill())
+
 	// Process jobs from queue
 	for {
 		jobID, jobCtx, ok := w.queue.Dequeue(ctx)

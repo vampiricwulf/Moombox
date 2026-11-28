@@ -639,6 +639,16 @@ func (db *Database) SettleChatStatus(id string, status JobStatus, from []ChatSta
 // it behaves exactly as UpdateJobFields always has, and reports whether the
 // statement ran.
 func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond string, condArgs []any) (*Job, bool) {
+	return db.updateJobFieldsWhereStamped(id, fields, cond, condArgs, true)
+}
+
+// updateJobFieldsWhereStamped is updateJobFieldsWhere with the updated_at
+// bump made optional: with stamp false the fields are written and the
+// subscribers told exactly as before, but updated_at stays as it was. For a
+// fact learned about an archived row long after its last change
+// (SetLatencyModeIfUnset), which must not move the row up the lists that
+// sort by updated_at (the player's recording picker).
+func (db *Database) updateJobFieldsWhereStamped(id string, fields map[string]any, cond string, condArgs []any, stamp bool) (*Job, bool) {
 	if len(fields) == 0 {
 		return nil, false
 	}
@@ -670,9 +680,11 @@ func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond 
 		return nil, false
 	}
 
-	// Always update updated_at
-	setClauses = append(setClauses, "updated_at=?")
-	args = append(args, time.Now().UTC().Format(time.RFC3339))
+	// Update updated_at: always, but for a stamp-less write.
+	if stamp {
+		setClauses = append(setClauses, "updated_at=?")
+		args = append(args, time.Now().UTC().Format(time.RFC3339))
+	}
 	args = append(args, id)
 
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
