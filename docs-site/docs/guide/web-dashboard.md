@@ -68,13 +68,16 @@ tab. Each row shows:
 Thumbnail
 :   The stream's thumbnail (Moombox's saved copy once it has one, otherwise
     the platform's). A Twitch channel that has not gone live yet shows the
-    channel's avatar instead. Two small overlays can appear on a finished
+    channel's avatar instead. Three small overlays can appear on a finished
     job's thumbnail:
 
     - an **eye** — filled when the job is marked watched, outlined when you
       stopped part-way through in the player (see [Player](player.md));
     - a **warning triangle** — "Recording is missing its tail — Resume to
-      fetch it": the archive finished but its last segments are missing.
+      fetch it": the archive finished but its last segments are missing;
+    - a **muted speaker**, bottom left — "No audio": the archive has no
+      audio stream although the stream offered sound (see
+      [Jobs](jobs.md#no-audio)).
 
     The checkbox in the corner selects the row for [batch
     actions](#selecting-several-jobs).
@@ -326,8 +329,10 @@ recording. Beside it:
 | **Status** | The status badge, plus a **Watched** / **Paused at 1:23:45** pill for finished jobs. A finished job also gets **Mark Watched** / **Mark Unwatched** buttons. |
 | **Chat** | The chat capture's state as a coloured badge (see below), and the message count. |
 | **Incomplete tail** | A warning badge on a finished archive whose last segments are missing. |
+| **No audio** | A warning badge on a finished archive that has no audio stream although the stream offered sound. See [Jobs](jobs.md#no-audio). |
 | **Start** | For a YouTube live capture that recorded from the live edge instead of the broadcast's start: "Recorded from the live edge: *reason*, joined 1:23:45 in". |
 | **Gap-fill** | For a finished live Twitch job: "Gap-fill pending: 2 spans, until *time*", "Gap-fill: filled 2 spans" or "Gap-fill: kept as recorded: *reason*". See [Twitch](twitch.md). |
+| **Latency** | For a YouTube job: its stream's latency setting and the chat offset the player suggests for it, "Normal latency, suggested chat offset 15 s", or "Not stated by YouTube" for a live recording YouTube named no setting for. A downloaded upload that was never a stream shows no row. Older recordings get this row in the background. See [Player](player.md#suggested-offset-youtube). |
 | **Type** | **Live** (with a **Segments** row: `V: n/total | A: n/total`, or one count for Twitch) or **VOD** (with a **Progress** row). |
 | **Speed** | Current download speed, while downloading. |
 | **Filename** | The output file, with a copy button. |

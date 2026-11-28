@@ -193,6 +193,73 @@ func (s ChatStatus) InFlight() bool {
 	return s == ChatPending || s == ChatDownloading
 }
 
+// LatencyMode is the latency setting of the YouTube broadcast a job recorded
+// (owner ruling RV-19), read from the player response's
+// videoDetails.latencyClass (ParseLatencyClass). Stored in jobs.latency_mode
+// at the first extraction of a live capture and of a VOD download of a past
+// stream; NULL ("") until then, and for a Twitch job. A Finished YouTube
+// row the worker left NULL (one from before v30, an ordinary upload's VOD
+// download) is filled in by the worker's latency-mode backfill, which stores
+// LatencyModeUnstated for an upload. jobstate.SuggestedChatOffset reads it.
+// A fact about the broadcast, so a Reinitialize keeps it.
+type LatencyMode string
+
+const (
+	// LatencyModeNone is the zero value: never asked (NULL).
+	LatencyModeNone LatencyMode = ""
+	// LatencyModeNormal is YouTube's "Normal latency".
+	LatencyModeNormal LatencyMode = "normal"
+	// LatencyModeLow is YouTube's "Low latency".
+	LatencyModeLow LatencyMode = "low"
+	// LatencyModeUltraLow is YouTube's "Ultra low latency".
+	LatencyModeUltraLow LatencyMode = "ultra_low"
+	// LatencyModeUnstated is a broadcast YouTube was asked about and whose
+	// answer named no latency class (a player response with videoDetails and
+	// no latencyClass, or one Moombox does not know), or one the background
+	// backfill found private, deleted or never a stream: asked once, and
+	// never asked again.
+	LatencyModeUnstated LatencyMode = "unstated"
+)
+
+// LatencyModes is every stored LatencyMode except the zero value.
+var LatencyModes = []LatencyMode{LatencyModeNormal, LatencyModeLow, LatencyModeUltraLow, LatencyModeUnstated}
+
+// Known reports whether m names one of YouTube's three latency settings.
+func (m LatencyMode) Known() bool {
+	return m == LatencyModeNormal || m == LatencyModeLow || m == LatencyModeUltraLow
+}
+
+// Label is how both UIs name m: "Normal latency", "Low latency",
+// "Ultra low latency" (YouTube Studio's own words); "" for the rest.
+func (m LatencyMode) Label() string {
+	switch m {
+	case LatencyModeNormal:
+		return "Normal latency"
+	case LatencyModeLow:
+		return "Low latency"
+	case LatencyModeUltraLow:
+		return "Ultra low latency"
+	}
+	return ""
+}
+
+// ParseLatencyClass maps YouTube's videoDetails.latencyClass
+// (MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL, _LOW, _ULTRA_LOW) to a
+// LatencyMode. Anything else, the empty string included, is
+// LatencyModeUnstated: the caller asks only when it holds an answer that
+// should have said.
+func ParseLatencyClass(class string) LatencyMode {
+	switch class {
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL":
+		return LatencyModeNormal
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW":
+		return LatencyModeLow
+	case "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW":
+		return LatencyModeUltraLow
+	}
+	return LatencyModeUnstated
+}
+
 // Job is the primary data model for a download job.
 type Job struct {
 	// Version is the write that produced this copy of the row: a number
@@ -351,6 +418,37 @@ type Job struct {
 	// live edge: <reason>, joined H:MM:SS in" — YouTube has no gap-fill, so
 	// the operator is the only one who can fetch the missing start.
 	LiveEdgeReason string `json:"liveEdgeReason,omitempty"`
+	// MediaStartTime is the wall clock (RFC 3339, sub-second) of a live
+	// YouTube archive's time zero (owner ruling RV-19): the first recorded
+	// segment's Ingestion-Walltime-Us (DASH) or #EXT-X-PROGRAM-DATE-TIME
+	// (the live HLS path). FFmpeg's mux moves each input's first timestamp
+	// to 0, so that segment's first frame is the archive's 0:00. The
+	// dashboard player lines chat up with it (computeChatBiasMs: chat's
+	// wall-clock offsets minus this, so a capture that joined at the live
+	// edge shows its chat where it was sent, not months late). Written by
+	// the finalize from the staged recording beside JoinOffsetSeconds
+	// (mediaStartTime, internal/worker/recording_start.go; a split archive's
+	// is part 1's), so a resume or a later part never moves it; cleared by a
+	// Reinitialize. "" (NULL) for a VOD, a Twitch capture, a row from before
+	// v30, and a capture whose first segment carried no wall clock.
+	MediaStartTime string `json:"mediaStartTime,omitempty"`
+	// LatencyMode is the YouTube broadcast's latency setting (owner ruling
+	// RV-19, see the type). "" (NULL) when never asked.
+	LatencyMode LatencyMode `json:"latencyMode,omitempty"`
+	// ChatOffsetSet is true when the operator saved a chat offset
+	// (jobs.chat_offset_set, v30): PUT /api/jobs/{id}/chat-offset sets it,
+	// even for 0, and DELETE clears it. A saved offset always wins over the
+	// suggested one (jobstate.SuggestedChatOffset). A row from before v30
+	// holds 0 here, so jobstate.HasOperatorChatOffset also counts a non-zero
+	// ChatOffset as set.
+	ChatOffsetSet bool `json:"chatOffsetSet,omitempty"`
+	// MissingAudio marks a Finished archive with no audio stream although the
+	// stream advertised sound for what it recorded (jobs.missing_audio, v31):
+	// a live YouTube HLS capture whose master named an audio codec or an
+	// audio rendition. The finalize writes it on every archive it checks and
+	// a Reinitialize clears it. Both UIs show it on a Finished job. False for
+	// a row from before v31, which was never checked.
+	MissingAudio bool `json:"missingAudio,omitempty"`
 	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED
 	// Twitch job last started to record (owner ruling RV-6). Such a job's ID
 	// is often not the key the live monitor looks a broadcast up by

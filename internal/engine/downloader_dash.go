@@ -420,7 +420,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime.StoreNow()
-		d.firstMediaWritten(writeSeq)
+		d.firstMediaWritten(writeSeq, data, time.Time{})
 		rs.onSegmentWritten()
 		edge.segmentsWritten++
 		hasStartedDownloading = true

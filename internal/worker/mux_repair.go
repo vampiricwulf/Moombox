@@ -280,6 +280,27 @@ const muxStartTolerance = 0.5
 // A copy whose inputs kept their starts is left as FFmpeg has always muxed
 // it, and so is a copy of one input, whose tracks keep their places in it.
 func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID string, ins *stagedInputs) error {
+	if ins.video != nil && ins.audio != nil && isStagedHlsPair(ins.video.path, ins.audio.path) {
+		// An HLS pair is placed by its segments' dates, never by the
+		// decode-time comparison below: its two halves run on unrelated
+		// media clocks (alignHlsPair). A repair that cut the leading
+		// fragments of one half only happens to an fMP4 pair (EXT-X-MAP
+		// renditions; the walk reads no MPEG-TS), and how much it cut is
+		// not known — the walk sees where the first readable fragment
+		// starts, not where the dropped one did — so that half is placed by
+		// its first segment's date and plays early by the cut stretch.
+		// YouTube's renditions are MPEG-TS (2026-11-28), so no capture is
+		// in this case today; it is said in the log when one is.
+		o.alignHlsPair(jobID, ins)
+		o.warnOneSidedHlsGaps(jobID, ins)
+		for _, in := range []*stagedInput{ins.video, ins.audio} {
+			if in.lostStart() {
+				o.logger.Warn("a staged half of an HLS capture lost its first fragment(s) to damage; the pair is placed by its segments' dates, which do not account for the cut, so this half may play early by the dropped stretch",
+					"staged", in.path, "jobID", jobID)
+			}
+		}
+		return nil
+	}
 	if ins.video == nil || ins.audio == nil || (!ins.video.lostStart() && !ins.audio.lostStart()) {
 		return nil
 	}
@@ -307,6 +328,229 @@ func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID stri
 			"staged", in.path, "startGap", fmt.Sprintf("0:00:00.0 to %s (%.1fs)", engine.FormatTimelineSeconds(off), off), "jobID", jobID)
 	}
 	return nil
+}
+
+// isStagedHlsPair reports whether video and audio are the two halves of one
+// demuxed HLS capture: a video.ts and an audio.ts, or the asides of them
+// (video.ts.restart-<ts>).
+func isStagedHlsPair(video, audio string) bool {
+	stem := func(p string) string {
+		base := filepath.Base(p)
+		if i := strings.LastIndex(base, engine.StagedRestartSuffix); i >= 0 {
+			base = base[:i]
+		}
+		return base
+	}
+	return stem(video) == "video.ts" && stem(audio) == hlsAudioFile
+}
+
+// hlsPairMaxSkew is the largest start difference between the two halves of
+// an HLS pair that alignHlsPair places: the most the copy can delay an
+// MPEG-TS input by. FFmpeg's timestamp-discontinuity correction for MPEG-TS
+// input (-dts_delta_threshold, 10 s by default, a global option) undoes an
+// -itsoffset past it, so the delayed half comes out level (measured
+// 2026-11-28 on FFmpeg 8.0.1: 10 s lands, 10.5 s does not, in either
+// direction), and nothing in the copy says so: the per-track start check
+// reads fragmented MP4 only. Half a second of margin below it. A downloader
+// that started a segment later than its sibling (2 or 5 s) is inside it;
+// pairLoneHlsHalf and levelFreshHlsPair keep the known routes to a larger
+// skew from arising.
+const hlsPairMaxSkew = 9.5
+
+// stagedWallClock is the date of the first segment of the staged file at p
+// (mediaStartFile); ok is false when none is recorded.
+func stagedWallClock(p string) (time.Time, bool) {
+	v, ok := readStagingRecord[string](filepath.Dir(p), mediaStartFile)[filepath.Base(p)]
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	return t, err == nil
+}
+
+// hlsPairSkew is how many seconds after the staged video.ts its audio.ts
+// begins, negative when it begins before, read from their first segments'
+// dates. dated is false when either date is not recorded; placed is whether
+// alignHlsPair places the pair by it (within hlsPairMaxSkew), which is
+// whether the archive's 0:00 is the earlier half's first segment — what
+// mediaStartTime and joinOffsetSeconds read. An unplaced pair starts each
+// half at the archive's 0:00, so its time zero is the video's.
+func hlsPairSkew(video, audio string) (skew float64, dated, placed bool) {
+	vw, vok := stagedWallClock(video)
+	aw, aok := stagedWallClock(audio)
+	if !vok || !aok {
+		return 0, false, false
+	}
+	skew = aw.Sub(vw).Seconds()
+	return skew, true, math.Abs(skew) <= hlsPairMaxSkew
+}
+
+// alignHlsPair places the two halves of a demuxed HLS capture (video.ts and
+// audio.ts) against each other. They are recorded by two downloaders, each
+// from where its own playlist's window started when it first read it, so one
+// can begin a segment (or, after a failure, a few) after the other; and
+// FFmpeg starts every input file at its own first timestamp, which would
+// play such a pair out of step by that much for the whole archive.
+//
+// Their MPEG-TS timestamps cannot place them: YouTube's video variant and
+// audio rendition run on unrelated clocks (2026-11-28: a video.ts starting at
+// 17149.8 s beside an audio.ts ffprobe gives no start time at all). Their
+// #EXT-X-PROGRAM-DATE-TIME can: each playlist dates its segments on one wall
+// clock, and the same media sequence carries the same date in both (the same
+// capture: both began at sq 1740509, dated 01:14:05.026Z). The first
+// segment's date of each file is in mediaStartFile, so the later one is
+// delayed by the difference (engine.InputOffsets) and the archive starts at
+// the earlier one's first frame — the time zero mediaStartTime stores. A
+// difference past hlsPairMaxSkew cannot be applied by the copy, so the pair
+// is muxed as it stands, its sound out of step by that much, with a Warn
+// naming the job. With no date for one of them, two halves
+// recordingStartFile says began at the same sequence are level, as FFmpeg
+// muxes them; any other pair (an aside, whose records stayed with the live
+// names, a staging dir an older binary left) is muxed as it stands, said in
+// the log.
+func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
+	diff, dated, placed := hlsPairSkew(ins.video.path, ins.audio.path) // audio after video when positive
+	if !dated {
+		vs, vsok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
+		as, asok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
+		if !vsok || !asok || vs != as {
+			o.logger.Info("where the two halves of an HLS capture start is not recorded; they are muxed as they stand",
+				"video", ins.video.path, "audio", ins.audio.path, "jobID", jobID)
+		}
+		return
+	}
+	if !placed {
+		o.logger.Warn("the two halves of an HLS capture start further apart than the copy can delay one of them by; they are muxed as they stand, and the archive's sound is out of step with its picture by that much",
+			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "maxSeconds", hlsPairMaxSkew, "jobID", jobID)
+		return
+	}
+	if diff > 0 {
+		ins.offsets = engine.InputOffsets{Audio: diff}
+	} else {
+		ins.offsets = engine.InputOffsets{Video: -diff}
+	}
+	ins.aligned = true
+	if diff != 0 {
+		o.logger.Info("the two halves of an HLS capture start apart; the later one is placed after the earlier",
+			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
+	}
+}
+
+// warnOneSidedHlsGaps says in a Warn when one half of a demuxed HLS pair
+// skipped segments the other half has: a stuck segment skipped, or expired
+// ones jumped over (the job's gap rows, per stream). A YouTube HLS
+// downloader skips on its own, so each half does it alone, and FFmpeg's
+// MPEG-TS discontinuity correction (the -dts_delta_threshold that bounds
+// hlsPairMaxSkew) collapses a hole longer than about 10 s in that half:
+// everything after it plays early for the rest of the part. A muxed
+// master's one file collapses both tracks together and stays in step, and a
+// DASH pair is placed by its fragments' decode times. Detection only: the
+// part is muxed as it stands.
+//
+// The job's gap rows are the job's, not the part's, so they are bounded to
+// this pair: each stream's from its own recorded first sequence
+// (recording-start.json; a forced start below the playlist window leaves a
+// gap row before it, a later start alignHlsPair places, not a hole), and
+// both up to the earlier half's last saved sequence when both resume
+// sidecars are there (a later part's gaps are past it). A pair whose
+// starts are not both recorded (an aside, whose records stayed with the
+// live names; staging an older binary left) is not checked. The live
+// finalize writes the tracker's rows (ProgressTracker.Finalize) before it
+// muxes; a part split mid-capture may not yet see the last few seconds'.
+func (o *DownloadOrchestrator) warnOneSidedHlsGaps(jobID string, ins *stagedInputs) {
+	if o.db == nil {
+		return
+	}
+	job, err := o.db.GetJob(jobID)
+	if err != nil || job == nil || len(job.Gaps) == 0 {
+		return
+	}
+	vs, vok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
+	as, aok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
+	if !vok || !aok {
+		return
+	}
+	upTo := -1
+	if vNext, ok := engine.StagedResumeNextSeq(ins.video.path); ok {
+		if aNext, ok := engine.StagedResumeNextSeq(ins.audio.path); ok {
+			upTo = min(vNext, aNext) - 1
+		}
+	}
+	videoOnly, audioOnly := oneSidedGaps(job.Gaps, vs, as, upTo)
+	if len(videoOnly) == 0 && len(audioOnly) == 0 {
+		return
+	}
+	o.logger.Warn("one half of an HLS capture skipped segments the other half has; a skip longer than about 10 s makes everything after it in that half play early, out of step with the other, for the rest of the part",
+		"video", ins.video.path, "audio", ins.audio.path,
+		"videoOnlyGaps", formatSeqRanges(videoOnly), "audioOnlyGaps", formatSeqRanges(audioOnly), "jobID", jobID)
+}
+
+// oneSidedGaps is the sequences one stream skipped that the other did not
+// — video's gaps less audio's, and audio's less video's, as inclusive
+// ranges — reading each stream's gap rows from its own first sequence on
+// (videoFrom, audioFrom) and both up to upTo (none when upTo < 0).
+func oneSidedGaps(gaps []database.Gap, videoFrom, audioFrom, upTo int) (videoOnly, audioOnly [][2]int) {
+	var video, audio [][2]int
+	for _, g := range gaps {
+		from := videoFrom
+		if g.Stream == "audio" {
+			from = audioFrom
+		}
+		lo, hi := max(g.From, from), g.To
+		if upTo >= 0 {
+			hi = min(hi, upTo)
+		}
+		if hi < lo {
+			continue
+		}
+		switch g.Stream {
+		case "video":
+			video = append(video, [2]int{lo, hi})
+		case "audio":
+			audio = append(audio, [2]int{lo, hi})
+		}
+	}
+	return subtractSeqRanges(video, audio), subtractSeqRanges(audio, video)
+}
+
+// subtractSeqRanges is the sequences in a's inclusive ranges that none of
+// b's covers, as inclusive ranges in a's order.
+func subtractSeqRanges(a, b [][2]int) [][2]int {
+	var out [][2]int
+	for _, r := range a {
+		pieces := [][2]int{r}
+		for _, c := range b {
+			var next [][2]int
+			for _, p := range pieces {
+				if c[1] < p[0] || c[0] > p[1] {
+					next = append(next, p)
+					continue
+				}
+				if c[0] > p[0] {
+					next = append(next, [2]int{p[0], c[0] - 1})
+				}
+				if c[1] < p[1] {
+					next = append(next, [2]int{c[1] + 1, p[1]})
+				}
+			}
+			pieces = next
+		}
+		out = append(out, pieces...)
+	}
+	return out
+}
+
+// formatSeqRanges is ranges as "40-42, 50".
+func formatSeqRanges(ranges [][2]int) string {
+	parts := make([]string, 0, len(ranges))
+	for _, r := range ranges {
+		if r[0] == r[1] {
+			parts = append(parts, fmt.Sprint(r[0]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", r[0], r[1]))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // stagedStart is where a staged input begins on its capture's timeline: its

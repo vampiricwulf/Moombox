@@ -64,6 +64,15 @@ is on. A message's place on the timeline comes from the capture; Moombox
 corrects for the gap between when the chat capture and the video started, and
 merges the per-part chat files of a split recording onto one timeline.
 
+For a YouTube live recording, the player places chat by the time the
+recording's first segment reached YouTube, which Moombox stores with the job.
+A recording that started at the live edge (see
+[When the recording starts at the live edge instead](youtube.md#when-the-recording-starts-at-the-live-edge-instead))
+then shows its chat where it belongs in the file. A recording archived before
+Moombox stored that time falls back to its join point (**joined H:MM:SS in**
+in the job details), which is accurate to a fraction of a percent: a few
+minutes off on a stream that had been live for 100 days.
+
 ### The sidebar
 
 The sidebar's header shows the message count, for example **12,345 messages ·
@@ -112,7 +121,48 @@ the offset box in the sidebar header (placeholder **-0.0s offset**):
 
 Decimals are allowed. The change applies immediately to both the sidebar and
 the overlay, and is saved for this job when you press ++enter++ or leave the
-box, so it applies on every device. The **✕** beside the box resets it to 0.
+box, so it applies on every device. The **✕** beside the box clears your
+offset: back to 0, or to the suggested offset when there is one (below).
+
+#### Suggested offset (YouTube)
+
+Viewers of a live stream watch a little behind it, so chat reacts to what they
+saw a few seconds earlier. YouTube tells Moombox which latency setting the
+streamer used, and Moombox suggests an offset to match. A YouTube recording
+for which you have not set an offset plays with that suggestion straight away:
+the box shows it in italics with **suggested (typical): Normal latency** (or
+Low, or Ultra low) beside it.
+
+| Latency setting | Suggested offset | Without a stored start time |
+|---|---|---|
+| Normal latency | 20 s | 15 s |
+| Low latency | 7 s | 2 s |
+| Ultra low latency | 4 s | 0 s |
+
+The figures are typical delays for each setting (YouTube says most viewers
+see under 10 seconds on Low and under 5 on Ultra low), not measured for your
+recording. A live recording made with this version stores the time its first
+second of video reached YouTube and places chat by it, so it gets the whole
+delay. A recording without that stored time places chat by the stream's start
+time, which already sits about 5 seconds later, so it gets 5 seconds less:
+recordings from before this version, downloaded VODs, and the rare new
+recording whose first segment carried no time. The job details' **Latency**
+row shows which figure a recording gets.
+
+The box always holds the whole offset. Type your own number (0 included) and
+it replaces the suggestion for this recording, and it is kept: Moombox never
+changes an offset you set. Empty the box, or click **✕**, and the recording
+goes back to the suggestion.
+
+Twitch recordings, YouTube uploads that were never streams, and streams
+YouTube would not name a setting for get no suggestion, and the box works as
+it always did. Recordings and VOD downloads made before this version get
+their latency setting from YouTube in the background; new ones get it when
+they are recorded or downloaded. In the background Moombox asks about one recording a minute, only while online, and pauses while
+YouTube is rate-limiting it or a live capture is starting, so the suggestion
+appears on them over time. A video that is now private or deleted cannot be
+asked about, and keeps no suggestion. The job details show the setting and the suggestion in a **Latency**
+row.
 
 ## Flying comments (overlay)
 

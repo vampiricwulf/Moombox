@@ -810,7 +810,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
 			d.lastSegTime.StoreNow()
-			if d.firstMediaWritten(hlsSeq) && d.opts.OnFirstSegment != nil {
+			if d.firstMediaWritten(hlsSeq, nil, seg.ProgramDateTime) && d.opts.OnFirstSegment != nil {
 				d.opts.OnFirstSegment(seg.ProgramDateTime)
 			}
 			if d.opts.OnSegmentWritten != nil && !seg.ProgramDateTime.IsZero() {
@@ -1215,7 +1215,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			// live loop: the live loop hands any ENDLIST playlist outside
 			// StopOnGap to this writer, so a capture that met a finished
 			// playlist first would otherwise report no start at all (FE-18).
-			d.firstMediaWritten(writtenSeq)
+			d.firstMediaWritten(writtenSeq, nil, pl.Segments[nextIdx].ProgramDateTime)
 			d.currentSeq.Add(1)
 			nextIdx++
 			// Slide the ceiling's exemption to the new head and wake any

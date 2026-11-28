@@ -8,7 +8,7 @@
 //
 // The rule both sides implement is EXCLUSIVE at the boundary: a Finished job
 // whose updatedAt sits exactly on the cutoff stays active. Go compares
-// `t.Before(cutoff)`, JS compares `nowMs - t > cutoffMs`.
+// `t.Before(cutoff)`, JS compares `nowMs - t > ageDays * 86400 * 1000` (_isAgedOut).
 //
 // Like app.test.mjs, this needs jsdom and skips (never fails) without it.
 import { test, after } from "node:test";
@@ -30,7 +30,7 @@ after(() => harness?.teardownAll());
 // window of exactly that many seconds, not zero.
 //
 // Mutant: port the Go copies' old truncation to this side — replace
-// `ageDays * 86400 * 1000` in _evaluateArchiveBoundary with
+// `ageDays * 86400 * 1000` in _isAgedOut with
 // `Math.floor(ageDays * 24) * 3600 * 1000`. 0.02 d truncates to 0 hours, so
 // the `{ days: 0.02, ageSecs: 20 * 60, archived: false }` row flips: a
 // 20-minute-old Finished job is archived under a 29-minute threshold. That is
@@ -72,7 +72,7 @@ test("the archive boundary keeps sub-hour fractions", { skip }, async () => {
 // the two implementations could silently disagree on. Go:
 // TestIsArchivedRules "finished exactly at the cutoff".
 //
-// Mutant: `nowMs - t >= cutoffMs` in _evaluateArchiveBoundary — the job at
+// Mutant: `nowMs - t >= ageDays * 86400 * 1000` in _isAgedOut — the job at
 // exactly 12 h under a 0.5 d threshold is archived, and the Go side keeps it.
 test("a Finished job exactly on the cutoff stays active", { skip }, async () => {
   const { app } = await harness.makeApp();
@@ -92,12 +92,12 @@ test("a Finished job exactly on the cutoff stays active", { skip }, async () => 
 // TestArchiveCutoffIsTotalForNegativeThresholds and the "finished,
 // unparseable timestamp" row of TestIsArchivedRules.
 //
-// Mutants: drop the `ageDays < 0` early return in _evaluateArchiveBoundary —
+// Mutants: drop the `ageDays < 0` test in _isAgedOut and the early return in _evaluateArchiveBoundary —
 // the year-old job archives under the "never archive" knob, and the first
-// assertion fails; rewrite the age test as the tempting `!(nowMs - t <=
-// cutoffMs)` — NaN comparisons invert, so the malformed and the missing
+// assertion fails; rewrite the age test in _isAgedOut as the tempting `!(nowMs - t <=
+// ageDays * 86400 * 1000)` — NaN comparisons invert, so the malformed and the missing
 // timestamp both archive and the deepEqual loses "bad" and "none"; drop the
-// `j.status !== "Finished"` guard — "cancelled" goes too.
+// `job.status !== "Finished"` test in _isAgedOut — "cancelled" goes too.
 test("a negative threshold and a malformed timestamp never archive", { skip }, async () => {
   const { app } = await harness.makeApp();
 

@@ -173,6 +173,18 @@ The staging is protected for
 [`downloader.incomplete_staging_expiry_days`](../configuration/downloader.md#downloaderincomplete_staging_expiry_days)
 (7 days by default). The badge itself never goes away.
 
+### No audio
+
+A finished YouTube archive with no audio stream, although the stream offered
+sound for what was recorded, is flagged **No audio**: a muted-speaker mark
+on its row and a badge in its details in the dashboard, a dim `no audio` tag
+on its row and an *Audio* line in its details pane in the terminal UI, and a
+warning in the job's log. An archive split into parts is flagged when any
+part has no audio stream, and the warning names the part. The job still
+finishes normally and the file is kept as it is. A stream that offered no
+sound is never flagged. A **Reinitialize** clears the flag; the Mux action
+checks the archive again.
+
 ### Finished jobs leave the Tasks list
 
 Finished jobs older than

@@ -15,13 +15,13 @@ import (
 // liveShapeStagingNames are the staged media names every capture EXCEPT the
 // whole-file VOD download writes: the DASH family's video_stream and
 // audio_stream (live, post-live and manifest-driven DASH alike) and the HLS
-// strategy's video.ts. The whole-file pair, video.mp4 and audio.m4a, is
-// DownloadVod's alone.
+// strategy's video.ts, with audio.ts beside it for a demuxed master. The
+// whole-file pair, video.mp4 and audio.m4a, is DownloadVod's alone.
 //
 // discoverStagingMedia ranks these above the whole-file pair, which is right
 // for every dir that only ever held one capture and wrong for the one that
 // held two: see setAsideLiveShapesForVod.
-var liveShapeStagingNames = []string{"video_stream", "audio_stream", "video.ts"}
+var liveShapeStagingNames = []string{"video_stream", "audio_stream", "video.ts", hlsAudioFile}
 
 // setAsideStagedMedia sets aside every file named in names under dir the way
 // the engine's no-truncate guard sets a recording aside: renamed to
@@ -190,8 +190,9 @@ func setAsideLiveShapesForVod(job *JobContext) error {
 // setAsideOtherLiveShape clears a capture's part dir (job.StagingDir) of the
 // staged media of the OTHER live shape, once a setup has built the
 // downloaders in result and before they write: the DASH family's
-// video_stream and audio_stream when result records HLS (video.ts), the HLS
-// video.ts when it records anything else. setAsideLiveShapesForVod's rule —
+// video_stream and audio_stream when result records HLS (video.ts, with
+// audio.ts for a demuxed master), and the HLS half it does not write; the
+// HLS video.ts and audio.ts when it records anything else. setAsideLiveShapesForVod's rule —
 // two captures cannot share a dir — for the two live shapes; a whole-file
 // download has cleared both already (DownloadVod), so for it this finds
 // nothing.
@@ -219,9 +220,19 @@ func setAsideOtherLiveShape(job *JobContext, result *DownloadResult) error {
 	if result == nil {
 		return nil
 	}
-	other, shape := []string{"video.ts"}, "DASH"
+	other, shape := []string{"video.ts", hlsAudioFile}, "DASH"
 	if result.IsHls {
 		other, shape = []string{"video_stream", "audio_stream"}, "HLS"
+		// The HLS half this capture does not write is another recording's
+		// too: an audio.ts beside a muxed master's video.ts, or a video.ts
+		// beside an audio-only recording's audio.ts, would otherwise be
+		// paired with it by discoverStagingMedia at a restart mux.
+		if !result.HasAudio {
+			other = append(other, hlsAudioFile)
+		}
+		if !result.HasVideo {
+			other = append(other, "video.ts")
+		}
 	}
 	asides, err := setAsideStagedMedia(job.StagingDir, other)
 	lg := newScopedLogger(job.Logger, "jobID", job.Job.ID)

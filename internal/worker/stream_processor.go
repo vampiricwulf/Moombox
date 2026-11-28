@@ -909,10 +909,18 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 		}
 	}
 
+	// The broadcast's latency mode (owner ruling RV-19), once.
+	if mode, ok := latencyModeToStore(job, info); ok {
+		updates["latency_mode"] = mode
+	}
+
 	if len(updates) > 0 {
 		sp.db.UpdateJobFields(job.ID, updates)
 
 		// Sync local job object
+		if v, ok := updates["latency_mode"].(database.LatencyMode); ok {
+			job.LatencyMode = v
+		}
 		if v, ok := updates["title"].(string); ok {
 			job.Title = v
 		}
@@ -977,6 +985,38 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 			},
 		)
 	}
+}
+
+// latencyModeToStore is the latency mode a YouTube job's row takes from info
+// (owner ruling RV-19): written once, at the first extraction that shows the
+// broadcast begun, and never replaced (a stored mode wins, and a later
+// answer that does not say keeps it).
+//
+//   - live or post_live: the stated mode, or LatencyModeUnstated when the
+//     response carried videoDetails without a class YouTube gave (only a
+//     playable one: a refusal's classless details store nothing);
+//   - vod: only when the response names a class at all, which is what tells
+//     a past stream's VOD from an ordinary upload (YouTube gives an ended
+//     stream's class on every client; an upload has none, and keeps NULL);
+//   - upcoming, not_a_stream, and an answer with no videoDetails: nothing.
+func latencyModeToStore(job *database.Job, info *youtube.VideoInfo) (database.LatencyMode, bool) {
+	if job == nil || info == nil || job.LatencyMode != database.LatencyModeNone || !info.LatencyClassAsked {
+		return "", false
+	}
+	switch info.StreamStatus {
+	case youtube.StreamLive, youtube.StreamPostLive:
+		if info.LatencyClass == "" && info.PlayabilityError != "" {
+			// A refusal's videoDetails without a class (a members-only
+			// broadcast seen signed out) say nothing; a later answer may.
+			return "", false
+		}
+		return database.ParseLatencyClass(info.LatencyClass), true
+	case youtube.StreamVOD:
+		if info.LatencyClass != "" {
+			return database.ParseLatencyClass(info.LatencyClass), true
+		}
+	}
+	return "", false
 }
 
 // StashTwitchStreamInfo records a freshly-fetched Twitch stream info under its

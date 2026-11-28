@@ -158,15 +158,15 @@ direct loopback connection (see
 | `GET` | `/api/jobs/{id}/segments/{index}/chat` | One part's chat file. |
 | `GET` | `/api/jobs/{id}/chat` | The job's chat file. |
 | `GET` | `/api/jobs/{id}/audio-info` | Codec and channel count of the first audio track (for the player's unplayable-audio notice). |
-| `GET` | `/api/jobs/{id}/watch-state` | Watched flag, resume position and chat offset. |
+| `GET` | `/api/jobs/{id}/watch-state` | Watched flag, resume position, chat offset, and `chatOffsetSet` (you saved the offset; a saved 0 counts). |
 | `PUT` | `/api/jobs/{id}/resume-position` | Save the playback position. |
 | `POST` | `/api/jobs/{id}/resume-position` | Same, for browsers that can only `POST` on page close. |
 | `POST` | `/api/jobs/{id}/watched` | Mark watched (clears the resume position). |
 | `DELETE` | `/api/jobs/{id}/watched` | Mark unwatched. |
 | `POST` | `/api/jobs/batch/watched` | Body `{jobIds:[…]}`. Mark several watched. |
 | `DELETE` | `/api/jobs/batch/watched` | Body `{jobIds:[…]}`. Mark several unwatched. |
-| `PUT` | `/api/jobs/{id}/chat-offset` | Body `{chatOffset}`. Save the chat timing offset. |
-| `DELETE` | `/api/jobs/{id}/chat-offset` | Reset the chat offset to 0. |
+| `PUT` | `/api/jobs/{id}/chat-offset` | Body `{chatOffset}`. Save your chat timing offset (0 included); it wins over a suggested one. |
+| `DELETE` | `/api/jobs/{id}/chat-offset` | Clear your chat offset; the player goes back to the suggested one, or 0. |
 
 ### Chapters and trims
 

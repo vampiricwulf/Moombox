@@ -320,6 +320,27 @@ sl-tab::part(base) {
     height: 14px;
 }
 
+/* Bottom-left: the checkbox holds the top-left corner, the missing-tail
+   mark the top-right and the watch mark the bottom-right. */
+.thumb .missing-audio-indicator {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    z-index: 2;
+    background: rgba(0, 0, 0, 0.7);
+    border-radius: 10px;
+    padding: 2px 6px;
+    display: flex;
+    align-items: center;
+    line-height: 1;
+    color: var(--sl-color-warning-400);
+}
+
+.thumb .missing-audio-indicator svg {
+    width: 14px;
+    height: 14px;
+}
+
 .watch-pill {
     display: inline-flex;
     align-items: center;
@@ -1903,6 +1924,27 @@ sl-progress-bar {
 
 #player-chat-offset::placeholder {
     color: var(--sl-color-neutral-400);
+}
+
+/* A suggested offset (owner ruling RV-19): the box holds the value the player
+   applies, set in italics, with the latency mode beside it, until the
+   operator types their own. */
+#player-chat-offset.suggested {
+    font-style: italic;
+    color: var(--sl-color-neutral-600);
+}
+
+/* The 350 px sidebar header is one row: the hint gives way first (cut with an
+   ellipsis; the box's title carries the whole text). */
+.player-chat-offset-hint {
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 0 1 auto;
+    margin-left: var(--sl-spacing-2x-small);
 }
 
 #player-chat-offset-reset {
@@ -3856,6 +3898,17 @@ html.sl-theme-light .log-debug {
     }
 
     .video-item > .thumb .incomplete-indicator svg {
+        width: 10px;
+        height: 10px;
+    }
+
+    .video-item > .thumb .missing-audio-indicator {
+        bottom: 2px;
+        left: 2px;
+        padding: 1px 4px;
+    }
+
+    .video-item > .thumb .missing-audio-indicator svg {
         width: 10px;
         height: 10px;
     }

@@ -299,7 +299,9 @@ func challengeFreeHlsInfo(ctx context.Context, job *JobContext, info *youtube.Vi
 // start: its sq=0 is gone. It records the live HLS playlist first, and the
 // from-start setup above runs only when that fails (setupMarathonOr).
 func setupWithFallback(ctx context.Context, job *JobContext, strategy DownloadStrategy, isVod bool, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
+	job.PairStagedHalves = true
 	result, err := setupMarathonOr(ctx, job, strategy, isVod, info, deps)
+	job.PairStagedHalves = false
 	if err != nil {
 		return result, err
 	}

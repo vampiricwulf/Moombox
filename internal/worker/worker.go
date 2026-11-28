@@ -181,7 +181,12 @@ type JobContext struct {
 	Filename      string
 	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
 	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
-	Logger        logger
+	// PairStagedHalves is set by setupWithFallback for the job's setup only:
+	// DownloadHls then sets aside a lone staged half of a demuxed HLS capture
+	// and starts both halves together (pairLoneHlsHalf). A refresh into the
+	// running part leaves the part's files alone.
+	PairStagedHalves bool
+	Logger           logger
 	// Interruption tracks the broadcast-interrupted signature (interruption
 	// spec Tier 1) observed across every player-response fetch for this
 	// job. Shared by POINTER — strategyCtx/segCtx/segJobCtx value-copies
@@ -323,6 +328,13 @@ type DownloadWorker struct {
 	conn      Connectivity
 	wg        sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob chan struct{}  // signal to re-check for new jobs (non-blocking send)
+
+	// latencyHoldUntil and latencyHoldRecord are the latency-mode backfill's
+	// own rate-limit hold carried across a restart
+	// (RestoreLatencyBackfillHold, RecordLatencyBackfillHold): set before
+	// Start, read once by newLatencyBackfill.
+	latencyHoldUntil  time.Time
+	latencyHoldRecord func(until time.Time)
 
 	// stagingClaimMu guards stagingClaims, the per-job claim BOTH off-queue
 	// verbs take before they start: MuxJob and RecoverAsides. Each writes into
@@ -663,6 +675,10 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 	// Twitch archive-VOD gap-fill (owner decision D17): the plans finished
 	// live captures left in twitch_gap_fills, looked at on their backoff.
 	go w.runTwitchGapFills(ctx, w.newTwitchGapFiller())
+
+	// The latency-mode backfill (owner ruling RV-19): archived YouTube
+	// recordings with no latency mode, asked about one a minute.
+	go w.runLatencyBackfill(ctx, w.newLatencyBackfill())
 
 	// Process jobs from queue
 	for {

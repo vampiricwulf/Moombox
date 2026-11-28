@@ -323,7 +323,7 @@ func stagedAsideRecordings(stagingDir string) []string {
 type asideGroup struct {
 	stamp string   // the literal timestamp text, reused in the output name
 	video string   // "" when the restart set aside audio only
-	audio string   // "" for HLS/VOD captures and video-only DASH
+	audio string   // "" for a muxed HLS capture, a single-file VOD and video-only DASH
 	files []string // every file in the group, in the order the scan found them
 }
 
@@ -367,7 +367,7 @@ func groupStagedAsides(asides []string) []asideGroup {
 			order = append(order, key)
 		}
 		g.files = append(g.files, p)
-		if stem == "audio_stream" || stem == "audio.m4a" {
+		if stem == "audio_stream" || stem == "audio.m4a" || stem == hlsAudioFile {
 			g.audio = p
 		} else {
 			g.video = p
@@ -385,14 +385,17 @@ func groupStagedAsides(asides []string) []asideGroup {
 // asideRecordingOf names the recording an aside's stem belongs to: the two
 // halves of one DASH capture (video_stream, audio_stream) are one recording,
 // and so are the two halves of one whole-file download (video.mp4,
-// audio.m4a). Every other stem — video.ts, the HLS strategy's single muxed
-// stream — is a recording of its own, which no audio half ever joins.
+// audio.m4a), and the two halves of one demuxed HLS capture (video.ts,
+// audio.ts). A video.ts with no audio.ts beside it — a muxed master's
+// capture — is a recording of its own all the same.
 func asideRecordingOf(stem string) string {
 	switch stem {
 	case "audio_stream":
 		return "video_stream"
 	case "audio.m4a":
 		return "video.mp4"
+	case hlsAudioFile:
+		return "video.ts"
 	}
 	return stem
 }
@@ -1295,6 +1298,24 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			updates["join_offset_seconds"] = nil
 		}
 	}
+	// The wall clock of the archive's time zero, which the dashboard player
+	// lines chat up with (owner ruling RV-19): a live YouTube capture's, or a
+	// post-live one's that recorded from the live edge, read from what its
+	// staged recording recorded; NULL when it is not known and for a VOD
+	// downloaded whole, whose archive is the video's own timeline.
+	if jobCtx.Job != nil && jobCtx.Job.Platform == "youtube" {
+		updates["media_start_time"] = nil
+		if anchorsMediaStart(jobCtx.Job, result) {
+			if start, ok := mediaStartTime(videoPath, audioPath); ok {
+				updates["media_start_time"] = start
+			}
+		}
+	}
+	// The missing-audio guard: an archive with no audio stream although the
+	// stream advertised sound for what was recorded does not finish silently.
+	if jobCtx.Job != nil {
+		updates["missing_audio"] = o.archiveMissesAdvertisedAudio(jobCtx, result, videoPath, audioPath, outputFile, probeData)
+	}
 
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
@@ -1702,6 +1723,21 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			updates["join_offset_seconds"] = nil
 		}
 	}
+	// Part 1's time-zero wall clock, by the single-file finalize's rules: the
+	// split archive's chat runs on one timeline from part 1 (owner ruling
+	// RV-19).
+	if jobCtx.Job.Platform == "youtube" {
+		updates["media_start_time"] = nil
+		if anchorsMediaStart(jobCtx.Job, result) {
+			if start, ok := splitMediaStartTime(jobCtx, segments); ok {
+				updates["media_start_time"] = start
+			}
+		}
+	}
+	// The missing-audio guard, part by part: a split archive any of whose
+	// parts has no audio stream although the stream advertised sound for it
+	// does not finish silently either.
+	updates["missing_audio"] = o.splitArchiveMissesAdvertisedAudio(ctx, jobCtx, segments)
 
 	// Copy assets
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
@@ -2361,10 +2397,19 @@ func discoverStagingMedia(dir string) *DownloadResult {
 		result.HasAudio = true
 	}
 
-	// HLS (single muxed stream)
+	// HLS: video.ts, the picked variant, and beside it audio.ts when the
+	// master was demuxed (its variants video-only, the sound in a rendition
+	// of its own: DownloadHls); audio.ts alone for an audio-only recording
+	// of such a master. A muxed master's capture is video.ts alone, with its
+	// audio inside.
 	if !result.HasVideo && fileExists(filepath.Join(dir, "video.ts")) {
 		result.VideoPath = filepath.Join(dir, "video.ts")
 		result.HasVideo = true
+		result.IsHls = true
+	}
+	if !result.HasAudio && (result.IsHls || !result.HasVideo) && fileExists(filepath.Join(dir, hlsAudioFile)) {
+		result.AudioPath = filepath.Join(dir, hlsAudioFile)
+		result.HasAudio = true
 		result.IsHls = true
 	}
 

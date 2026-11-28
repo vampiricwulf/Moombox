@@ -106,10 +106,12 @@ func reinitResetFields(autoRetryCount int) map[string]any {
 		"video_fps":           nil,
 		"length_seconds":      nil,
 		"join_offset_seconds": nil,
+		"media_start_time":    nil,
 		"live_edge_reason":    nil,
 		"selected_video_itag": nil,
 		"selected_audio_itag": nil,
 		"auto_retry_count":    autoRetryCount,
 		"incomplete_tail":     false,
+		"missing_audio":       false,
 	}
 }

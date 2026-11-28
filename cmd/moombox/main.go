@@ -294,6 +294,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// And the YouTube rate-limit hold, the same way: one standing when the
 	// last process stopped holds the backlog until it runs out.
 	restoreRateLimitHold(s.openAlerts, dlWorker.Scheduler())
+	// And the latency-mode backfill's own rate-limit hold (owner ruling
+	// RV-19), which it keeps apart from the backlog's.
+	restoreLatencyBackfillHold(s.openAlerts, dlWorker)
 
 	// Register all routes. See routes_wiring.go.
 	importCleanup := s.wireRoutes()

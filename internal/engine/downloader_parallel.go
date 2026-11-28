@@ -587,7 +587,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.lastSegTime.StoreNow()
-			d.firstMediaWritten(nextSeq)
+			d.firstMediaWritten(nextSeq, data, time.Time{})
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{

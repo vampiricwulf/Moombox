@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import {
   pendingAutoAction, pendingAutoActionText, reinitializeDeletesText, sumReinitializePreviews, isWaitLine, isAwaitingProcessing,
   queuedHold, queuedHoldText, diskGaugeLevel, cookieRetry, cookieRetryText,
+  suggestedChatOffset, latencyText, hasOperatorChatOffset,
 } from "../public/modules/utils.js";
 
 let jsdomMissing = null;
@@ -403,4 +404,22 @@ test("a COOKIES? row shows its cookie retries and follows the holds frame", { sk
   h.app.handleMessage({ type: "admission_holds", payload: { cookieRetries: { c1: { count: 3, of: 3, last } } } });
   await h.flush();
   assert.equal(cell("c1").textContent, "Cookie retries used up (3 of 3): no more automatic retries");
+});
+
+// Owner ruling RV-19. Mutants: an offset or a basis swapped; Ultra low's
+// known 0 read as no suggestion; Twitch given one; the unstated line dropped
+// or shown on a VOD (an upload the backfill asked about);
+// a pre-flag non-zero offset read as none.
+test("suggestedChatOffset, latencyText and hasOperatorChatOffset answer the shared table as Go does", () => {
+  assert.ok(PARITY.suggestedChatOffset.length >= 10);
+  for (const c of PARITY.suggestedChatOffset) {
+    const { line, ...want } = c.want;
+    assert.deepEqual(suggestedChatOffset(c.job), want, c.name);
+    assert.equal(latencyText(c.job), line, c.name);
+  }
+  assert.deepEqual(suggestedChatOffset(null), { seconds: 0, known: false, basis: "" });
+  assert.ok(PARITY.operatorChatOffset.length >= 5);
+  for (const c of PARITY.operatorChatOffset) {
+    assert.equal(hasOperatorChatOffset(c.job), c.want, c.name);
+  }
 });

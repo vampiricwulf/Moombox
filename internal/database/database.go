@@ -80,6 +80,10 @@ var fieldToColumn = map[string]string{
 	"join_offset_seconds": "join_offset_seconds",
 	"live_edge_reason":    "live_edge_reason",
 	"twitch_stream_id":    "twitch_stream_id",
+	"media_start_time":    "media_start_time",
+	"latency_mode":        "latency_mode",
+	"chat_offset_set":     "chat_offset_set",
+	"missing_audio":       "missing_audio",
 }
 
 // dbLogger is the interface for database error logging.
@@ -449,7 +453,8 @@ func (db *Database) prepareStatements() error {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id
+		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id,
+		media_start_time, latency_mode, chat_offset_set, missing_audio
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -635,6 +640,16 @@ func (db *Database) SettleChatStatus(id string, status JobStatus, from []ChatSta
 // it behaves exactly as UpdateJobFields always has, and reports whether the
 // statement ran.
 func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond string, condArgs []any) (*Job, bool) {
+	return db.updateJobFieldsWhereStamped(id, fields, cond, condArgs, true)
+}
+
+// updateJobFieldsWhereStamped is updateJobFieldsWhere with the updated_at
+// bump made optional: with stamp false the fields are written and the
+// subscribers told exactly as before, but updated_at stays as it was. For a
+// fact learned about an archived row long after its last change
+// (SetLatencyModeIfUnset), which must not move the row up the lists that
+// sort by updated_at (the player's recording picker).
+func (db *Database) updateJobFieldsWhereStamped(id string, fields map[string]any, cond string, condArgs []any, stamp bool) (*Job, bool) {
 	if len(fields) == 0 {
 		return nil, false
 	}
@@ -666,9 +681,11 @@ func (db *Database) updateJobFieldsWhere(id string, fields map[string]any, cond 
 		return nil, false
 	}
 
-	// Always update updated_at
-	setClauses = append(setClauses, "updated_at=?")
-	args = append(args, time.Now().UTC().Format(time.RFC3339))
+	// Update updated_at: always, but for a stamp-less write.
+	if stamp {
+		setClauses = append(setClauses, "updated_at=?")
+		args = append(args, time.Now().UTC().Format(time.RFC3339))
+	}
 	args = append(args, id)
 
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
@@ -797,11 +814,42 @@ func (db *Database) UpdateResumePosition(jobID string, seconds float64) bool {
 	return db.updateSingleColumnSilent(jobID, "resume_position", seconds, "UpdateResumePosition")
 }
 
-// UpdateChatOffset saves the chat timing offset without bumping updated_at
-// or triggering subscriber notifications. Returns true when a row was
-// updated (false for an unknown jobID).
+// UpdateChatOffset saves the operator's chat timing offset without bumping
+// updated_at or triggering subscriber notifications, and marks it set
+// (chat_offset_set), so an operator's 0 is kept as a value and wins over a
+// suggested offset (owner ruling RV-19, Job.ChatOffsetSet). Returns true when
+// a row was updated (false for an unknown jobID).
 func (db *Database) UpdateChatOffset(jobID string, offset float64) bool {
-	return db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
+	return db.setChatOffsetSilent(jobID, offset, true, "UpdateChatOffset")
+}
+
+// ClearChatOffset removes the operator's chat offset: 0 and not set, so the
+// player falls back to the suggested offset when there is one. Silent like
+// UpdateChatOffset.
+func (db *Database) ClearChatOffset(jobID string) bool {
+	return db.setChatOffsetSilent(jobID, 0, false, "ClearChatOffset")
+}
+
+// setChatOffsetSilent writes chat_offset and chat_offset_set in one
+// statement, without bumping updated_at or notifying subscribers
+// (updateSingleColumnSilent's rules, for the pair).
+func (db *Database) setChatOffsetSilent(jobID string, offset float64, set bool, opName string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	res, err := db.db.ExecContext(db.getCtx(),
+		"UPDATE jobs SET chat_offset = ?, chat_offset_set = ? WHERE id = ?", offset, boolToInt(set), jobID)
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error(opName+" failed", "jobID", jobID, "err", err)
+		}
+		return false
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return true // the driver cannot say; assume the row existed
+	}
+	return n > 0
 }
 
 // TakeAnnounceFound clears jobID's announce_found flag and reports whether it
@@ -907,8 +955,8 @@ type rowScanner interface {
 func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
-	var notifMsgs, liveEdgeReason, twitchStreamID sql.NullString
-	var announceFound int
+	var notifMsgs, liveEdgeReason, twitchStreamID, mediaStartTime, latencyMode sql.NullString
+	var announceFound, chatOffsetSet, missingAudio int
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -925,6 +973,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
 		&notifMsgs, &announceFound, &j.JoinOffsetSeconds, &liveEdgeReason, &twitchStreamID,
+		&mediaStartTime, &latencyMode, &chatOffsetSet, &missingAudio,
 	)
 	if err != nil {
 		return nil, err
@@ -938,6 +987,10 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.AnnounceFound = intToBool(announceFound)
 	j.LiveEdgeReason = liveEdgeReason.String
 	j.TwitchStreamID = twitchStreamID.String
+	j.MediaStartTime = mediaStartTime.String
+	j.LatencyMode = LatencyMode(latencyMode.String)
+	j.ChatOffsetSet = intToBool(chatOffsetSet)
+	j.MissingAudio = intToBool(missingAudio)
 	return &j, nil
 }
 

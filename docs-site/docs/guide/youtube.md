@@ -134,6 +134,41 @@ reasons are:
 | no GVS token could be minted for the from-start formats (missing_pot) | The from-start formats need a PO token and none could be made (see [PO tokens](#po-tokens-and-the-botguard-sidecar)). |
 | the player's JS challenges could not be solved and no split pair that needs none was left | See [Signature and n-parameter challenges](#signature-and-n-parameter-challenges). |
 
+Such a recording starts wherever the capture joined, often far into the
+broadcast (on a 24/7 stream, months). The [player](player.md#chat-replay)
+lines its chat up with the recording by the time its first segment reached
+YouTube, so the chat appears where it was sent. Earlier versions put that chat
+late by the whole time the stream had been live, so on a long stream no chat
+appeared at all; a recording made before the fix is corrected by its join
+point. If you had re-timed such a recording's chat by hand with the
+player's chat offset to make up for the old placement, that offset now moves
+the chat too early by the same amount: clear it (the **✕** beside the offset
+box) and the corrected placement takes over.
+
+The playlist reaches back about an hour before the moment the capture
+started, but chat is recorded only from that moment, so the first hour or so
+of such a recording has no chat.
+
+YouTube serves this playlist with the sound in a separate audio track
+beside the picture. Moombox records both and joins them in the archive. The
+job log's *selected HLS variant* line says where the audio comes from
+(*in the variant* or *separate rendition*), and a finished archive that has
+no sound although the stream offered some is flagged **No audio** (see
+[Jobs](jobs.md#no-audio)).
+
+!!! warning "Live-edge recordings made by v2.9.8 to v2.9.10"
+    Recordings of long-running (24/7) YouTube streams made by v2.9.8 to
+    v2.9.10 without a signed-in session may have no audio track: those
+    versions recorded only the picture of this playlist. To check one, open it
+    in a player and look for an audio track, or run
+    `ffprobe <file>` and look for an `Audio:` stream. Such a recording
+    cannot be repaired after the fact: the sound was never downloaded.
+
+    A recording still in progress when you upgrade is split where the new
+    version takes over: what was recorded before is kept as a silent file
+    beside the archive (its name ends in `.restart-` and a number), and the
+    archive itself has sound from that point on.
+
 If the live HLS playlist is DRM-protected too, there is nothing Moombox can
 record: see [Streams Moombox cannot record (DRM)](#streams-moombox-cannot-record-drm).
 

@@ -309,6 +309,9 @@ func TestStatusProbeEscalationThatFailsLeavesItInconclusive(t *testing.T) {
 		if inconclusive.EscalationErr == nil || !strings.Contains(inconclusive.EscalationErr.Error(), "HTTP 400") {
 			t.Errorf("EscalationErr = %v, want web_embedded's HTTP 400", inconclusive.EscalationErr)
 		}
+		if inconclusive.EscalationPlayability != "" {
+			t.Errorf("EscalationPlayability = %q on a failed call, want none", inconclusive.EscalationPlayability)
+		}
 		if got := strings.Join(tr.calls, ","); got != clientAndroidVR+","+clientWebEmbedded {
 			t.Errorf("calls %s, want android_vr then one web_embedded", got)
 		}
@@ -631,5 +634,10 @@ func TestAPrivateVideoLeavesTheStatusProbeInconclusive(t *testing.T) {
 	}
 	if inconclusive.Playability != PlayabilityPrivate {
 		t.Errorf("Playability = %q, want private", inconclusive.Playability)
+	}
+	// The escalation refused the same way, and says so (the latency-mode
+	// backfill stops asking about a video both clients call private).
+	if inconclusive.EscalationPlayability != PlayabilityPrivate {
+		t.Errorf("EscalationPlayability = %q, want private", inconclusive.EscalationPlayability)
 	}
 }

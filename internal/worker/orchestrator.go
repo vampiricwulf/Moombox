@@ -448,8 +448,8 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 		// YouTube live A/V share one segment timeline, so the two seeds are
 		// numerically close in any healthy row. A missing or wildly diverged
-		// audio seed means it's stale from a previous session SHAPE — an HLS
-		// interlude carries no separate audio downloader (and old builds
+		// audio seed means it's stale from a previous session SHAPE — a capture of a
+		// muxed HLS master carries no separate audio downloader (and old builds
 		// zeroed the column outright) — and force-starting audio there would
 		// rewind hours of audio into this part. Align it to the video seed.
 		const avSeedTolerance = 50 // ~2-4 min of segments
@@ -1218,9 +1218,21 @@ func refreshFormatMatches(old, fresh *DownloadResult) bool {
 // does not have) decides nothing. The live loop splits on it exactly as on a
 // quality change, since a refreshed downloader continues the current part's
 // files and the engine's append path cannot tell codecs apart.
+//
+// Two HLS captures of different shapes are different renditions too: a muxed
+// master's (video.ts alone, its sound in it), a demuxed master's (video.ts
+// video-only, audio.ts beside it) and an audio-only recording's (audio.ts
+// alone) record different things into the same file names, so a refresh that
+// came back in another shape continuing the part would leave a stale audio.ts
+// beside a muxed video.ts, or start an audio.ts mid-part beside a video.ts
+// that carried its own sound until then. HasVideo and HasAudio say which
+// halves an HLS result records (a muxed master's sets no HasAudio).
 func streamIdentityChanged(old, fresh *DownloadResult) bool {
 	if old == nil || fresh == nil {
 		return false
+	}
+	if old.IsHls && fresh.IsHls && (old.HasVideo != fresh.HasVideo || old.HasAudio != fresh.HasAudio) {
+		return true
 	}
 	return (old.VideoItag != 0 && fresh.VideoItag != 0 && old.VideoItag != fresh.VideoItag) ||
 		(old.AudioItag != 0 && fresh.AudioItag != 0 && old.AudioItag != fresh.AudioItag)

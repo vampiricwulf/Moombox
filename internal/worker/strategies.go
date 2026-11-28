@@ -271,6 +271,12 @@ type DownloadResult struct {
 	// numbers count in. The finalize's join point (joinOffsetSeconds, owner
 	// decision CJ-3) multiplies an MPEG-TS capture's first sequence by it.
 	SegmentDurationSec int
+	// AdvertisedAudio is set by the HLS strategy when the master advertised
+	// sound for what it records: the picked variant's CODECS names an audio
+	// codec, or an audio rendition is recorded beside it (audio.ts). The
+	// finalize's missing-audio guard reads it, and the staging record it is
+	// kept in (noteAdvertisedAudio) for a finalize that has no result.
+	AdvertisedAudio bool
 	// LiveEdgeReason is set by the setup fallbacks that put a live capture's
 	// first setup on the live HLS playlist instead of from the start, saying
 	// why (owner decision PR-R2): setupMarathonOr's age arm and

@@ -1794,6 +1794,21 @@ export class MoomboxApp {
             // indicator counts rows by status, and no status moved.
             this.updateJobCard(updatedJob);
           }
+        } else if (this._isAgedOut(updatedJob, Date.now())) {
+          // A row the list classifies as archived, changed by a write that
+          // leaves updated_at alone: the latency-mode backfill stores one
+          // archived recording about once a minute
+          // (database.SetLatencyModeIfUnset). It stays in the Archived list;
+          // pushing it into Tasks only for _evaluateArchiveBoundary to take
+          // it out again drew a card there and the archived list twice.
+          const idx = this.archivedJobs.findIndex((j) => j.id === updatedJob.id);
+          if (idx !== -1) {
+            this.details._preserveStagingFields([this.archivedJobs[idx]], [updatedJob]);
+            this.archivedJobs[idx] = updatedJob;
+          } else {
+            this.archivedJobs.push(updatedJob);
+          }
+          this._scheduleArchivedRender();
         } else {
           // Job not in the active array — either brand new, or one that had
           // aged into archivedJobs and just had a field change that bumped its
@@ -2802,14 +2817,15 @@ export class MoomboxApp {
 
   /**
    * What of a card depends on more than the status and the fields
-   * updateJobCard patches: whether the row offers Resume, and the
-   * missing-tail mark. A same-status update that changes this draws the
+   * updateJobCard patches: whether the row offers Resume, the missing-tail
+   * mark and the no-audio mark. A same-status update that changes this draws the
    * card again (_moveJobCard).
    */
   _cardShape(job) {
     const thumb = this._thumbSources(job);
     return (canResumeJob(job, { requireKnownStaging: true }) ? "R" : "-")
       + (this.incompleteIndicatorHtml(job) ? "T" : "-")
+      + (this.missingAudioIndicatorHtml(job) ? "A" : "-")
       + (thumb.thumbnailUrl || thumb.fallbackThumb ? "I" : "-");
   }
 
@@ -2820,6 +2836,21 @@ export class MoomboxApp {
   _reshapeJobCard(job, oldShape) {
     if (this._cardShape(job) === oldShape || !this.jobs.includes(job)) return;
     if (!this._moveJobCard(job)) this.renderJobs();
+  }
+
+  /**
+   * Whether the list classifies job as archived at nowMs: Finished, with an
+   * updatedAt older than hideFinishedAgeDays (never, below 0). Strict age >
+   * threshold, matching the server's `age > hideAge`: at 0 days every
+   * Finished job with a past updatedAt is archived, one aged exactly 0 ms is
+   * not (the server keeps it).
+   */
+  _isAgedOut(job, nowMs) {
+    const ageDays = this.hideFinishedAgeDays;
+    if (ageDays < 0 || job.status !== "Finished" || !job.updatedAt) return false;
+    const t = Date.parse(job.updatedAt);
+    if (Number.isNaN(t)) return false;
+    return nowMs - t > ageDays * 86400 * 1000;
   }
 
   /**
@@ -2838,21 +2869,12 @@ export class MoomboxApp {
    *   silent: skip the post-move re-render (caller will render).
    */
   _evaluateArchiveBoundary({ silent = false } = {}) {
-    const ageDays = this.hideFinishedAgeDays;
-    if (ageDays < 0 || !this.jobs.length) return false;
-    const cutoffMs = ageDays * 86400 * 1000;
+    if (this.hideFinishedAgeDays < 0 || !this.jobs.length) return false;
     const nowMs = Date.now();
     const moved = [];
     for (let i = this.jobs.length - 1; i >= 0; i--) {
       const j = this.jobs[i];
-      if (j.status !== "Finished" || !j.updatedAt) continue;
-      const t = Date.parse(j.updatedAt);
-      if (Number.isNaN(t)) continue;
-      // Strict age > threshold, matching the server's `age > hideAge`. When
-      // ageDays === 0 cutoffMs is 0, so this archives every Finished job with
-      // a past updatedAt — without the always-true `|| ageDays === 0` clause
-      // that previously also swept a job aged exactly 0ms (server keeps it).
-      if (nowMs - t > cutoffMs) {
+      if (this._isAgedOut(j, nowMs)) {
         this.jobs.splice(i, 1);
         const existingIdx = this.archivedJobs.findIndex(a => a.id === j.id);
         if (existingIdx !== -1) {
@@ -3201,6 +3223,18 @@ export class MoomboxApp {
   }
 
   /**
+   * Returns the no-audio overlay for a Finished job whose archive has no audio
+   * stream although the stream advertised sound (jobs.missing_audio, the
+   * finalize's missing-audio guard), or empty string. Gated on Finished as the
+   * missing-tail mark is: the flag stays on the row through a new download
+   * until the next finalize writes it again.
+   */
+  missingAudioIndicatorHtml(job) {
+    if (job.status !== "Finished" || !job.missingAudio) return "";
+    return `<span class="missing-audio-indicator" title="No audio: the archive has no audio stream, though the stream advertised sound"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06m7.137 2.096a.5.5 0 0 1 0 .708L12.207 8l1.647 1.646a.5.5 0 0 1-.708.708L11.5 8.707l-1.646 1.647a.5.5 0 0 1-.708-.708L10.793 8 9.146 6.354a.5.5 0 1 1 .708-.708L11.5 7.293l1.646-1.647a.5.5 0 0 1 .708 0"/></svg></span>`;
+  }
+
+  /**
    * Where a card's thumbnail comes from: thumbnailUrl is what the <img>
    * loads, fallbackThumb what its error handler swaps in. A row with neither
    * draws no <img> at all, and updateJobCard cannot add one, so _cardShape
@@ -3315,7 +3349,7 @@ export class MoomboxApp {
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}
                ${fallbackIsAvatar ? `data-fallback-avatar="true"` : ""}>` : ""}
           ${this.watchIndicatorHtml(job)}
-          ${this.incompleteIndicatorHtml(job)}
+          ${this.incompleteIndicatorHtml(job)}${this.missingAudioIndicatorHtml(job)}
         </div>
         <div class="stream-info" role="cell">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>

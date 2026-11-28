@@ -70,6 +70,43 @@ type HlsVariant struct {
 	// original language first (_video.py:3655-3663). "" when absent, as on
 	// every Twitch and most YouTube playlists.
 	AudioContentID string
+	// AudioGroup is the variant's AUDIO attribute: the GROUP-ID of the
+	// #EXT-X-MEDIA TYPE=AUDIO renditions it plays with. "" when absent, as on
+	// every Twitch playlist and YouTube's older muxed masters.
+	AudioGroup string
+	// VideoOnly reports that the variant's own segments carry no audio: its
+	// AUDIO group's first rendition has a URI of its own, so the sound is
+	// served there, beside it. yt-dlp decides it the same way
+	// (extractor/common.py _parse_m3u8_formats_and_subtitles: a variant with
+	// an AUDIO group, a CODECS attribute and a video codec, whose group's
+	// first rendition has a URI, gets acodec 'none'). Its CODECS still names
+	// the audio codec ("avc1.640028,mp4a.40.2"): it describes the variant
+	// with its group, not what its segments hold. YouTube's live masters
+	// from the visionos client are demuxed this way (2026-11-27: every
+	// variant names group 233 or 234, both AAC-only renditions). A rendition
+	// without a URI means the audio is in the variant, which is not
+	// video-only.
+	VideoOnly bool
+}
+
+// HlsRendition is one #EXT-X-MEDIA tag of an HLS master playlist.
+type HlsRendition struct {
+	Type     string // AUDIO, VIDEO, SUBTITLES or CLOSED-CAPTIONS
+	GroupID  string
+	Name     string
+	Language string // LANGUAGE, "" when absent
+	// URI is the rendition's own media playlist, resolved against the
+	// master's URL; "" when the rendition is carried in the variants that
+	// name its group.
+	URI string
+	// Default is DEFAULT=YES. Alternate is DEFAULT=NO or AUTOSELECT=NO, which
+	// yt-dlp ranks below the others (source_preference -2: an audio
+	// description, a commentary track).
+	Default   bool
+	Alternate bool
+	// AudioContentID is YouTube's YT-EXT-AUDIO-CONTENT-ID on the rendition,
+	// as on a variant; "" when absent.
+	AudioContentID string
 }
 
 // HlsSegment represents a segment in an HLS media playlist.
@@ -96,8 +133,13 @@ type HlsSegment struct {
 	// ProgramDateTime is the wall-clock time of the segment's first frame:
 	// its own #EXT-X-PROGRAM-DATE-TIME, or the last one seen advanced by the
 	// durations in between (RFC 8216 §4.3.2.6) — the same clock the ad
-	// classification above reads. Zero when the playlist carries no PDT tags
-	// (YouTube HLS, an old capture). See DownloaderOptions.OnFirstSegment.
+	// classification above reads. YouTube's live HLS variant carries a single
+	// date-time tag at the playlist head (within 0.15 s of the segment's
+	// Ingestion-Walltime in the 2026-11-27 measurement), which this parse
+	// carries to the later segments by their EXTINF durations: that value is
+	// the time-zero anchor of a live-edge YouTube capture (media_start_time,
+	// owner ruling RV-19; SegmentDownloader.OnFirstMediaWallclock). Zero when
+	// the playlist carries no PDT tags. See DownloaderOptions.OnFirstSegment.
 	ProgramDateTime time.Time
 }
 
@@ -182,7 +224,67 @@ func parseHlsKey(tag, attrs string) *HlsKey {
 type HlsParseResult struct {
 	IsMaster bool
 	Variants []HlsVariant
-	Playlist *HlsPlaylist
+	// Renditions is every #EXT-X-MEDIA tag of a master playlist that states
+	// TYPE, GROUP-ID and NAME (yt-dlp's extract_media skips any other), in
+	// document order.
+	Renditions []HlsRendition
+	Playlist   *HlsPlaylist
+}
+
+// AudioRenditions returns the TYPE=AUDIO renditions of group that have a URI
+// of their own, in document order.
+func (r *HlsParseResult) AudioRenditions(group string) []*HlsRendition {
+	if r == nil || group == "" {
+		return nil
+	}
+	var out []*HlsRendition
+	for i := range r.Renditions {
+		m := &r.Renditions[i]
+		if m.Type == "AUDIO" && m.GroupID == group && m.URI != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// audioCodecPrefixes are the CODECS entries that name an audio codec. A
+// CODECS list made only of these is an audio-only variant, which yt-dlp's
+// parse_codecs gives vcodec 'none' and never marks video-only.
+var audioCodecPrefixes = []string{"mp4a", "opus", "vorbis", "ac-3", "ec-3", "flac", "alac", "mp3", "dtsc", "dtse", "dtsh", "dtsl"}
+
+// isAudioCodec reports whether one CODECS entry names an audio codec.
+func isAudioCodec(c string) bool {
+	c = strings.ToLower(strings.TrimSpace(c))
+	for _, p := range audioCodecPrefixes {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// codecsHaveVideo reports whether a CODECS list names anything other than
+// an audio codec.
+func codecsHaveVideo(codecs string) bool {
+	for _, c := range strings.Split(codecs, ",") {
+		if strings.TrimSpace(c) != "" && !isAudioCodec(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// CodecsNameAudio reports whether a CODECS list names an audio codec: what an
+// HLS master advertises for a variant, in it or in its audio rendition group.
+// It reads the same list as codecsHaveVideo, so the parser's video-only
+// verdict and the worker's missing-audio guard agree on what is audio.
+func CodecsNameAudio(codecs string) bool {
+	for _, c := range strings.Split(codecs, ",") {
+		if isAudioCodec(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- DASH Parsing ---
@@ -552,6 +654,57 @@ func ParseHls(m3u8Content string, baseURL string) *HlsParseResult {
 func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 	result := &HlsParseResult{IsMaster: true}
 
+	// The #EXT-X-MEDIA tags first, wherever they sit, so a variant listed
+	// ahead of its group still finds it — yt-dlp's order, for the same reason.
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") {
+			continue
+		}
+		m := HlsRendition{}
+		for _, attr := range parseAttributes(line[len("#EXT-X-MEDIA:"):]) {
+			switch attr.key {
+			case "TYPE":
+				m.Type = attr.value
+			case "GROUP-ID":
+				m.GroupID = attr.value
+			case "NAME":
+				m.Name = attr.value
+			case "LANGUAGE":
+				m.Language = attr.value
+			case "URI":
+				if attr.value != "" {
+					m.URI = resolveURL(baseURL, attr.value)
+				}
+			case "DEFAULT":
+				m.Default = attr.value == "YES"
+				if attr.value == "NO" {
+					m.Alternate = true
+				}
+			case "AUTOSELECT":
+				if attr.value == "NO" {
+					m.Alternate = true
+				}
+			case "YT-EXT-AUDIO-CONTENT-ID":
+				m.AudioContentID = attr.value
+			}
+		}
+		if m.Type == "" || m.GroupID == "" || m.Name == "" {
+			continue
+		}
+		result.Renditions = append(result.Renditions, m)
+	}
+	// firstOfGroup is yt-dlp's groups[group_id][0]: the first rendition of
+	// any type that names the group.
+	firstOfGroup := func(group string) *HlsRendition {
+		for i := range result.Renditions {
+			if result.Renditions[i].GroupID == group {
+				return &result.Renditions[i]
+			}
+		}
+		return nil
+	}
+
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
 		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
@@ -587,6 +740,8 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 				variant.Codecs = strings.Trim(attr.value, "\"")
 			case "YT-EXT-AUDIO-CONTENT-ID":
 				variant.AudioContentID = strings.Trim(attr.value, "\"")
+			case "AUDIO":
+				variant.AudioGroup = attr.value
 			case "VIDEO":
 				name := strings.Trim(attr.value, "\"")
 				variant.Name = name
@@ -600,6 +755,17 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 			if nextLine != "" && !strings.HasPrefix(nextLine, "#") {
 				variant.URL = resolveURL(baseURL, nextLine)
 				break
+			}
+		}
+
+		// yt-dlp: a variant that names an AUDIO group, states CODECS and has
+		// a video codec is video-only when its group's first rendition has a
+		// URI. One that names a group but states no CODECS is taken as a
+		// complete format, as yt-dlp takes it (RFC 8216 requires CODECS there,
+		// and a master that breaks the rule is read the lenient way).
+		if variant.AudioGroup != "" && variant.Codecs != "" && codecsHaveVideo(variant.Codecs) {
+			if first := firstOfGroup(variant.AudioGroup); first != nil && first.URI != "" {
+				variant.VideoOnly = true
 			}
 		}
 

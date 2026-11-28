@@ -10,8 +10,11 @@
  *   epochRFC3339()), not whatever start time the run that is CURRENTLY
  *   appending to it was created with. For a live/early-chat file that epoch
  *   is typically the SCHEDULED start; the video begins at the ACTUAL start
- *   (job.streamStartTime; DASH backfills from sequence 0), so bias = actual
- *   − scheduled, and negative offsets are waiting-room chat. A replay/VOD
+ *   (job.streamStartTime) when the capture recorded from sequence 0, so
+ *   bias = actual − scheduled, and negative offsets are waiting-room chat. A
+ *   capture that began later (the live edge) starts its file there instead:
+ *   computeChatBiasMs uses the job's mediaStartTime, the file's time zero on
+ *   the wall clock, when it has one (owner ruling RV-19). A replay/VOD
  *   chat file's offsets are already VOD-relative (YouTube's own
  *   videoOffsetTimeMsec, with pre-stream messages recovered from
  *   timestampText), and the worker refreshes job.streamStartTime to that
@@ -74,12 +77,45 @@ export function deriveMissingOffsets(messages, streamStartTime) {
   return messages;
 }
 
-export function computeChatBiasMs({ platform, chatStreamStartTime, jobStreamStartTime }) {
+/**
+ * Date.parse for an RFC 3339 time, in ms, with any fractional seconds past
+ * the millisecond dropped first: the job's mediaStartTime carries Go's
+ * RFC3339Nano (up to nine digits), and ECMAScript only promises to parse
+ * three. NaN when the text is not a time.
+ * @param {string|undefined} text
+ */
+export function parseTimeMs(text) {
+  return Date.parse(String(text || "").replace(/(\.\d{3})\d+/, "$1"));
+}
+
+/**
+ * The bias the player subtracts from every chat offset (offsetMs − bias is
+ * the message's place in the video). See the header comment for the epochs.
+ *
+ * YouTube, by what the job knows (owner ruling RV-19):
+ * - mediaStartTime (the wall clock of the archive's time zero, its first
+ *   recorded segment's ingest time): bias = that − the chat file's epoch,
+ *   which puts live chat's wall-clock offsets on the media clock exactly —
+ *   a capture that joined at the live edge (a 24/7 stream, months in) shows
+ *   each message where its moment is in the file, not months late;
+ * - none, but joinOffsetSeconds > 0 (a late join archived before the
+ *   anchor existed): today's bias plus the join point, which is the
+ *   sequence times the segment length or the fragments' own timing — good
+ *   to a fraction of a percent (on a stream live for 100 days, minutes);
+ * - otherwise: actual start − the chat epoch, as before.
+ * Twitch: 0, its offsets are already video-relative.
+ */
+export function computeChatBiasMs({ platform, chatStreamStartTime, jobStreamStartTime, mediaStartTime, joinOffsetSeconds }) {
   if (platform === "twitch") return 0;
-  const chatStart = Date.parse(chatStreamStartTime || "");
-  const jobStart = Date.parse(jobStreamStartTime || "");
-  if (!Number.isFinite(chatStart) || !Number.isFinite(jobStart)) return 0;
-  return jobStart - chatStart;
+  const chatStart = parseTimeMs(chatStreamStartTime);
+  if (!Number.isFinite(chatStart)) return 0;
+  const anchor = parseTimeMs(mediaStartTime);
+  if (Number.isFinite(anchor)) return anchor - chatStart;
+  const jobStart = parseTimeMs(jobStreamStartTime);
+  const bias = Number.isFinite(jobStart) ? jobStart - chatStart : 0;
+  const join = Number(joinOffsetSeconds);
+  if (joinOffsetSeconds != null && Number.isFinite(join) && join > 0) return bias + Math.round(join * 1000);
+  return bias;
 }
 
 /** First index whose offsetMs is strictly greater than `offsetMs` (messages sorted ascending). */

@@ -53,6 +53,21 @@ type jobStateParity struct {
 		Now   time.Time               `json:"now"`
 		Want  jobstate.CookieRetry    `json:"want"`
 	} `json:"cookieRetries"`
+	SuggestedChatOffset []struct {
+		Name string          `json:"name"`
+		Job  json.RawMessage `json:"job"`
+		Want struct {
+			Seconds int    `json:"seconds"`
+			Known   bool   `json:"known"`
+			Basis   string `json:"basis"`
+			Line    string `json:"line"`
+		} `json:"want"`
+	} `json:"suggestedChatOffset"`
+	OperatorChatOffset []struct {
+		Name string          `json:"name"`
+		Job  json.RawMessage `json:"job"`
+		Want bool            `json:"want"`
+	} `json:"operatorChatOffset"`
 }
 
 func loadJobStateParity(t *testing.T) jobStateParity {
@@ -273,6 +288,77 @@ func TestCookieRetryParity(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("utils.js cookieRetryText has no sentence that reads %q", r.Text())
+		}
+	}
+}
+
+// TestSuggestedChatOffsetParity runs jobstate.SuggestedChatOffset and
+// LatencyLine over the table the dashboard's suggestedChatOffset and
+// latencyText run over (owner ruling RV-19), and pins utils.js's six offsets
+// and three mode labels to the Go ones.
+//
+// Mutants: a case's want edited; an offset or a label edited on one side.
+func TestSuggestedChatOffsetParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.SuggestedChatOffset) < 10 {
+		t.Fatalf("parsed %d suggestedChatOffset cases, want the table", len(p.SuggestedChatOffset))
+	}
+	for _, c := range p.SuggestedChatOffset {
+		var job database.Job
+		if err := json.Unmarshal(c.Job, &job); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		s, known, basis := jobstate.SuggestedChatOffset(&job)
+		if s != c.Want.Seconds || known != c.Want.Known || string(basis) != c.Want.Basis {
+			t.Errorf("%s: SuggestedChatOffset = %d %v %q, want %d %v %q", c.Name, s, known, basis, c.Want.Seconds, c.Want.Known, c.Want.Basis)
+		}
+		if got := jobstate.LatencyLine(&job); got != c.Want.Line {
+			t.Errorf("%s: LatencyLine = %q, want %q", c.Name, got, c.Want.Line)
+		}
+	}
+
+	src := readUtilsJS(t)
+	for name, v := range map[string]int{
+		"SUGGESTED_CHAT_OFFSET_INGEST_NORMAL":    jobstate.SuggestedChatOffsetIngestNormal,
+		"SUGGESTED_CHAT_OFFSET_INGEST_LOW":       jobstate.SuggestedChatOffsetIngestLow,
+		"SUGGESTED_CHAT_OFFSET_INGEST_ULTRA_LOW": jobstate.SuggestedChatOffsetIngestUltraLow,
+		"SUGGESTED_CHAT_OFFSET_START_NORMAL":     jobstate.SuggestedChatOffsetStartNormal,
+		"SUGGESTED_CHAT_OFFSET_START_LOW":        jobstate.SuggestedChatOffsetStartLow,
+		"SUGGESTED_CHAT_OFFSET_START_ULTRA_LOW":  jobstate.SuggestedChatOffsetStartUltraLow,
+	} {
+		m := regexp.MustCompile(`(?m)^export const ` + name + ` = (\d+);`).FindStringSubmatch(src)
+		if m == nil {
+			t.Errorf("utils.js: %s not found", name)
+			continue
+		}
+		if n, _ := strconv.Atoi(m[1]); n != v {
+			t.Errorf("utils.js %s = %d, Go %d", name, n, v)
+		}
+	}
+	for _, m := range []database.LatencyMode{database.LatencyModeNormal, database.LatencyModeLow, database.LatencyModeUltraLow} {
+		if want := `  ` + string(m) + `: "` + m.Label() + `",`; !strings.Contains(src, want) {
+			t.Errorf("utils.js LATENCY_MODE_LABELS does not hold %q", want)
+		}
+	}
+}
+
+// TestOperatorChatOffsetParity runs jobstate.HasOperatorChatOffset over
+// the table the dashboard's hasOperatorChatOffset runs over: an operator's
+// saved offset (a 0 included) always wins over the suggestion.
+//
+// Mutant: a case's want edited.
+func TestOperatorChatOffsetParity(t *testing.T) {
+	p := loadJobStateParity(t)
+	if len(p.OperatorChatOffset) < 5 {
+		t.Fatalf("parsed %d operatorChatOffset cases, want the table", len(p.OperatorChatOffset))
+	}
+	for _, c := range p.OperatorChatOffset {
+		var job database.Job
+		if err := json.Unmarshal(c.Job, &job); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if got := jobstate.HasOperatorChatOffset(&job); got != c.Want {
+			t.Errorf("%s: HasOperatorChatOffset = %v, want %v", c.Name, got, c.Want)
 		}
 	}
 }

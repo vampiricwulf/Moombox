@@ -52,6 +52,12 @@ type openAlertsDoc struct {
 	// restoreRateLimitHold); zero when none stands. Kept only in memory, a
 	// restart inside the hour reopened admission into the limit.
 	RateLimitHeldUntil time.Time `json:"rateLimitHeldUntil,omitzero"`
+	// LatencyBackfillHeldUntil is when the latency-mode backfill's own
+	// rate-limit hold runs out (worker.DownloadWorker.RecordLatencyBackfillHold,
+	// restoreLatencyBackfillHold); zero when none stands. The walk does not
+	// place the scheduler's hold, so it keeps its own, saved for the same
+	// reason. Absent in a file an older binary wrote.
+	LatencyBackfillHeldUntil time.Time `json:"latencyBackfillHeldUntil,omitzero"`
 }
 
 // openDiskAlert is diskAlerts' open state.
@@ -174,7 +180,7 @@ func (a *openAlerts) snapshot() openAlertsDoc {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	d := openAlertsDoc{SidecarDown: a.doc.SidecarDown, DiskGateHeld: a.doc.DiskGateHeld,
-		RateLimitHeldUntil: a.doc.RateLimitHeldUntil}
+		RateLimitHeldUntil: a.doc.RateLimitHeldUntil, LatencyBackfillHeldUntil: a.doc.LatencyBackfillHeldUntil}
 	if a.doc.Disk != nil {
 		disk := *a.doc.Disk
 		d.Disk = &disk

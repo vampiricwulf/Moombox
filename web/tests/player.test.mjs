@@ -100,6 +100,132 @@ test("a saved chat offset is restored, edited, persisted and cleared", { skip },
   assert.equal(reset.style.display, "none");
 });
 
+// Owner ruling RV-19: a YouTube recording with a known latency mode and no
+// operator offset plays with the suggested one; the box holds the WHOLE
+// offset (suggested 15, the operator types 2 => 2), marked as suggested; an
+// operator's value, 0 included, is saved and wins; clearing it returns to
+// the suggestion. A recording with none behaves as before.
+//
+// Mutants: the suggestion not applied on load; an untouched box saving the
+// suggestion on blur; a typed 0 sent as a DELETE; the clear not restoring
+// the suggestion; an emptied box applying 0 until the blur; the hint left
+// without its caveat or the box without aria-describedby; a saved 0 read as none on reload; Twitch given one.
+test("a suggested chat offset is the default, shown as suggested, and an operator's value wins", { skip }, async () => {
+  const chat = { platform: "youtube", messages: [{ offsetMs: 0, authorName: "u", message: [{ text: "hi" }] }] };
+  const h = harness.makePlayer({
+    jobs: [
+      finished("n", { platform: "youtube", latencyMode: "normal", chatFilename: "chat.json" }),
+      finished("z", { platform: "youtube", latencyMode: "ultra_low", chatFilename: "chat.json" }),
+      finished("t", { platform: "twitch", latencyMode: "normal", chatFilename: "chat.json" }),
+    ],
+    watchStateById: { n: { chatOffset: 0, chatOffsetSet: false }, z: { chatOffset: 0, chatOffsetSet: false }, t: { chatOffset: 0 } },
+    chatById: { n: chat, z: chat, t: { ...chat, platform: "twitch" } },
+    storage: { "player-sidebar-toggle": "true" },
+  });
+  const input = h.el("player-chat-offset");
+  const hint = h.el("player-chat-offset-hint");
+  const reset = h.el("player-chat-offset-reset");
+  const typeAndBlur = async (v) => {
+    input.value = v;
+    input.dispatchEvent(new h.window.Event("input"));
+    input.focus();
+    input.blur();
+    await h.flush();
+  };
+
+  await h.selectJob("n");
+  assert.equal(input.value, "15");
+  assert.equal(h.player.playerCustomOffsetMs, 15000);
+  assert.ok(input.classList.contains("suggested"));
+  assert.equal(hint.hidden, false);
+  assert.equal(hint.textContent, "suggested (typical): Normal latency");
+  assert.match(input.title, /typical, not measured/);
+  assert.equal(input.getAttribute("aria-describedby"), "player-chat-offset-hint", "the caveat reaches a screen reader");
+  assert.equal(reset.style.display, "none", "no reset for a suggestion");
+
+  // Focus and leave without typing: nothing is saved.
+  input.focus();
+  input.blur();
+  await h.flush();
+  assert.equal(h.http.matching("/api/jobs/n/chat-offset", "PUT").length, 0);
+  assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 0);
+
+  // The operator types 2: the whole offset is 2, saved, no longer suggested.
+  await typeAndBlur("2");
+  assert.equal(h.player.playerCustomOffsetMs, 2000);
+  assert.deepEqual(h.http.matching("/api/jobs/n/chat-offset", "PUT").at(-1).body, { chatOffset: 2 });
+  assert.ok(!input.classList.contains("suggested"));
+  assert.equal(hint.hidden, true);
+  assert.equal(input.getAttribute("aria-describedby"), null, "an operator value points at no hint");
+  assert.equal(reset.style.display, "");
+
+  // A typed 0 is the operator's value too, not a clear.
+  await typeAndBlur("0");
+  assert.equal(h.player.playerCustomOffsetMs, 0);
+  assert.deepEqual(h.http.matching("/api/jobs/n/chat-offset", "PUT").at(-1).body, { chatOffset: 0 });
+  assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 0);
+  assert.equal(input.value, "0");
+
+  // Emptying the box: while it is empty (before the blur) the suggestion
+  // already applies, not 0; the blur then clears the operator's offset and
+  // shows the suggestion again.
+  input.value = "";
+  input.dispatchEvent(new h.window.Event("input"));
+  assert.equal(h.player.playerCustomOffsetMs, 15000, "an emptied box applies the suggestion, not 0");
+  input.focus();
+  input.blur();
+  await h.flush();
+  assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 1);
+  assert.equal(input.value, "15");
+  assert.equal(h.player.playerCustomOffsetMs, 15000);
+  assert.ok(input.classList.contains("suggested"));
+
+  // The reset button does the same from an operator value.
+  await typeAndBlur("-3");
+  assert.equal(reset.style.display, "");
+  reset.click();
+  await h.flush();
+  assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 2);
+  assert.equal(h.player.playerCustomOffsetMs, 15000);
+  assert.equal(input.value, "15");
+
+  // Ultra low on the start basis is a known 0: shown, as a suggestion.
+  await h.selectJob("z");
+  assert.equal(input.value, "0");
+  assert.equal(h.player.playerCustomOffsetMs, 0);
+  assert.equal(hint.textContent, "suggested (typical): Ultra low latency");
+
+  // Twitch: no suggestion, exactly as before.
+  await h.selectJob("t");
+  assert.equal(input.value, "");
+  assert.equal(h.player.playerCustomOffsetMs, 0);
+  assert.equal(hint.hidden, true);
+  assert.ok(!input.classList.contains("suggested"));
+});
+
+test("a saved operator 0 wins over the suggestion when the recording is opened", { skip }, async () => {
+  const chat = { platform: "youtube", messages: [{ offsetMs: 0, authorName: "u", message: [{ text: "hi" }] }] };
+  const h = harness.makePlayer({
+    jobs: [finished("s", { platform: "youtube", latencyMode: "low", mediaStartTime: "2026-11-27T22:56:50Z", chatFilename: "chat.json" })],
+    watchStateById: { s: { chatOffset: 0, chatOffsetSet: true } },
+    chatById: { s: chat },
+    storage: { "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("s");
+  const input = h.el("player-chat-offset");
+  assert.equal(input.value, "0");
+  assert.equal(h.player.playerCustomOffsetMs, 0);
+  assert.ok(!input.classList.contains("suggested"));
+  assert.equal(h.el("player-chat-offset-reset").style.display, "");
+});
+
+// The sign the suggestion relies on: a positive offset shows chat SOONER (a
+// message sent 20 s in is shown, and seeked to, at 5 s with a 15 s offset).
+test("a positive chat offset shows chat sooner", () => {
+  assert.equal(chatSeekTargetSeconds(20000, 15000, 0), 5);
+  assert.equal(chatSeekTargetSeconds(20000, 0, 0), 20);
+});
+
 // ── 3. Chunked build alignment (Task 11) ────────────────────────────────────
 
 const chatOf = (messages, extra = {}) => ({ platform: "twitch", messages, ...extra });
@@ -1746,6 +1872,59 @@ test("a Twitch part's chat is never re-derived either", { skip }, async () => {
 
   assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [0, 60000],
     "both parts keep their part-relative 0; only mergePartChats' shift applies");
+});
+
+// ── Late-join chat alignment (owner ruling RV-19) ───────────────────────────
+
+test("a YouTube job's mediaStartTime puts live chat on the file's clock", { skip }, async () => {
+  // Capture A of the chat-alignment measurement: a live-edge capture 100 days
+  // into the broadcast. Its job row carries the file's time zero; the chat
+  // file's offsets count from the broadcast start. Mutant: the player not
+  // passing mediaStartTime (the message stays 8,694,787 s out).
+  const epoch = "2026-08-19T07:43:43Z";
+  const offsetMs = Date.UTC(2026, 10, 27, 23, 10, 0) - Date.parse(epoch);
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", streamStartTime: epoch, mediaStartTime: "2026-11-27T22:56:50.408302Z", joinOffsetSeconds: 8694310 })],
+    watchState: {},
+    chat: chatOf([{ ...msg(offsetMs, "in the file"), hasOffset: true }], { platform: "youtube", streamStartTime: epoch }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [789592]);
+});
+
+// The bias and the suggestion together: an anchored Normal-latency job puts
+// a message sent at 23:10:00 on the file's clock at 23:10:00 − time zero
+// (789.592 s) and plays with the ingest-basis 20 s, so the message shows (and
+// a click on it seeks) 20 s before that. Mutant: the anchored row given the
+// start-basis 15 s.
+test("an anchored Normal-latency job shows chat 20 s before its ingest moment", { skip }, async () => {
+  const epoch = "2026-08-19T07:43:43Z";
+  const offsetMs = Date.UTC(2026, 10, 27, 23, 10, 0) - Date.parse(epoch);
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { platform: "youtube", latencyMode: "normal", chatFilename: "chat.json", streamStartTime: epoch, mediaStartTime: "2026-11-27T22:56:50.408302Z" })],
+    watchState: { chatOffset: 0, chatOffsetSet: false },
+    chat: chatOf([{ ...msg(offsetMs, "in the file"), hasOffset: true }], { platform: "youtube", streamStartTime: epoch }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  const placed = h.player.playerChatMessages[0].offsetMs;
+  assert.equal(placed, 789592);
+  assert.equal(h.player.playerCustomOffsetMs, 20000);
+  assert.equal(chatSeekTargetSeconds(placed, h.player.playerCustomOffsetMs, 0), 769.592);
+});
+
+test("a YouTube job with a join point and no mediaStartTime shifts chat by the join point", { skip }, async () => {
+  // Mutant: the player not passing joinOffsetSeconds (the message stays
+  // 90 s past its moment).
+  const h = harness.makePlayer({
+    jobs: [finished("j1", { chatFilename: "chat.json", streamStartTime: D_EPOCH, joinOffsetSeconds: 90 })],
+    watchState: {},
+    chat: chatOf([{ ...msg(95000, "five seconds in"), hasOffset: true }], { platform: "youtube", streamStartTime: D_EPOCH }),
+    storage: { "player-nico-toggle": "false", "player-sidebar-toggle": "true" },
+  });
+  await h.selectJob("j1");
+  assert.deepEqual(h.player.playerChatMessages.map((m) => m.offsetMs), [5000]);
 });
 
 // ── Legacy Twitch emote replay (Arc 1, T1-1) ────────────────────────────────

@@ -28,6 +28,15 @@ var runtimeOnlyJobFields = []string{
 	// TwitchStreamID is the worker's too, written when a manually added
 	// Twitch job starts recording a broadcast (owner ruling RV-6).
 	"TwitchStreamID",
+	// MediaStartTime is written at finalize beside JoinOffsetSeconds (owner
+	// ruling RV-19).
+	"MediaStartTime",
+	// LatencyMode is the worker's, written at the first extraction of a
+	// broadcast; ChatOffsetSet is the player's, beside ChatOffset (owner
+	// ruling RV-19).
+	"LatencyMode", "ChatOffsetSet",
+	// MissingAudio is the finalize's, written beside the archive it checked.
+	"MissingAudio",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

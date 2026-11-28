@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 29
+const schemaVersion = 31
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -151,7 +151,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     announce_found INTEGER NOT NULL DEFAULT 0,
     join_offset_seconds REAL,
     live_edge_reason TEXT,
-    twitch_stream_id TEXT  -- v29: the broadcast a manually added Twitch job recorded (owner ruling RV-6)
+    twitch_stream_id TEXT,  -- v29: the broadcast a manually added Twitch job recorded (owner ruling RV-6)
+    media_start_time TEXT,  -- v30: the wall clock of the archive's time zero (owner ruling RV-19)
+    latency_mode TEXT,      -- v30: the YouTube broadcast's latency mode (owner ruling RV-19)
+    chat_offset_set INTEGER NOT NULL DEFAULT 0, -- v30: the operator saved chat_offset (owner ruling RV-19)
+    missing_audio INTEGER NOT NULL DEFAULT 0    -- v31: the archive has no audio the stream advertised
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -821,6 +825,27 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	if version < 30 {
+		if err := db.migrateV30(); err != nil {
+			return err
+		}
+		if err := db.writeUserVersion(30); err != nil {
+			return err
+		}
+	}
+
+	// v31: missing_audio, a Finished archive with no audio stream although
+	// the stream advertised sound for what it recorded (Job.MissingAudio).
+	// Default 0, no backfill: an older archive was never checked.
+	if version < 31 {
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN missing_audio INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("v31 alter: %w", err)
+		}
+		if err := db.writeUserVersion(31); err != nil {
+			return err
+		}
+	}
+
 	// Data only, no version: see the function for why it runs on every Open.
 	db.backfillTwitchOfflineParkReasons()
 
@@ -1133,6 +1158,35 @@ func (db *Database) migrateV28() error {
 func (db *Database) migrateV29() error {
 	if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN twitch_stream_id TEXT`); err != nil && !isDuplicateColumnErr(err) {
 		return fmt.Errorf("v29 alter: %w", err)
+	}
+	return nil
+}
+
+// migrateV30 adds three jobs columns for owner ruling RV-19, all in one
+// block so the latency work needs no second schema bump:
+//
+//   - media_start_time: the wall clock (RFC 3339, sub-second) of a live
+//     YouTube archive's time zero, the first recorded segment's
+//     Ingestion-Walltime-Us or #EXT-X-PROGRAM-DATE-TIME (see the
+//     Job.MediaStartTime doc comment in types.go);
+//   - latency_mode: the broadcast's YouTube latency mode (LatencyMode);
+//   - chat_offset_set: the operator saved chat_offset (Job.ChatOffsetSet),
+//     so an operator's 0 is told from "none" and wins over a suggested
+//     offset. Default 0: an older row's non-zero chat_offset still counts as
+//     set (jobstate.HasOperatorChatOffset).
+//
+// No backfill here: a row from before the column did not keep
+// its first segment's wall clock, and the latency mode is learnt from YouTube.
+// Guarded ALTERs, so a crash mid-block re-runs it.
+func (db *Database) migrateV30() error {
+	for _, stmt := range []string{
+		`ALTER TABLE jobs ADD COLUMN media_start_time TEXT`,
+		`ALTER TABLE jobs ADD COLUMN latency_mode TEXT`,
+		`ALTER TABLE jobs ADD COLUMN chat_offset_set INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.db.ExecContext(db.getCtx(), stmt); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("v30 alter: %w", err)
+		}
 	}
 	return nil
 }

@@ -365,3 +365,31 @@ func (d *SegmentDownloader) removeRenditionMarker() {
 		d.logger.Warn("[Downloader] Could not remove a stale rendition marker", "file", d.renditionFile(), "err", err)
 	}
 }
+
+// StagedResumeNextSeq is the sequence a segmented downloader resuming the
+// staged file at outputFile would continue from: its resume sidecar's last
+// sequence plus one. ok is false when the file has no usable sidecar — none,
+// unreadable, one that describes no bytes, older than maxResumeStateAge, or
+// one claiming more bytes than the file holds — the states a resume refuses
+// whatever stream it is for. Exported for package worker, which
+// starts the half of a demuxed HLS capture that has no staged file where its
+// staged sibling resumes, so the two stay on one timeline.
+func StagedResumeNextSeq(outputFile string) (int, bool) {
+	data, err := os.ReadFile(outputFile + resumeFileSuffix)
+	if err != nil {
+		return 0, false
+	}
+	var state ResumeState
+	if json.Unmarshal(data, &state) != nil || state.LastSeq <= 0 || state.BytesWritten <= 0 {
+		return 0, false
+	}
+	if state.Timestamp > 0 {
+		if age := time.Since(time.Unix(state.Timestamp, 0)); age > maxResumeStateAge {
+			return 0, false
+		}
+	}
+	if info, err := os.Stat(outputFile); err != nil || info.Size() < state.BytesWritten {
+		return 0, false
+	}
+	return state.LastSeq + 1, true
+}

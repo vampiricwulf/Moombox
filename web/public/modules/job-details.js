@@ -2,7 +2,7 @@
  * Job Details Controller — the details dialog: render, live updates, action
  * buttons and per-job logs
  */
-import { cookieRetry, cookieRetryText, canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
+import { cookieRetry, cookieRetryText, canResumeJob, streamUrl, isImportPlaceholderId, serverErrorMessage, liveEdgeText, gapFillText, latencyText, setAsideArchiveText, unusedRecordingText, pendingAutoAction, pendingAutoActionText, isAwaitingProcessing, CANCEL_STATUSES, REINIT_STATUSES, MUX_STATUSES, MUX_PARTS_STATUSES, DELETE_STATUSES, TRIM_STATUSES, chatStatusVariant } from "./utils.js";
 
 /** A running trim's progress as the whole percentage its bar shows. */
 function trimPercent(progress) {
@@ -22,6 +22,11 @@ export function stampFactsStatus(job) {
   if (job && typeof job === "object") job.factsStatus = job.status;
   return job;
 }
+
+// The details row of a Finished job whose archive has no audio stream although
+// the stream advertised sound (jobs.missing_audio); the TUI's details pane
+// says the same on its Audio line (tui.MissingAudioText).
+const MISSING_AUDIO_ROW = '<span class="details-label"></span><span class="details-value" data-field="missing-audio"><sl-badge variant="warning" title="The archive has no audio stream, though the stream advertised sound">No audio</sl-badge></span>';
 
 /** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
 const JOB_LOG_POLL_MS = 1000;
@@ -431,6 +436,27 @@ export class JobDetailsController {
       incompleteTailValue.closest(".details-row")?.remove();
     }
 
+    // The missing-audio badge (jobs.missing_audio: the finalize found no audio
+    // stream in the archive although the stream advertised sound), created
+    // and removed the same way.
+    const missingAudioValue = content.querySelector('[data-field="missing-audio"]');
+    const shouldShowMissingAudio = job.status === "Finished" && !!job.missingAudio;
+    if (shouldShowMissingAudio && !missingAudioValue) {
+      let typeRow = null;
+      for (const row of content.querySelectorAll(".details-row")) {
+        const label = row.querySelector(".details-label");
+        if (label && label.textContent === "Type:") { typeRow = row; break; }
+      }
+      if (typeRow) {
+        const newRow = document.createElement("div");
+        newRow.className = "details-row";
+        newRow.innerHTML = MISSING_AUDIO_ROW;
+        typeRow.parentNode.insertBefore(newRow, typeRow);
+      }
+    } else if (!shouldShowMissingAudio && missingAudioValue) {
+      missingAudioValue.closest(".details-row")?.remove();
+    }
+
     // The late-start and gap-fill lines (owner decisions PR-R2, PR-R5): set
     // by a job_update long after the dialog opened, so, like the
     // incomplete-tail badge above, each is created, patched or removed here
@@ -442,6 +468,9 @@ export class JobDetailsController {
     // again and the row moves on to filled or kept.
     this.syncTextRow(content, "live-edge", "Start:", liveEdgeText(job));
     this.syncTextRow(content, "gap-fill", "Gap-fill:", gapFillText(job));
+    // The latency mode and the chat offset it suggests (owner ruling RV-19),
+    // learnt at a capture's first extraction, so a row can gain it live.
+    this.syncTextRow(content, "latency", "Latency:", latencyText(job));
     if (job.gapFill?.state === "pending" && this.app.selectedJobId === job.id) {
       this._fetchStagingFields(job.id);
     }
@@ -809,7 +838,8 @@ export class JobDetailsController {
             </span>
           </div>`;
           })() : ""}
-          ${job.status === "Finished" && job.incompleteTail ? `
+          ${job.status === "Finished" && job.missingAudio ? `<div class="details-row">${MISSING_AUDIO_ROW}</div>
+          ` : ""}${job.status === "Finished" && job.incompleteTail ? `
           <div class="details-row">
             <span class="details-label"></span>
             <span class="details-value" data-field="incomplete-tail"><sl-badge variant="warning">Incomplete tail</sl-badge></span>
@@ -823,6 +853,11 @@ export class JobDetailsController {
           <div class="details-row">
             <span class="details-label">Gap-fill:</span>
             <span class="details-value" data-field="gap-fill">${this.app.escapeHtml(gapFillText(job))}</span>
+          </div>` : ""}
+          ${latencyText(job) ? `
+          <div class="details-row">
+            <span class="details-label">Latency:</span>
+            <span class="details-value" data-field="latency">${this.app.escapeHtml(latencyText(job))}</span>
           </div>` : ""}
           ${
             // A VOD row, and a row that is not yet anything else: a Queued row
