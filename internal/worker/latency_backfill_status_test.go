@@ -46,7 +46,10 @@ func (l *infoArgsLogger) take() [][]any {
 // lasts); enter not comparing the pause reason (the capture-to-rate-limit
 // pause logs nothing); the run flag not kept between a pause and its end
 // (resumed logged as started); the run counters not counting unstated
-// answers; the moved end not signalled.
+// answers; the moved end not signalled; a stored row not signalled (an open
+// Settings line keeps the count the run started with); a caught-up walk
+// entering a pause at its hourly look with nothing to ask about (a pause
+// line, then a zero caught-up line, each time).
 func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 	t.Parallel()
 	h := newBackfillHarness(t, openTestDB(t))
@@ -79,7 +82,13 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 	h.online = true
 
 	h.step(latencyBackfillPause) // aaa
+	// A stored row signals a change while the walk stays running, so an open
+	// Settings line's count moves with each row.
+	before := changes
 	h.step(latencyBackfillPause) // bbb
+	if changes != before+1 {
+		t.Errorf("a stored row while running signalled %d changes, want 1", changes-before)
+	}
 	expect("running", []any{"latency backfill: started, asking YouTube about one recording a minute", "toAsk", 3})
 
 	h.starting = true
@@ -92,7 +101,7 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 	h.step(latencyBackfillPause)
 	h.step(latencyBackfillPause)
 	expect("rate limit", []any{"latency backfill: paused for a YouTube rate limit", "until", "2026-11-27T12:30:00Z"})
-	before := changes
+	before = changes
 	h.schedUntil = h.now.Add(45 * time.Minute)
 	h.step(latencyBackfillPause)
 	expect("rate limit extended")
@@ -107,6 +116,28 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 	h.step(latencyBackfillIdle)
 	expect("caught up", []any{"latency backfill: caught up", "filled", 3, "unstated", 1, "gaveUp", 0, "left", 0})
 
+	// Caught up, a pause condition met at the hourly look is no pause: with
+	// nothing to ask about the walk stays caught up, logs nothing, signals
+	// nothing, and waits the idle hour.
+	before = changes
+	for _, gate := range []func(bool){
+		func(on bool) { h.starting = on },
+		func(on bool) { h.online = !on },
+		func(on bool) { h.held, h.schedUntil = on, h.now.Add(30*time.Minute) },
+	} {
+		gate(true)
+		h.step(latencyBackfillIdle)
+		gate(false)
+		h.step(latencyBackfillIdle)
+	}
+	expect("caught up, then a pause condition")
+	if changes != before {
+		t.Errorf("a caught-up walk meeting a pause condition signalled %d changes, want 0", changes-before)
+	}
+	if got := h.b.snapshot().state; got != LatencyBackfillCaughtUp {
+		t.Errorf("state after the pause conditions = %q, want caught_up", got)
+	}
+
 	h.switchedOff = true
 	h.step(latencyBackfillPause)
 	h.step(latencyBackfillPause)
@@ -120,9 +151,10 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 		[]any{"latency backfill: started, asking YouTube about one recording a minute", "toAsk", 1})
 
 	// waiting→offline, →running, →capture, →rate limit, its end moved,
-	// →running, →caught up, →off, →running.
-	if changes != 9 {
-		t.Errorf("%d changes signalled, want 9", changes)
+	// →running, →caught up, →off, →running, and one per stored row (aaa,
+	// bbb, ccc, ddd).
+	if changes != 13 {
+		t.Errorf("%d changes signalled, want 13", changes)
 	}
 }
 

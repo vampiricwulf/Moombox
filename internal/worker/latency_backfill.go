@@ -308,19 +308,16 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 		return latencyBackfillPause
 	}
 	if !b.isOnline() {
-		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseOffline})
-		return latencyBackfillPause
+		return b.pauseIfWork(now, latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseOffline})
 	}
 	if !b.heldUntil.IsZero() && !now.Before(b.heldUntil) {
 		b.setHold(time.Time{})
 	}
 	if until, held := b.rateLimitHold(now); held {
-		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseRateLimit, until: until})
-		return latencyBackfillPause
+		return b.pauseIfWork(now, latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseRateLimit, until: until})
 	}
 	if b.captureStarting != nil && b.captureStarting() {
-		b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseCaptureLive})
-		return latencyBackfillPause
+		return b.pauseIfWork(now, latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseCaptureLive})
 	}
 	row, ok, err := b.next(now)
 	if err != nil {
@@ -349,6 +346,12 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 			if mode == database.LatencyModeUnstated {
 				b.run.unstated++
 			}
+			// The phase stays running, but the counts moved: both UIs read
+			// the status again, so an open Settings line counts each row (at
+			// most one push and one count a minute, only while rows fill).
+			if b.changed != nil {
+				b.changed()
+			}
 			b.logger.Debug("latency backfill: stored the broadcast's latency mode", "jobID", row.JobID, "mode", string(mode))
 		}
 	case latencyRateLimited:
@@ -370,6 +373,25 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 				"jobID", row.JobID, "tries", n, "err", errText(err))
 		}
 	}
+	return latencyBackfillPause
+}
+
+// pauseIfWork enters the pause p only when a row is waiting to be asked
+// about: a walk with nothing to ask (caught up, or a first step with no row)
+// is caught up whatever holds it, so it logs no pause and a zero caught-up
+// line after it at every hourly look. The look reads the database and sends
+// no request, and leaves the cursor where it was, so the row it found is
+// the one asked about once the pause ends. A failed read pauses: the step
+// after it reads again.
+func (b *latencyBackfill) pauseIfWork(now time.Time, p latencyPhase) time.Duration {
+	cursor := b.cursor
+	_, ok, err := b.next(now)
+	b.cursor = cursor
+	if err == nil && !ok {
+		b.enter(latencyPhase{state: LatencyBackfillCaughtUp})
+		return latencyBackfillIdle
+	}
+	b.enter(p)
 	return latencyBackfillPause
 }
 
