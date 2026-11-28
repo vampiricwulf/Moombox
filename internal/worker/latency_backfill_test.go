@@ -662,7 +662,7 @@ func TestLatencyBackfillWakeOnlyWhenTheSwitchMoved(t *testing.T) {
 // kind, its reason text, whether videoDetails came back and the client that
 // answered (an inconclusive probe's two clients and their refusals), and
 // err's text with a media URL's credentials cut. A network failure, which
-// has no answer, carries err alone.
+// has no answer, carries err alone. The settle line carries the same.
 //
 // Mutants: the answer's fields left off either line (both lines read
 // err=""); err logged unredacted (the pot value shows).
@@ -702,6 +702,7 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 	}
 	const retry = "latency backfill: the request failed; asking again on a later pass"
 	const gaveUp = "latency backfill: giving up on this recording until the next start"
+	const settled = "latency backfill: YouTube refused this recording on every try; stored it as unstated"
 	want := map[string][]any{
 		"aaa": {"jobID", "aaa", "tries", 1, "err", "", "playability", "login_required", "reason", "Sign in to confirm you're not a bot",
 			"videoDetails", false, "client", "tv_auth"},
@@ -721,8 +722,13 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 		}
 		for id, w := range want {
 			w[3] = i
-			if !reflect.DeepEqual(got[msg+" "+id], w) {
-				t.Errorf("try %d, %s: logged %v, want %v", i, id, got[msg+" "+id], w)
+			m := msg
+			if id == "bbb" && i == latencyBackfillMaxTries {
+				// Refused by both clients on every try: settled, not given up.
+				m = settled
+			}
+			if !reflect.DeepEqual(got[m+" "+id], w) {
+				t.Errorf("try %d, %s: logged %v, want %v", i, id, got[m+" "+id], w)
 			}
 		}
 		c := got[msg+" ccc"]
@@ -730,5 +736,101 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 			t.Errorf("try %d, ccc: logged %v, want jobID, tries and a redacted err only", i, c)
 		}
 		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+}
+
+// TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing: a row YouTube
+// refused on every one of its latencyBackfillMaxTries tries, an hour apart,
+// settles as unstated at the last one, counted as filled and unstated: the
+// measured terminated channel (both probe clients refused it, kind unknown),
+// the copyright removal on the answer itself, and a members-only upload the
+// session cannot see. A row with one try that failed some other way (a
+// network error, a panic, an escalation that failed) keeps today's give-up,
+// and so does the bot wall, which refuses the session and not the
+// recording.
+//
+// Mutants: the settle rule dropped (the refused rows stay NULL); settling on
+// any third failure (the mixed, panic and escalation-failed rows settle); a
+// panic counted as a refusal; an inconclusive probe whose escalation failed
+// counted; the bot wall counted; the settle reached before the last try.
+func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &infoArgsLogger{}
+	h.b.logger = log
+	const gone = "This video is no longer available because the YouTube account associated with this video has been terminated."
+	inconclusive := func(esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
+		return func() (*youtube.VideoInfo, error) {
+			return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+				Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: escErr, EscalationPlayability: esc}
+		}
+	}
+	refusal := func(p youtube.PlayabilityError, reason string) func() (*youtube.VideoInfo, error) {
+		return func() (*youtube.VideoInfo, error) {
+			return &youtube.VideoInfo{PlayabilityError: p, PlayabilityReason: reason, LatencyClassAsked: true}, nil
+		}
+	}
+	// thenOnTry answers a on every try but the n-th, which b answers.
+	thenOnTry := func(n int, a, b func() (*youtube.VideoInfo, error)) func() (*youtube.VideoInfo, error) {
+		try := 0
+		return func() (*youtube.VideoInfo, error) {
+			try++
+			if try == n {
+				return b()
+			}
+			return a()
+		}
+	}
+	copyright := refusal(youtube.PlayabilityUnknown, "This video has been removed following a copyright removal request.")
+	settles := map[string]func() (*youtube.VideoInfo, error){
+		"terminated": inconclusive(youtube.PlayabilityUnknown, errors.New("refused too")),
+		"copyright":  copyright,
+		"members":    refusal(youtube.PlayabilityMembersOnly, "Join this channel to get access to members-only content like this video."),
+	}
+	staysNull := map[string]func() (*youtube.VideoInfo, error){
+		"mixed":   thenOnTry(2, copyright, func() (*youtube.VideoInfo, error) { return nil, errors.New("dial tcp: timeout") }),
+		"panic":   thenOnTry(1, copyright, func() (*youtube.VideoInfo, error) { panic("boom") }),
+		"escfail": thenOnTry(1, copyright, inconclusive("", errors.New("HTTP 400"))),
+		"botwall": refusal(youtube.PlayabilityLoginRequired, "Sign in to confirm you're not a bot"),
+	}
+	for _, m := range []map[string]func() (*youtube.VideoInfo, error){settles, staysNull} {
+		for id, a := range m {
+			h.add(id, database.StatusFinished)
+			h.answers[id] = a
+		}
+	}
+	rows := len(settles) + len(staysNull)
+	for try := 1; try <= latencyBackfillMaxTries; try++ {
+		for range rows {
+			h.step(latencyBackfillPause)
+		}
+		h.step(latencyBackfillIdle)
+		if got := len(h.takeAsked()); got != rows {
+			t.Fatalf("try %d: %d requests, want one per row (%d)", try, got, rows)
+		}
+		for id := range settles {
+			want := database.LatencyModeNone
+			if try == latencyBackfillMaxTries {
+				want = database.LatencyModeUnstated
+			}
+			if got := h.mode(id); got != want {
+				t.Errorf("try %d: %s = %q, want %q", try, id, got, want)
+			}
+		}
+		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+	for id := range staysNull {
+		if got := h.mode(id); got != database.LatencyModeNone {
+			t.Errorf("%s = %q, want NULL (given up until the next start)", id, got)
+		}
+	}
+	// The last run's caught-up line counts the settled rows as filled.
+	lines := log.take()
+	if want := []any{"latency backfill: caught up", "filled", len(settles), "unstated", len(settles), "gaveUp", len(staysNull), "left", len(staysNull)}; len(lines) == 0 || !reflect.DeepEqual(lines[len(lines)-1], want) {
+		t.Errorf("last line %v, want %v", lines[len(lines)-1:], want)
+	}
+	h.step(latencyBackfillIdle)
+	if got := h.takeAsked(); len(got) != 0 {
+		t.Errorf("asked %v after the last try", got)
 	}
 }
