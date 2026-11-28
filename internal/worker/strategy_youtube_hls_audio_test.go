@@ -69,17 +69,6 @@ func newHlsAudioServer(t *testing.T, master string) *hlsAudioServer {
 	return s
 }
 
-func (s *hlsAudioServer) saw(sub string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range s.paths {
-		if strings.Contains(p, sub) {
-			return true
-		}
-	}
-	return false
-}
-
 func hlsAudioInfo(srv *hlsAudioServer, source string) *youtube.VideoInfo {
 	return &youtube.VideoInfo{
 		StreamStatus:      youtube.StreamLive,
