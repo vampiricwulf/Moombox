@@ -35,10 +35,10 @@ import (
 //     that returned videoDetails gave the same latencyClass, ended streams
 //     included (the 2026-11-27 research);
 //   - an answer is stored for good (classifyLatencyAnswer): the stated mode,
-//     or LatencyModeUnstated when videoDetails carried no class (an ordinary
-//     upload: never a stream) or when YouTube calls the video private, gone
-//     or blocked here (isTerminalPlayability, from the probe and its
-//     escalation alike);
+//     or LatencyModeUnstated when a playable answer's videoDetails carried
+//     no class (an ordinary upload: never a stream) or when YouTube calls
+//     the video private, gone or blocked here (isTerminalPlayability, from
+//     the probe and its escalation alike);
 //   - anything else leaves the row NULL: it is asked again on a later pass,
 //     no sooner than latencyBackfillRetryAfter, and at most
 //     latencyBackfillMaxTries times in one process, so one bad video cannot
@@ -137,11 +137,13 @@ func (w *DownloadWorker) latencyProbe(ctx context.Context, videoID string) (*you
 }
 
 // latencyProbeVia is latencyProbe over its three calls: probe, then authProbe
-// for a members-only refusal with no videoDetails while signedIn.
+// for a members-only refusal that named no class (with or without
+// videoDetails: a refusal often carries the title and channel) while
+// signedIn.
 func latencyProbeVia(ctx context.Context, videoID string,
 	probe, authProbe func(context.Context, string) (*youtube.VideoInfo, error), signedIn func() bool) (*youtube.VideoInfo, error) {
 	info, err := probe(ctx, videoID)
-	if err == nil && info != nil && !info.LatencyClassAsked &&
+	if err == nil && info != nil && info.LatencyClass == "" &&
 		info.PlayabilityError == youtube.PlayabilityMembersOnly && signedIn() {
 		return authProbe(ctx, videoID)
 	}
@@ -322,8 +324,11 @@ const (
 
 // classifyLatencyAnswer reads one request's answer (owner ruling RV-19):
 //
-//   - videoDetails came back: the stated mode, LatencyModeUnstated without a
-//     class it knows (an ordinary upload says none);
+//   - a class came back: the stated mode (LatencyModeUnstated for one this
+//     build does not know);
+//   - a playable answer with videoDetails and no class: LatencyModeUnstated
+//     (an ordinary upload says none). A refusal's videoDetails without a
+//     class settle nothing: the rules below read its playability;
 //   - refused for a rate limit (the probe's own, its escalation's, or a 429
 //     on the authenticated probe): latencyRateLimited;
 //   - refused as private, unavailable or region-blocked by every client
@@ -348,8 +353,14 @@ func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.Latency
 	switch {
 	case info == nil:
 		return "", latencyTransient
-	case info.LatencyClassAsked:
+	case info.LatencyClass != "":
 		return database.ParseLatencyClass(info.LatencyClass), latencyAnswered
+	case info.LatencyClassAsked && info.PlayabilityError == "":
+		// A playable answer with videoDetails and no class: YouTube would
+		// not say. A refusal's details without a class say nothing (a
+		// members-only or age-gated archive often carries its title and
+		// channel), so it falls to the playability rules below.
+		return database.LatencyModeUnstated, latencyAnswered
 	case info.PlayabilityError == youtube.PlayabilityRateLimited:
 		return "", latencyRateLimited
 	case isTerminalPlayability(info.PlayabilityError):

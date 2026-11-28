@@ -16,7 +16,8 @@ import (
 //
 // Mutants: the job.LatencyMode guard dropped (the later LOW answer replaces
 // NORMAL); the VOD arm storing a classless answer (the upload reads
-// unstated); the upcoming case storing; the in-memory job not synced.
+// unstated); the upcoming case storing; the in-memory job not synced; a
+// refusal's classless videoDetails stored as unstated.
 func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
 	info := func(status youtube.StreamStatus, class string, asked bool) *youtube.VideoInfo {
@@ -37,6 +38,11 @@ func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 		{"upcoming", info(youtube.StreamUpcoming, normal, true), database.LatencyModeNone},
 		{"not a stream", info(youtube.StreamNotAStream, "", true), database.LatencyModeNone},
 		{"no videoDetails", info(youtube.StreamLive, "", false), database.LatencyModeNone},
+		{"a members-only refusal with details and no class", func() *youtube.VideoInfo {
+			i := info(youtube.StreamLive, "", true)
+			i.PlayabilityError = youtube.PlayabilityMembersOnly
+			return i
+		}(), database.LatencyModeNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp, db := newTestSP(t)

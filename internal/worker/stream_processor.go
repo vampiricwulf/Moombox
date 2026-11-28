@@ -993,7 +993,8 @@ func (sp *StreamProcessor) applyJobMetadata(job *database.Job, info *youtube.Vid
 // answer that does not say keeps it).
 //
 //   - live or post_live: the stated mode, or LatencyModeUnstated when the
-//     response carried videoDetails without a class YouTube gave;
+//     response carried videoDetails without a class YouTube gave (only a
+//     playable one: a refusal's classless details store nothing);
 //   - vod: only when the response names a class at all, which is what tells
 //     a past stream's VOD from an ordinary upload (YouTube gives an ended
 //     stream's class on every client; an upload has none, and keeps NULL);
@@ -1004,6 +1005,11 @@ func latencyModeToStore(job *database.Job, info *youtube.VideoInfo) (database.La
 	}
 	switch info.StreamStatus {
 	case youtube.StreamLive, youtube.StreamPostLive:
+		if info.LatencyClass == "" && info.PlayabilityError != "" {
+			// A refusal's videoDetails without a class (a members-only
+			// broadcast seen signed out) say nothing; a later answer may.
+			return "", false
+		}
 		return database.ParseLatencyClass(info.LatencyClass), true
 	case youtube.StreamVOD:
 		if info.LatencyClass != "" {

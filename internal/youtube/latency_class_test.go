@@ -11,10 +11,14 @@ import (
 // reaches VideoInfo (owner ruling RV-19); a response with videoDetails and no
 // class is asked-but-unstated; one without videoDetails is not asked; and a
 // cascade whose winner carried no videoDetails takes the first response's
-// that did (web_embedded and web_creator return none).
+// that did (web_embedded and web_creator return none), the first to NAME a
+// class winning over an earlier one with videoDetails and none (a refusal
+// can carry details without the class).
 //
 // Mutants: readLatencyClass reporting asked for an empty videoDetails;
-// noteLatencyClass letting a later response replace the first;
+// noteLatencyClass letting a later response replace the first; the first
+// videoDetails response winning even with no class (the classless
+// response ahead of NORMAL wins);
 // finishExtraction not stamping the extraction's class.
 func TestLatencyClassThroughTheCascade(t *testing.T) {
 	for _, tc := range []struct {
@@ -57,7 +61,7 @@ func TestLatencyClassThroughTheCascade(t *testing.T) {
 	}
 
 	ctx := withExtractionState(context.Background())
-	for _, vd := range []string{``, `{"videoId": "test1234567", "latencyClass": "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}`,
+	for _, vd := range []string{``, `{"videoId": "test1234567"}`, `{"videoId": "test1234567", "latencyClass": "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}`,
 		`{"videoId": "test1234567", "latencyClass": "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW"}`} {
 		if _, err := p.parsePlayerResponse(ctx, response(vd), "", nil, "test1234567"); err != nil {
 			t.Fatal(err)

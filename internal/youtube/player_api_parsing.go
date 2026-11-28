@@ -445,14 +445,17 @@ func (s *extractionState) stretchedRatio() (float64, bool) {
 }
 
 // noteLatencyClass records a response's latencyClass when it is the first
-// to carry videoDetails. Nil outside a cascade.
+// to carry videoDetails, or the first to name a class after earlier ones
+// that carried videoDetails without one (a refusal can carry the title and
+// channel and no class, and a later client's real class must not be lost to
+// it). Nil outside a cascade.
 func (s *extractionState) noteLatencyClass(class string, asked bool) {
 	if s == nil || !asked {
 		return
 	}
 	s.langsMu.Lock()
 	defer s.langsMu.Unlock()
-	if !s.latencyAsked {
+	if !s.latencyAsked || (s.latencyClass == "" && class != "") {
 		s.latencyClass, s.latencyAsked = class, true
 	}
 }

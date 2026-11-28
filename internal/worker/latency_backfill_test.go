@@ -20,7 +20,9 @@ import (
 // Mutants: the class parsed only for a live answer (the VOD cases fail);
 // a lone terminal refusal from ANDROID_VR taken as final while its
 // escalation failed (the "escalation failed" case); a members-only refusal
-// taken as final; the escalation's rate limit read as transient.
+// taken as final; the escalation's rate limit read as transient; a
+// refusal's classless videoDetails read as unstated (the members-only and
+// login-required "with details" cases).
 func TestClassifyLatencyAnswer(t *testing.T) {
 	t.Parallel()
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
@@ -46,6 +48,14 @@ func TestClassifyLatencyAnswer(t *testing.T) {
 			nil, database.LatencyModeUnstated, latencyAnswered},
 		{"members only, no details", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly},
 			nil, "", latencyTransient},
+		{"members only with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true},
+			nil, "", latencyTransient},
+		{"login required with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityLoginRequired, LatencyClassAsked: true},
+			nil, "", latencyTransient},
+		{"private with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate, LatencyClassAsked: true},
+			nil, database.LatencyModeUnstated, latencyAnswered},
+		{"members only with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClass: normal, LatencyClassAsked: true},
+			nil, database.LatencyModeNormal, latencyAnswered},
 		{"login required (bot wall)", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityLoginRequired},
 			nil, "", latencyTransient},
 		{"a rate-limited answer", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityRateLimited},
@@ -350,12 +360,13 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 }
 
 // TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal: the walk's
-// request is the status probe, and for a members-only refusal with no
-// videoDetails the authenticated TV probe, but only while signed in; any
-// other answer is returned as it is.
+// request is the status probe, and for a members-only refusal that named no
+// class (with or without videoDetails) the authenticated TV probe, but only
+// while signed in; any other answer is returned as it is.
 //
 // Mutants: the follow-up dropped (members-only signed in returns the
-// refusal); the signed-in check dropped (a signed-out jar asks TV).
+// refusal); the signed-in check dropped (a signed-out jar asks TV); the
+// follow-up skipped for a refusal that carried videoDetails.
 func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 	t.Parallel()
 	member := &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
@@ -367,7 +378,9 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 	}{
 		{"members only, signed in", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly}, true, true},
 		{"members only, signed out", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly}, false, false},
-		{"members only with details", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true}, true, false},
+		{"members only with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true}, true, true},
+		{"members only with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true,
+			LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}, true, false},
 		{"an answer", &youtube.VideoInfo{LatencyClassAsked: true}, true, false},
 		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate}, true, false},
 	} {
