@@ -143,6 +143,10 @@ func (s *runState) wireWebSocket() {
 			// Every monitor's health list (owner ruling R-H1), as /api/status
 			// and each channel_monitors frame carry them.
 			"channelMonitors": s.channelMonitors(),
+			// The latency-mode backfill's status (owner ruling RV-20), as
+			// GET /api/latency-backfill and each latency_backfill frame
+			// carry it.
+			"latencyBackfill": s.dlWorker.LatencyBackfillStatus(),
 		}
 	}
 

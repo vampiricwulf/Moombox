@@ -1899,6 +1899,13 @@ type StatusRouteDeps struct {
 	// from (owner ruling R-H1). channelHealth, the merged list, is unchanged.
 	// The WebSocket's channel_monitors frame pushes each change of the flag.
 	GetChannelMonitors func() any
+	// GetLatencyBackfill is the latency-mode backfill's derived status
+	// (worker.DownloadWorker.LatencyBackfillStatus, owner ruling RV-20),
+	// served alone at GET /api/latency-backfill: the Settings line beside
+	// monitors.latency_backfill reads it when Settings opens, and the
+	// WebSocket's latency_backfill frame pushes each change. nil leaves the
+	// route unregistered.
+	GetLatencyBackfill func() worker.LatencyBackfillStatus
 }
 
 // hostUTCOffsetMinutes is the host's zone offset from UTC right now, in
@@ -1915,6 +1922,11 @@ func hostUTCOffsetMinutes() int {
 
 // StatusRoute returns the server status.
 func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
+	if deps.GetLatencyBackfill != nil {
+		r.Get("/api/latency-backfill", func(rw http.ResponseWriter, req *http.Request) {
+			jsonResponse(rw, deps.GetLatencyBackfill())
+		})
+	}
 	r.Get("/api/status", func(rw http.ResponseWriter, req *http.Request) {
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)

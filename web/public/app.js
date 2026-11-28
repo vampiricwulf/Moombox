@@ -121,6 +121,8 @@ export class MoomboxApp {
     // frame. The Settings channel list derives its "Checks failing" flag
     // from it (failingChannel in utils.js). null until read.
     this.channelMonitors = null;
+    // The latency-mode backfill's status (setLatencyBackfill); null until read.
+    this.latencyBackfill = null;
     // One-shot timer for the earliest future hold end in admissionHolds: a
     // row's own hold runs out with no frame to say so (setAdmissionHolds).
     this._holdExpiryTimer = null;
@@ -431,6 +433,9 @@ export class MoomboxApp {
           this.stats.activate();
         } else if (e.detail.name === "logs") {
           this.logPanel.onShow();
+        } else if (e.detail.name === "settings") {
+          // The backfill's counts move a recording a minute: read them fresh.
+          this.settings.loadLatencyBackfill();
         }
         // Detach the player's document-level keydown listener when leaving
         // the player tab — it used to run for every keystroke app-wide even
@@ -1639,6 +1644,7 @@ export class MoomboxApp {
         // indicator read it (stats.onAdmissionHolds).
         if (p.admissionHolds) this.setAdmissionHolds(p.admissionHolds);
         if (p.channelMonitors) this.setChannelMonitors(p.channelMonitors);
+        if (p.latencyBackfill) this.setLatencyBackfill(p.latencyBackfill);
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
@@ -1993,6 +1999,10 @@ export class MoomboxApp {
         this.setChannelMonitors(p);
         break;
 
+      case "latency_backfill":
+        this.setLatencyBackfill(p);
+        break;
+
       case "backfill_status":
         this.handleBackfillStatus(p);
         break;
@@ -2031,6 +2041,16 @@ export class MoomboxApp {
   setChannelMonitors(monitors) {
     this.channelMonitors = monitors || null;
     this.settings.refreshChannelHealthBadges();
+  }
+
+  /**
+   * setLatencyBackfill stores the latency-mode backfill's status (owner
+   * ruling RV-20: initial_state, each latency_backfill frame and the read
+   * Settings makes when it opens) and redraws its Settings line.
+   */
+  setLatencyBackfill(status) {
+    this.latencyBackfill = status || null;
+    this.settings.renderLatencyBackfill();
   }
 
   /**
