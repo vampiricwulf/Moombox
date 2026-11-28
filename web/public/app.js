@@ -1794,6 +1794,21 @@ export class MoomboxApp {
             // indicator counts rows by status, and no status moved.
             this.updateJobCard(updatedJob);
           }
+        } else if (this._isAgedOut(updatedJob, Date.now())) {
+          // A row the list classifies as archived, changed by a write that
+          // leaves updated_at alone: the latency-mode backfill stores one
+          // archived recording about once a minute
+          // (database.SetLatencyModeIfUnset). It stays in the Archived list;
+          // pushing it into Tasks only for _evaluateArchiveBoundary to take
+          // it out again drew a card there and the archived list twice.
+          const idx = this.archivedJobs.findIndex((j) => j.id === updatedJob.id);
+          if (idx !== -1) {
+            this.details._preserveStagingFields([this.archivedJobs[idx]], [updatedJob]);
+            this.archivedJobs[idx] = updatedJob;
+          } else {
+            this.archivedJobs.push(updatedJob);
+          }
+          this._scheduleArchivedRender();
         } else {
           // Job not in the active array — either brand new, or one that had
           // aged into archivedJobs and just had a field change that bumped its
@@ -2823,6 +2838,21 @@ export class MoomboxApp {
   }
 
   /**
+   * Whether the list classifies job as archived at nowMs: Finished, with an
+   * updatedAt older than hideFinishedAgeDays (never, below 0). Strict age >
+   * threshold, matching the server's `age > hideAge`: at 0 days every
+   * Finished job with a past updatedAt is archived, one aged exactly 0 ms is
+   * not (the server keeps it).
+   */
+  _isAgedOut(job, nowMs) {
+    const ageDays = this.hideFinishedAgeDays;
+    if (ageDays < 0 || job.status !== "Finished" || !job.updatedAt) return false;
+    const t = Date.parse(job.updatedAt);
+    if (Number.isNaN(t)) return false;
+    return nowMs - t > ageDays * 86400 * 1000;
+  }
+
+  /**
    * Move Finished jobs in `this.jobs` that have aged past hideFinishedAgeDays
    * into `this.archivedJobs`. Mirrors the server's filterJobsByAge logic and
    * the TUI's isJobArchived check so the active panel reclassifies as time
@@ -2838,21 +2868,12 @@ export class MoomboxApp {
    *   silent: skip the post-move re-render (caller will render).
    */
   _evaluateArchiveBoundary({ silent = false } = {}) {
-    const ageDays = this.hideFinishedAgeDays;
-    if (ageDays < 0 || !this.jobs.length) return false;
-    const cutoffMs = ageDays * 86400 * 1000;
+    if (this.hideFinishedAgeDays < 0 || !this.jobs.length) return false;
     const nowMs = Date.now();
     const moved = [];
     for (let i = this.jobs.length - 1; i >= 0; i--) {
       const j = this.jobs[i];
-      if (j.status !== "Finished" || !j.updatedAt) continue;
-      const t = Date.parse(j.updatedAt);
-      if (Number.isNaN(t)) continue;
-      // Strict age > threshold, matching the server's `age > hideAge`. When
-      // ageDays === 0 cutoffMs is 0, so this archives every Finished job with
-      // a past updatedAt — without the always-true `|| ageDays === 0` clause
-      // that previously also swept a job aged exactly 0ms (server keeps it).
-      if (nowMs - t > cutoffMs) {
+      if (this._isAgedOut(j, nowMs)) {
         this.jobs.splice(i, 1);
         const existingIdx = this.archivedJobs.findIndex(a => a.id === j.id);
         if (existingIdx !== -1) {

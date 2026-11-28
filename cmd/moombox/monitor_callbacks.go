@@ -2275,13 +2275,17 @@ func (s *runState) wireMonitorCallbacks() {
 		// Follow the job's status for per-job log routing (CORE-12).
 		s.syncJobLogRoutingOnChange(ev)
 		// No archive gate. One used to skip broadcasting rows the list
-		// classifies as archived, but every event here comes from
+		// classifies as archived, and nearly every event here comes from
 		// UpdateJobFields, which stamps updated_at with the write time — so it
 		// could only ever fire at hide_finished_age_days = 0, where a row is
 		// archived the second it is written, and there it swallowed the
 		// Muxing → Finished transition itself: the dashboard kept a "Muxing"
 		// card until the next reconnect. The client archives a Finished row
-		// it is sent on its own (_evaluateArchiveBoundary).
+		// it is sent on its own (_evaluateArchiveBoundary). The one write that
+		// leaves updated_at alone is the latency-mode backfill's
+		// (SetLatencyModeIfUnset), so an archived recording stays archived:
+		// the client replaces its archived copy in place (the _isAgedOut
+		// branch of job_update) instead of drawing it in Tasks.
 		// A tick that moved only progress columns is broadcast as the slim
 		// job_progress frame; everything else — every state transition,
 		// status included — stays on job_update, which the client handles

@@ -470,3 +470,33 @@ test("a row deleted while the tab is hidden is redrawn at once", { skip }, async
   h.app.handleMessage({ type: "job_deleted", payload: { id: "a1" } });
   assert.deepEqual(cards(h).map((c) => c.dataset.jobId), ["a0", "a2"]);
 });
+
+// The latency-mode backfill stores one archived recording at a time with a
+// write that leaves updated_at alone (database.SetLatencyModeIfUnset), and the
+// server sends that row as a job_update. It stays in Archived, replaced in
+// place, and an open details dialog on it is refreshed; no card is drawn in
+// Tasks on the way.
+//
+// Mutant: drop the `_isAgedOut` branch of job_update — the row is pushed
+// into Tasks and a Tasks card is inserted before the boundary re-archives it.
+test("a stamp-less change to an archived row stays in Archived", { skip }, async () => {
+  const h = await open({ "GET /api/jobs/archived": () => rows(3) });
+  h.app.hideFinishedAgeDays = 7;
+  await h.app.fetchArchivedJobs();
+  h.app.selectedJobId = "a1";
+  const refreshed = [];
+  const realUpdate = h.app.details.updateJobDetails.bind(h.app.details);
+  h.app.details.updateJobDetails = (job) => { refreshed.push(job.id); return realUpdate(job); };
+  const inserted = [];
+  const realInsert = h.app._insertJobCard.bind(h.app);
+  h.app._insertJobCard = (job) => { inserted.push(job.id); return realInsert(job); };
+
+  h.app.handleMessage({ type: "job_update", payload: row(1, { latencyMode: "low" }) });
+
+  assert.deepEqual(h.app.jobs.map((j) => j.id), [], "the archived row was pushed into Tasks");
+  assert.deepEqual(inserted, [], "a Tasks card was drawn for an archived row");
+  assert.deepEqual(h.app.archivedJobs.map((j) => j.id), ["a0", "a1", "a2"]);
+  assert.equal(h.app.archivedJobs[1].latencyMode, "low", "the archived copy was not replaced");
+  assert.deepEqual(refreshed, ["a1"], "the open dialog was not refreshed");
+  assert.equal(cards(h).length, 3);
+});
