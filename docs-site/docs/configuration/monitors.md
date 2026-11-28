@@ -350,7 +350,9 @@ VOD downloads), so the player can
 [suggest a chat offset](../guide/player.md#suggested-offset-youtube) for it.
 It asks about one recording a minute, starting 5 minutes after Moombox
 starts, and pauses while you are offline, while YouTube is rate-limiting
-requests, and while a capture is live.
+requests, and while a live capture is starting (the moment between YouTube
+going live and the first segment; once the capture is recording, the walk
+goes on).
 
 Turning it off stops only this background walk, before its next request. A
 new capture or download still stores its latency setting when it starts,
@@ -364,12 +366,13 @@ what it is doing, for example `212 of 540 recordings done`,
 `caught up (540 recordings)`,
 `paused: YouTube rate limit until 14:05 (212 of 540 recordings done)`,
 `paused: offline (212 of 540 recordings done)`,
-`paused: a capture is live (212 of 540 recordings done)` or
+`paused: a capture is starting (212 of 540 recordings done)` or
 `off (212 of 540 recordings done)`. The log has a
 `latency backfill:` line each time it starts, pauses, resumes, catches up
 or is switched off or on (see
-[Player](../guide/player.md#suggested-offset-youtube)), and each recording
-it has asked about shows a **Latency** row in its job details.
+[Player](../guide/player.md#suggested-offset-youtube)), and each stream
+recording it has filled shows a **Latency** row in its job details (a
+downloaded upload that was never a stream gets none).
 
 When to turn it off: if you do not use the player's chat overlay on old
 recordings, or want Moombox to make no requests to YouTube beyond what your

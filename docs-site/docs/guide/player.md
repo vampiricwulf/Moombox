@@ -159,7 +159,7 @@ YouTube would not name a setting for get no suggestion, and the box works as
 it always did. Recordings and VOD downloads made before this version get
 their latency setting from YouTube in the background; new ones get it when
 they are recorded or downloaded. In the background Moombox asks about one recording a minute, only while online, and pauses while
-YouTube is rate-limiting it or a capture is live, so the suggestion
+YouTube is rate-limiting it or a live capture is starting, so the suggestion
 appears on them over time. A video that is now private or deleted cannot be
 asked about, and keeps no suggestion. The job details show the setting and the suggestion in a **Latency**
 row. The switch for this background walk is
@@ -175,7 +175,7 @@ How to tell it ran:
   a start), `212 of 540 recordings done`,
   `paused: offline (212 of 540 recordings done)`,
   `paused: YouTube rate limit until 14:05 (212 of 540 recordings done)`,
-  `paused: a capture is live (212 of 540 recordings done)`,
+  `paused: a capture is starting (212 of 540 recordings done)`,
   `caught up (540 recordings)` or `off (212 of 540 recordings done)`. When
   YouTube did not answer for some recordings, it says so:
   `caught up (538 of 540 recordings done; 2 not answered yet)`. Those are
@@ -186,7 +186,7 @@ How to tell it ran:
   about one recording a minute` (with how many are left, `toAsk`),
   `latency backfill: paused while the device is offline`,
   `latency backfill: paused for a YouTube rate limit` (with `until`),
-  `latency backfill: paused while a capture is live`,
+  `latency backfill: paused while a capture is starting`,
   `latency backfill: resumed`, `latency backfill: caught up` (with
   `filled`, how many it stored this run, `unstated`, how many of those
   YouTube would not name a setting for, `gaveUp`, how many it stopped asking
