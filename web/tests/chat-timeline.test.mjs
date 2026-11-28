@@ -493,3 +493,21 @@ test("correctLegacyTwitchEmotes: a non-Twitch file is not its business", () => {
   correctLegacyTwitchEmotes(yt);
   assert.deepEqual(yt.messages[0].message, [{ text: "hi" }]);
 });
+
+// A post-live DRM capture (a VOD row whose HLS held only the broadcast's
+// last ~2 h) is anchored too (Arc CO fix round): its replay chat counts from
+// the broadcast's start, so the bias is how far into the broadcast the file
+// begins, and a message 8 h 1 min in lands 1 min into the file, not 8 h past
+// its end as the start-time rule put it.
+//
+// Mutant: the anchor branch dropped (bias 0 from the start-time rule, the
+// message lands at 8 h 1 min).
+test("computeChatBiasMs: a post-live capture from the last 2 h lands its chat inside the file", () => {
+  const start = "2026-11-27T10:00:00Z";
+  const bias = computeChatBiasMs({
+    platform: "youtube", chatStreamStartTime: start, jobStreamStartTime: start,
+    mediaStartTime: "2026-11-27T18:00:00.250Z",
+  });
+  const msgOffsetMs = (8 * 3600 + 60) * 1000;
+  assert.equal(msgOffsetMs - bias, 59750);
+});
