@@ -178,8 +178,8 @@ How to tell it ran:
   `paused: a capture is starting (212 of 540 recordings done)`,
   `caught up (540 recordings)` or `off (212 of 540 recordings done)`. When
   YouTube did not answer for some recordings, it says so:
-  `caught up (538 of 540 recordings done; 2 not answered yet)`. Those are
-  asked again an hour later, up to three times, and after that at the next
+  `caught up (538 of 540 recordings done; 2 not answered yet)`. Each is
+  asked again an hour later, up to three tries in all, and after that at the next
   start.
 - **The log**, at the default level, one line each time the walk changes
   state, never once a minute: `latency backfill: started, asking YouTube

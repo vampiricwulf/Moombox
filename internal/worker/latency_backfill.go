@@ -245,8 +245,10 @@ func (w *DownloadWorker) runLatencyBackfill(ctx context.Context, b *latencyBackf
 // sleep waits d before the next step, or less when a wake finds the switch
 // moved since the last step (off to on, or on to off): the step then runs at
 // once, to stop or resume now. A wake that finds it where it was goes on
-// waiting out d, so a Settings save never makes the walk ask sooner than its
-// pace. Reports false when ctx ends.
+// waiting out d, so a save that leaves the switch where it was never makes the
+// walk ask sooner. Switching it on asks at once, so off and straight back on
+// can send a request less than latencyBackfillPause after the last one (the
+// rate-limit holds still stand). Reports false when ctx ends.
 func (b *latencyBackfill) sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()

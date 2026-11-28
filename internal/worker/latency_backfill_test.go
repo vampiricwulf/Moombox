@@ -566,8 +566,8 @@ func TestLatencyBackfillSwitch(t *testing.T) {
 
 // TestLatencyBackfillWakeOnlyWhenTheSwitchMoved: a wake ends the walk's
 // wait at once when the switch moved since the last step, and is ignored
-// when it did not, so a Settings save never makes the walk ask sooner than
-// its pace.
+// when it did not, so a Settings save that leaves the switch where it was
+// never makes the walk ask sooner.
 //
 // Mutants: sleep ignoring the wake (the moved case waits out the timer);
 // sleep returning on every wake (the unmoved case returns early).
