@@ -281,7 +281,8 @@ const muxStartTolerance = 0.5
 // it, and so is a copy of one input, whose tracks keep their places in it.
 func (o *DownloadOrchestrator) alignStagedInputs(ctx context.Context, jobID string, ins *stagedInputs) error {
 	if ins.video != nil && ins.audio != nil && isStagedHlsPair(ins.video.path, ins.audio.path) {
-		return o.alignHlsPair(ctx, jobID, ins)
+		o.alignHlsPair(jobID, ins)
+		return nil
 	}
 	if ins.video == nil || ins.audio == nil || (!ins.video.lostStart() && !ins.audio.lostStart()) {
 		return nil
@@ -326,49 +327,57 @@ func isStagedHlsPair(video, audio string) bool {
 	return stem(video) == "video.ts" && stem(audio) == hlsAudioFile
 }
 
-// mpegtsWrapSeconds is the span of MPEG-TS's 33-bit 90 kHz timestamps, after
-// which they wrap to 0.
-const mpegtsWrapSeconds = float64(1<<33) / 90000
-
 // hlsPairMaxSkew bounds how far apart the two halves of an HLS pair may
 // start for alignHlsPair to place them: a downloader that started a segment
-// or a few later than its sibling is minutes at most. Beyond it the two do
-// not share a clock, and an offset worked out from them would be nonsense.
+// or a few later than its sibling is minutes at most. Beyond it the records
+// cannot be describing one capture, and the pair is muxed as it stands.
 const hlsPairMaxSkew = 300.0
 
 // alignHlsPair places the two halves of a demuxed HLS capture (video.ts and
 // audio.ts) against each other. They are recorded by two downloaders, each
 // from where its own playlist's window started when it first read it, so one
 // can begin a segment (or, after a failure, a few) after the other; and
-// FFmpeg starts every input file at its own first timestamp, which played
-// such a pair out of step by that much for the whole archive. Both are cut
-// from one encoder's output and carry its MPEG-TS timestamps, so ffprobe's
-// start time of each places them: the later one is delayed by the
-// difference (engine.InputOffsets), and the archive starts at the earlier
-// one's first frame. A pair whose start cannot be read refuses the copy, with
-// staging kept, as alignStagedInputs refuses; one whose starts are further
-// apart than hlsPairMaxSkew is muxed as it stands, with a Warn.
-func (o *DownloadOrchestrator) alignHlsPair(ctx context.Context, jobID string, ins *stagedInputs) error {
-	var starts [2]float64
-	for i, in := range []*stagedInput{ins.video, ins.audio} {
-		p := o.runFFprobe(ctx, in.read)
-		if p == nil {
-			return fmt.Errorf("where the staged %s begins cannot be read to place it against the other half of its HLS capture, so the two could play out of step — staging is preserved; mux them by hand",
-				filepath.Base(in.path))
+// FFmpeg starts every input file at its own first timestamp, which would
+// play such a pair out of step by that much for the whole archive.
+//
+// Their MPEG-TS timestamps cannot place them: YouTube's video variant and
+// audio rendition run on unrelated clocks (2026-11-28: a video.ts starting at
+// 17149.8 s beside an audio.ts ffprobe gives no start time at all). Their
+// #EXT-X-PROGRAM-DATE-TIME can: each playlist dates its segments on one wall
+// clock, and the same media sequence carries the same date in both (the same
+// capture: both began at sq 1740509, dated 01:14:05.026Z). The first
+// segment's date of each file is in mediaStartFile, so the later one is
+// delayed by the difference (engine.InputOffsets) and the archive starts at
+// the earlier one's first frame — the time zero mediaStartTime stores. With
+// no date for one of them, two halves recordingStartFile says began at the
+// same sequence are level, as FFmpeg muxes them; any other pair (an aside,
+// whose records stayed with the live names, a staging dir an older binary
+// left) is muxed as it stands, said in the log.
+func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
+	wall := func(p string) (time.Time, bool) {
+		v, ok := readStagingRecord[string](filepath.Dir(p), mediaStartFile)[filepath.Base(p)]
+		if !ok {
+			return time.Time{}, false
 		}
-		starts[i] = p.StartSec
+		t, err := time.Parse(time.RFC3339Nano, v)
+		return t, err == nil
 	}
-	diff := starts[1] - starts[0] // audio after video when positive
-	switch {
-	case diff > mpegtsWrapSeconds/2:
-		diff -= mpegtsWrapSeconds
-	case diff < -mpegtsWrapSeconds/2:
-		diff += mpegtsWrapSeconds
+	vw, vok := wall(ins.video.path)
+	aw, aok := wall(ins.audio.path)
+	if !vok || !aok {
+		vs, vsok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
+		as, asok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
+		if !vsok || !asok || vs != as {
+			o.logger.Info("where the two halves of an HLS capture start is not recorded; they are muxed as they stand",
+				"video", ins.video.path, "audio", ins.audio.path, "jobID", jobID)
+		}
+		return
 	}
+	diff := aw.Sub(vw).Seconds() // audio after video when positive
 	if math.Abs(diff) > hlsPairMaxSkew {
-		o.logger.Warn("the two halves of an HLS capture start too far apart to share a clock; they are muxed as they stand",
-			"video", ins.video.path, "audio", ins.audio.path, "skewSeconds", diff, "jobID", jobID)
-		return nil
+		o.logger.Warn("the two halves of an HLS capture are recorded as starting too far apart to be one capture; they are muxed as they stand",
+			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
+		return
 	}
 	if diff > 0 {
 		ins.offsets = engine.InputOffsets{Audio: diff}
@@ -376,11 +385,10 @@ func (o *DownloadOrchestrator) alignHlsPair(ctx context.Context, jobID string, i
 		ins.offsets = engine.InputOffsets{Video: -diff}
 	}
 	ins.aligned = true
-	if math.Abs(diff) >= 0.5 {
+	if diff != 0 {
 		o.logger.Info("the two halves of an HLS capture start apart; the later one is placed after the earlier",
 			"video", ins.video.path, "audio", ins.audio.path, "audioAfterVideoSeconds", diff, "jobID", jobID)
 	}
-	return nil
 }
 
 // stagedStart is where a staged input begins on its capture's timeline: its

@@ -163,7 +163,8 @@ func writeOffsetAudioTSFixture(t *testing.T, ffmpegPath, path string, seconds, o
 // began, so one can start a segment after the other. FFmpeg starts each
 // input at its own first timestamp and played such a pair 5 s out of step;
 // the copy delays the later half by the difference instead, read from the
-// two files' MPEG-TS start times.
+// first segments' #EXT-X-PROGRAM-DATE-TIME (media-start.json): the MPEG-TS
+// clocks of YouTube's variant and rendition are unrelated.
 //
 // Mutant: alignHlsPair not called (both tracks start at 0 in the copy).
 func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
@@ -176,12 +177,20 @@ func TestCopyStagedPlacesTheHlsPairOnOneTimeline(t *testing.T) {
 		{"audio a segment late", 100, 105, 0, 5},
 		{"video a segment late", 105, 100, 5, 0},
 		{"level", 100, 100, 0, 0},
+		{"no dates recorded", -1, -1, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			video, audio := filepath.Join(dir, "video.ts"), filepath.Join(dir, "audio.ts")
-			writeOffsetTSFixture(t, ffmpegPath, video, 20, tc.videoAt)
-			writeOffsetAudioTSFixture(t, ffmpegPath, audio, 20, tc.audioAt)
+			// The two files' MPEG-TS clocks are unrelated, as YouTube's are; only
+			// the first segments' dates (media-start.json) place them.
+			writeOffsetTSFixture(t, ffmpegPath, video, 20, 17000)
+			writeOffsetAudioTSFixture(t, ffmpegPath, audio, 20, 3)
+			day := time.Date(2026, 11, 28, 1, 14, 0, 0, time.UTC)
+			if tc.videoAt >= 0 {
+				noteMediaStart(video, day.Add(time.Duration(tc.videoAt)*time.Second))
+				noteMediaStart(audio, day.Add(time.Duration(tc.audioAt)*time.Second))
+			}
 			o := NewDownloadOrchestrator(nil, nil, ffmpegPath, discardLogger{}, nil, nil, nil, nil, nil)
 			out := filepath.Join(dir, "out.mp4")
 			if _, err := o.copyStaged(context.Background(), "j1", video, audio, out, "", nil); err != nil {
