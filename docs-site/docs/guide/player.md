@@ -156,9 +156,9 @@ goes back to the suggestion.
 
 Twitch recordings, YouTube uploads that were never streams, and streams
 YouTube would not name a setting for get no suggestion, and the box works as
-it always did. Recordings made before this version, and downloaded VODs of past
-streams, get their latency setting from YouTube in the background: Moombox
-asks about one recording a minute, only while online, and pauses while
+it always did. Recordings and VOD downloads made before this version get
+their latency setting from YouTube in the background; new ones get it when
+they are recorded or downloaded. In the background Moombox asks about one recording a minute, only while online, and pauses while
 YouTube is rate-limiting it or a live capture is starting, so the suggestion
 appears on them over time. A video that is now private or deleted cannot be
 asked about, and keeps no suggestion. The job details show the setting and the suggestion in a **Latency**
