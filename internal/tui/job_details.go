@@ -753,7 +753,10 @@ func (m *JobDetailsModel) buildRows() {
 	// rows it had.
 	terminalChatStatus, terminalChatCount := m.effectiveChat(j)
 	chatIncomplete := !isActiveState && terminalChatStatus == database.ChatIncomplete
-	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps)) || chatIncomplete
+	// A Finished archive with no audio stream although the stream advertised
+	// sound (the finalize's missing-audio guard, jobs.missing_audio).
+	missingAudio := isFinished && j.MissingAudio
+	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps)) || chatIncomplete || missingAudio
 	if hasMediaContent {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Media"})
@@ -775,6 +778,9 @@ func (m *JobDetailsModel) buildRows() {
 
 		if chatIncomplete {
 			m.addFieldColor("Chat", chatRowValue(terminalChatStatus, terminalChatCount), ColorWarning)
+		}
+		if missingAudio {
+			m.addFieldColor("Audio", MissingAudioText, ColorWarning)
 		}
 	}
 
@@ -1516,3 +1522,8 @@ func wrapText(text string, maxW int) []string {
 func unusedRecordingLine(name string, size int64) string {
 	return fmt.Sprintf("Kept recording not in the archive: %s (%s)", name, formatFileSize(size))
 }
+
+// MissingAudioText is the details line of a Finished job whose archive has
+// no audio stream although the stream advertised sound (jobs.missing_audio);
+// the dashboard's badge says the same.
+const MissingAudioText = "none in the archive, though the stream advertised sound"

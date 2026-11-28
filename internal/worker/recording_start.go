@@ -437,3 +437,57 @@ func advertisedSegmentDuration(infos ...*youtube.VideoInfo) int {
 	}
 	return 0
 }
+
+// advertisedAudioFile records, in a staging dir, whether the HLS master a
+// staged recording came from advertised sound for it (DownloadResult.
+// AdvertisedAudio), keyed by the file's base name as recordingStartFile is.
+// Written by DownloadHls at every setup, so a finalize that has no result —
+// a restart mux, the Mux action — still knows it (archiveMissesAdvertisedAudio).
+// A sibling file an older binary ignores.
+const advertisedAudioFile = "advertised-audio.json"
+
+// noteAdvertisedAudio records result's AdvertisedAudio for each staged file
+// it records into. Best effort: a record that cannot be written leaves only
+// a re-finalize without the guard.
+func noteAdvertisedAudio(result *DownloadResult) {
+	for _, p := range []string{result.VideoPath, result.AudioPath} {
+		if p != "" {
+			noteStagingRecord(p, advertisedAudioFile, result.AdvertisedAudio)
+		}
+	}
+}
+
+// advertisedAudio reports whether the run's result, or the record beside
+// either staged input, says the stream advertised sound for the recording.
+func advertisedAudio(result *DownloadResult, videoPath, audioPath string) bool {
+	if result != nil && result.AdvertisedAudio {
+		return true
+	}
+	for _, p := range []string{videoPath, audioPath} {
+		if p != "" && readStagingRecord[bool](filepath.Dir(p), advertisedAudioFile)[filepath.Base(p)] {
+			return true
+		}
+	}
+	return false
+}
+
+// archiveMissesAdvertisedAudio is the finalize's missing-audio guard: true,
+// with a Warn naming the job, when the archive's probe found no audio stream
+// although the stream advertised sound for what was recorded — a live
+// YouTube HLS capture whose master named an audio codec for the picked
+// variant or an audio rendition beside it, the case that finished silently
+// before the demuxed master's rendition was recorded. The finalize stores
+// the answer on the row (missing_audio), which both UIs show. A stream that
+// advertised none (a genuinely video-only source), and an archive that could
+// not be probed, are not flagged.
+func (o *DownloadOrchestrator) archiveMissesAdvertisedAudio(jobCtx *JobContext, result *DownloadResult, videoPath, audioPath, outputFile string, probe *ffprobeData) bool {
+	if probe == nil || !advertisedAudio(result, videoPath, audioPath) {
+		return false
+	}
+	if _, present := probe.streamSeconds("audio"); present {
+		return false
+	}
+	o.logger.Warn("the archive has no audio stream although the stream advertised sound for what was recorded; it is kept as it is, flagged on the job",
+		"jobID", jobCtx.Job.ID, "output", outputFile)
+	return true
+}

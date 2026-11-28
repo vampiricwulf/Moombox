@@ -35,6 +35,8 @@ var runtimeOnlyJobFields = []string{
 	// broadcast; ChatOffsetSet is the player's, beside ChatOffset (owner
 	// ruling RV-19).
 	"LatencyMode", "ChatOffsetSet",
+	// MissingAudio is the finalize's, written beside the archive it checked.
+	"MissingAudio",
 }
 
 // AddJob's INSERT names a fixed column list, so a Job field outside it takes

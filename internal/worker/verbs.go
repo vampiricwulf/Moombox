@@ -112,5 +112,6 @@ func reinitResetFields(autoRetryCount int) map[string]any {
 		"selected_audio_itag": nil,
 		"auto_retry_count":    autoRetryCount,
 		"incomplete_tail":     false,
+		"missing_audio":       false,
 	}
 }

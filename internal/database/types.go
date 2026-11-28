@@ -442,6 +442,13 @@ type Job struct {
 	// holds 0 here, so jobstate.HasOperatorChatOffset also counts a non-zero
 	// ChatOffset as set.
 	ChatOffsetSet bool `json:"chatOffsetSet,omitempty"`
+	// MissingAudio marks a Finished archive with no audio stream although the
+	// stream advertised sound for what it recorded (jobs.missing_audio, v31):
+	// a live YouTube HLS capture whose master named an audio codec or an
+	// audio rendition. The finalize writes it on every archive it checks and
+	// a Reinitialize clears it. Both UIs show it on a Finished job. False for
+	// a row from before v31, which was never checked.
+	MissingAudio bool `json:"missingAudio,omitempty"`
 	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED
 	// Twitch job last started to record (owner ruling RV-6). Such a job's ID
 	// is often not the key the live monitor looks a broadcast up by

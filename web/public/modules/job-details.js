@@ -24,6 +24,11 @@ export function stampFactsStatus(job) {
 }
 
 /** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
+// The details row of a Finished job whose archive has no audio stream although
+// the stream advertised sound (jobs.missing_audio); the TUI's details pane
+// says the same on its Audio line (tui.MissingAudioText).
+const MISSING_AUDIO_ROW = '<span class="details-label"></span><span class="details-value" data-field="missing-audio"><sl-badge variant="warning" title="The archive has no audio stream, though the stream advertised sound">No audio</sl-badge></span>';
+
 const JOB_LOG_POLL_MS = 1000;
 // How long one poll may stay unanswered before it is given up.
 const JOB_LOG_POLL_DEADLINE_MS = 10000;
@@ -431,6 +436,27 @@ export class JobDetailsController {
       incompleteTailValue.closest(".details-row")?.remove();
     }
 
+    // The missing-audio badge (jobs.missing_audio: the finalize found no audio
+    // stream in the archive although the stream advertised sound), created
+    // and removed the same way.
+    const missingAudioValue = content.querySelector('[data-field="missing-audio"]');
+    const shouldShowMissingAudio = job.status === "Finished" && !!job.missingAudio;
+    if (shouldShowMissingAudio && !missingAudioValue) {
+      let typeRow = null;
+      for (const row of content.querySelectorAll(".details-row")) {
+        const label = row.querySelector(".details-label");
+        if (label && label.textContent === "Type:") { typeRow = row; break; }
+      }
+      if (typeRow) {
+        const newRow = document.createElement("div");
+        newRow.className = "details-row";
+        newRow.innerHTML = MISSING_AUDIO_ROW;
+        typeRow.parentNode.insertBefore(newRow, typeRow);
+      }
+    } else if (!shouldShowMissingAudio && missingAudioValue) {
+      missingAudioValue.closest(".details-row")?.remove();
+    }
+
     // The late-start and gap-fill lines (owner decisions PR-R2, PR-R5): set
     // by a job_update long after the dialog opened, so, like the
     // incomplete-tail badge above, each is created, patched or removed here
@@ -812,6 +838,8 @@ export class JobDetailsController {
             </span>
           </div>`;
           })() : ""}
+          ${job.status === "Finished" && job.missingAudio ? `
+          <div class="details-row">${MISSING_AUDIO_ROW}</div>` : ""}
           ${job.status === "Finished" && job.incompleteTail ? `
           <div class="details-row">
             <span class="details-label"></span>

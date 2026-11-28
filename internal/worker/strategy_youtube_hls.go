@@ -244,6 +244,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 			result.AudioItag = hlsItagOf(rendition.URI)
 			result.AudioPath = filepath.Join(job.StagingDir, hlsAudioFile)
 			result.AudioDownloader = newHlsDownloader(rendition.URI, result.AudioPath, "audio", job.AudioStartSeq)
+			noteAdvertisedAudio(result)
 			if err := waitForPlayback(ctx, job, videoInfo, videoInfo.HlsManifestAvailableAt, videoInfo.HlsManifestSource, "HLS"); err != nil {
 				return nil, fmt.Errorf("HLS: waiting out the pre-roll ad: %w", err)
 			}
@@ -305,6 +306,10 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		result.AudioPath = filepath.Join(job.StagingDir, hlsAudioFile)
 		result.AudioDownloader = newHlsDownloader(audioRendition.URI, result.AudioPath, "audio", job.AudioStartSeq)
 	}
+
+	// Kept beside the staged files for a finalize that has no result (a
+	// restart mux, the Mux action): the missing-audio guard reads it.
+	noteAdvertisedAudio(result)
 
 	// The master playlist is fetched; the variant playlist and its segments
 	// wait out the pre-roll ad of the response that served the master

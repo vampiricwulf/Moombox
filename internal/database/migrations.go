@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 30
+const schemaVersion = 31
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -154,7 +154,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     twitch_stream_id TEXT,  -- v29: the broadcast a manually added Twitch job recorded (owner ruling RV-6)
     media_start_time TEXT,  -- v30: the wall clock of the archive's time zero (owner ruling RV-19)
     latency_mode TEXT,      -- v30: the YouTube broadcast's latency mode (owner ruling RV-19)
-    chat_offset_set INTEGER NOT NULL DEFAULT 0  -- v30: the operator saved chat_offset (owner ruling RV-19)
+    chat_offset_set INTEGER NOT NULL DEFAULT 0, -- v30: the operator saved chat_offset (owner ruling RV-19)
+    missing_audio INTEGER NOT NULL DEFAULT 0    -- v31: the archive has no audio the stream advertised
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -829,6 +830,18 @@ func (db *Database) migrate() error {
 			return err
 		}
 		if err := db.writeUserVersion(30); err != nil {
+			return err
+		}
+	}
+
+	// v31: missing_audio, a Finished archive with no audio stream although
+	// the stream advertised sound for what it recorded (Job.MissingAudio).
+	// Default 0, no backfill: an older archive was never checked.
+	if version < 31 {
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN missing_audio INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("v31 alter: %w", err)
+		}
+		if err := db.writeUserVersion(31); err != nil {
 			return err
 		}
 	}

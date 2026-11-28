@@ -1311,6 +1311,11 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			}
 		}
 	}
+	// The missing-audio guard: an archive with no audio stream although the
+	// stream advertised sound for what was recorded does not finish silently.
+	if jobCtx.Job != nil {
+		updates["missing_audio"] = o.archiveMissesAdvertisedAudio(jobCtx, result, videoPath, audioPath, outputFile, probeData)
+	}
 
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)

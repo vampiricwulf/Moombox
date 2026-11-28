@@ -83,6 +83,7 @@ var fieldToColumn = map[string]string{
 	"media_start_time":    "media_start_time",
 	"latency_mode":        "latency_mode",
 	"chat_offset_set":     "chat_offset_set",
+	"missing_audio":       "missing_audio",
 }
 
 // dbLogger is the interface for database error logging.
@@ -453,7 +454,7 @@ func (db *Database) prepareStatements() error {
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
 		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id,
-		media_start_time, latency_mode, chat_offset_set
+		media_start_time, latency_mode, chat_offset_set, missing_audio
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -955,7 +956,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
 	var notifMsgs, liveEdgeReason, twitchStreamID, mediaStartTime, latencyMode sql.NullString
-	var announceFound, chatOffsetSet int
+	var announceFound, chatOffsetSet, missingAudio int
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -972,7 +973,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
 		&notifMsgs, &announceFound, &j.JoinOffsetSeconds, &liveEdgeReason, &twitchStreamID,
-		&mediaStartTime, &latencyMode, &chatOffsetSet,
+		&mediaStartTime, &latencyMode, &chatOffsetSet, &missingAudio,
 	)
 	if err != nil {
 		return nil, err
@@ -989,6 +990,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.MediaStartTime = mediaStartTime.String
 	j.LatencyMode = LatencyMode(latencyMode.String)
 	j.ChatOffsetSet = intToBool(chatOffsetSet)
+	j.MissingAudio = intToBool(missingAudio)
 	return &j, nil
 }
 
