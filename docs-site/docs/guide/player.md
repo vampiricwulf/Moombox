@@ -194,6 +194,14 @@ How to tell it ran:
   YouTube would not name a setting for, `gaveUp`, how many it stopped asking
   about until the next start, and `left`, how many still have none),
   `latency backfill: switched off (...)` and `latency backfill: switched on`.
+  Two more lines, one per recording, at its third try:
+  `latency backfill: giving up on this recording until the next start` and
+  `latency backfill: YouTube refused this recording on every try; stored it
+  as unstated`. Each carries the job (`jobID`), `tries`, the error (`err`)
+  and what YouTube answered: `playability`, its `reason` text,
+  `videoDetails` (whether the video's details came back) and the `client`
+  that answered, with `escalation` and `escalationPlayability` when a
+  second client was asked too.
 - **A recording's job details**: the **Latency** row appears once its
   setting is stored (a downloaded upload that was never a stream gets none).
 

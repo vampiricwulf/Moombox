@@ -57,8 +57,9 @@ import (
 //     LatencyModeUnstated at the last one, at least two hours after the
 //     first: waiting will not change the answer, and the mode is only a
 //     suggestion. A row with any other failure among its tries (a network
-//     error, a panic, an escalation that failed, the bot wall) is given up
-//     on until the next start, as before.
+//     error, a panic, an escalation that failed, the bot wall, an answer
+//     with no playabilityStatus) is given up on until the next start, as
+//     before.
 //
 // The rows themselves are the state: a restart walks every row still NULL
 // from the start. The one thing saved beside them is the walk's own
