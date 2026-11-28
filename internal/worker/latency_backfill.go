@@ -52,7 +52,13 @@ import (
 // rate-limit hold, so a restart inside its hour does not ask again into the
 // limit. No config key: like the Twitch
 // gap-fill sweep and the session keep-alive, it is a background job of the
-// archive's own with no switch. Once the archive is caught up it costs one
+// archive's own with no switch. The membership scan's switch
+// (monitors.membership_discovery) is not the model: that scan reads every
+// channel's members-only tab with the login cookies every feed cycle, for
+// good, and finds jobs, a feature an operator may not want; this walk finds
+// nothing, changes no job's course, asks each recording once (cookieless
+// unless a members-only refusal needs the signed-in retry) and ends when the
+// archive is caught up. Once the archive is caught up it costs one
 // request per newly finished row it has to ask about (a VOD download of an
 // upload, which the worker leaves NULL) and a database read an hour.
 
