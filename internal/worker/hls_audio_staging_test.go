@@ -256,6 +256,9 @@ func TestCarriedStartSeqsKeepOneTimelineAcrossShapes(t *testing.T) {
 	}{
 		{"muxed master", &DownloadResult{IsHls: true, HasVideo: true, VideoDownloader: d()}, 500, 0, 500, 500},
 		{"demuxed master", &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, VideoDownloader: d(), AudioDownloader: d()}, 500, 498, 500, 498},
+		// Stopped mid-catch-up, audio ahead: carried as it stands; the
+		// fresh part levels them (TestDownloadHlsLevelsAFreshPart).
+		{"demuxed master stopped apart", &DownloadResult{IsHls: true, HasVideo: true, HasAudio: true, VideoDownloader: d(), AudioDownloader: d()}, 500, 560, 500, 560},
 		{"audio-only recording", &DownloadResult{IsHls: true, HasAudio: true, AudioDownloader: d()}, 0, 498, 498, 498},
 		{"DASH", &DownloadResult{HasVideo: true, HasAudio: true, VideoDownloader: d(), AudioDownloader: d()}, 500, 498, 500, 498},
 		{"DASH with no audio downloader", &DownloadResult{HasVideo: true, VideoDownloader: d()}, 500, 0, 500, 0},

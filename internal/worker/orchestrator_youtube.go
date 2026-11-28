@@ -1855,7 +1855,9 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 // audio-only HLS recording has no video downloader, so the next capture's
 // video starts where its audio stopped. A demuxed master's capture records
 // its audio rendition with a downloader of its own (DownloadHls), whose
-// position stands. switchBack's from-start pair and a part split's next
+// position is carried as it stands; DownloadHls then starts both halves of
+// the fresh part at the earlier of the two (levelFreshHlsPair), since the
+// halves do not advance together while they catch up. switchBack's from-start pair and a part split's next
 // capture (splitPart) both start here: a muxed master refreshed into a
 // demuxed one would otherwise start the new audio rendition at the
 // playlist window's start, up to an hour behind its video.

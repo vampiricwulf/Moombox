@@ -447,10 +447,16 @@ func (o *DownloadOrchestrator) alignHlsPair(jobID string, ins *stagedInputs) {
 // DASH pair is placed by its fragments' decode times. Detection only: the
 // part is muxed as it stands.
 //
-// Only the rows from the pair's earlier recorded start on are read (an
-// earlier part's gaps are below it); with no start recorded, all of them.
-// Rows the live tracker has not yet written (it writes them every few
-// seconds and at its finalize) are not seen.
+// The job's gap rows are the job's, not the part's, so they are bounded to
+// this pair: each stream's from its own recorded first sequence
+// (recording-start.json; a forced start below the playlist window leaves a
+// gap row before it, a later start alignHlsPair places, not a hole), and
+// both up to the earlier half's last saved sequence when both resume
+// sidecars are there (a later part's gaps are past it). A pair whose
+// starts are not both recorded (an aside, whose records stayed with the
+// live names; staging an older binary left) is not checked. The live
+// finalize writes the tracker's rows (ProgressTracker.Finalize) before it
+// muxes; a part split mid-capture may not yet see the last few seconds'.
 func (o *DownloadOrchestrator) warnOneSidedHlsGaps(jobID string, ins *stagedInputs) {
 	if o.db == nil {
 		return
@@ -459,13 +465,18 @@ func (o *DownloadOrchestrator) warnOneSidedHlsGaps(jobID string, ins *stagedInpu
 	if err != nil || job == nil || len(job.Gaps) == 0 {
 		return
 	}
-	from := 0
 	vs, vok := readRecordingStarts(filepath.Dir(ins.video.path))[filepath.Base(ins.video.path)]
 	as, aok := readRecordingStarts(filepath.Dir(ins.audio.path))[filepath.Base(ins.audio.path)]
-	if vok && aok {
-		from = min(vs, as)
+	if !vok || !aok {
+		return
 	}
-	videoOnly, audioOnly := oneSidedGaps(job.Gaps, from)
+	upTo := -1
+	if vNext, ok := engine.StagedResumeNextSeq(ins.video.path); ok {
+		if aNext, ok := engine.StagedResumeNextSeq(ins.audio.path); ok {
+			upTo = min(vNext, aNext) - 1
+		}
+	}
+	videoOnly, audioOnly := oneSidedGaps(job.Gaps, vs, as, upTo)
 	if len(videoOnly) == 0 && len(audioOnly) == 0 {
 		return
 	}
@@ -474,13 +485,21 @@ func (o *DownloadOrchestrator) warnOneSidedHlsGaps(jobID string, ins *stagedInpu
 		"videoOnlyGaps", formatSeqRanges(videoOnly), "audioOnlyGaps", formatSeqRanges(audioOnly), "jobID", jobID)
 }
 
-// oneSidedGaps is, for the gap rows at or after sequence from, the
-// sequences one stream skipped that the other did not: video's gaps less
-// audio's, and audio's less video's, as inclusive ranges.
-func oneSidedGaps(gaps []database.Gap, from int) (videoOnly, audioOnly [][2]int) {
+// oneSidedGaps is the sequences one stream skipped that the other did not
+// — video's gaps less audio's, and audio's less video's, as inclusive
+// ranges — reading each stream's gap rows from its own first sequence on
+// (videoFrom, audioFrom) and both up to upTo (none when upTo < 0).
+func oneSidedGaps(gaps []database.Gap, videoFrom, audioFrom, upTo int) (videoOnly, audioOnly [][2]int) {
 	var video, audio [][2]int
 	for _, g := range gaps {
+		from := videoFrom
+		if g.Stream == "audio" {
+			from = audioFrom
+		}
 		lo, hi := max(g.From, from), g.To
+		if upTo >= 0 {
+			hi = min(hi, upTo)
+		}
 		if hi < lo {
 			continue
 		}
