@@ -652,7 +652,8 @@ func (pt *ProgressTracker) maybeUpdate() {
 
 	// Snapshot values for DB update. The seq columns are persisted only for
 	// stream kinds that have actually REPORTED this session: an audio-less
-	// session (HLS delivers muxed A+V) used to overwrite last_audio_seq
+	// session (a capture of a muxed HLS master, whose one stream carries
+	// A+V) used to overwrite last_audio_seq
 	// with a constant 0 — and any session's first chat/audio tick used to
 	// do the same to last_video_seq before video's first event — destroying
 	// the prior session's continuation position that restart seeding needs.

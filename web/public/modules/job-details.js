@@ -23,12 +23,12 @@ export function stampFactsStatus(job) {
   return job;
 }
 
-/** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
 // The details row of a Finished job whose archive has no audio stream although
 // the stream advertised sound (jobs.missing_audio); the TUI's details pane
 // says the same on its Audio line (tui.MissingAudioText).
 const MISSING_AUDIO_ROW = '<span class="details-label"></span><span class="details-value" data-field="missing-audio"><sl-badge variant="warning" title="The archive has no audio stream, though the stream advertised sound">No audio</sl-badge></span>';
 
+/** How often the open details dialog re-reads its Job Log, as the TUI's O L overlay does. */
 const JOB_LOG_POLL_MS = 1000;
 // How long one poll may stay unanswered before it is given up.
 const JOB_LOG_POLL_DEADLINE_MS = 10000;

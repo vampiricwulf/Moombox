@@ -448,8 +448,8 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 		// YouTube live A/V share one segment timeline, so the two seeds are
 		// numerically close in any healthy row. A missing or wildly diverged
-		// audio seed means it's stale from a previous session SHAPE — an HLS
-		// interlude carries no separate audio downloader (and old builds
+		// audio seed means it's stale from a previous session SHAPE — a capture of a
+		// muxed HLS master carries no separate audio downloader (and old builds
 		// zeroed the column outright) — and force-starting audio there would
 		// rewind hours of audio into this part. Align it to the video seed.
 		const avSeedTolerance = 50 // ~2-4 min of segments
