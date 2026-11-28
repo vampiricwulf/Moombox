@@ -137,7 +137,11 @@ func TestJoinOffsetAsksEveryLateInput(t *testing.T) {
 // column, and would otherwise pre-fill the next import with the old
 // recording's join point (owner decision CJ-3).
 //
-// Mutants: either reset leaving join_offset_seconds (it still reads 5025).
+// The same holds for media_start_time, the old recording's time zero (owner
+// ruling RV-19).
+//
+// Mutants: either reset leaving join_offset_seconds (it still reads 5025) or
+// media_start_time.
 func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -153,7 +157,7 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 			if _, err := db.AddJob(&database.Job{ID: id, VideoID: id, URL: "u", Platform: "youtube", Status: tc.status}); err != nil {
 				t.Fatal(err)
 			}
-			db.UpdateJobFields(id, map[string]any{"join_offset_seconds": 5025.0})
+			db.UpdateJobFields(id, map[string]any{"join_offset_seconds": 5025.0, "media_start_time": "2026-11-27T22:56:50.408302Z"})
 			if job, _ := db.GetJob(id); job == nil || job.JoinOffsetSeconds == nil {
 				t.Fatal("the fixture's join point was not stored")
 			}
@@ -164,6 +168,9 @@ func TestReinitializeClearsTheJoinOffset(t *testing.T) {
 			}
 			if job.JoinOffsetSeconds != nil {
 				t.Errorf("join_offset_seconds = %v after %s, want NULL", *job.JoinOffsetSeconds, tc.name)
+			}
+			if job.MediaStartTime != "" {
+				t.Errorf("media_start_time = %q after %s, want NULL (owner ruling RV-19)", job.MediaStartTime, tc.name)
 			}
 		})
 	}

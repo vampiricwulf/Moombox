@@ -1295,6 +1295,18 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			updates["join_offset_seconds"] = nil
 		}
 	}
+	// The wall clock of the archive's time zero, which the dashboard player
+	// lines chat up with (owner ruling RV-19): a live YouTube capture's, read
+	// from what its staged recording recorded; NULL when it is not known and
+	// for a VOD, whose archive is the video's own timeline.
+	if jobCtx.Job != nil && jobCtx.Job.Platform == "youtube" {
+		updates["media_start_time"] = nil
+		if !jobCtx.Job.IsVod {
+			if start, ok := mediaStartTime(videoPath, audioPath); ok {
+				updates["media_start_time"] = start
+			}
+		}
+	}
 
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
@@ -1700,6 +1712,17 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			updates["join_offset_seconds"] = join
 		} else {
 			updates["join_offset_seconds"] = nil
+		}
+	}
+	// Part 1's time-zero wall clock, by the single-file finalize's rules: the
+	// split archive's chat runs on one timeline from part 1 (owner ruling
+	// RV-19).
+	if jobCtx.Job.Platform == "youtube" {
+		updates["media_start_time"] = nil
+		if !jobCtx.Job.IsVod {
+			if start, ok := splitMediaStartTime(jobCtx, segments); ok {
+				updates["media_start_time"] = start
+			}
 		}
 	}
 

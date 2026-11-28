@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -33,45 +34,37 @@ import (
 // be written — is of unknown start, and is treated as late.
 const recordingStartFile = "recording-start.json"
 
-// recordingStartMu serialises the read-modify-write of recordingStartFile:
-// a job's video and audio downloaders report their first segment from two
-// goroutines at once, into the same dir.
+// recordingStartMu serialises the read-modify-write of recordingStartFile and
+// mediaStartFile: a job's video and audio downloaders report their first
+// segment from two goroutines at once, into the same dir.
 var recordingStartMu sync.Mutex
+
+// mediaStartFile records, in a staging dir, the wall clock of each staged
+// recording's first segment (engine.SegmentDownloader.OnFirstMediaWallclock:
+// a live YouTube DASH segment's Ingestion-Walltime-Us, an HLS segment's
+// #EXT-X-PROGRAM-DATE-TIME), as RFC 3339 with sub-second digits, keyed by the
+// file's base name as recordingStartFile is. It follows recordingStartFile's
+// rules exactly: written once per file a downloader starts, left alone by a
+// resume or an append, dropped when a downloader opens the file empty. A
+// sibling file and not a field of recordingStartFile, so a staging dir an
+// older binary left still reads.
+//
+// FFmpeg's mux moves each input's first timestamp to 0, so the entry is
+// the wall clock of the archive's time zero: the job's media_start_time,
+// which the dashboard player lines chat up with (owner ruling RV-19).
+const mediaStartFile = "media-start.json"
 
 // readRecordingStarts returns dir's recordingStartFile entries, or nil when
 // it has none or cannot be read.
 func readRecordingStarts(dir string) map[string]int {
-	data, err := os.ReadFile(filepath.Join(dir, recordingStartFile))
-	if err != nil {
-		return nil
-	}
-	var starts map[string]int
-	if json.Unmarshal(data, &starts) != nil {
-		return nil
-	}
-	return starts
+	return readStagingRecord[int](dir, recordingStartFile)
 }
 
 // noteRecordingStart records that the staged file at path began at seq.
 // Best effort: a write that fails leaves the file's start unknown, which
 // costs it only the chapters a known start at sq=0 would have earned.
 func noteRecordingStart(path string, seq int) {
-	if path == "" {
-		return
-	}
-	recordingStartMu.Lock()
-	defer recordingStartMu.Unlock()
-	dir := filepath.Dir(path)
-	starts := readRecordingStarts(dir)
-	if starts == nil {
-		starts = map[string]int{}
-	}
-	starts[filepath.Base(path)] = seq
-	data, err := json.Marshal(starts)
-	if err != nil {
-		return
-	}
-	_ = utils.WriteFileAtomic(filepath.Join(dir, recordingStartFile), data, 0o644)
+	noteStagingRecord(path, recordingStartFile, seq)
 }
 
 // forgetRecordingStart drops the staged file at path's entry, so the file
@@ -79,58 +72,169 @@ func noteRecordingStart(path string, seq int) {
 // effort, like noteRecordingStart: an entry that cannot be dropped is
 // overwritten by that write all the same.
 func forgetRecordingStart(path string) {
+	forgetStagingRecord[int](path, recordingStartFile)
+}
+
+// readStagingRecord returns the entries of dir's per-file record name
+// (recordingStartFile, mediaStartFile), or nil when it has none or cannot
+// be read.
+func readStagingRecord[T any](dir, name string) map[string]T {
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return nil
+	}
+	var entries map[string]T
+	if json.Unmarshal(data, &entries) != nil {
+		return nil
+	}
+	return entries
+}
+
+// noteStagingRecord sets the staged file at path's entry in its dir's
+// record name to v, keeping every other file's. Best effort.
+func noteStagingRecord[T any](path, name string, v T) {
 	if path == "" {
 		return
 	}
 	recordingStartMu.Lock()
 	defer recordingStartMu.Unlock()
 	dir := filepath.Dir(path)
-	starts := readRecordingStarts(dir)
-	if _, ok := starts[filepath.Base(path)]; !ok {
-		return
+	entries := readStagingRecord[T](dir, name)
+	if entries == nil {
+		entries = map[string]T{}
 	}
-	delete(starts, filepath.Base(path))
-	data, err := json.Marshal(starts)
+	entries[filepath.Base(path)] = v
+	data, err := json.Marshal(entries)
 	if err != nil {
 		return
 	}
-	_ = utils.WriteFileAtomic(filepath.Join(dir, recordingStartFile), data, 0o644)
+	_ = utils.WriteFileAtomic(filepath.Join(dir, name), data, 0o644)
+}
+
+// forgetStagingRecord drops the staged file at path's entry from its dir's
+// record name. Best effort.
+func forgetStagingRecord[T any](path, name string) {
+	if path == "" {
+		return
+	}
+	recordingStartMu.Lock()
+	defer recordingStartMu.Unlock()
+	dir := filepath.Dir(path)
+	entries := readStagingRecord[T](dir, name)
+	if _, ok := entries[filepath.Base(path)]; !ok {
+		return
+	}
+	delete(entries, filepath.Base(path))
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return
+	}
+	_ = utils.WriteFileAtomic(filepath.Join(dir, name), data, 0o644)
 }
 
 // recordStartsOf has each of result's downloaders record the sequence its
-// file begins at (noteRecordingStart), unless something else already
-// listens. Installed by runDownloaders ahead of Start, so every capture it
-// runs — live, post-live and VOD alike — leaves the record.
+// file begins at (noteRecordingStart) and that first segment's wall clock
+// (noteMediaStart), each unless something else already listens for it.
+// Installed by runDownloaders ahead of Start, so every capture it runs —
+// live, post-live and VOD alike — leaves the records.
 //
 // An entry describes the recording that was in the file when it was
 // written, and a file of the same name is started over — set aside by the
 // engine's no-truncate guard or setAsideStagedMedia, a discarded partial —
 // with that entry still in the record. So a downloader that opens its file
-// empty (OnStart with resuming false) first drops the file's entry, and the
-// fresh recording is of unknown start until its own first media write
+// empty (OnStart with resuming false) first drops the file's entries, and
+// the fresh recording is of unknown start until its own first media write
 // records one: a fresh file whose writer reports no start, or whose first
-// write never comes, is never read as the earlier recording's sq=0. A
-// listener a caller installed on OnStart still runs, after the drop.
+// write never comes, is never read as the earlier recording's. A listener a
+// caller installed on OnStart still runs, after the drop.
 func recordStartsOf(result *DownloadResult) {
 	for _, pair := range []struct {
 		d    *engine.SegmentDownloader
 		path string
 	}{{result.VideoDownloader, result.VideoPath}, {result.AudioDownloader, result.AudioPath}} {
-		if pair.d == nil || pair.path == "" || pair.d.OnFirstMedia != nil {
+		if pair.d == nil || pair.path == "" {
+			continue
+		}
+		ownStart, ownWall := pair.d.OnFirstMedia == nil, pair.d.OnFirstMediaWallclock == nil
+		if !ownStart && !ownWall {
 			continue
 		}
 		path := pair.path
 		prev := pair.d.OnStart
 		pair.d.OnStart = func(seq int, resuming bool) {
 			if !resuming {
-				forgetRecordingStart(path)
+				if ownStart {
+					forgetRecordingStart(path)
+				}
+				if ownWall {
+					forgetStagingRecord[string](path, mediaStartFile)
+				}
 			}
 			if prev != nil {
 				prev(seq, resuming)
 			}
 		}
-		pair.d.OnFirstMedia = func(seq int) { noteRecordingStart(path, seq) }
+		if ownStart {
+			pair.d.OnFirstMedia = func(seq int) { noteRecordingStart(path, seq) }
+		}
+		if ownWall {
+			pair.d.OnFirstMediaWallclock = func(wall time.Time) { noteMediaStart(path, wall) }
+		}
 	}
+}
+
+// noteMediaStart records that the staged file at path's first segment has
+// the wall clock wall (mediaStartFile). Best effort: a write that fails
+// leaves the archive unanchored, and the player falls back to the join
+// offset.
+func noteMediaStart(path string, wall time.Time) {
+	noteStagingRecord(path, mediaStartFile, wall.UTC().Format(time.RFC3339Nano))
+}
+
+// mediaStartTime is the wall clock of a single-file mux's time zero, for the
+// job's media_start_time (owner ruling RV-19): the video input's
+// mediaStartFile entry, which is what the picture starts at. A video that
+// carries no wall clock (a WebM segment has no readable metadata) takes the
+// audio's entry only when the two are known to have begun at the same
+// sequence (recordingStartFile), or when there is no video input; otherwise
+// it is unknown — never a guess. ok is false when it is not known.
+func mediaStartTime(videoPath, audioPath string) (string, bool) {
+	entry := func(p string) (string, bool) {
+		if p == "" {
+			return "", false
+		}
+		v, ok := readStagingRecord[string](filepath.Dir(p), mediaStartFile)[filepath.Base(p)]
+		if !ok {
+			return "", false
+		}
+		if _, err := time.Parse(time.RFC3339Nano, v); err != nil {
+			return "", false
+		}
+		return v, true
+	}
+	if v, ok := entry(videoPath); ok {
+		return v, true
+	}
+	if videoPath != "" {
+		vs, vok := readRecordingStarts(filepath.Dir(videoPath))[filepath.Base(videoPath)]
+		as, aok := readRecordingStarts(filepath.Dir(audioPath))[filepath.Base(audioPath)]
+		if audioPath == "" || !vok || !aok || vs != as {
+			return "", false
+		}
+	}
+	return entry(audioPath)
+}
+
+// splitMediaStartTime is mediaStartTime for a split archive: part 1's, read
+// from its own staging dir as splitJoinOffsetSeconds reads its join point.
+// The split archive's chat runs on one timeline from part 1's start, so a
+// later part, a resume or a quality split never moves it.
+func splitMediaStartTime(jobCtx *JobContext, segments []database.Segment) (string, bool) {
+	media := partOneStagingMedia(jobCtx, segments)
+	if media == nil {
+		return "", false
+	}
+	return mediaStartTime(media.VideoPath, media.AudioPath)
 }
 
 // recordedFromStart reports whether every staged input of a single-file mux
@@ -227,18 +331,26 @@ func (o *DownloadOrchestrator) joinOffsetSeconds(ctx context.Context, result *Do
 // timestamps past a gap land later in the archive than they should by the
 // gap's length: not compensated, as the import's single offset cannot.
 func (o *DownloadOrchestrator) splitJoinOffsetSeconds(ctx context.Context, jobCtx *JobContext, segments []database.Segment, result *DownloadResult) (float64, bool) {
-	if len(segments) == 0 || jobCtx.StagingDir == "" {
+	media := partOneStagingMedia(jobCtx, segments)
+	if media == nil {
 		return 0, false
+	}
+	return o.joinOffsetSeconds(ctx, result, media.VideoPath, media.AudioPath)
+}
+
+// partOneStagingMedia is the staged recording of a split archive's part 1 —
+// segments[0], the first part the archive keeps — in the job's staging root
+// (part 0, unless a seg_0 dir exists: rootIsPartZero) or in seg_<its index>;
+// nil when there is none.
+func partOneStagingMedia(jobCtx *JobContext, segments []database.Segment) *DownloadResult {
+	if len(segments) == 0 || jobCtx.StagingDir == "" {
+		return nil
 	}
 	dir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segments[0].SegmentIndex))
 	if segments[0].SegmentIndex == 0 && rootIsPartZero(jobCtx.StagingDir) {
 		dir = jobCtx.StagingDir
 	}
-	media := discoverStagingMedia(dir)
-	if media == nil {
-		return 0, false
-	}
-	return o.joinOffsetSeconds(ctx, result, media.VideoPath, media.AudioPath)
+	return discoverStagingMedia(dir)
 }
 
 // formatTargetDuration is the advertised per-segment duration of the format
