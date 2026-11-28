@@ -137,6 +137,7 @@ Tags that can appear in the progress slot:
 | `⟳ 2/3` | A `Queued` job waiting to retry (attempt 2 of 3). |
 | `⟳ mux` | An `Error` job that Moombox will mux by itself once the Twitch monitor confirms the broadcast is over. |
 | `⟳ retry` | An `Error` job that Moombox will retry by itself when the Twitch channel is live again. |
+| `no audio` | A `Finished` job whose archive has no audio stream although the stream offered sound. See [Jobs](jobs.md#no-audio). |
 
 See [Jobs](jobs.md) for what each status and hold means.
 

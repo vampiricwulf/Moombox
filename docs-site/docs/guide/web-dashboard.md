@@ -68,13 +68,16 @@ tab. Each row shows:
 Thumbnail
 :   The stream's thumbnail (Moombox's saved copy once it has one, otherwise
     the platform's). A Twitch channel that has not gone live yet shows the
-    channel's avatar instead. Two small overlays can appear on a finished
+    channel's avatar instead. Three small overlays can appear on a finished
     job's thumbnail:
 
     - an **eye** — filled when the job is marked watched, outlined when you
       stopped part-way through in the player (see [Player](player.md));
     - a **warning triangle** — "Recording is missing its tail — Resume to
-      fetch it": the archive finished but its last segments are missing.
+      fetch it": the archive finished but its last segments are missing;
+    - a **muted speaker**, bottom left — "No audio": the archive has no
+      audio stream although the stream offered sound (see
+      [Jobs](jobs.md#no-audio)).
 
     The checkbox in the corner selects the row for [batch
     actions](#selecting-several-jobs).
