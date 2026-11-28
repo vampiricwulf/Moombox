@@ -1905,6 +1905,21 @@ sl-progress-bar {
     color: var(--sl-color-neutral-400);
 }
 
+/* A suggested offset (owner ruling RV-19): the box holds the value the player
+   applies, set in italics, with the latency mode beside it, until the
+   operator types their own. */
+#player-chat-offset.suggested {
+    font-style: italic;
+    color: var(--sl-color-neutral-600);
+}
+
+.player-chat-offset-hint {
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    white-space: nowrap;
+    margin-left: var(--sl-spacing-2x-small);
+}
+
 #player-chat-offset-reset {
     font-size: 1rem;
     margin: -4px 0;

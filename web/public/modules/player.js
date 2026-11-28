@@ -1,7 +1,10 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage, unplayableAudioText } from "./utils.js";
+import {
+  formatMsToTime, formatTimestamp, isTypingInInput, safePlay, serverErrorMessage, unplayableAudioText,
+  suggestedChatOffset, hasOperatorChatOffset, LATENCY_MODE_LABELS,
+} from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 import {
   normalizeOffsetMs,
@@ -373,6 +376,13 @@ export class PlayerController {
     this._nicoDroppedShown = 0;
     this._nicoDropPillTimer = null;
     this.playerCustomOffsetMs = 0;
+    // The chat offset's source (owner ruling RV-19): the suggestion the
+    // job's latency mode gives (suggestedChatOffset), whether the operator
+    // saved their own (which always wins), and whether the box was typed in
+    // since it was last filled. Set by _setOffsetSource.
+    this._offsetSuggestion = { seconds: 0, known: false, basis: "" };
+    this._offsetOperatorSet = false;
+    this._offsetDirty = false;
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
     this.twitchEmoteMap = new Map();
@@ -747,7 +757,12 @@ export class PlayerController {
         v = v.replace(/(?!^)-/g, "").replace(/(\..*)\./g, "$1");
         offsetInput.value = v;
         const val = parseFloat(v);
-        this.playerCustomOffsetMs = isNaN(val) ? 0 : val * 1000;
+        this._offsetDirty = true;
+        // An empty box is no operator offset: the suggestion applies when
+        // there is one, as it will once the clear is saved.
+        const fallback = this._offsetSuggestion.known ? this._offsetSuggestion.seconds * 1000 : 0;
+        this.playerCustomOffsetMs = isNaN(val) ? fallback : val * 1000;
+        this._markOffsetSuggested(false);
         // Re-sync chat to current time with new offset
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
@@ -758,14 +773,30 @@ export class PlayerController {
         this._syncOffsetResetButton();
       });
 
+      // With a suggestion the box always holds the whole offset: an untouched
+      // box (the suggestion shown) saves nothing, an emptied one clears the
+      // operator's offset and shows the suggestion again, and any number,
+      // 0 included, is the operator's and wins. Without one, as before: 0 or
+      // empty clears.
       const persistOffset = () => {
         if (!this.playerJob) return;
+        const suggested = this._offsetSuggestion.known;
+        if (suggested && !this._offsetDirty) return;
+        this._offsetDirty = false;
         const val = parseFloat(offsetInput.value);
         const jobId = this.playerJob.id;
-        if (isNaN(val) || val === 0) {
-          this.playerCustomOffsetMs = 0;
+        if (isNaN(val) || (!suggested && val === 0)) {
+          this._offsetOperatorSet = false;
+          this.playerJob.chatOffset = 0;
+          this.playerJob.chatOffsetSet = false;
+          if (suggested) this._applyOffsetUI(0);
+          else this.playerCustomOffsetMs = 0;
           fetch(`/api/jobs/${jobId}/chat-offset`, { method: "DELETE" }).catch(() => {});
         } else {
+          this._offsetOperatorSet = true;
+          this.playerJob.chatOffset = val;
+          this.playerJob.chatOffsetSet = true;
+          this._syncOffsetResetButton();
           fetch(`/api/jobs/${jobId}/chat-offset`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -782,6 +813,13 @@ export class PlayerController {
       });
 
       document.getElementById("player-chat-offset-reset")?.addEventListener("click", () => {
+        // Back to no operator offset: the suggestion when there is one.
+        this._offsetOperatorSet = false;
+        this._offsetDirty = false;
+        if (this.playerJob) {
+          this.playerJob.chatOffset = 0;
+          this.playerJob.chatOffsetSet = false;
+        }
         this._applyOffsetUI(0);
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
@@ -800,18 +838,73 @@ export class PlayerController {
     this.setupKeyboardControls();
   }
 
-  /** Apply a persisted/cleared offset to state, input text and the reset button. */
+  /**
+   * Take the chat offset's source from job (null: no job): the suggestion
+   * its latency mode gives and whether the operator saved an offset (owner
+   * ruling RV-19). Call _applyOffsetUI after it.
+   */
+  _setOffsetSource(job) {
+    this._offsetSuggestion = suggestedChatOffset(job);
+    this._offsetOperatorSet = hasOperatorChatOffset(job);
+    this._offsetDirty = false;
+  }
+
+  /**
+   * Apply the operator's offset (seconds; 0 for none) to state, input text
+   * and the reset button. With no operator offset and a suggestion, the
+   * suggestion is applied instead and shown as one. The box always holds
+   * the whole offset the player applies.
+   */
   _applyOffsetUI(seconds) {
+    const sugg = this._offsetSuggestion;
+    const input = document.getElementById("player-chat-offset");
+    if (sugg.known && !this._offsetOperatorSet) {
+      this.playerCustomOffsetMs = sugg.seconds * 1000;
+      if (input) input.value = String(sugg.seconds);
+      this._markOffsetSuggested(true);
+      this._syncOffsetResetButton();
+      return;
+    }
     const s = Number.isFinite(seconds) ? seconds : 0;
     this.playerCustomOffsetMs = Math.round(s * 1000);
-    const input = document.getElementById("player-chat-offset");
-    if (input) input.value = s === 0 ? "" : String(s);
+    // An operator's 0 on a recording with a suggestion is a value, so it is
+    // shown; without one, 0 is no offset and the box stays empty, as ever.
+    if (input) input.value = s === 0 && !sugg.known ? "" : String(s);
+    this._markOffsetSuggested(false);
     this._syncOffsetResetButton();
+  }
+
+  /**
+   * Mark the offset box as holding the suggested offset, or not: the
+   * italic class, the "suggested: Normal latency" hint beside it and the
+   * box's title.
+   */
+  _markOffsetSuggested(on) {
+    const input = document.getElementById("player-chat-offset");
+    const hint = document.getElementById("player-chat-offset-hint");
+    const label = on ? LATENCY_MODE_LABELS[this.playerJob?.latencyMode] : "";
+    const shown = on && !!label;
+    if (input) {
+      input.classList.toggle("suggested", shown);
+      input.title = shown
+        ? `Chat offset in seconds, suggested for ${label} (typical, not measured). Type your own to replace it.`
+        : "Chat offset in seconds";
+    }
+    if (hint) {
+      hint.textContent = shown ? `suggested: ${label}` : "";
+      hint.hidden = !shown;
+    }
   }
 
   _syncOffsetResetButton() {
     const btn = document.getElementById("player-chat-offset-reset");
-    if (btn) btn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
+    if (!btn) return;
+    // With a suggestion, the reset is for an operator's offset (a typed
+    // one, 0 included); without, for any offset, as before.
+    const shown = this._offsetSuggestion.known
+      ? this._offsetOperatorSet || this._offsetDirty
+      : this.playerCustomOffsetMs !== 0;
+    btn.style.display = shown ? "" : "none";
   }
 
   setupKeyboardControls() {
@@ -1020,6 +1113,7 @@ export class PlayerController {
     clearTimeout(this._nicoGeoSettle);
     this._nicoGeoSettle = null;
     this._resetNicoDropCount();
+    this._setOffsetSource(null);
     this._applyOffsetUI(0);
     const chatSearch = document.getElementById("chat-search");
     if (chatSearch && chatSearch.value) chatSearch.value = "";
@@ -1616,6 +1710,7 @@ export class PlayerController {
         // The chat-offset input is restored from playerJob.chatOffset — copy
         // the fresh value too, or a stale cached offset gets re-applied.
         if (ws.chatOffset !== undefined) this.playerJob.chatOffset = ws.chatOffset;
+        if (ws.chatOffsetSet !== undefined) this.playerJob.chatOffsetSet = ws.chatOffsetSet;
       }
     } catch { /* proceed with cached values */ }
 
@@ -1716,7 +1811,10 @@ export class PlayerController {
     this.nico.unanchor();
 
     // Load saved custom chat offset (from watch-state response, already on playerJob)
-    this._applyOffsetUI(this.playerJob.chatOffset || 0);
+    // A suggested offset applies when the operator saved none (owner ruling
+    // RV-19).
+    this._setOffsetSource(this.playerJob);
+    this._applyOffsetUI(this._offsetOperatorSet ? this.playerJob.chatOffset || 0 : 0);
 
     // Same rule as the nico toggle: the overlay's display was just decided, so
     // measure it now it is visible — a job switch that reveals a previously
