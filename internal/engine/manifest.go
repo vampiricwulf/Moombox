@@ -96,8 +96,13 @@ type HlsSegment struct {
 	// ProgramDateTime is the wall-clock time of the segment's first frame:
 	// its own #EXT-X-PROGRAM-DATE-TIME, or the last one seen advanced by the
 	// durations in between (RFC 8216 §4.3.2.6) — the same clock the ad
-	// classification above reads. Zero when the playlist carries no PDT tags
-	// (YouTube HLS, an old capture). See DownloaderOptions.OnFirstSegment.
+	// classification above reads. YouTube's live HLS variant carries a single
+	// date-time tag at the playlist head (within 0.15 s of the segment's
+	// Ingestion-Walltime in the 2026-11-27 measurement), which this parse
+	// carries to the later segments by their EXTINF durations: that value is
+	// the time-zero anchor of a live-edge YouTube capture (media_start_time,
+	// owner ruling RV-19; SegmentDownloader.OnFirstMediaWallclock). Zero when
+	// the playlist carries no PDT tags. See DownloaderOptions.OnFirstSegment.
 	ProgramDateTime time.Time
 }
 
