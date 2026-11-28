@@ -217,7 +217,7 @@ available.
 
 Depending on the job, it shows:
 
-- **Title, Channel, Video ID** (**Stream ID** for Twitch jobs), **Stream URL**, **Status** (coloured; `COOKIES?` reads **Auth Required**), **Type** (VOD or Live), start-time and gap-fill notes, **Latency** for a YouTube stream (its latency setting and the chat offset the dashboard player suggests for it; or "Not stated by YouTube" for an upload that was never a stream; see [Player](player.md#suggested-offset-youtube)), and for Twitch the **Platform**, **Category** and **Quality**.
+- **Title, Channel, Video ID** (**Stream ID** for Twitch jobs), **Stream URL**, **Status** (coloured; `COOKIES?` reads **Auth Required**), **Type** (VOD or Live), start-time and gap-fill notes, **Latency** for a YouTube stream (its latency setting and the chat offset the dashboard player suggests for it; or "Not stated by YouTube" for a live recording YouTube named no setting for; a downloaded upload shows no row; see [Player](player.md#suggested-offset-youtube)), and for Twitch the **Platform**, **Category** and **Quality**.
 - **Advanced Options** when the job was added with a chosen video or audio format or a time range.
 - **Progress**: progress text, **Queue** (why a `Queued` job is waiting), **Speed**, **ETA**, and chat capture state.
 - **Media**: resolution, FPS, file size.

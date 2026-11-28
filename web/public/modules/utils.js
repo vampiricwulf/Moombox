@@ -1577,13 +1577,15 @@ export function suggestedChatOffset(job) {
 
 /**
  * latencyText is jobstate.LatencyLine, the job-details line for a YouTube
- * job's latency mode and its suggested chat offset; "" for none.
+ * job's latency mode and its suggested chat offset; "" for none, and for a
+ * VOD stored as unstated (an upload the backfill asked about: never a
+ * stream).
  * @param {object} job
  * @returns {string}
  */
 export function latencyText(job) {
   if (!job || job.platform === "twitch") return "";
-  if (job.latencyMode === "unstated") return "Not stated by YouTube";
+  if (job.latencyMode === "unstated") return job.isVod ? "" : "Not stated by YouTube";
   const s = suggestedChatOffset(job);
   if (!s.known) return "";
   return `${LATENCY_MODE_LABELS[job.latencyMode]}, suggested chat offset ${s.seconds} s`;

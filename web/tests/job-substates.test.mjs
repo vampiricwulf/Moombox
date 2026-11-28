@@ -407,7 +407,8 @@ test("a COOKIES? row shows its cookie retries and follows the holds frame", { sk
 });
 
 // Owner ruling RV-19. Mutants: an offset or a basis swapped; Ultra low's
-// known 0 read as no suggestion; Twitch given one; the unstated line dropped;
+// known 0 read as no suggestion; Twitch given one; the unstated line dropped
+// or shown on a VOD (an upload the backfill asked about);
 // a pre-flag non-zero offset read as none.
 test("suggestedChatOffset, latencyText and hasOperatorChatOffset answer the shared table as Go does", () => {
   assert.ok(PARITY.suggestedChatOffset.length >= 10);

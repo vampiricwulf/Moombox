@@ -84,13 +84,20 @@ func SuggestedChatOffset(job *database.Job) (seconds int, known bool, basis Chat
 // for a YouTube job's latency mode and the chat offset it suggests: "Normal
 // latency, suggested chat offset 15 s", or "Not stated by YouTube" for a
 // broadcast YouTube would not name a mode for. "" for a job with none
-// (Twitch, an upload, never asked). utils.js latencyText is the dashboard's
-// copy (same parity table).
+// (Twitch, never asked), and for a VOD download stored as unstated: the
+// backfill stores that marker on an ordinary upload (never a stream, owner
+// ruling RV-19: it has no latency mode) and on a private or deleted video,
+// only so it is not asked again, and a VOD that is unstated carries no
+// suggestion either way. utils.js latencyText is the dashboard's copy (same
+// parity table).
 func LatencyLine(job *database.Job) string {
 	if job == nil || job.Platform == "twitch" {
 		return ""
 	}
 	if job.LatencyMode == database.LatencyModeUnstated {
+		if job.IsVod {
+			return ""
+		}
 		return "Not stated by YouTube"
 	}
 	seconds, known, _ := SuggestedChatOffset(job)
