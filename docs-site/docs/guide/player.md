@@ -198,7 +198,7 @@ How to tell it ran:
   `latency backfill: giving up on this recording until the next start` and
   `latency backfill: YouTube refused this recording on every try; stored it
   as unstated`. Each carries the job (`jobID`), `tries`, the error (`err`)
-  and what YouTube answered: `playability`, its `reason` text,
+  and, when YouTube answered, `playability`, its `reason` text,
   `videoDetails` (whether the video's details came back) and the `client`
   that answered, with `escalation` and `escalationPlayability` when a
   second client was asked too.

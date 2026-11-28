@@ -879,7 +879,7 @@ func TestLatencyBackfillSettleOnARowThatHasItsModeIsNoGiveUp(t *testing.T) {
 	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
 		try++
 		if try == latencyBackfillMaxTries && !h.db.SetLatencyModeIfUnset("aaa", database.LatencyModeNormal) {
-			t.Fatal("could not store the re-extraction's mode")
+			t.Error("could not store the re-extraction's mode")
 		}
 		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityUnknown, PlayabilityStatus: "UNPLAYABLE",
 			PlayabilityReason: "This video has been removed following a copyright removal request.", LatencyClassAsked: true}, nil
