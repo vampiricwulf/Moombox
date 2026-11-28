@@ -121,7 +121,8 @@ the offset box in the sidebar header (placeholder **-0.0s offset**):
 
 Decimals are allowed. The change applies immediately to both the sidebar and
 the overlay, and is saved for this job when you press ++enter++ or leave the
-box, so it applies on every device. The **✕** beside the box resets it to 0.
+box, so it applies on every device. The **✕** beside the box clears your
+offset: back to 0, or to the suggested offset when there is one (below).
 
 #### Suggested offset (YouTube)
 
@@ -132,18 +133,21 @@ for which you have not set an offset plays with that suggestion straight away:
 the box shows it in italics with **suggested (typical): Normal latency** (or
 Low, or Ultra low) beside it.
 
-| Latency setting | Suggested offset | For a recording from before this version |
+| Latency setting | Suggested offset | Without a stored start time |
 |---|---|---|
 | Normal latency | 20 s | 15 s |
 | Low latency | 7 s | 2 s |
 | Ultra low latency | 4 s | 0 s |
 
-The figures are typical delays for each setting (YouTube promises under 10
-seconds for Low and under 5 for Ultra low), not measured for your recording.
-Recordings made with this version place chat by the moment each piece of
-video reached YouTube, so they get the whole delay; older recordings place
-chat by the stream's start time, which already sits about 5 seconds later, so
-they get 5 seconds less.
+The figures are typical delays for each setting (YouTube says most viewers
+see under 10 seconds on Low and under 5 on Ultra low), not measured for your
+recording. A live recording made with this version stores the time its first
+second of video reached YouTube and places chat by it, so it gets the whole
+delay. A recording without that stored time places chat by the stream's start
+time, which already sits about 5 seconds later, so it gets 5 seconds less:
+recordings from before this version, downloaded VODs, and the rare new
+recording whose first segment carried no time. The job details' **Latency**
+row shows which figure a recording gets.
 
 The box always holds the whole offset. Type your own number (0 included) and
 it replaces the suggestion for this recording, and it is kept: Moombox never
