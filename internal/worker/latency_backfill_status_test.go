@@ -305,3 +305,21 @@ func TestLatencyBackfillPauseKeepsItsPlace(t *testing.T) {
 		t.Errorf("logged %v, want only the offline pause", got)
 	}
 }
+
+// TestLatencyBackfillStatusOnBeforeTheWalkSteps: a walk whose last step
+// found the switch off reads waiting, not off, once the key is on again and
+// before its next step runs (a hand edit of config.toml wakes nothing, and a
+// step whose read fails enters no phase).
+//
+// Mutant: LatencyBackfillStatus taking the walk's off phase as it stands
+// with the key on.
+func TestLatencyBackfillStatusOnBeforeTheWalkSteps(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorkerSetup(t)
+	b := w.newLatencyBackfill()
+	b.enter(latencyPhase{state: LatencyBackfillOff})
+	w.cfg.Monitors.LatencyBackfill = nil
+	if got := w.LatencyBackfillStatus().State; got != LatencyBackfillWaiting {
+		t.Errorf("key on, walk last off: state %q, want waiting", got)
+	}
+}

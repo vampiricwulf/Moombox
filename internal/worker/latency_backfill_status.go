@@ -190,7 +190,8 @@ func (w *DownloadWorker) signalLatencyChanged() {
 // LatencyBackfillStatus is the latency-mode backfill's status now: off
 // whenever monitors.latency_backfill is false (read now, so the line never
 // lags the switch), else the phase the walk last entered (waiting before
-// the walk has run a step); and the counts, read now. Safe from any
+// the walk has run a step, and while its last phase is still off from
+// before the switch went on); and the counts, read now. Safe from any
 // goroutine.
 func (w *DownloadWorker) LatencyBackfillStatus() LatencyBackfillStatus {
 	s := LatencyBackfillStatus{State: LatencyBackfillWaiting}
@@ -204,8 +205,14 @@ func (w *DownloadWorker) LatencyBackfillStatus() LatencyBackfillStatus {
 			on = c.Monitors.LatencyBackfillEnabled()
 		}
 	})
-	if !on {
+	switch {
+	case !on:
 		s = LatencyBackfillStatus{State: LatencyBackfillOff}
+	case s.State == LatencyBackfillOff:
+		// Switched on, and the walk has not stepped since (a hand edit of
+		// config.toml wakes nothing, and a step whose read fails enters no
+		// phase): it is waiting for that step, never off.
+		s.State = LatencyBackfillWaiting
 	}
 	if w.db != nil {
 		if done, total, err := w.db.LatencyBackfillCounts(); err == nil {
