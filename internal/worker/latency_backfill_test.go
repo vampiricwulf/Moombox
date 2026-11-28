@@ -141,11 +141,36 @@ func (h *backfillHarness) mode(id string) database.LatencyMode {
 	return j.LatencyMode
 }
 
-// step runs one step and checks the wait it asks for.
+// stepDeadline bounds one step in the tests: a step reads a page or two of
+// a small database and makes one scripted request, so one that has not
+// returned by then is looping (a cursor that never advances spins next()
+// forever), and the test fails fast instead of hanging to the package
+// timeout.
+const stepDeadline = 10 * time.Second
+
+// step runs one step and checks the wait it asks for, failing the test when
+// the step does not return within stepDeadline.
 func (h *backfillHarness) step(want time.Duration) {
 	h.t.Helper()
-	if got := h.b.stepRecovered(context.Background()); got != want {
-		h.t.Fatalf("step waits %v, want %v", got, want)
+	done := make(chan time.Duration, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				close(done)
+			}
+		}()
+		done <- h.b.stepRecovered(context.Background())
+	}()
+	select {
+	case got, ok := <-done:
+		if !ok {
+			h.t.Fatal("step panicked past its own recover")
+		}
+		if got != want {
+			h.t.Fatalf("step waits %v, want %v", got, want)
+		}
+	case <-time.After(stepDeadline):
+		h.t.Fatalf("step did not return within %v: the walk is looping", stepDeadline)
 	}
 }
 
