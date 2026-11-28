@@ -351,6 +351,20 @@ type Job struct {
 	// live edge: <reason>, joined H:MM:SS in" — YouTube has no gap-fill, so
 	// the operator is the only one who can fetch the missing start.
 	LiveEdgeReason string `json:"liveEdgeReason,omitempty"`
+	// MediaStartTime is the wall clock (RFC 3339, sub-second) of a live
+	// YouTube archive's time zero (owner ruling RV-19): the first recorded
+	// segment's Ingestion-Walltime-Us (DASH) or #EXT-X-PROGRAM-DATE-TIME
+	// (the live HLS path). FFmpeg's mux moves each input's first timestamp
+	// to 0, so that segment's first frame is the archive's 0:00. The
+	// dashboard player lines chat up with it (computeChatBiasMs: chat's
+	// wall-clock offsets minus this, so a capture that joined at the live
+	// edge shows its chat where it was sent, not months late). Written by
+	// the finalize from the staged recording beside JoinOffsetSeconds
+	// (mediaStartTime, internal/worker/recording_start.go; a split archive's
+	// is part 1's), so a resume or a later part never moves it; cleared by a
+	// Reinitialize. "" (NULL) for a VOD, a Twitch capture, a row from before
+	// v30, and a capture whose first segment carried no wall clock.
+	MediaStartTime string `json:"mediaStartTime,omitempty"`
 	// TwitchStreamID is the Twitch stream ID of the broadcast a MANUALLY ADDED
 	// Twitch job last started to record (owner ruling RV-6). Such a job's ID
 	// is often not the key the live monitor looks a broadcast up by

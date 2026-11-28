@@ -80,6 +80,7 @@ var fieldToColumn = map[string]string{
 	"join_offset_seconds": "join_offset_seconds",
 	"live_edge_reason":    "live_edge_reason",
 	"twitch_stream_id":    "twitch_stream_id",
+	"media_start_time":    "media_start_time",
 }
 
 // dbLogger is the interface for database error logging.
@@ -449,7 +450,8 @@ func (db *Database) prepareStatements() error {
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
 		auto_retry_count, channel_id, queue_priority, incomplete_tail, park_reason, park_identity,
-		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id
+		notification_msgs, announce_found, join_offset_seconds, live_edge_reason, twitch_stream_id,
+		media_start_time
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -907,7 +909,7 @@ type rowScanner interface {
 func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched, incompleteTail int
-	var notifMsgs, liveEdgeReason, twitchStreamID sql.NullString
+	var notifMsgs, liveEdgeReason, twitchStreamID, mediaStartTime sql.NullString
 	var announceFound int
 	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
@@ -925,6 +927,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 		&j.AutoRetryCount, &j.ChannelID, &j.QueuePriority, &incompleteTail, &j.ParkReason, &j.ParkIdentity,
 		&notifMsgs, &announceFound, &j.JoinOffsetSeconds, &liveEdgeReason, &twitchStreamID,
+		&mediaStartTime,
 	)
 	if err != nil {
 		return nil, err
@@ -938,6 +941,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 	j.AnnounceFound = intToBool(announceFound)
 	j.LiveEdgeReason = liveEdgeReason.String
 	j.TwitchStreamID = twitchStreamID.String
+	j.MediaStartTime = mediaStartTime.String
 	return &j, nil
 }
 
