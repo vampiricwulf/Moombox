@@ -159,7 +159,7 @@ YouTube would not name a setting for get no suggestion, and the box works as
 it always did. Recordings and VOD downloads made before this version get
 their latency setting from YouTube in the background; new ones get it when
 they are recorded or downloaded. In the background Moombox asks about one recording a minute, only while online, and pauses while
-YouTube is rate-limiting it or a live capture is starting, so the suggestion
+YouTube is rate-limiting it or a capture is live, so the suggestion
 appears on them over time. A video that is now private or deleted cannot be
 asked about, and keeps no suggestion. The job details show the setting and the suggestion in a **Latency**
 row. The switch for this background walk is
@@ -169,13 +169,18 @@ row. The switch for this background walk is
 How to tell it ran:
 
 - **Settings → Monitors**, both UIs: the line under the **Latency Mode
-  Backfill** switch (TUI: **Latency backfill**) says what it is doing now:
-  `waiting to start` (the first 5 minutes after a start),
-  `212 of 540 recordings done`, `paused: offline`,
-  `paused: YouTube rate limit until 14:05`, `paused: a capture is live`,
-  `caught up (540 recordings)` or `off`. When some recordings could not be
-  asked (YouTube failed three times), it says so: `caught up (538 of 540
-  recordings done; 2 are asked again at the next start)`.
+  Backfill** switch (TUI: **Latency backfill**) says what it is doing now,
+  with how many recordings have their setting (here 212 of 540):
+  `waiting to start (212 of 540 recordings done)` (the first 5 minutes after
+  a start), `212 of 540 recordings done`,
+  `paused: offline (212 of 540 recordings done)`,
+  `paused: YouTube rate limit until 14:05 (212 of 540 recordings done)`,
+  `paused: a capture is live (212 of 540 recordings done)`,
+  `caught up (540 recordings)` or `off (212 of 540 recordings done)`. When
+  YouTube did not answer for some recordings, it says so:
+  `caught up (538 of 540 recordings done; 2 not answered yet)`. Those are
+  asked again an hour later, up to three times, and after that at the next
+  start.
 - **The log**, at the default level, one line each time the walk changes
   state, never once a minute: `latency backfill: started, asking YouTube
   about one recording a minute` (with how many are left, `toAsk`),

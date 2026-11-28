@@ -131,8 +131,9 @@ func TestLatencyBackfillLogsEachStateOnce(t *testing.T) {
 // last did, and the counts are the database's, read on each call.
 //
 // Mutants: the config not read (off shows the walk's paused phase); the
-// walk's phase not read (paused shows waiting); the counts not read; the
-// worker's walk not signalling LatencyBackfillChanged.
+// walk's phase not read, or the worker's walk not stored for it (paused
+// shows waiting); the counts not read; the worker's walk not signalling
+// LatencyBackfillChanged.
 func TestLatencyBackfillStatus(t *testing.T) {
 	t.Parallel()
 	w, db := testWorkerSetup(t)
@@ -147,7 +148,6 @@ func TestLatencyBackfillStatus(t *testing.T) {
 		t.Errorf("before Start: %+v, want %+v", got, want)
 	}
 	b := w.newLatencyBackfill()
-	w.latencyWalk.Store(b)
 	until := time.Date(2026, 11, 27, 14, 5, 0, 0, time.UTC)
 	b.enter(latencyPhase{state: LatencyBackfillPaused, pause: LatencyPauseRateLimit, until: until})
 	want := LatencyBackfillStatus{State: LatencyBackfillPaused, Pause: LatencyPauseRateLimit, Until: until, Done: 1, Total: 2}
@@ -163,6 +163,30 @@ func TestLatencyBackfillStatus(t *testing.T) {
 	case <-w.LatencyBackfillChanged():
 	default:
 		t.Error("the phase change was not signalled to LatencyBackfillChanged")
+	}
+}
+
+// TestWakeLatencyBackfillSignalsTheStatus: a Settings save that moves the
+// switch reaches both UIs at once, even with no walk listening (the first
+// five minutes after start): the wake signals LatencyBackfillChanged, and
+// the status the push then reads is off.
+//
+// Mutant: WakeLatencyBackfill not signalling (nothing is pushed until the
+// walk's next step).
+func TestWakeLatencyBackfillSignalsTheStatus(t *testing.T) {
+	t.Parallel()
+	w, _ := testWorkerSetup(t)
+	w.newLatencyBackfill()
+	f := false
+	w.cfg.Monitors.LatencyBackfill = &f
+	w.WakeLatencyBackfill()
+	select {
+	case <-w.LatencyBackfillChanged():
+	default:
+		t.Fatal("the wake did not signal LatencyBackfillChanged")
+	}
+	if got := w.LatencyBackfillStatus().State; got != LatencyBackfillOff {
+		t.Errorf("status after the wake = %q, want off", got)
 	}
 }
 

@@ -163,7 +163,8 @@ type latencyTry struct {
 }
 
 // newLatencyBackfill is the worker's walk: its database, its YouTube
-// service, its connectivity monitor, and its scheduler's rate-limit hold.
+// service, its connectivity monitor, and its scheduler's rate-limit hold. It
+// is also the walk LatencyBackfillStatus reads.
 func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
 	b := &latencyBackfill{db: w.db, logger: w.logger, heldUntil: w.latencyHoldUntil, recordHold: w.latencyHoldRecord,
 		wake: w.latencyWake}
@@ -192,6 +193,8 @@ func (w *DownloadWorker) newLatencyBackfill() *latencyBackfill {
 			return err != nil || has
 		}
 	}
+	// The walk LatencyBackfillStatus reads its phase from.
+	w.latencyWalk.Store(b)
 	return b
 }
 
@@ -526,10 +529,14 @@ func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.Latency
 // resumes now, rather than at its next look, which may be up to
 // latencyBackfillIdle away. Non-blocking: a wake already pending covers it.
 // The walk reads the key itself, so a wake that changed nothing does
-// nothing.
+// nothing. It also signals LatencyBackfillChanged: the status reads the
+// switch from the config, so both UIs show the change at once, before the
+// walk's next step (in the first latencyBackfillStartDelay after start the
+// walk is not listening for a wake at all).
 func (w *DownloadWorker) WakeLatencyBackfill() {
 	select {
 	case w.latencyWake <- struct{}{}:
 	default:
 	}
+	w.signalLatencyChanged()
 }

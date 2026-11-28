@@ -906,8 +906,7 @@ export function latencyBackfillLine(status, utcOffsetMinutes) {
     case "caught_up": {
       if (total === 0) return "caught up (no recordings to ask about)";
       if (done >= total) return `caught up (${total} ${noun})`;
-      const left = total - done;
-      return `caught up (${counts}; ${left} ${left === 1 ? "is" : "are"} asked again at the next start)`;
+      return `caught up (${counts}; ${total - done} not answered yet)`;
     }
   }
   return "";

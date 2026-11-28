@@ -16,8 +16,8 @@
     { "name": "paused for a reason this build does not know", "utcOffsetMinutes": 0, "status": { "state": "paused", "pause": "sideways", "done": 212, "total": 540 }, "line": "paused (212 of 540 recordings done)" },
     { "name": "caught up", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 540, "total": 540 }, "line": "caught up (540 recordings)" },
     { "name": "caught up with one", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 1, "total": 1 }, "line": "caught up (1 recording)" },
-    { "name": "caught up with rows given up on", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 538, "total": 540 }, "line": "caught up (538 of 540 recordings done; 2 are asked again at the next start)" },
-    { "name": "caught up with one row given up on", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 539, "total": 540 }, "line": "caught up (539 of 540 recordings done; 1 is asked again at the next start)" },
+    { "name": "caught up with rows not answered yet", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 538, "total": 540 }, "line": "caught up (538 of 540 recordings done; 2 not answered yet)" },
+    { "name": "caught up with one of one not answered yet", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 0, "total": 1 }, "line": "caught up (0 of 1 recording done; 1 not answered yet)" },
     { "name": "caught up with nothing to consider", "utcOffsetMinutes": 0, "status": { "state": "caught_up", "done": 0, "total": 0 }, "line": "caught up (no recordings to ask about)" },
     { "name": "a state this build does not know", "utcOffsetMinutes": 0, "status": { "state": "sideways", "done": 1, "total": 2 }, "line": "" },
     { "name": "no status at all, as from an older binary", "jsOnly": true, "utcOffsetMinutes": 0, "status": null, "line": "" }

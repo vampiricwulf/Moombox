@@ -689,9 +689,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 
 	// The latency-mode backfill (owner ruling RV-19): archived YouTube
 	// recordings with no latency mode, asked about one a minute.
-	walk := w.newLatencyBackfill()
-	w.latencyWalk.Store(walk)
-	go w.runLatencyBackfill(ctx, walk)
+	go w.runLatencyBackfill(ctx, w.newLatencyBackfill())
 
 	// Process jobs from queue
 	for {

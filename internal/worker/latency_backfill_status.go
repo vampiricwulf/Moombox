@@ -223,9 +223,10 @@ func (w *DownloadWorker) LatencyBackfillStatus() LatencyBackfillStatus {
 //	paused: YouTube rate limit until 14:05 (212 of 540 recordings done)
 //	paused: a capture is live (212 of 540 recordings done)
 //	caught up (540 recordings)
-//	caught up (538 of 540 recordings done; 2 are asked again at the next start)
+//	caught up (538 of 540 recordings done; 2 not answered yet)
 //
-// The counts are left out while there is no recording to consider. ""
+// A caught-up walk with rows still NULL has rows waiting out their retry
+// hour or given up on until the next start. The counts are left out while there is no recording to consider. ""
 // for a state this build does not know.
 func LatencyBackfillLine(s LatencyBackfillStatus, loc *time.Location) string {
 	noun := "recordings"
@@ -272,12 +273,10 @@ func LatencyBackfillLine(s LatencyBackfillStatus, loc *time.Location) string {
 		case s.Done >= s.Total:
 			return fmt.Sprintf("caught up (%d %s)", s.Total, noun)
 		}
-		left := s.Total - s.Done
-		verb := "are"
-		if left == 1 {
-			verb = "is"
-		}
-		return fmt.Sprintf("caught up (%s; %d %s asked again at the next start)", counts, left, verb)
+		// Rows still NULL: asked again after their retry wait, or, given up
+		// on after latencyBackfillMaxTries, at the next start. Not answered
+		// yet is true of both.
+		return fmt.Sprintf("caught up (%s; %d not answered yet)", counts, s.Total-s.Done)
 	}
 	return ""
 }
