@@ -9,6 +9,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/redact"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -47,7 +48,18 @@ import (
 //   - anything else leaves the row NULL: it is asked again on a later pass,
 //     no sooner than latencyBackfillRetryAfter, and at most
 //     latencyBackfillMaxTries times in one process, so one bad video cannot
-//     loop. A failure met while going offline is not counted.
+//     loop. A failure met while going offline is not counted. Each failure
+//     is logged with what YouTube answered (latencyFailure);
+//   - a row YouTube refused outright on every one of those tries (a
+//     members-only or age-gated recording this session cannot see, or a
+//     refusal the parser cannot place, as a terminated channel or a
+//     copyright removal reads; latencyFailure.refused) is stored as
+//     LatencyModeUnstated at the last one, at least two hours after the
+//     first: waiting will not change the answer, and the mode is only a
+//     suggestion. A row with any other failure among its tries (a network
+//     error, a panic, an escalation that failed, the bot wall, an answer
+//     with no playabilityStatus) is given up on until the next start, as
+//     before.
 //
 // The rows themselves are the state: a restart walks every row still NULL
 // from the start. The one thing saved beside them is the walk's own
@@ -156,10 +168,12 @@ type latencyRun struct {
 	filled, unstated, gaveUp int
 }
 
-// latencyTry is one row's failed requests and when it may be asked again.
+// latencyTry is one row's failed requests, how many of them YouTube
+// refused the recording outright (latencyFailure.refused), and when it may
+// be asked again.
 type latencyTry struct {
-	n    int
-	next time.Time
+	n, refusals int
+	next        time.Time
 }
 
 // newLatencyBackfill is the worker's walk: its database, its YouTube
@@ -208,13 +222,19 @@ func (w *DownloadWorker) latencyProbe(ctx context.Context, videoID string) (*you
 // latencyProbeVia is latencyProbe over its three calls: probe, then authProbe
 // for a members-only refusal that named no class (with or without
 // videoDetails: a refusal often carries the title and channel) while
-// signedIn.
+// signedIn. The authenticated answer is tagged
+// youtube.StatusProbeEscalationTVAuth, as the status probe tags its own
+// escalation, so the failure lines name the client that answered
+// (latencyAnswerClient); nothing else the walk reads looks at the tag.
 func latencyProbeVia(ctx context.Context, videoID string,
 	probe, authProbe func(context.Context, string) (*youtube.VideoInfo, error), signedIn func() bool) (*youtube.VideoInfo, error) {
 	info, err := probe(ctx, videoID)
 	if err == nil && info != nil && info.LatencyClass == "" &&
 		info.PlayabilityError == youtube.PlayabilityMembersOnly && signedIn() {
-		return authProbe(ctx, videoID)
+		info, err = authProbe(ctx, videoID)
+		if err == nil && info != nil && info.StatusProbeEscalation == "" {
+			info.StatusProbeEscalation = youtube.StatusProbeEscalationTVAuth
+		}
 	}
 	return info, err
 }
@@ -277,7 +297,7 @@ func (b *latencyBackfill) stepRecovered(ctx context.Context) (wait time.Duration
 		if r := recover(); r != nil {
 			b.logger.Error("panic in a latency-mode backfill step", "jobID", b.current, "panic", fmt.Sprint(r))
 			if b.current != "" {
-				b.fail(b.current, b.clock())
+				b.fail(b.current, b.clock(), false)
 			}
 			b.current = ""
 			wait = latencyBackfillPause
@@ -366,13 +386,36 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 			// Failed as the device went offline: not the video's failure.
 			return latencyBackfillPause
 		}
-		if n := b.fail(row.JobID, now); n >= latencyBackfillMaxTries {
+		why := latencyFailureOf(info, err)
+		n, refusals := b.fail(row.JobID, now, why.refused())
+		switch {
+		case n >= latencyBackfillMaxTries && refusals == n:
+			// YouTube refused the recording on every try, an hour or more
+			// apart: it will not describe it, so it settles as unstated.
+			// Like an answer, it is done with its tries whether the write
+			// applies or not: a refused write is a row that has its mode
+			// already (stored meanwhile by a re-extraction), not one given
+			// up on, and a failed one leaves the row NULL for a later pass.
+			delete(b.tries, row.JobID)
+			if !b.db.SetLatencyModeIfUnset(row.JobID, database.LatencyModeUnstated) {
+				b.logger.Debug("latency backfill: the recording YouTube kept refusing has a mode already, or the write failed",
+					"jobID", row.JobID)
+				break
+			}
+			b.run.filled++
+			b.run.unstated++
+			if b.changed != nil {
+				b.changed()
+			}
+			b.logger.Info("latency backfill: YouTube refused this recording on every try; stored it as unstated",
+				why.logArgs(row.JobID, n)...)
+		case n >= latencyBackfillMaxTries:
 			b.run.gaveUp++
 			b.logger.Info("latency backfill: giving up on this recording until the next start",
-				"jobID", row.JobID, "tries", n, "err", errText(err))
-		} else {
+				why.logArgs(row.JobID, n)...)
+		default:
 			b.logger.Debug("latency backfill: the request failed; asking again on a later pass",
-				"jobID", row.JobID, "tries", n, "err", errText(err))
+				why.logArgs(row.JobID, n)...)
 		}
 	}
 	return latencyBackfillPause
@@ -433,6 +476,120 @@ func (w *DownloadWorker) RestoreLatencyBackfillHold(until time.Time) bool {
 	return true
 }
 
+// latencyFailure is what one failed request's answer said, for the walk's
+// failure lines: a nil error with an answer YouTube refused or would not
+// place, or the status probe's inconclusive refusal by both clients asked.
+// It never holds a cookie, a token or visitor data: the kind, YouTube's
+// reason text, whether videoDetails came back and the client's name are all
+// the answer carries, and err's text goes through redact.MediaText.
+type latencyFailure struct {
+	err string
+	// answered is whether YouTube answered at all: false for a network
+	// failure, a timeout or an empty answer, whose lines carry err alone.
+	answered bool
+	kind     youtube.PlayabilityError
+	reason   string
+	// status is playabilityStatus.status as YouTube sent it, on an answer
+	// (VideoInfo.PlayabilityStatus) or ANDROID_VR's on an inconclusive
+	// probe (StatusProbeInconclusiveError.Status); never logged, read by
+	// refused.
+	status  string
+	details bool
+	// client names the client that answered (latencyAnswerClient), set on
+	// every answer; escalation and escalationKind are the status probe's
+	// second client and its own refusal, on an inconclusive probe.
+	client         string
+	escalation     string
+	escalationKind youtube.PlayabilityError
+	// inconclusive is whether err was the status probe's
+	// StatusProbeInconclusiveError, whose escalationKind is "" when the
+	// second client failed or was never asked.
+	inconclusive bool
+}
+
+// latencyFailureOf reads one failed request's info and err.
+func latencyFailureOf(info *youtube.VideoInfo, err error) latencyFailure {
+	f := latencyFailure{err: redact.MediaText(errText(err))}
+	if inc, ok := errors.AsType[*youtube.StatusProbeInconclusiveError](err); ok {
+		f.answered, f.inconclusive = true, true
+		f.kind, f.reason, f.status, f.client = inc.Playability, inc.Reason, inc.Status, "android_vr"
+		f.escalation, f.escalationKind = inc.Escalation, inc.EscalationPlayability
+		return f
+	}
+	if err == nil && info != nil {
+		f.answered = true
+		f.kind, f.reason, f.details = info.PlayabilityError, info.PlayabilityReason, info.LatencyClassAsked
+		f.status = info.PlayabilityStatus
+		f.client = latencyAnswerClient(info)
+	}
+	return f
+}
+
+// refused reports whether the failure was YouTube refusing the recording
+// itself, a definite answer that waiting will not change: a refusal of a
+// kind the walk does not settle at once (members-only or age-gated for this
+// session, or one the parser could not place, as a terminated channel or a
+// copyright removal reads), on the answer itself or, on an inconclusive
+// probe, by both clients asked. A row refused on every one of its
+// latencyBackfillMaxTries tries settles as unstated. A failure with no
+// answer (a network error, a timeout, an empty answer), a playable answer
+// without videoDetails, a rate limit and the bot wall are not refusals of
+// the recording: the bot wall (Sign in to confirm you're not a bot,
+// login_required) refuses the session, as a rate limit does, and would
+// otherwise settle every row it met for good.
+func (f latencyFailure) refused() bool {
+	if !f.answered || !refusesTheRecording(f.kind) {
+		return false
+	}
+	if f.kind == youtube.PlayabilityUnknown && f.reason == "" && f.status == "" {
+		// No playabilityStatus at all reads unknown too: YouTube said
+		// nothing, which is no refusal. (The escalation's own reason is not
+		// on the error, so only ANDROID_VR's side is read for it.)
+		return false
+	}
+	return !f.inconclusive || refusesTheRecording(f.escalationKind)
+}
+
+// refusesTheRecording reports whether a refusal of kind p is about the
+// recording rather than the session (latencyFailure.refused).
+func refusesTheRecording(p youtube.PlayabilityError) bool {
+	return !p.Playable() && p != youtube.PlayabilityRateLimited && p != youtube.PlayabilityLoginRequired
+}
+
+// latencyAnswerClient is the client that answered: the escalation when one
+// answered in ANDROID_VR's place (the status probe's own, or the walk's
+// member probe, latencyProbeVia), else the client stamped on its manifest,
+// else ANDROID_VR, whose answer every other status-probe answer is (an
+// upload's or a refusal's answer often carries no manifest).
+func latencyAnswerClient(info *youtube.VideoInfo) string {
+	switch {
+	case info.StatusProbeEscalation != "":
+		return info.StatusProbeEscalation
+	case info.DashManifestSource != "":
+		return info.DashManifestSource
+	case info.HlsManifestSource != "":
+		return info.HlsManifestSource
+	default:
+		return "android_vr"
+	}
+}
+
+// logArgs are a failure line's key-value pairs for jobID's n-th try.
+func (f latencyFailure) logArgs(jobID string, n int) []any {
+	args := []any{"jobID", jobID, "tries", n, "err", f.err}
+	if !f.answered {
+		return args
+	}
+	args = append(args, "playability", string(f.kind), "reason", f.reason, "videoDetails", f.details)
+	if f.client != "" {
+		args = append(args, "client", f.client)
+	}
+	if f.escalation != "" {
+		args = append(args, "escalation", f.escalation, "escalationPlayability", string(f.escalationKind))
+	}
+	return args
+}
+
 // errText is err's text, or "" for none.
 func errText(err error) string {
 	if err == nil {
@@ -441,16 +598,21 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// fail counts one failed request for jobID at now and returns the count.
-func (b *latencyBackfill) fail(jobID string, now time.Time) int {
+// fail counts one failed request for jobID at now, a refusal of the
+// recording when refused, and returns the row's failed requests and
+// refusals so far.
+func (b *latencyBackfill) fail(jobID string, now time.Time, refused bool) (n, refusals int) {
 	if b.tries == nil {
 		b.tries = make(map[string]latencyTry)
 	}
 	t := b.tries[jobID]
 	t.n++
+	if refused {
+		t.refusals++
+	}
 	t.next = now.Add(latencyBackfillRetryAfter)
 	b.tries[jobID] = t
-	return t.n
+	return t.n, t.refusals
 }
 
 // eligible reports whether jobID may be asked about at now: not given up on,
@@ -512,7 +674,9 @@ const (
 //   - refused as private, unavailable or region-blocked by every client
 //     asked (isTerminalPlayability): LatencyModeUnstated, for good;
 //   - anything else (a network failure, a bot wall, a members-only refusal,
-//     an age gate, an answer about another video): latencyTransient.
+//     an age gate, an answer about another video): latencyTransient. The
+//     walk settles a row refused on every try as unstated
+//     (latencyFailure.refused), which one answer cannot decide.
 func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.LatencyMode, latencyVerdict) {
 	if err != nil {
 		if _, ok := errors.AsType[*youtube.HTTPRateLimitError](err); ok {
@@ -533,7 +697,7 @@ func classifyLatencyAnswer(info *youtube.VideoInfo, err error) (database.Latency
 		return "", latencyTransient
 	case info.LatencyClass != "":
 		return database.ParseLatencyClass(info.LatencyClass), latencyAnswered
-	case info.LatencyClassAsked && info.PlayabilityError == "":
+	case info.LatencyClassAsked && info.PlayabilityError.Playable():
 		// A playable answer with videoDetails and no class: YouTube would
 		// not say. A refusal's details without a class say nothing (a
 		// members-only or age-gated archive often carries its title and

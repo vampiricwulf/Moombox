@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +24,9 @@ import (
 // escalation failed (the "escalation failed" case); a members-only refusal
 // taken as final; the escalation's rate limit read as transient; a
 // refusal's classless videoDetails read as unstated (the members-only and
-// login-required "with details" cases).
+// login-required "with details" cases); the playable check reading only an
+// empty verdict (the upload, spelled PlayabilityOK as the parser does, reads
+// transient).
 func TestClassifyLatencyAnswer(t *testing.T) {
 	t.Parallel()
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
@@ -38,11 +42,11 @@ func TestClassifyLatencyAnswer(t *testing.T) {
 		mode    database.LatencyMode
 		verdict latencyVerdict
 	}{
-		{"an ended stream with its class", &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, LatencyClass: normal, LatencyClassAsked: true},
+		{"an ended stream with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamVOD, LatencyClass: normal, LatencyClassAsked: true},
 			nil, database.LatencyModeNormal, latencyAnswered},
-		{"ultra low", &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", LatencyClassAsked: true},
+		{"ultra low", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", LatencyClassAsked: true},
 			nil, database.LatencyModeUltraLow, latencyAnswered},
-		{"an upload: videoDetails, no class", &youtube.VideoInfo{StreamStatus: youtube.StreamVOD, LatencyClassAsked: true},
+		{"an upload: playable, videoDetails, no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamNotAStream, LatencyClassAsked: true},
 			nil, database.LatencyModeUnstated, latencyAnswered},
 		{"private on the answer itself", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate},
 			nil, database.LatencyModeUnstated, latencyAnswered},
@@ -191,7 +195,7 @@ func (h *backfillHarness) takeAsked() []string {
 
 func answered(class string) func() (*youtube.VideoInfo, error) {
 	return func() (*youtube.VideoInfo, error) {
-		return &youtube.VideoInfo{LatencyClass: class, LatencyClassAsked: true}, nil
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: class, LatencyClassAsked: true}, nil
 	}
 }
 
@@ -228,6 +232,50 @@ func TestLatencyBackfillStoresOneRowPerStep(t *testing.T) {
 	}
 	if h.mode("ccc") != database.LatencyModeNone {
 		t.Error("an Error row was asked about")
+	}
+}
+
+// TestLatencyBackfillSettlesAMembersOnlyUploadInOneRequest is the measured
+// members-only upload (2026-11-27): ANDROID_VR refuses it members_only with
+// its videoDetails, the signed-in TV probe answers it playable with
+// videoDetails and no class, and the walk stores unstated in that one
+// request; a stream the member session sees still stores its class.
+//
+// Mutants: classifyLatencyAnswer's playable check back to an empty verdict
+// only (the upload stays NULL and is counted as a failure).
+func TestLatencyBackfillSettlesAMembersOnlyUploadInOneRequest(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	h.add("upload", database.StatusFinished)
+	h.add("stream", database.StatusFinished)
+	member := map[string]*youtube.VideoInfo{
+		"upload": {PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamNotAStream, LatencyClassAsked: true},
+		"stream": {PlayabilityError: youtube.PlayabilityOK, StreamStatus: youtube.StreamVOD, LatencyClassAsked: true,
+			LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW"},
+	}
+	h.b.probe = func(ctx context.Context, videoID string) (*youtube.VideoInfo, error) {
+		h.asked = append(h.asked, videoID)
+		return latencyProbeVia(ctx, videoID,
+			func(context.Context, string) (*youtube.VideoInfo, error) {
+				return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true,
+					PlayabilityReason: "Join this channel to get access to members-only content like this video."}, nil
+			},
+			func(_ context.Context, id string) (*youtube.VideoInfo, error) { return member[id], nil },
+			func() bool { return true })
+	}
+	h.step(latencyBackfillPause)
+	h.step(latencyBackfillPause)
+	if got := h.takeAsked(); len(got) != 2 {
+		t.Fatalf("asked %v, want each row once", got)
+	}
+	if h.mode("upload") != database.LatencyModeUnstated {
+		t.Errorf("upload = %q, want unstated in one request", h.mode("upload"))
+	}
+	if h.mode("stream") != database.LatencyModeLow {
+		t.Errorf("stream = %q, want low", h.mode("stream"))
+	}
+	if len(h.b.tries) != 0 {
+		t.Errorf("failures counted: %v", h.b.tries)
 	}
 }
 
@@ -396,14 +444,16 @@ func TestNewLatencyBackfillReadsTheSchedulersHold(t *testing.T) {
 // TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal: the walk's
 // request is the status probe, and for a members-only refusal that named no
 // class (with or without videoDetails) the authenticated TV probe, but only
-// while signed in; any other answer is returned as it is.
+// while signed in, its answer tagged as the TV client's; any other answer is
+// returned as it is.
 //
 // Mutants: the follow-up dropped (members-only signed in returns the
 // refusal); the signed-in check dropped (a signed-out jar asks TV); the
-// follow-up skipped for a refusal that carried videoDetails.
+// follow-up skipped for a refusal that carried videoDetails; the member's
+// answer left untagged (its failure line would name android_vr), or the
+// status probe's own answer tagged.
 func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 	t.Parallel()
-	member := &youtube.VideoInfo{LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
 	for _, c := range []struct {
 		name     string
 		first    *youtube.VideoInfo
@@ -415,9 +465,10 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		{"members only with details and no class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true}, true, true},
 		{"members only with its class", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, LatencyClassAsked: true,
 			LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"}, true, false},
-		{"an answer", &youtube.VideoInfo{LatencyClassAsked: true}, true, false},
+		{"an answer", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClassAsked: true}, true, false},
 		{"private", &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityPrivate}, true, false},
 	} {
+		member := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", LatencyClassAsked: true}
 		authAsked := false
 		got, err := latencyProbeVia(context.Background(), "vid",
 			func(context.Context, string) (*youtube.VideoInfo, error) { return c.first, nil },
@@ -432,9 +483,13 @@ func TestLatencyProbeAsksTheMemberSessionForAMembersOnlyRefusal(t *testing.T) {
 		if want := c.first; c.wantAuth {
 			if got != member {
 				t.Errorf("%s: returned the refusal, want the member's answer", c.name)
+			} else if got.StatusProbeEscalation != youtube.StatusProbeEscalationTVAuth {
+				t.Errorf("%s: the member's answer is tagged %q, want %q", c.name, got.StatusProbeEscalation, youtube.StatusProbeEscalationTVAuth)
 			}
 		} else if got != want {
 			t.Errorf("%s: answer replaced", c.name)
+		} else if got.StatusProbeEscalation != "" {
+			t.Errorf("%s: the probe's own answer tagged %q", c.name, got.StatusProbeEscalation)
 		}
 	}
 }
@@ -606,5 +661,254 @@ func TestLatencyBackfillWakeOnlyWhenTheSwitchMoved(t *testing.T) {
 	wake <- struct{}{}
 	if !bounded() {
 		t.Error("a switch moved to on did not end the wait")
+	}
+}
+
+// TestLatencyBackfillFailureLinesSayWhy: a failed request's Debug line and
+// the give-up Info line carry YouTube's answer beside err: the playability
+// kind, its reason text, whether videoDetails came back and the client that
+// answered (an inconclusive probe's two clients and their refusals; a
+// plain ANDROID_VR refusal, which names no client of its own, as android_vr),
+// and err's text with a media URL's credentials cut. A network failure, which
+// has no answer, carries err alone. The settle line carries the same.
+//
+// Mutants: the answer's fields left off either line (both lines read
+// err=""); err logged unredacted (the pot value shows); a plain refusal
+// logged with no client.
+func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &lockedLogger{}
+	h.b.logger = log
+	const gone = "This video is no longer available because the YouTube account associated with this video has been terminated."
+	h.add("aaa", database.StatusFinished)
+	h.add("bbb", database.StatusFinished)
+	h.add("ccc", database.StatusFinished)
+	h.add("ddd", database.StatusFinished)
+	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityLoginRequired, PlayabilityReason: "Sign in to confirm you're not a bot",
+			StatusProbeEscalation: youtube.StatusProbeEscalationTVAuth}, nil
+	}
+	h.answers["bbb"] = func() (*youtube.VideoInfo, error) {
+		return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}
+	}
+	const join = "Join this channel to get access to members-only content like this video."
+	h.answers["ddd"] = func() (*youtube.VideoInfo, error) {
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityMembersOnly, PlayabilityStatus: "LOGIN_REQUIRED", PlayabilityReason: join}, nil
+	}
+	h.answers["ccc"] = func() (*youtube.VideoInfo, error) {
+		return nil, errors.New(`Get "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&pot=SECRETPOT&sig=x": dial tcp: timeout`)
+	}
+	lines := func() map[string][]any {
+		log.mu.Lock()
+		defer log.mu.Unlock()
+		out := map[string][]any{}
+		for _, l := range log.lines {
+			for i := 1; i+1 < len(l); i += 2 {
+				if l[i] == "jobID" {
+					out[fmt.Sprint(l[0], " ", l[i+1])] = l[1:]
+				}
+			}
+		}
+		log.lines = nil
+		return out
+	}
+	const retry = "latency backfill: the request failed; asking again on a later pass"
+	const gaveUp = "latency backfill: giving up on this recording until the next start"
+	const settled = "latency backfill: YouTube refused this recording on every try; stored it as unstated"
+	want := map[string][]any{
+		"aaa": {"jobID", "aaa", "tries", 1, "err", "", "playability", "login_required", "reason", "Sign in to confirm you're not a bot",
+			"videoDetails", false, "client", "tv_auth"},
+		"bbb": {"jobID", "bbb", "tries", 1, "err", (&youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: gone,
+			Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: errors.New("refused too"), EscalationPlayability: youtube.PlayabilityUnknown}).Error(),
+			"playability", "unknown", "reason", gone, "videoDetails", false, "client", "android_vr",
+			"escalation", "tv_auth", "escalationPlayability", "unknown"},
+		"ddd": {"jobID", "ddd", "tries", 1, "err", "", "playability", "members_only", "reason", join, "videoDetails", false, "client", "android_vr"},
+	}
+	for i := 1; i <= latencyBackfillMaxTries; i++ {
+		for range 4 {
+			h.step(latencyBackfillPause)
+		}
+		got := lines()
+		msg := retry
+		if i == latencyBackfillMaxTries {
+			msg = gaveUp
+		}
+		for id, w := range want {
+			w[3] = i
+			m := msg
+			if id != "aaa" && i == latencyBackfillMaxTries {
+				// Refused on every try (bbb by both clients): settled, not
+				// given up.
+				m = settled
+			}
+			if !reflect.DeepEqual(got[m+" "+id], w) {
+				t.Errorf("try %d, %s: logged %v, want %v", i, id, got[m+" "+id], w)
+			}
+		}
+		c := got[msg+" ccc"]
+		if len(c) != 6 || strings.Contains(fmt.Sprint(c), "SECRETPOT") || !strings.Contains(fmt.Sprint(c), "dial tcp: timeout") {
+			t.Errorf("try %d, ccc: logged %v, want jobID, tries and a redacted err only", i, c)
+		}
+		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+}
+
+// TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing: a row YouTube
+// refused on every one of its latencyBackfillMaxTries tries, an hour apart,
+// settles as unstated at the last one, counted as filled and unstated: the
+// measured terminated channel (both probe clients refused it, kind unknown),
+// the copyright removal on the answer itself, a members-only upload the
+// session cannot see, and a refusal whose status came with no reason text.
+// Each refusal carries the playabilityStatus.status the parser pairs with
+// its kind. A row with one try that failed some other way (a network error,
+// a panic, an escalation that failed) keeps today's give-up, and so does
+// the bot wall, which refuses the session and not the recording, and so
+// does an answer with no playabilityStatus at all, which the parser reads
+// unknown with no reason and no status.
+//
+// Mutants: the settle rule dropped (the refused rows stay NULL); settling on
+// any third failure (the mixed, panic and escalation-failed rows settle); a
+// panic counted as a refusal; an inconclusive probe whose escalation failed
+// counted; the bot wall counted; an answer with no playabilityStatus
+// counted; an answer with a status and no reason read as no playabilityStatus
+// (the noreason row stays NULL); an inconclusive probe's status not read
+// (the incnoreason row stays NULL); the settle reached before the last try.
+func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &infoArgsLogger{}
+	h.b.logger = log
+	const gone = "This video is no longer available because the YouTube account associated with this video has been terminated."
+	// inconclusiveSaid is an inconclusive probe whose ANDROID_VR refusal
+	// carried status and reason; inconclusive is the terminated channel's.
+	inconclusiveSaid := func(status, reason string, esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
+		return func() (*youtube.VideoInfo, error) {
+			return nil, &youtube.StatusProbeInconclusiveError{Playability: youtube.PlayabilityUnknown, Reason: reason, Status: status,
+				Escalation: youtube.StatusProbeEscalationTVAuth, EscalationErr: escErr, EscalationPlayability: esc}
+		}
+	}
+	inconclusive := func(esc youtube.PlayabilityError, escErr error) func() (*youtube.VideoInfo, error) {
+		return inconclusiveSaid("ERROR", gone, esc, escErr)
+	}
+	refusal := func(p youtube.PlayabilityError, status, reason string) func() (*youtube.VideoInfo, error) {
+		return func() (*youtube.VideoInfo, error) {
+			return &youtube.VideoInfo{PlayabilityError: p, PlayabilityStatus: status, PlayabilityReason: reason, LatencyClassAsked: true}, nil
+		}
+	}
+	// thenOnTry answers a on every try but the n-th, which b answers.
+	thenOnTry := func(n int, a, b func() (*youtube.VideoInfo, error)) func() (*youtube.VideoInfo, error) {
+		try := 0
+		return func() (*youtube.VideoInfo, error) {
+			try++
+			if try == n {
+				return b()
+			}
+			return a()
+		}
+	}
+	copyright := refusal(youtube.PlayabilityUnknown, "UNPLAYABLE", "This video has been removed following a copyright removal request.")
+	settles := map[string]func() (*youtube.VideoInfo, error){
+		"terminated": inconclusive(youtube.PlayabilityUnknown, errors.New("refused too")),
+		"copyright":  copyright,
+		"members":    refusal(youtube.PlayabilityMembersOnly, "LOGIN_REQUIRED", "Join this channel to get access to members-only content like this video."),
+		// A refusal with its status and no reason text: YouTube said UNPLAYABLE.
+		"noreason": refusal(youtube.PlayabilityUnknown, "UNPLAYABLE", ""),
+		// The same on an inconclusive probe, both clients refusing it.
+		"incnoreason": inconclusiveSaid("UNPLAYABLE", "", youtube.PlayabilityUnknown, errors.New("refused too")),
+	}
+	staysNull := map[string]func() (*youtube.VideoInfo, error){
+		"mixed":   thenOnTry(2, copyright, func() (*youtube.VideoInfo, error) { return nil, errors.New("dial tcp: timeout") }),
+		"panic":   thenOnTry(1, copyright, func() (*youtube.VideoInfo, error) { panic("boom") }),
+		"escfail": thenOnTry(1, copyright, inconclusive("", errors.New("HTTP 400"))),
+		"botwall": refusal(youtube.PlayabilityLoginRequired, "LOGIN_REQUIRED", "Sign in to confirm you're not a bot"),
+		// No playabilityStatus at all: the parser reads it unknown, with
+		// nothing YouTube said.
+		"nostatus": refusal(youtube.PlayabilityUnknown, "", ""),
+		// And on an inconclusive probe whose ANDROID_VR answer had none.
+		"incnostatus": inconclusiveSaid("", "", youtube.PlayabilityUnknown, errors.New("refused too")),
+	}
+	for _, m := range []map[string]func() (*youtube.VideoInfo, error){settles, staysNull} {
+		for id, a := range m {
+			h.add(id, database.StatusFinished)
+			h.answers[id] = a
+		}
+	}
+	rows := len(settles) + len(staysNull)
+	for try := 1; try <= latencyBackfillMaxTries; try++ {
+		for range rows {
+			h.step(latencyBackfillPause)
+		}
+		h.step(latencyBackfillIdle)
+		if got := len(h.takeAsked()); got != rows {
+			t.Fatalf("try %d: %d requests, want one per row (%d)", try, got, rows)
+		}
+		for id := range settles {
+			want := database.LatencyModeNone
+			if try == latencyBackfillMaxTries {
+				want = database.LatencyModeUnstated
+			}
+			if got := h.mode(id); got != want {
+				t.Errorf("try %d: %s = %q, want %q", try, id, got, want)
+			}
+		}
+		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+	for id := range staysNull {
+		if got := h.mode(id); got != database.LatencyModeNone {
+			t.Errorf("%s = %q, want NULL (given up until the next start)", id, got)
+		}
+	}
+	// The last run's caught-up line counts the settled rows as filled.
+	lines := log.take()
+	if want := []any{"latency backfill: caught up", "filled", len(settles), "unstated", len(settles), "gaveUp", len(staysNull), "left", len(staysNull)}; len(lines) == 0 || !reflect.DeepEqual(lines[len(lines)-1], want) {
+		t.Errorf("last line %v, want %v", lines[len(lines)-1:], want)
+	}
+	h.step(latencyBackfillIdle)
+	if got := h.takeAsked(); len(got) != 0 {
+		t.Errorf("asked %v after the last try", got)
+	}
+}
+
+// TestLatencyBackfillSettleOnARowThatHasItsModeIsNoGiveUp: a row YouTube
+// refused on every try whose mode landed meanwhile (a re-extraction stored
+// it while the last request was out) keeps that mode, and the refused
+// settle write is neither a settle nor a give-up: no Info line names the
+// row, and the caught-up line counts it in neither filled nor gaveUp.
+//
+// Mutants: the refused write falling through to the give-up (the give-up
+// line, gaveUp 1); the settle counted before the write applied (filled 1).
+func TestLatencyBackfillSettleOnARowThatHasItsModeIsNoGiveUp(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &infoArgsLogger{}
+	h.b.logger = log
+	h.add("aaa", database.StatusFinished)
+	try := 0
+	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
+		try++
+		if try == latencyBackfillMaxTries && !h.db.SetLatencyModeIfUnset("aaa", database.LatencyModeNormal) {
+			t.Error("could not store the re-extraction's mode")
+		}
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityUnknown, PlayabilityStatus: "UNPLAYABLE",
+			PlayabilityReason: "This video has been removed following a copyright removal request.", LatencyClassAsked: true}, nil
+	}
+	for range latencyBackfillMaxTries {
+		h.step(latencyBackfillPause)
+		h.step(latencyBackfillIdle)
+		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+	if got := h.mode("aaa"); got != database.LatencyModeNormal {
+		t.Errorf("mode %q, want the re-extraction's normal kept", got)
+	}
+	lines := log.take()
+	for _, l := range lines {
+		if strings.Contains(fmt.Sprint(l), "aaa") {
+			t.Errorf("logged %v, want no line naming the row", l)
+		}
+	}
+	if want := []any{"latency backfill: caught up", "filled", 0, "unstated", 0, "gaveUp", 0, "left", 0}; len(lines) == 0 || !reflect.DeepEqual(lines[len(lines)-1], want) {
+		t.Errorf("last line %v, want %v", lines[len(lines)-1:], want)
 	}
 }

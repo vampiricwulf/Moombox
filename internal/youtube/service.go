@@ -269,7 +269,7 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 		return info, err
 	}
 	if info.PlayabilityError == PlayabilityRateLimited {
-		return nil, &StatusProbeInconclusiveError{Playability: info.PlayabilityError, Reason: info.PlayabilityReason, EscalationErr: errRateLimitedSession}
+		return nil, &StatusProbeInconclusiveError{Playability: info.PlayabilityError, Reason: info.PlayabilityReason, Status: info.PlayabilityStatus, EscalationErr: errRateLimitedSession}
 	}
 	return s.escalateStatusProbe(ctx, videoID, vd, info)
 }

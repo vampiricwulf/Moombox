@@ -180,7 +180,9 @@ How to tell it ran:
   YouTube did not answer for some recordings, it says so:
   `caught up (538 of 540 recordings done; 2 not answered yet)`. Each is
   asked again an hour later, up to three tries in all, and after that at the next
-  start.
+  start. A recording YouTube refuses on all three tries (members-only or
+  age-restricted for the account Moombox is signed in with, removed, or from a
+  closed channel) counts as done with no setting, and is not asked again.
 - **The log**, at the default level, one line each time the walk changes
   state, never once a minute: `latency backfill: started, asking YouTube
   about one recording a minute` (with how many are left, `toAsk`),
@@ -192,6 +194,14 @@ How to tell it ran:
   YouTube would not name a setting for, `gaveUp`, how many it stopped asking
   about until the next start, and `left`, how many still have none),
   `latency backfill: switched off (...)` and `latency backfill: switched on`.
+  Two more lines, one per recording, at its third try:
+  `latency backfill: giving up on this recording until the next start` and
+  `latency backfill: YouTube refused this recording on every try; stored it
+  as unstated`. Each carries the job (`jobID`), `tries`, the error (`err`)
+  and, when YouTube answered, `playability`, its `reason` text,
+  `videoDetails` (whether the video's details came back) and the `client`
+  that answered, with `escalation` and `escalationPlayability` when a
+  second client was asked too.
 - **A recording's job details**: the **Latency** row appears once its
   setting is stored (a downloaded upload that was never a stream gets none).
 

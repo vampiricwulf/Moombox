@@ -83,9 +83,12 @@ const (
 // reads as one (errors.Is(err, context.Canceled)) and a substituted video as
 // a *VideoIDMismatchError.
 type StatusProbeInconclusiveError struct {
-	// Playability and Reason are ANDROID_VR's refusal.
+	// Playability and Reason are ANDROID_VR's refusal, and Status its
+	// playabilityStatus.status as YouTube sent it (VideoInfo.PlayabilityStatus:
+	// "" when the answer had no playabilityStatus at all).
 	Playability PlayabilityError
 	Reason      string
+	Status      string
 	// Escalation names the one client asked next:
 	// StatusProbeEscalationTVAuth when the jar is signed in,
 	// StatusProbeEscalationWebEmbedded when it is not. "" when none was asked,
@@ -211,7 +214,7 @@ func statusAnswerInconclusive(info *VideoInfo) bool {
 // cookies.txt replaced by hand must reach it. The authenticated probe syncs
 // again itself; an unchanged file costs a stat.
 func (s *Service) escalateStatusProbe(ctx context.Context, videoID, visitorData string, refused *VideoInfo) (*VideoInfo, error) {
-	inconclusive := &StatusProbeInconclusiveError{Playability: refused.PlayabilityError, Reason: refused.PlayabilityReason}
+	inconclusive := &StatusProbeInconclusiveError{Playability: refused.PlayabilityError, Reason: refused.PlayabilityReason, Status: refused.PlayabilityStatus}
 	if err := ctx.Err(); err != nil {
 		inconclusive.EscalationErr = err
 		return nil, inconclusive

@@ -11,17 +11,20 @@ import (
 // write: the first extraction that shows the broadcast begun stores its
 // mode (a live capture's, a past stream's VOD), an answer with videoDetails
 // and no class stores "unstated", and nothing replaces a stored mode. An
-// upcoming broadcast, an ordinary upload (a VOD with no class) and an answer
-// with no videoDetails store nothing.
+// upcoming broadcast, an ordinary upload (which the parser reads
+// not_a_stream: no liveBroadcastDetails, not live content), a past stream's
+// VOD with no class and an answer with no videoDetails store nothing.
 //
 // Mutants: the job.LatencyMode guard dropped (the later LOW answer replaces
-// NORMAL); the VOD arm storing a classless answer (the upload reads
-// unstated); the upcoming case storing; the in-memory job not synced; a
-// refusal's classless videoDetails stored as unstated.
+// NORMAL); the VOD arm storing a classless answer (the classless VOD
+// reads unstated); the upcoming case storing; the in-memory job not synced; a
+// refusal's classless videoDetails stored as unstated; the playable check
+// reading only an empty verdict (the two "would not say" cases store nothing,
+// as on every real answer, which the parser spells PlayabilityOK).
 func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 	const normal = "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_NORMAL"
 	info := func(status youtube.StreamStatus, class string, asked bool) *youtube.VideoInfo {
-		i := &youtube.VideoInfo{LatencyClass: class, LatencyClassAsked: asked}
+		i := &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityOK, LatencyClass: class, LatencyClassAsked: asked}
 		i.SetStatus(status)
 		return i
 	}
@@ -34,9 +37,10 @@ func TestLatencyModeStoredOnceAtTheFirstExtraction(t *testing.T) {
 		{"post_live", info(youtube.StreamPostLive, "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_ULTRA_LOW", true), database.LatencyModeUltraLow},
 		{"a past stream's VOD", info(youtube.StreamVOD, "MDE_STREAM_OPTIMIZATIONS_RENDERER_LATENCY_LOW", true), database.LatencyModeLow},
 		{"live, YouTube would not say", info(youtube.StreamLive, "", true), database.LatencyModeUnstated},
-		{"an ordinary upload", info(youtube.StreamVOD, "", true), database.LatencyModeNone},
+		{"post_live, YouTube would not say", info(youtube.StreamPostLive, "", true), database.LatencyModeUnstated},
+		{"a past stream's VOD with no class", info(youtube.StreamVOD, "", true), database.LatencyModeNone},
 		{"upcoming", info(youtube.StreamUpcoming, normal, true), database.LatencyModeNone},
-		{"not a stream", info(youtube.StreamNotAStream, "", true), database.LatencyModeNone},
+		{"an ordinary upload (not a stream)", info(youtube.StreamNotAStream, "", true), database.LatencyModeNone},
 		{"no videoDetails", info(youtube.StreamLive, "", false), database.LatencyModeNone},
 		{"a members-only refusal with details and no class", func() *youtube.VideoInfo {
 			i := info(youtube.StreamLive, "", true)

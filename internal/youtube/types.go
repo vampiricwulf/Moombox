@@ -60,6 +60,17 @@ const (
 	PlayabilityUnknown     PlayabilityError = "unknown"
 )
 
+// Playable reports whether p is an answer YouTube did not refuse: the
+// parser's PlayabilityOK, or the empty verdict of an info no player response
+// filled in. It is the worker's one reading of "this answer is playable"
+// (its playability check, the discovery embed's wording, the latency mode
+// stored at capture and by the backfill). The sites that need YouTube's own
+// word that a parsed response was OK compare against PlayabilityOK instead,
+// where an empty verdict must not count.
+func (p PlayabilityError) Playable() bool {
+	return p == "" || p == PlayabilityOK
+}
+
 // SessionAuthState is what YouTube itself said about the login state of the
 // session that performed an extraction — not what our config claims. It is
 // read straight off the watch page's ytcfg, which is the cheapest available
@@ -170,8 +181,10 @@ type VideoInfo struct {
 	// StatusProbeEscalationWebEmbedded — when ANDROID_VR's own answer was a
 	// refusal that said nothing about the broadcast and the probe's one
 	// escalation answered for it (Service.ProbeVideoStatus,
-	// status_probe.go); "" on every other answer. What the answer says
-	// about the broadcast is the escalation's, and so is everything else:
+	// status_probe.go), and the TV member probe the latency backfill asks
+	// after a members-only refusal (internal/worker's latencyProbeVia); ""
+	// on every other answer. What the answer says about the broadcast is
+	// the escalation's, and so is everything else:
 	// its formats are another client's, fetched under that client's rules,
 	// so the consumers that read ANDROID_VR's shape (the waiting room's B1
 	// switch, the stall check's interruption signature, the quality probe's
