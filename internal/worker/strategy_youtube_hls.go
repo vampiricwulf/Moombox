@@ -270,7 +270,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		audioWhere = "separate rendition (group " + audioRendition.GroupID + ")"
 	case bestVariant.VideoOnly:
 		audioWhere = "none: the variant is video-only and its audio group has no rendition to record"
-	case !codecsNameAudio(bestVariant.Codecs):
+	case !engine.CodecsNameAudio(bestVariant.Codecs):
 		audioWhere = "none advertised"
 	}
 	job.Logger.Info("selected HLS variant",
@@ -298,7 +298,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	result.VideoWidth = bestVariant.Width
 	result.VideoHeight = bestVariant.Height
 	result.VideoFps = bestVariant.FPS
-	result.AdvertisedAudio = audioRendition != nil || codecsNameAudio(bestVariant.Codecs)
+	result.AdvertisedAudio = audioRendition != nil || engine.CodecsNameAudio(bestVariant.Codecs)
 	result.VideoDownloader = newHlsDownloader(bestVariant.URL, result.VideoPath, "video", job.VideoStartSeq)
 	if audioRendition != nil {
 		result.HasAudio = true
@@ -326,21 +326,6 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 // engine.HlsVariant.VideoOnly). A capture of a muxed master writes video.ts
 // alone, as it always has.
 const hlsAudioFile = "audio.ts"
-
-// codecsNameAudio reports whether an HLS variant's CODECS list names an audio
-// codec — what its master advertises for it, in the variant or in its
-// rendition group.
-func codecsNameAudio(codecs string) bool {
-	for _, c := range strings.Split(codecs, ",") {
-		c = strings.ToLower(strings.TrimSpace(c))
-		for _, p := range []string{"mp4a", "opus", "vorbis", "ac-3", "ec-3", "flac", "alac", "mp3"} {
-			if strings.HasPrefix(c, p) {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // hlsItagOf is the itag in a YouTube HLS playlist URL (/itag/N), 0 when it
 // names none. An audio rendition's says which of the master's audio groups a

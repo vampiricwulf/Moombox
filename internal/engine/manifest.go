@@ -252,22 +252,35 @@ func (r *HlsParseResult) AudioRenditions(group string) []*HlsRendition {
 // parse_codecs gives vcodec 'none' and never marks video-only.
 var audioCodecPrefixes = []string{"mp4a", "opus", "vorbis", "ac-3", "ec-3", "flac", "alac", "mp3", "dtsc", "dtse", "dtsh", "dtsl"}
 
+// isAudioCodec reports whether one CODECS entry names an audio codec.
+func isAudioCodec(c string) bool {
+	c = strings.ToLower(strings.TrimSpace(c))
+	for _, p := range audioCodecPrefixes {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // codecsHaveVideo reports whether a CODECS list names anything other than
 // an audio codec.
 func codecsHaveVideo(codecs string) bool {
 	for _, c := range strings.Split(codecs, ",") {
-		c = strings.ToLower(strings.TrimSpace(c))
-		if c == "" {
-			continue
+		if strings.TrimSpace(c) != "" && !isAudioCodec(c) {
+			return true
 		}
-		audio := false
-		for _, p := range audioCodecPrefixes {
-			if strings.HasPrefix(c, p) {
-				audio = true
-				break
-			}
-		}
-		if !audio {
+	}
+	return false
+}
+
+// CodecsNameAudio reports whether a CODECS list names an audio codec: what an
+// HLS master advertises for a variant, in it or in its audio rendition group.
+// It reads the same list as codecsHaveVideo, so the parser's video-only
+// verdict and the worker's missing-audio guard agree on what is audio.
+func CodecsNameAudio(codecs string) bool {
+	for _, c := range strings.Split(codecs, ",") {
+		if isAudioCodec(c) {
 			return true
 		}
 	}

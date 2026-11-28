@@ -111,3 +111,23 @@ func TestParseHlsRenditionNeedsTypeGroupAndName(t *testing.T) {
 		}
 	}
 }
+
+// CodecsNameAudio and the parser's video-only verdict read one codec list:
+// a CODECS entry the parser counts as audio is audio for the worker's
+// missing-audio guard too, the dts family included.
+//
+// Mutant: CodecsNameAudio given a list of its own that leaves out an entry
+// of audioCodecPrefixes.
+func TestCodecsNameAudioReadsTheParsersList(t *testing.T) {
+	for _, p := range audioCodecPrefixes {
+		if !CodecsNameAudio("avc1.4d401f," + p + ".x") {
+			t.Errorf("%q is audio to the parser but not to CodecsNameAudio", p)
+		}
+		if codecsHaveVideo(p + ".x") {
+			t.Errorf("%q alone reads as video", p)
+		}
+	}
+	if CodecsNameAudio("avc1.4d401f") || CodecsNameAudio("") {
+		t.Error("a video-only CODECS list names audio")
+	}
+}
