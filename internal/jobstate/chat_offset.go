@@ -80,9 +80,9 @@ func SuggestedChatOffset(job *database.Job) (seconds int, known bool, basis Chat
 	}
 }
 
-// LatencyLine is the job-details line both UIs show for a YouTube job's
-// latency mode and the chat offset it suggests: "Latency: Normal latency,
-// suggested chat offset 15 s", or "Latency: not stated by YouTube" for a
+// LatencyLine is the value of the "Latency" row both UIs' job details show
+// for a YouTube job's latency mode and the chat offset it suggests: "Normal
+// latency, suggested chat offset 15 s", or "Not stated by YouTube" for a
 // broadcast YouTube would not name a mode for. "" for a job with none
 // (Twitch, an upload, never asked). utils.js latencyText is the dashboard's
 // copy (same parity table).
@@ -91,11 +91,11 @@ func LatencyLine(job *database.Job) string {
 		return ""
 	}
 	if job.LatencyMode == database.LatencyModeUnstated {
-		return "Latency: not stated by YouTube"
+		return "Not stated by YouTube"
 	}
 	seconds, known, _ := SuggestedChatOffset(job)
 	if !known {
 		return ""
 	}
-	return fmt.Sprintf("Latency: %s, suggested chat offset %d s", job.LatencyMode.Label(), seconds)
+	return fmt.Sprintf("%s, suggested chat offset %d s", job.LatencyMode.Label(), seconds)
 }

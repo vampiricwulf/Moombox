@@ -120,3 +120,21 @@ test("the details dialog follows a pending gap-fill to its end", { skip }, async
   await h.flush();
   assert.equal(field(h, "gap-fill"), gapFillText({ gapFill: state }));
 });
+
+// The latency row (owner ruling RV-19): latencyText's value under
+// "Latency:", drawn at open and gained or dropped by a live update.
+//
+// Mutants: the row left out of renderJobDetails; updateJobDetails not
+// syncing it.
+test("the details dialog shows the latency mode and its suggested chat offset", { skip }, async () => {
+  const h = await harness.makeApp();
+  h.app.details.renderJobDetails(live({ latencyMode: "normal" }));
+  assert.equal(field(h, "latency"), "Normal latency, suggested chat offset 15 s");
+
+  h.app.details.renderJobDetails(live());
+  assert.equal(field(h, "latency"), null);
+  h.app.details.updateJobDetails(live({ latencyMode: "low", mediaStartTime: "2026-11-27T22:56:50Z" }));
+  assert.equal(field(h, "latency"), "Low latency, suggested chat offset 7 s");
+  h.app.details.updateJobDetails(live({ latencyMode: "unstated" }));
+  assert.equal(field(h, "latency"), "Not stated by YouTube");
+});

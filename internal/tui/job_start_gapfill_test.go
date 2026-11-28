@@ -131,3 +131,33 @@ func TestDetailsPanelShowsLateStartAndGapFill(t *testing.T) {
 		t.Errorf("the Twitch VOD shows a gap-fill: %+v", r)
 	}
 }
+
+// TestDetailsPanelShowsTheLatencyLine: the Latency row is
+// jobstate.LatencyLine's (owner ruling RV-19), drawn for a YouTube job with
+// a mode and for one YouTube would not name, and absent for a Twitch job and
+// a YouTube job never asked.
+//
+// Mutant: the Latency row left out of buildRows.
+func TestDetailsPanelShowsTheLatencyLine(t *testing.T) {
+	m := NewJobDetailsModel()
+	m.SetSize(80, 30)
+	for _, tc := range []struct {
+		job  *database.Job
+		want string
+	}{
+		{&database.Job{ID: "a", Platform: "youtube", Status: database.StatusFinished, LatencyMode: database.LatencyModeNormal}, "Normal latency, suggested chat offset 15 s"},
+		{&database.Job{ID: "b", Platform: "youtube", Status: database.StatusFinished, LatencyMode: database.LatencyModeLow, MediaStartTime: "2026-11-27T22:56:50Z"}, "Low latency, suggested chat offset 7 s"},
+		{&database.Job{ID: "c", Platform: "youtube", Status: database.StatusFinished, LatencyMode: database.LatencyModeUnstated}, "Not stated by YouTube"},
+		{&database.Job{ID: "d", Platform: "youtube", Status: database.StatusFinished}, ""},
+		{&database.Job{ID: "e", Platform: "twitch", Status: database.StatusFinished, LatencyMode: database.LatencyModeNormal}, ""},
+	} {
+		m.SetJob(tc.job)
+		r := fieldRow(m, "Latency")
+		switch {
+		case tc.want == "" && r != nil:
+			t.Errorf("%s: Latency row %+v, want none", tc.job.ID, r)
+		case tc.want != "" && (r == nil || r.value != tc.want):
+			t.Errorf("%s: Latency row %+v, want %q", tc.job.ID, r, tc.want)
+		}
+	}
+}

@@ -1583,10 +1583,10 @@ export function suggestedChatOffset(job) {
  */
 export function latencyText(job) {
   if (!job || job.platform !== "youtube") return "";
-  if (job.latencyMode === "unstated") return "Latency: not stated by YouTube";
+  if (job.latencyMode === "unstated") return "Not stated by YouTube";
   const s = suggestedChatOffset(job);
   if (!s.known) return "";
-  return `Latency: ${LATENCY_MODE_LABELS[job.latencyMode]}, suggested chat offset ${s.seconds} s`;
+  return `${LATENCY_MODE_LABELS[job.latencyMode]}, suggested chat offset ${s.seconds} s`;
 }
 
 /**

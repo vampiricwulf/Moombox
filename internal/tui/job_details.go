@@ -562,6 +562,11 @@ func (m *JobDetailsModel) buildRows() {
 	if line := gapFillLine(m.gapFill, time.Now()); line != "" {
 		m.addField("Gap-fill", line)
 	}
+	// The latency mode and the chat offset it suggests (owner ruling RV-19);
+	// the TUI has no player, so this line is the whole of it here.
+	if line := jobstate.LatencyLine(j); line != "" {
+		m.addField("Latency", line)
+	}
 	if isTwitch {
 		m.addFieldColor("Platform", "Twitch", ColorTwitch)
 		if j.TwitchCategory != "" {
