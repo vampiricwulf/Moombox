@@ -326,6 +326,7 @@ recording. Beside it:
 | **Status** | The status badge, plus a **Watched** / **Paused at 1:23:45** pill for finished jobs. A finished job also gets **Mark Watched** / **Mark Unwatched** buttons. |
 | **Chat** | The chat capture's state as a coloured badge (see below), and the message count. |
 | **Incomplete tail** | A warning badge on a finished archive whose last segments are missing. |
+| **No audio** | A warning badge on a finished archive that has no audio stream although the stream offered sound. See [Jobs](jobs.md#no-audio). |
 | **Start** | For a YouTube live capture that recorded from the live edge instead of the broadcast's start: "Recorded from the live edge: *reason*, joined 1:23:45 in". |
 | **Gap-fill** | For a finished live Twitch job: "Gap-fill pending: 2 spans, until *time*", "Gap-fill: filled 2 spans" or "Gap-fill: kept as recorded: *reason*". See [Twitch](twitch.md). |
 | **Latency** | For a YouTube job: its stream's latency setting and the chat offset the player suggests for it, "Normal latency, suggested chat offset 15 s", or "Not stated by YouTube" for a live recording YouTube named no setting for. A downloaded upload that was never a stream shows no row. Older recordings get this row in the background. See [Player](player.md#suggested-offset-youtube). |

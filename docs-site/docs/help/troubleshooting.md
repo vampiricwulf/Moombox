@@ -473,6 +473,15 @@ Moombox update. For interruptions, quality changes and set-aside recordings
 after a restart, see [YouTube](../guide/youtube.md). On Twitch, ad breaks and
 expired segments are covered in [Twitch](../guide/twitch.md).
 
+### A recording has no sound
+
+A YouTube recording from the live edge takes its sound from a separate audio
+track, which Moombox records beside the picture. If a finished job shows
+**No audio**, the job's log says why (search it for *audio*). Recordings of
+24/7 streams made by v2.9.8 to v2.9.10 without a signed-in session may have
+no audio track at all, and cannot be repaired; see
+[YouTube](../guide/youtube.md#when-the-recording-starts-at-the-live-edge-instead).
+
 ### Every Twitch request fails
 
 If Twitch has rotated out the built-in Client-ID, set a current one in
