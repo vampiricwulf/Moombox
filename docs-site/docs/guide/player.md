@@ -129,8 +129,8 @@ Viewers of a live stream watch a little behind it, so chat reacts to what they
 saw a few seconds earlier. YouTube tells Moombox which latency setting the
 streamer used, and Moombox suggests an offset to match. A YouTube recording
 for which you have not set an offset plays with that suggestion straight away:
-the box shows it in italics with **suggested: Normal latency** (or Low, or
-Ultra low) beside it.
+the box shows it in italics with **suggested (typical): Normal latency** (or
+Low, or Ultra low) beside it.
 
 | Latency setting | Suggested offset | For a recording from before this version |
 |---|---|---|

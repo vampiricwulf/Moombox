@@ -108,7 +108,8 @@ test("a saved chat offset is restored, edited, persisted and cleared", { skip },
 //
 // Mutants: the suggestion not applied on load; an untouched box saving the
 // suggestion on blur; a typed 0 sent as a DELETE; the clear not restoring
-// the suggestion; a saved 0 read as none on reload; Twitch given one.
+// the suggestion; an emptied box applying 0 until the blur; the hint left
+// without its caveat or the box without aria-describedby; a saved 0 read as none on reload; Twitch given one.
 test("a suggested chat offset is the default, shown as suggested, and an operator's value wins", { skip }, async () => {
   const chat = { platform: "youtube", messages: [{ offsetMs: 0, authorName: "u", message: [{ text: "hi" }] }] };
   const h = harness.makePlayer({
@@ -137,8 +138,9 @@ test("a suggested chat offset is the default, shown as suggested, and an operato
   assert.equal(h.player.playerCustomOffsetMs, 15000);
   assert.ok(input.classList.contains("suggested"));
   assert.equal(hint.hidden, false);
-  assert.equal(hint.textContent, "suggested: Normal latency");
+  assert.equal(hint.textContent, "suggested (typical): Normal latency");
   assert.match(input.title, /typical, not measured/);
+  assert.equal(input.getAttribute("aria-describedby"), "player-chat-offset-hint", "the caveat reaches a screen reader");
   assert.equal(reset.style.display, "none", "no reset for a suggestion");
 
   // Focus and leave without typing: nothing is saved.
@@ -154,6 +156,7 @@ test("a suggested chat offset is the default, shown as suggested, and an operato
   assert.deepEqual(h.http.matching("/api/jobs/n/chat-offset", "PUT").at(-1).body, { chatOffset: 2 });
   assert.ok(!input.classList.contains("suggested"));
   assert.equal(hint.hidden, true);
+  assert.equal(input.getAttribute("aria-describedby"), null, "an operator value points at no hint");
   assert.equal(reset.style.display, "");
 
   // A typed 0 is the operator's value too, not a clear.
@@ -163,8 +166,15 @@ test("a suggested chat offset is the default, shown as suggested, and an operato
   assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 0);
   assert.equal(input.value, "0");
 
-  // Emptying the box clears it and the suggestion comes back.
-  await typeAndBlur("");
+  // Emptying the box: while it is empty (before the blur) the suggestion
+  // already applies, not 0; the blur then clears the operator's offset and
+  // shows the suggestion again.
+  input.value = "";
+  input.dispatchEvent(new h.window.Event("input"));
+  assert.equal(h.player.playerCustomOffsetMs, 15000, "an emptied box applies the suggestion, not 0");
+  input.focus();
+  input.blur();
+  await h.flush();
   assert.equal(h.http.matching("/api/jobs/n/chat-offset", "DELETE").length, 1);
   assert.equal(input.value, "15");
   assert.equal(h.player.playerCustomOffsetMs, 15000);
@@ -183,7 +193,7 @@ test("a suggested chat offset is the default, shown as suggested, and an operato
   await h.selectJob("z");
   assert.equal(input.value, "0");
   assert.equal(h.player.playerCustomOffsetMs, 0);
-  assert.equal(hint.textContent, "suggested: Ultra low latency");
+  assert.equal(hint.textContent, "suggested (typical): Ultra low latency");
 
   // Twitch: no suggestion, exactly as before.
   await h.selectJob("t");

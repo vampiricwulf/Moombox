@@ -876,8 +876,10 @@ export class PlayerController {
 
   /**
    * Mark the offset box as holding the suggested offset, or not: the
-   * italic class, the "suggested: Normal latency" hint beside it and the
-   * box's title.
+   * italic class, the "suggested (typical): Normal latency" hint beside it
+   * (visible text, so a touch screen and a screen reader get the caveat a
+   * tooltip alone would hide; the box points to it with aria-describedby)
+   * and the box's title.
    */
   _markOffsetSuggested(on) {
     const input = document.getElementById("player-chat-offset");
@@ -889,9 +891,11 @@ export class PlayerController {
       input.title = shown
         ? `Chat offset in seconds, suggested for ${label} (typical, not measured). Type your own to replace it.`
         : "Chat offset in seconds";
+      if (shown) input.setAttribute("aria-describedby", "player-chat-offset-hint");
+      else input.removeAttribute("aria-describedby");
     }
     if (hint) {
-      hint.textContent = shown ? `suggested: ${label}` : "";
+      hint.textContent = shown ? `suggested (typical): ${label}` : "";
       hint.hidden = !shown;
     }
   }
