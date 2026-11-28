@@ -632,7 +632,7 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "(V: 1234/1300 A: 1234/1300 C: 5678)",
 })
 ```
-Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 52-entry whitelist over `jobs` columns; `notification_msgs` is deliberately absent — `UpdateNotificationMsgs` is its only writer). Auto-updates `updated_at`. Triggers `OnJobUpdate` and `OnJobChange` subscribers after write. Returns the updated `*Job`.
+Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 58-entry whitelist over `jobs` columns; `notification_msgs` is deliberately absent — `UpdateNotificationMsgs` is its only writer). Auto-updates `updated_at`. Triggers `OnJobUpdate` and `OnJobChange` subscribers after write. Returns the updated `*Job`.
 
 **Pub/sub:** six subscriber kinds, each registered through an `On…` method that returns an unsubscribe function. `OnJobUpdate(func(*Job))` and `OnJobChange(func(*JobChange))` both fire synchronously after every `UpdateJobFields` write (the latter also carries the list of columns written). `OnJobAdded`, `OnJobDeleted` and `OnTrimsChanged` are the lifecycle events of `AddJob`, `DeleteJob` and `AddTrim`/`DeleteTrim`. `OnJobsChange(func([]*Job))` is the full-list refresh and is dispatched only by the two bulk writers, `BatchSetWatched` and `DeleteJobsAndHistoryForChannel`, on a fresh goroutine. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` (and their siblings for the other kinds) with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
 
