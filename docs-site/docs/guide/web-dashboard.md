@@ -328,6 +328,7 @@ recording. Beside it:
 | **Incomplete tail** | A warning badge on a finished archive whose last segments are missing. |
 | **Start** | For a YouTube live capture that recorded from the live edge instead of the broadcast's start: "Recorded from the live edge: *reason*, joined 1:23:45 in". |
 | **Gap-fill** | For a finished live Twitch job: "Gap-fill pending: 2 spans, until *time*", "Gap-fill: filled 2 spans" or "Gap-fill: kept as recorded: *reason*". See [Twitch](twitch.md). |
+| **Latency** | For a YouTube stream: its latency setting and the chat offset the player suggests for it, "Normal latency, suggested chat offset 15 s", or "Not stated by YouTube". See [Player](player.md#suggested-offset-youtube). |
 | **Type** | **Live** (with a **Segments** row: `V: n/total | A: n/total`, or one count for Twitch) or **VOD** (with a **Progress** row). |
 | **Speed** | Current download speed, while downloading. |
 | **Filename** | The output file, with a copy button. |
