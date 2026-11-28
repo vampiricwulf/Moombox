@@ -352,7 +352,8 @@ func isStagedHlsPair(video, audio string) bool {
 // direction), and nothing in the copy says so: the per-track start check
 // reads fragmented MP4 only. Half a second of margin below it. A downloader
 // that started a segment later than its sibling (2 or 5 s) is inside it;
-// pairLoneHlsHalf keeps the known routes to a larger skew from arising.
+// pairLoneHlsHalf and levelFreshHlsPair keep the known routes to a larger
+// skew from arising.
 const hlsPairMaxSkew = 9.5
 
 // stagedWallClock is the date of the first segment of the staged file at p

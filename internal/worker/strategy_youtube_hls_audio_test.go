@@ -508,3 +508,52 @@ func TestSetupPairsALoneStagedHalf(t *testing.T) {
 		t.Error("the lone video.ts is still staged")
 	}
 }
+
+// TestDownloadHlsLevelsAFreshPart: the two halves of a demuxed HLS capture
+// do not advance together while they catch up, so a part split
+// mid-catch-up (carriedStartSeqs carries each half's own position: video
+// 500, audio 560) or a restart seeded from last_video_seq and last_audio_seq
+// can name two starts minutes apart. A fresh part starts both at the
+// earlier one; a part whose halves are staged continues each file where it
+// stands, since moving one back would append segments it already holds.
+//
+// Mutants: the levelling dropped (500 and 560); the max taken instead of
+// the min; the staged-file check dropped (the staged audio is moved back).
+func TestDownloadHlsLevelsAFreshPart(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		staged       bool
+		v, a         int
+		wantV, wantA int
+	}{
+		{"fresh part, audio ahead", false, 500, 560, 500, 500},
+		{"fresh part, video ahead", false, 560, 500, 500, 500},
+		{"fresh part, level", false, 500, 500, 500, 500},
+		{"staged part continues each file", true, 500, 560, 500, 560},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			built := recordDownloaders(t)
+			srv := newHlsAudioServer(t, demuxedTestMaster)
+			job, _ := vodPotJob(t)
+			job.Config.MaxVideoResolution = 1080
+			job.VideoStartSeq, job.AudioStartSeq = tc.v, tc.a
+			if tc.staged {
+				for _, name := range []string{"video.ts", hlsAudioFile} {
+					if err := os.WriteFile(filepath.Join(job.StagingDir, name), []byte("[x]"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if _, err := DownloadHls(context.Background(), job, hlsAudioInfo(srv, "visionos"), nil, nil, nil, nil); err != nil {
+				t.Fatalf("DownloadHls: %v", err)
+			}
+			if len(*built) != 2 {
+				t.Fatalf("built %d downloaders, want 2", len(*built))
+			}
+			v, a := (*built)[0], (*built)[1]
+			if v.StartSeq != tc.wantV || !v.ForceStartSeq || a.StartSeq != tc.wantA || !a.ForceStartSeq {
+				t.Errorf("starts: video %d/%v audio %d/%v, want %d and %d, forced", v.StartSeq, v.ForceStartSeq, a.StartSeq, a.ForceStartSeq, tc.wantV, tc.wantA)
+			}
+		})
+	}
+}

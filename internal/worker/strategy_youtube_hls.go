@@ -306,6 +306,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		if err != nil {
 			return nil, err
 		}
+		videoStart, audioStart = levelFreshHlsPair(job, result.VideoPath, filepath.Join(job.StagingDir, hlsAudioFile), videoStart, audioStart)
 	}
 	result.VideoDownloader = newHlsDownloader(bestVariant.URL, result.VideoPath, "video", videoStart)
 	if audioRendition != nil {
@@ -404,6 +405,35 @@ func pairLoneHlsHalf(job *JobContext, videoPath, audioPath string, videoStart, a
 	lg.Warn("a staged half of an HLS capture had no other half beside it; it was set aside, to be muxed into its own file beside the archive, and the new video and audio start together where it stopped",
 		"asides", strings.Join(asides, " | "), "startSeq", next)
 	return next, next, nil
+}
+
+// levelFreshHlsPair gives the two downloaders of a demuxed HLS capture one
+// start when they open a fresh part (neither half staged) at two different
+// positions: both start at the earlier one. The two halves do not advance
+// together while they catch up (audio segments are smaller: a live run had
+// its audio 900 s in when its video was 605 s in), so a part split
+// mid-catch-up (carriedStartSeqs carries each half's own position) or a
+// restart into a fresh part dir (seeded from last_video_seq and
+// last_audio_seq, which may differ by up to 50 segments) would otherwise
+// open a part whose halves begin minutes apart, further than the copy can
+// place them (hlsPairMaxSkew). The leading half re-fetches the difference,
+// which overlaps the part before as part overlap already allows; the
+// lagging half loses nothing.
+//
+// A part with staged halves is left alone: each continues its own file
+// (its resume sidecar, or an append at its own forced position), and moving
+// one back would append segments the file already holds.
+func levelFreshHlsPair(job *JobContext, videoPath, audioPath string, videoStart, audioStart int) (int, int) {
+	if videoStart <= 0 || audioStart <= 0 || videoStart == audioStart {
+		return videoStart, audioStart
+	}
+	if nonEmptyFile(videoPath) || nonEmptyFile(audioPath) {
+		return videoStart, audioStart
+	}
+	start := min(videoStart, audioStart)
+	job.Logger.Info("the video and audio of an HLS capture were to start a part at different segments; both start at the earlier one",
+		"jobID", job.Job.ID, "videoStartSeq", videoStart, "audioStartSeq", audioStart, "startSeq", start)
+	return start, start
 }
 
 // hlsAudioFile is the staged name of an HLS capture's separate audio
