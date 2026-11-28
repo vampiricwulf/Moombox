@@ -417,6 +417,7 @@ feed_check_interval = 10        # minutes, 1-1440
 hide_finished_age_days = 30     # days, 0-365; 0 = archive at once
 probe_cooldown = 0              # seconds; 0 = re-probe every cycle
 membership_discovery = true     # scan members-only tabs (needs cookies)
+latency_backfill = true         # ask YouTube the latency setting of old recordings
 
 [downloader]
 output_template = "${channel}/${start_date} ${title} [${id}]"
