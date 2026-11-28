@@ -472,7 +472,10 @@ type latencyFailure struct {
 	answered bool
 	kind     youtube.PlayabilityError
 	reason   string
-	details  bool
+	// status is playabilityStatus.status as YouTube sent it, on an answer
+	// (VideoInfo.PlayabilityStatus); never logged, read by refused.
+	status  string
+	details bool
 	// client names the client that answered, "" when the answer does not
 	// say (latencyAnswerClient); escalation and escalationKind are the
 	// status probe's second client and its own refusal, on an inconclusive
@@ -498,6 +501,7 @@ func latencyFailureOf(info *youtube.VideoInfo, err error) latencyFailure {
 	if err == nil && info != nil {
 		f.answered = true
 		f.kind, f.reason, f.details = info.PlayabilityError, info.PlayabilityReason, info.LatencyClassAsked
+		f.status = info.PlayabilityStatus
 		f.client = latencyAnswerClient(info)
 	}
 	return f
@@ -517,6 +521,12 @@ func latencyFailureOf(info *youtube.VideoInfo, err error) latencyFailure {
 // otherwise settle every row it met for good.
 func (f latencyFailure) refused() bool {
 	if !f.answered || !refusesTheRecording(f.kind) {
+		return false
+	}
+	if f.kind == youtube.PlayabilityUnknown && f.reason == "" && f.status == "" {
+		// No playabilityStatus at all reads unknown too: YouTube said
+		// nothing, which is no refusal. (The escalation's own reason is not
+		// on the error, so only ANDROID_VR's side is read for it.)
 		return false
 	}
 	return !f.inconclusive || refusesTheRecording(f.escalationKind)

@@ -747,12 +747,14 @@ func TestLatencyBackfillFailureLinesSayWhy(t *testing.T) {
 // session cannot see. A row with one try that failed some other way (a
 // network error, a panic, an escalation that failed) keeps today's give-up,
 // and so does the bot wall, which refuses the session and not the
-// recording.
+// recording, and so does an answer with no playabilityStatus at all, which
+// the parser reads unknown with no reason.
 //
 // Mutants: the settle rule dropped (the refused rows stay NULL); settling on
 // any third failure (the mixed, panic and escalation-failed rows settle); a
 // panic counted as a refusal; an inconclusive probe whose escalation failed
-// counted; the bot wall counted; the settle reached before the last try.
+// counted; the bot wall counted; an answer with no playabilityStatus
+// counted; the settle reached before the last try.
 func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 	t.Parallel()
 	h := newBackfillHarness(t, openTestDB(t))
@@ -792,6 +794,9 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 		"panic":   thenOnTry(1, copyright, func() (*youtube.VideoInfo, error) { panic("boom") }),
 		"escfail": thenOnTry(1, copyright, inconclusive("", errors.New("HTTP 400"))),
 		"botwall": refusal(youtube.PlayabilityLoginRequired, "Sign in to confirm you're not a bot"),
+		// No playabilityStatus at all: the parser reads it unknown, with
+		// nothing YouTube said.
+		"nostatus": refusal(youtube.PlayabilityUnknown, ""),
 	}
 	for _, m := range []map[string]func() (*youtube.VideoInfo, error){settles, staysNull} {
 		for id, a := range m {
