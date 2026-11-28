@@ -839,3 +839,45 @@ func TestLatencyBackfillSettlesARecordingYouTubeKeepsRefusing(t *testing.T) {
 		t.Errorf("asked %v after the last try", got)
 	}
 }
+
+// TestLatencyBackfillSettleOnARowThatHasItsModeIsNoGiveUp: a row YouTube
+// refused on every try whose mode landed meanwhile (a re-extraction stored
+// it while the last request was out) keeps that mode, and the refused
+// settle write is neither a settle nor a give-up: no Info line names the
+// row, and the caught-up line counts it in neither filled nor gaveUp.
+//
+// Mutants: the refused write falling through to the give-up (the give-up
+// line, gaveUp 1); the settle counted before the write applied (filled 1).
+func TestLatencyBackfillSettleOnARowThatHasItsModeIsNoGiveUp(t *testing.T) {
+	t.Parallel()
+	h := newBackfillHarness(t, openTestDB(t))
+	log := &infoArgsLogger{}
+	h.b.logger = log
+	h.add("aaa", database.StatusFinished)
+	try := 0
+	h.answers["aaa"] = func() (*youtube.VideoInfo, error) {
+		try++
+		if try == latencyBackfillMaxTries && !h.db.SetLatencyModeIfUnset("aaa", database.LatencyModeNormal) {
+			t.Fatal("could not store the re-extraction's mode")
+		}
+		return &youtube.VideoInfo{PlayabilityError: youtube.PlayabilityUnknown, PlayabilityStatus: "UNPLAYABLE",
+			PlayabilityReason: "This video has been removed following a copyright removal request.", LatencyClassAsked: true}, nil
+	}
+	for range latencyBackfillMaxTries {
+		h.step(latencyBackfillPause)
+		h.step(latencyBackfillIdle)
+		h.now = h.now.Add(latencyBackfillRetryAfter)
+	}
+	if got := h.mode("aaa"); got != database.LatencyModeNormal {
+		t.Errorf("mode %q, want the re-extraction's normal kept", got)
+	}
+	lines := log.take()
+	for _, l := range lines {
+		if strings.Contains(fmt.Sprint(l), "aaa") {
+			t.Errorf("logged %v, want no line naming the row", l)
+		}
+	}
+	if want := []any{"latency backfill: caught up", "filled", 0, "unstated", 0, "gaveUp", 0, "left", 0}; len(lines) == 0 || !reflect.DeepEqual(lines[len(lines)-1], want) {
+		t.Errorf("last line %v, want %v", lines[len(lines)-1:], want)
+	}
+}

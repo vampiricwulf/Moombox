@@ -382,9 +382,19 @@ func (b *latencyBackfill) step(ctx context.Context) time.Duration {
 		why := latencyFailureOf(info, err)
 		n, refusals := b.fail(row.JobID, now, why.refused())
 		switch {
-		case n >= latencyBackfillMaxTries && refusals == n && b.db.SetLatencyModeIfUnset(row.JobID, database.LatencyModeUnstated):
+		case n >= latencyBackfillMaxTries && refusals == n:
 			// YouTube refused the recording on every try, an hour or more
 			// apart: it will not describe it, so it settles as unstated.
+			// Like an answer, it is done with its tries whether the write
+			// applies or not: a refused write is a row that has its mode
+			// already (stored meanwhile by a re-extraction), not one given
+			// up on, and a failed one leaves the row NULL for a later pass.
+			delete(b.tries, row.JobID)
+			if !b.db.SetLatencyModeIfUnset(row.JobID, database.LatencyModeUnstated) {
+				b.logger.Debug("latency backfill: the recording YouTube kept refusing has a mode already, or the write failed",
+					"jobID", row.JobID)
+				break
+			}
 			b.run.filled++
 			b.run.unstated++
 			if b.changed != nil {
