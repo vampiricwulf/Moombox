@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,18 +153,133 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	if pin := pinnedVideoItag(job); pin > 0 {
 		job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual video itag %d cannot be honoured on an HLS stream (its variants carry no itag); selecting automatically", pin))
 	}
+
+	// Orchestrator-provided continuation position (restart discovery seeding
+	// a fresh part dir). Without honoring it, a fresh dir + StartSeq -1
+	// initializes at the playlist window start — which for DVR-enabled
+	// YouTube live HLS reaches back to broadcast start, re-downloading hours
+	// already archived in earlier parts. The DASH strategies honor the same
+	// field; a resume sidecar (resuming into an unmuxed part) still takes
+	// priority inside the engine. The audio rendition's downloader takes the
+	// audio position the same way.
+	startOf := func(seq int) (int, bool) {
+		if seq > 0 {
+			return seq, true
+		}
+		return -1, false
+	}
+
+	// newHlsDownloader builds the downloader of one media playlist of this
+	// master — the picked variant, or the audio rendition beside it — with
+	// the PO token, status check and 403 hook every one of them shares.
+	// Reuses hlsPoToken from the master-URL step above; no need to mint
+	// twice.
+	newHlsDownloader := func(playlistURL, outputFile, stream string, startSeq int) *engine.SegmentDownloader {
+		if hlsPoToken != "" {
+			playlistURL = strings.TrimRight(playlistURL, "/") + "/pot/" + hlsPoToken
+			what := "variant"
+			if stream == "audio" {
+				what = "audio rendition"
+			}
+			job.Logger.Info("[POT] added PO token to HLS "+what+" URL", "tokenLength", len(hlsPoToken))
+		}
+		seq, force := startOf(startSeq)
+		d := newSegmentDownloader(engine.DownloaderOptions{
+			BaseURL:             playlistURL,
+			OutputFile:          outputFile,
+			StartSeq:            seq,
+			ForceStartSeq:       force,
+			IsHls:               true,
+			PoToken:             hlsPoToken,
+			MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
+			SegmentWorkers:      job.Config.SegmentWorkers,
+			InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
+			EnforceMaxTimeout:   true, // YouTube status can stick; Twitch HLS opts out
+			IsOnline:            isOnline,
+			Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", stream),
+			CheckStreamStatus: func(ctx context.Context) (bool, error) {
+				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
+				return observeYouTubeStatusProbe(job, info, err)
+			},
+		})
+		// Wire OnCipherFailure for HLS so a 403 burst invalidates POT /
+		// visitor data / cipher caches. The playlist URL has POT in its path
+		// so we can't hot-swap it mid-loop; return "" and let the next
+		// orchestrator-driven refresh rebuild the strategy with fresh values.
+		// Installed whenever a solver is, whatever the extraction's
+		// PlayerURL, as the DASH hooks are: the POT and visitor-data halves
+		// need no player (audit G2).
+		if routedSolver != nil || cipherSolver != nil {
+			tag := "HLS"
+			if stream == "audio" {
+				tag = "HLS audio"
+			}
+			d.OnCipherFailure = func() string {
+				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, tag)
+				return ""
+			}
+		}
+		return d
+	}
+
+	result := &DownloadResult{
+		IsHls: true,
+		// An HLS variant maps to no player-response format, so no
+		// VideoFormat says how long a segment runs; the finalize's join
+		// point (owner decision CJ-3) needs it for an MPEG-TS that joined
+		// late.
+		SegmentDurationSec: advertisedSegmentDuration(extracted, videoInfo),
+	}
+
+	// audio_only on a demuxed master records the audio rendition alone —
+	// yt-dlp's best audio format there — where it used to pick the lowest
+	// bandwidth variant, whose segments on such a master hold no audio.
 	if qualityPref == "audio_only" {
-		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
+		if rendition := selectHlsAudioOnly(parsed, videoInfo.AudioLanguages); rendition != nil {
+			job.Logger.Info("selected HLS audio rendition for an audio-only recording",
+				"group", rendition.GroupID, "name", rendition.Name, "language", rendition.Language,
+				"audioTrack", rendition.AudioContentID)
+			result.HasAudio = true
+			result.AdvertisedAudio = true
+			result.AudioItag = hlsItagOf(rendition.URI)
+			result.AudioPath = filepath.Join(job.StagingDir, hlsAudioFile)
+			result.AudioDownloader = newHlsDownloader(rendition.URI, result.AudioPath, "audio", job.AudioStartSeq)
+			if err := waitForPlayback(ctx, job, videoInfo, videoInfo.HlsManifestAvailableAt, videoInfo.HlsManifestSource, "HLS"); err != nil {
+				return nil, fmt.Errorf("HLS: waiting out the pre-roll ad: %w", err)
+			}
+			return result, nil
+		}
+		job.Logger.Warn("audio_only preference with HLS: this master has no audio-only rendition, selecting the lowest bandwidth variant")
 	}
 	bestVariant := selectHlsVariant(parsed.Variants, qualityPref, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Config.PreferHDR, videoInfo.AudioLanguages)
 	if bestVariant == nil {
 		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
 
+	// A video-only variant (its AUDIO group's rendition has a URI of its
+	// own) is recorded with that rendition beside it: the variant's CODECS
+	// still names the audio codec, but its segments carry none.
+	var audioRendition *engine.HlsRendition
+	if bestVariant.VideoOnly {
+		audioRendition = selectHlsAudioRendition(parsed.AudioRenditions(bestVariant.AudioGroup), videoInfo.AudioLanguages)
+	}
+	audioWhere := "in the variant"
+	switch {
+	case audioRendition != nil:
+		audioWhere = "separate rendition (group " + audioRendition.GroupID + ")"
+	case bestVariant.VideoOnly:
+		audioWhere = "none: the variant is video-only and its audio group has no rendition to record"
+	case !codecsNameAudio(bestVariant.Codecs):
+		audioWhere = "none advertised"
+	}
 	job.Logger.Info("selected HLS variant",
 		"width", bestVariant.Width, "height", bestVariant.Height,
 		"bandwidth", bestVariant.Bandwidth, "codecs", bestVariant.Codecs,
-		"audioTrack", bestVariant.AudioContentID)
+		"audio", audioWhere, "audioTrack", bestVariant.AudioContentID)
+	if bestVariant.VideoOnly && audioRendition == nil {
+		job.Logger.Warn("the selected HLS variant is video-only and the master names no audio rendition to record beside it; the archive will have no sound",
+			"jobID", job.Job.ID, "audioGroup", bestVariant.AudioGroup)
+	}
 
 	// Step 4: Store variant dimensions on the job
 	if bestVariant.Width > 0 || bestVariant.Height > 0 {
@@ -172,72 +289,21 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		})
 	}
 
-	// Step 5: Create downloader using the selected variant's playlist URL
-	result := &DownloadResult{
-		HasVideo:    true,
-		IsHls:       true,
-		VideoPath:   filepath.Join(job.StagingDir, "video.ts"),
-		VideoWidth:  bestVariant.Width,
-		VideoHeight: bestVariant.Height,
-		VideoFps:    bestVariant.FPS,
-		// An HLS variant maps to no player-response format, so no
-		// VideoFormat says how long a segment runs; the finalize's join
-		// point (owner decision CJ-3) needs it for an MPEG-TS that joined
-		// late.
-		SegmentDurationSec: advertisedSegmentDuration(extracted, videoInfo),
-	}
-
-	// Reuse hlsPoToken from the master-URL step above; no need to mint twice.
-	variantURL := bestVariant.URL
-	if hlsPoToken != "" {
-		variantURL = strings.TrimRight(variantURL, "/") + "/pot/" + hlsPoToken
-		job.Logger.Info("[POT] added PO token to HLS variant URL", "tokenLength", len(hlsPoToken))
-	}
-
-	// Orchestrator-provided continuation position (restart discovery seeding
-	// a fresh part dir). Without honoring it, a fresh dir + StartSeq -1
-	// initializes at the playlist window start — which for DVR-enabled
-	// YouTube live HLS reaches back to broadcast start, re-downloading hours
-	// already archived in earlier parts. The DASH strategies honor the same
-	// field; a resume sidecar (resuming into an unmuxed part) still takes
-	// priority inside the engine.
-	hlsStartSeq := -1
-	hlsForceSeq := false
-	if job.VideoStartSeq > 0 {
-		hlsStartSeq = job.VideoStartSeq
-		hlsForceSeq = true
-	}
-
-	result.VideoDownloader = newSegmentDownloader(engine.DownloaderOptions{
-		BaseURL:             variantURL,
-		OutputFile:          result.VideoPath,
-		StartSeq:            hlsStartSeq,
-		ForceStartSeq:       hlsForceSeq,
-		IsHls:               true,
-		PoToken:             hlsPoToken,
-		MaxTimeout:          time.Duration(job.Config.MaximumTimeout) * time.Second,
-		SegmentWorkers:      job.Config.SegmentWorkers,
-		InterruptionTimeout: engineInterruptionTimeout(job.Config.InterruptionTimeout),
-		EnforceMaxTimeout:   true, // YouTube status can stick; Twitch HLS opts out
-		IsOnline:            isOnline,
-		Logger:              newScopedLogger(job.Logger, "jobID", job.Job.ID, "stream", "video"),
-		CheckStreamStatus: func(ctx context.Context) (bool, error) {
-			info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
-			return observeYouTubeStatusProbe(job, info, err)
-		},
-	})
-
-	// Wire OnCipherFailure for HLS so a 403 burst invalidates POT / visitor
-	// data / cipher caches. The variant URL has POT in its path so we can't
-	// hot-swap it mid-loop; return "" and let the next orchestrator-driven
-	// refresh rebuild the strategy with fresh values. Installed whenever a
-	// solver is, whatever the extraction's PlayerURL, as the DASH hooks are:
-	// the POT and visitor-data halves need no player (audit G2).
-	if routedSolver != nil || cipherSolver != nil {
-		result.VideoDownloader.OnCipherFailure = func() string {
-			invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "HLS")
-			return ""
-		}
+	// Step 5: Create the downloaders: the selected variant's playlist into
+	// video.ts and, for a video-only variant, its audio rendition's into
+	// audio.ts, muxed together at finalize.
+	result.HasVideo = true
+	result.VideoPath = filepath.Join(job.StagingDir, "video.ts")
+	result.VideoWidth = bestVariant.Width
+	result.VideoHeight = bestVariant.Height
+	result.VideoFps = bestVariant.FPS
+	result.AdvertisedAudio = audioRendition != nil || codecsNameAudio(bestVariant.Codecs)
+	result.VideoDownloader = newHlsDownloader(bestVariant.URL, result.VideoPath, "video", job.VideoStartSeq)
+	if audioRendition != nil {
+		result.HasAudio = true
+		result.AudioItag = hlsItagOf(audioRendition.URI)
+		result.AudioPath = filepath.Join(job.StagingDir, hlsAudioFile)
+		result.AudioDownloader = newHlsDownloader(audioRendition.URI, result.AudioPath, "audio", job.AudioStartSeq)
 	}
 
 	// The master playlist is fetched; the variant playlist and its segments
@@ -248,6 +314,123 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	return result, nil
+}
+
+// hlsAudioFile is the staged name of an HLS capture's separate audio
+// rendition, beside the variant's video.ts (a demuxed master's: see
+// engine.HlsVariant.VideoOnly). A capture of a muxed master writes video.ts
+// alone, as it always has.
+const hlsAudioFile = "audio.ts"
+
+// codecsNameAudio reports whether an HLS variant's CODECS list names an audio
+// codec — what its master advertises for it, in the variant or in its
+// rendition group.
+func codecsNameAudio(codecs string) bool {
+	for _, c := range strings.Split(codecs, ",") {
+		c = strings.ToLower(strings.TrimSpace(c))
+		for _, p := range []string{"mp4a", "opus", "vorbis", "ac-3", "ec-3", "flac", "alac", "mp3"} {
+			if strings.HasPrefix(c, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hlsItagOf is the itag in a YouTube HLS playlist URL (/itag/N), 0 when it
+// names none. An audio rendition's says which of the master's audio groups a
+// capture records, so a refresh that picks another group is a new rendition
+// (streamIdentityChanged), as a DASH audio itag is.
+func hlsItagOf(u string) int {
+	m := hlsItagRegex.FindStringSubmatch(u)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// hlsRenditionBetter reports whether a ranks above b as yt-dlp's format sort
+// would rank two audio renditions of one master: the language first (the
+// `lang` field, process_manifest_format's ORIGINAL/DEFAULT values from the
+// rendition's YT-EXT-AUDIO-CONTENT-ID or LANGUAGE), then an alternate
+// (DEFAULT=NO or AUTOSELECT=NO) below the rest (source_preference -2), then
+// the group's rank (groupRank, 0 when not ranked), then DEFAULT=YES. A tie
+// keeps the earlier one in the master.
+func hlsRenditionBetter(a, b *engine.HlsRendition, langs youtube.AudioLanguages, groupRank map[string]int) bool {
+	track := func(r *engine.HlsRendition) int {
+		if r.AudioContentID != "" {
+			return youtube.LanguageTrackScore(r.AudioContentID, langs)
+		}
+		return youtube.LanguageTrackScore(r.Language, langs)
+	}
+	if ta, tb := track(a), track(b); ta != tb {
+		return ta > tb
+	}
+	if a.Alternate != b.Alternate {
+		return !a.Alternate
+	}
+	if ga, gb := groupRank[a.GroupID], groupRank[b.GroupID]; ga != gb {
+		return ga > gb
+	}
+	return a.Default && !b.Default
+}
+
+// selectHlsAudioRendition picks the rendition to record beside a video-only
+// variant from its AUDIO group's renditions (engine.HlsParseResult.
+// AudioRenditions): the DEFAULT one, unless the group holds several, which
+// rank as yt-dlp ranks them (hlsRenditionBetter). nil for an empty group.
+func selectHlsAudioRendition(group []*engine.HlsRendition, langs youtube.AudioLanguages) *engine.HlsRendition {
+	var best *engine.HlsRendition
+	for _, r := range group {
+		if best == nil || hlsRenditionBetter(r, best, langs, nil) {
+			best = r
+		}
+	}
+	return best
+}
+
+// selectHlsAudioOnly picks the audio rendition an audio_only recording takes
+// from a demuxed master, as yt-dlp picks its best audio there: the renditions
+// of every group a video-only variant names, the groups ranked by the video
+// they serve (_parse_m3u8_formats_and_subtitles' audio_groups_by_quality:
+// each group placed where it first appears among those variants sorted by
+// bandwidth then width, the later the better). nil when the master has no
+// video-only variant — a muxed master, where the old lowest-bandwidth pick
+// stands.
+func selectHlsAudioOnly(parsed *engine.HlsParseResult, langs youtube.AudioLanguages) *engine.HlsRendition {
+	var serving []*engine.HlsVariant
+	for i := range parsed.Variants {
+		if v := &parsed.Variants[i]; v.VideoOnly {
+			serving = append(serving, v)
+		}
+	}
+	if len(serving) == 0 {
+		return nil
+	}
+	sort.SliceStable(serving, func(i, j int) bool {
+		if serving[i].Bandwidth != serving[j].Bandwidth {
+			return serving[i].Bandwidth < serving[j].Bandwidth
+		}
+		return serving[i].Width < serving[j].Width
+	})
+	groupRank := map[string]int{}
+	for _, v := range serving {
+		if _, seen := groupRank[v.AudioGroup]; !seen {
+			groupRank[v.AudioGroup] = len(groupRank)
+		}
+	}
+	var best *engine.HlsRendition
+	for i := range parsed.Renditions {
+		r := &parsed.Renditions[i]
+		if _, ranked := groupRank[r.GroupID]; !ranked || r.Type != "AUDIO" || r.URI == "" {
+			continue
+		}
+		if best == nil || hlsRenditionBetter(r, best, langs, groupRank) {
+			best = r
+		}
+	}
+	return best
 }
 
 // selectHlsVariant picks the variant to record from a YouTube live master
@@ -299,9 +482,11 @@ func selectHlsVariant(variants []engine.HlsVariant, qualityPref string, maxRes i
 	}
 
 	if qualityPref == "audio_only" {
-		// YouTube HLS has no audio-only variants — take the lowest bandwidth
-		// to minimise wasted video data (audio quality is the same across
-		// variants). DownloadHls logs the warning. The audio track comes
+		// Reached only for a master with no audio rendition of its own (a
+		// muxed one: DownloadHls records a demuxed master's rendition alone,
+		// selectHlsAudioOnly), which has no audio-only variant — take the
+		// lowest bandwidth to minimise wasted video data (audio quality is
+		// the same across variants). DownloadHls logs the warning. The audio track comes
 		// first, though: on a dubbed VOD's master each track is pre-merged
 		// into its own variant at every size, and an audio-only archive is
 		// the one where the track is the whole point — the lowest bandwidth
